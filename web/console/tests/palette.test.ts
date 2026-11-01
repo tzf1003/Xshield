@@ -26,7 +26,10 @@ test("a sixteen-digit hex string opens a session", () => {
 });
 
 test("a path offers a filter and a prefix filter", () => {
-  assert.deepEqual(labels("/rest/basket/6"), ["筛选路径 /rest/basket/6", "筛选路径前缀 /rest/basket/6*"]);
+  assert.deepEqual(labels("/rest/basket/6"), [
+    "筛选路径 /rest/basket/6",
+    "筛选路径前缀 /rest/basket/6*",
+  ]);
 });
 
 test("a site name offers the site and its tabs", () => {

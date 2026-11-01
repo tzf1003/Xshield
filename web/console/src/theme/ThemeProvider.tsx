@@ -1,6 +1,14 @@
 import { ConfigProvider, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { type Density, palettes, type ThemeMode, type ThemePreference } from "./tokens.ts";
 
 const THEME_KEY = "xshield.console.theme";
@@ -112,7 +120,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         colorBorder: palette?.borderStrong,
         borderRadius: 6,
         borderRadiusLG: 10,
-        fontFamily: 'system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+        fontFamily:
+          'system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
       },
     };
   }, [mode, density]);

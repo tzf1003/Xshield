@@ -69,23 +69,59 @@ export function RequestTable({
 
   return (
     <div className="tbl-wrap" ref={scrollerRef}>
-      <table className="tbl" role="grid" aria-label="请求列表" aria-rowcount={rows.length}>
+      <table className="tbl" aria-label="请求列表" aria-rowcount={rows.length}>
         <thead>
           <tr>
-            <th scope="col" style={{ width: showDate ? 150 : 110 }}>时间</th>
-            {showSite ? <th scope="col" style={{ width: 90 }}>站点</th> : null}
-            <th scope="col" style={{ width: 64 }}>方法</th>
+            <th scope="col" style={{ width: showDate ? 150 : 110 }}>
+              时间
+            </th>
+            {showSite ? (
+              <th scope="col" style={{ width: 90 }}>
+                站点
+              </th>
+            ) : null}
+            <th scope="col" style={{ width: 64 }}>
+              方法
+            </th>
             <th scope="col">路径</th>
-            <th scope="col" style={{ width: 56 }}>状态</th>
-            <th scope="col" style={{ width: 118 }}>判定</th>
-            <th scope="col" style={{ width: 96 }}>结论</th>
-            <th scope="col" style={{ width: 110 }}>Jev</th>
-            <th scope="col" style={{ width: 80 }}>耗时</th>
-            {extras.includes("session") ? <th scope="col" style={{ width: 110 }}>会话</th> : null}
-            {extras.includes("client") ? <th scope="col" style={{ width: 120 }}>客户端</th> : null}
-            {extras.includes("host") ? <th scope="col" style={{ width: 160 }}>Host</th> : null}
-            {extras.includes("version") ? <th scope="col" style={{ width: 80 }}>配置版本</th> : null}
-            <th scope="col" style={{ width: 120 }}>请求 ID</th>
+            <th scope="col" style={{ width: 56 }}>
+              状态
+            </th>
+            <th scope="col" style={{ width: 118 }}>
+              判定
+            </th>
+            <th scope="col" style={{ width: 96 }}>
+              结论
+            </th>
+            <th scope="col" style={{ width: 110 }}>
+              Jev
+            </th>
+            <th scope="col" style={{ width: 80 }}>
+              耗时
+            </th>
+            {extras.includes("session") ? (
+              <th scope="col" style={{ width: 110 }}>
+                会话
+              </th>
+            ) : null}
+            {extras.includes("client") ? (
+              <th scope="col" style={{ width: 120 }}>
+                客户端
+              </th>
+            ) : null}
+            {extras.includes("host") ? (
+              <th scope="col" style={{ width: 160 }}>
+                Host
+              </th>
+            ) : null}
+            {extras.includes("version") ? (
+              <th scope="col" style={{ width: 80 }}>
+                配置版本
+              </th>
+            ) : null}
+            <th scope="col" style={{ width: 120 }}>
+              请求 ID
+            </th>
             <th scope="col" style={{ width: 36 }}>
               <span className="sr-only">操作</span>
             </th>
@@ -99,10 +135,11 @@ export function RequestTable({
               <tr
                 key={row.request_id}
                 id={`row-${row.request_id}`}
-                role="row"
                 aria-selected={selected}
                 className={isFresh ? "row-click fresh" : "row-click"}
-                onClick={() => onSelect(row.request_id)}
+                onClick={(event) => {
+                  if (!isControlTarget(event.target)) onSelect(row.request_id);
+                }}
                 onDoubleClick={() => onOpen(row.request_id)}
                 onMouseEnter={() => prefetch(row.request_id)}
                 onMouseLeave={cancelPrefetch}
@@ -157,13 +194,13 @@ export function RequestTable({
                 {extras.includes("version") ? (
                   <td className="tnum">{row.site_version ?? <span className="dim">—</span>}</td>
                 ) : null}
-                <td onClick={(event) => event.stopPropagation()}>
+                <td>
                   <span className="row" style={{ gap: 2, flexWrap: "nowrap" }}>
                     <RequestLink id={row.request_id} />
                     <CopyButton text={row.request_id} />
                   </span>
                 </td>
-                <td onClick={(event) => event.stopPropagation()}>
+                <td>
                   <RowMenu row={row} actions={actionsFor(row)} />
                 </td>
               </tr>
@@ -173,6 +210,11 @@ export function RequestTable({
       </table>
     </div>
   );
+}
+
+/** A click on a link, a button or a menu item inside a row acts on that control, not on the row. */
+function isControlTarget(target: EventTarget): boolean {
+  return target instanceof Element && target.closest("a, button, [role='menuitem']") !== null;
 }
 
 function RowMenu({ row, actions }: { row: RequestRow; actions: RowAction[] }) {

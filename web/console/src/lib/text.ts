@@ -5,6 +5,7 @@
 
 export type TextSegment = { kind: "text"; text: string } | { kind: "hidden"; code: string };
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the C0 range is the point; these characters must be shown, not hidden
 const HIDDEN = /[\u0000-\u001f\u007f​-‏⁠﻿‪-‮⁦-⁩]/g;
 
 /** Splits text into visible runs and escaped control characters, e.g. `‮`. */

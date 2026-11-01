@@ -22,15 +22,27 @@ export type PaletteGroup = { title: string; items: PaletteItem[] };
 const METHOD_PATH = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/\S*)$/i;
 
 const COMMANDS: Array<{ label: string; action: PaletteAction; match: string[] }> = [
-  { label: "新建站点", action: { kind: "route", to: "/sites/new" }, match: ["新建", "站点", "site"] },
+  {
+    label: "新建站点",
+    action: { kind: "route", to: "/sites/new" },
+    match: ["新建", "站点", "site"],
+  },
   {
     label: "导入判定日志",
     action: { kind: "route", to: "/system", search: { tab: "import" } },
     match: ["导入", "日志", "import"],
   },
   { label: "切换主题", action: { kind: "command", command: "theme" }, match: ["主题", "theme"] },
-  { label: "复制当前页链接", action: { kind: "command", command: "copy-link" }, match: ["复制", "链接", "link"] },
-  { label: "查看快捷键", action: { kind: "command", command: "help" }, match: ["快捷键", "键", "help"] },
+  {
+    label: "复制当前页链接",
+    action: { kind: "command", command: "copy-link" },
+    match: ["复制", "链接", "link"],
+  },
+  {
+    label: "查看快捷键",
+    action: { kind: "command", command: "help" },
+    match: ["快捷键", "键", "help"],
+  },
 ];
 
 export function classifyInput(input: string, sites: string[]): PaletteGroup[] {
@@ -124,12 +136,20 @@ export function classifyInput(input: string, sites: string[]): PaletteGroup[] {
         {
           id: `site-config:${name}`,
           label: `打开 ${name} 的站点配置`,
-          action: { kind: "route", to: `/sites/${name}`, search: { tab: "config" } } as PaletteAction,
+          action: {
+            kind: "route",
+            to: `/sites/${name}`,
+            search: { tab: "config" },
+          } as PaletteAction,
         },
         {
           id: `site-insights:${name}`,
           label: `打开 ${name} 的调优建议`,
-          action: { kind: "route", to: `/sites/${name}`, search: { tab: "insights" } } as PaletteAction,
+          action: {
+            kind: "route",
+            to: `/sites/${name}`,
+            search: { tab: "insights" },
+          } as PaletteAction,
         },
       ]),
     });
@@ -165,7 +185,8 @@ export function classifyInput(input: string, sites: string[]): PaletteGroup[] {
   if (ids.length === 0 && !isSessionLabel(text) && !text.startsWith("/") && !method) {
     const commands = COMMANDS.filter(
       (command) =>
-        command.label.toLowerCase().includes(lower) || command.match.some((word) => lower.includes(word)),
+        command.label.toLowerCase().includes(lower) ||
+        command.match.some((word) => lower.includes(word)),
     );
     if (commands.length > 0) {
       groups.push({

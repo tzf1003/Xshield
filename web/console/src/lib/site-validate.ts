@@ -169,7 +169,11 @@ export function validateSpec(spec: SiteSpec): { errors: FieldIssue[]; warnings: 
   errors.push(...validateRules("bypass", spec.bypass ?? [], 0));
   for (const raw of spec.entries) {
     const parsed = parsePattern(raw);
-    if (parsed.ok && parsed.value.prefix && parsed.value.literal.split("/").filter(Boolean).length <= 1) {
+    if (
+      parsed.ok &&
+      parsed.value.prefix &&
+      parsed.value.literal.split("/").filter(Boolean).length <= 1
+    ) {
       warnings.push({
         group: "entries",
         field: raw,
@@ -190,7 +194,11 @@ export function validateSpec(spec: SiteSpec): { errors: FieldIssue[]; warnings: 
   return { errors, warnings };
 }
 
-function validateRules(group: "entries" | "bypass", rules: string[], minimum: number): FieldIssue[] {
+function validateRules(
+  group: "entries" | "bypass",
+  rules: string[],
+  minimum: number,
+): FieldIssue[] {
   const issues: FieldIssue[] = [];
   if (rules.length < minimum) {
     issues.push({

@@ -25,7 +25,9 @@ test("comparisons map to the numeric parameters", () => {
 });
 
 test("bare words are recognised by shape", () => {
-  const parsed = parseFilter("/rest/basket/6 req_01a19741107477ff9224781077354552 7c1e9a40d2b35f61 get");
+  const parsed = parseFilter(
+    "/rest/basket/6 req_01a19741107477ff9224781077354552 7c1e9a40d2b35f61 get",
+  );
   assert.deepEqual(parsed.errors, []);
   assert.deepEqual(parsed.params, {
     path: "/rest/basket/6",

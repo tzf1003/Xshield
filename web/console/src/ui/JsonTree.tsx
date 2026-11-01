@@ -29,7 +29,8 @@ function Leaf({ value, query }: { value: unknown; query: string }) {
     );
   }
   if (typeof value === "number") return <span className="num">{String(value)}</span>;
-  if (typeof value === "boolean" || value === null) return <span className="lit">{String(value)}</span>;
+  if (typeof value === "boolean" || value === null)
+    return <span className="lit">{String(value)}</span>;
   return <span className="lit">{String(value)}</span>;
 }
 

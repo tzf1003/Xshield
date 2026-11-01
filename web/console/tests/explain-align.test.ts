@@ -50,7 +50,14 @@ test("a DENY explains the value and where the origin showed it", () => {
     status: 200,
     host: "juice.example.com",
     trace: trace([
-      value({ at: "path[2]", value: "6", seen: true, sources: [{ field: "quantity", request: "GET /rest/basket/1", request_id: ID, at_millis: 0 }] }),
+      value({
+        at: "path[2]",
+        value: "6",
+        seen: true,
+        sources: [
+          { field: "quantity", request: "GET /rest/basket/1", request_id: ID, at_millis: 0 },
+        ],
+      }),
     ]),
     jev: jev({}),
   });
@@ -69,33 +76,72 @@ test("an attack is explained with the value that carried it", () => {
     trace: trace([value({ at: "body.q", value: "x' OR sleep(5)=0 --", kind: "input" })]),
     jev: jev({ attack: { BENIGN: 0.04, ATTACK: 0.95, UNKNOWN: 0.01 } }),
   });
-  assert.match(text, /^Jev 判定为攻击（ATTACK 95%）：请求体里的 body\.q 的值含 `x' OR sleep\(5\)=0 --`。返回 403。$/);
+  assert.match(
+    text,
+    /^Jev 判定为攻击（ATTACK 95%）：请求体里的 body\.q 的值含 `x' OR sleep\(5\)=0 --`。返回 403。$/,
+  );
 });
 
 test("the other decision paths give their documented reason", () => {
   const base = { status: 200, host: "juice.example.com", jev: null };
   assert.equal(
-    explainRecord({ ...base, decision_path: "bypass", outcome: "allowed", trace: trace([], { bypass: "/assets/*" }) }),
+    explainRecord({
+      ...base,
+      decision_path: "bypass",
+      outcome: "allowed",
+      trace: trace([], { bypass: "/assets/*" }),
+    }),
     "命中绕过规则 /assets/*，没有判定，直接转发。",
   );
   assert.equal(
-    explainRecord({ ...base, decision_path: "fast_allow", outcome: "allowed", trace: trace([value({ at: "path[2]", value: "6", verified: true, seen: true })]) }),
+    explainRecord({
+      ...base,
+      decision_path: "fast_allow",
+      outcome: "allowed",
+      trace: trace([value({ at: "path[2]", value: "6", verified: true, seen: true })]),
+    }),
     "1 个需核验的值都已核验，没有调用 Jev。",
   );
   assert.equal(
-    explainRecord({ ...base, decision_path: "no_session", outcome: "would_block", trace: trace([]) }),
+    explainRecord({
+      ...base,
+      decision_path: "no_session",
+      outcome: "would_block",
+      trace: trace([]),
+    }),
     "请求没有会话凭证，路径也不是入口。站点处于观察模式，请求照常转发。",
   );
   assert.equal(
-    explainRecord({ ...base, status: null, decision_path: "unknown_site", outcome: "blocked", host: "other.example.com", trace: trace([]) }),
+    explainRecord({
+      ...base,
+      status: null,
+      decision_path: "unknown_site",
+      outcome: "blocked",
+      host: "other.example.com",
+      trace: trace([]),
+    }),
     "Host other.example.com 不属于任何站点。",
   );
   assert.equal(
-    explainRecord({ ...base, decision_path: "jev_unavailable", outcome: "unjudged", trace: trace([]), jev: jev({ failure: "JEV_TIMEOUT", access: null, attack: null, timeout_ms: 3000 }) }),
+    explainRecord({
+      ...base,
+      decision_path: "jev_unavailable",
+      outcome: "unjudged",
+      trace: trace([]),
+      jev: jev({ failure: "JEV_TIMEOUT", access: null, attack: null, timeout_ms: 3000 }),
+    }),
     "Jev 调用超时（3000 ms）。站点设置为 Jev 不可用时放行，这个请求没有经过判定。",
   );
   assert.equal(
-    explainRecord({ ...base, decision_path: "jev_unavailable", outcome: "blocked", context: "address", status: 403, trace: trace([]), jev: jev({ failure: "JEV_CALL_LIMIT", access: null, attack: null, state: null }) }),
+    explainRecord({
+      ...base,
+      decision_path: "jev_unavailable",
+      outcome: "blocked",
+      context: "address",
+      status: 403,
+      trace: trace([]),
+      jev: jev({ failure: "JEV_CALL_LIMIT", access: null, attack: null, state: null }),
+    }),
     "本地址每分钟 Jev 调用已达上限，没有调用 Jev。返回 403。",
   );
 });
@@ -111,7 +157,14 @@ test("an upstream failure is appended and an old record says so", () => {
   });
   assert.equal(text, "请求里没有需要核验的值，没有调用 Jev。源站连接被拒绝，网关返回 502。");
   assert.equal(
-    explainRecord({ decision_path: "jev_deny", outcome: "blocked", status: 403, host: "x", trace: { v: 0 }, jev: null }),
+    explainRecord({
+      decision_path: "jev_deny",
+      outcome: "blocked",
+      status: 403,
+      host: "x",
+      trace: { v: 0 },
+      jev: null,
+    }),
     "旧格式记录：没有判定依据。返回 403。",
   );
 });
@@ -133,8 +186,17 @@ test("values align with the non-inert entries of the trace, in order", () => {
 });
 
 test("the state's recent list is the tail of the trace's list", () => {
-  const recent = [1, 2, 3, 4, 5].map((n) => ({ method: "GET", path: `/p/${n}`, status: 200, request_id: null, at_millis: n }));
-  assert.deepEqual(alignRecent(2, recent).map((r) => r.path), ["/p/4", "/p/5"]);
+  const recent = [1, 2, 3, 4, 5].map((n) => ({
+    method: "GET",
+    path: `/p/${n}`,
+    status: 200,
+    request_id: null,
+    at_millis: n,
+  }));
+  assert.deepEqual(
+    alignRecent(2, recent).map((r) => r.path),
+    ["/p/4", "/p/5"],
+  );
   assert.deepEqual(alignRecent(9, recent).length, 5);
   assert.deepEqual(alignRecent(3, null), []);
 });
@@ -146,11 +208,20 @@ test("trim levels say what was dropped", () => {
 });
 
 test("the reading of a value follows the verified and seen flags", () => {
-  assert.deepEqual(valueHint({ kind: "reference", seen_as: [], verified: false }), { tone: "bad", text: "从未见过" });
-  assert.deepEqual(valueHint({ kind: "reference", seen_as: ["quantity @ GET /x"], verified: false }), {
-    tone: "warn",
-    text: "见过但不是同类对象",
+  assert.deepEqual(valueHint({ kind: "reference", seen_as: [], verified: false }), {
+    tone: "bad",
+    text: "从未见过",
   });
-  assert.deepEqual(valueHint({ kind: "reference", seen_as: ["id"], verified: true }), { tone: "ok", text: "已核验" });
+  assert.deepEqual(
+    valueHint({ kind: "reference", seen_as: ["quantity @ GET /x"], verified: false }),
+    {
+      tone: "warn",
+      text: "见过但不是同类对象",
+    },
+  );
+  assert.deepEqual(valueHint({ kind: "reference", seen_as: ["id"], verified: true }), {
+    tone: "ok",
+    text: "已核验",
+  });
   assert.deepEqual(valueHint({ kind: "route", seen_as: [] }), { tone: "none", text: "路由词" });
 });

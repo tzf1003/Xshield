@@ -43,7 +43,9 @@ const SOURCE_REASON: Record<string, string> = {
   other: "出错",
 };
 
-export function topOf<T extends string>(probabilities: Partial<Record<T, number>> | null): T | null {
+export function topOf<T extends string>(
+  probabilities: Partial<Record<T, number>> | null,
+): T | null {
   if (!probabilities) return null;
   let best: T | null = null;
   let bestValue = -1;
@@ -160,7 +162,10 @@ export function explainRecord(input: ExplainInput): string {
   return [reason, action, upstream].filter((part) => part.length > 0).join("");
 }
 
-export function jevAnswerTop(jev: JevRecord | null): { access: JevAccess | null; attack: JevAttack | null } {
+export function jevAnswerTop(jev: JevRecord | null): {
+  access: JevAccess | null;
+  attack: JevAttack | null;
+} {
   return {
     access: topOf<JevAccess>(jev?.access ?? null),
     attack: topOf<JevAttack>(jev?.attack ?? null),

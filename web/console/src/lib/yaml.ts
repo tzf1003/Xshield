@@ -112,7 +112,11 @@ function checkObject(value: unknown, text: string | null): ParseResult {
   if (topProblem) return topProblem;
   const session = object.session;
   if (session !== undefined && session !== null && typeof session === "object") {
-    const sessionProblem = unknownIn(session as Record<string, unknown>, ["cookie", "header"], text);
+    const sessionProblem = unknownIn(
+      session as Record<string, unknown>,
+      ["cookie", "header"],
+      text,
+    );
     if (sessionProblem) return sessionProblem;
   }
   const advanced = object.advanced;

@@ -14,6 +14,15 @@ export function hasDotSegment(path: string): boolean {
   return path.split("/").some((segment) => segment === "." || segment === "..");
 }
 
+/** True for C0 control characters and DEL, which neither a pattern nor a path may contain. */
+function hasControl(text: string): boolean {
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
 /** Parses an entry or bypass rule: an absolute path, no query, `*` only as the last byte. */
 export function parsePattern(raw: string): PatternParse {
   if (raw.length === 0) return { ok: false, reason: "不能为空" };
@@ -22,7 +31,8 @@ export function parsePattern(raw: string): PatternParse {
   const prefix = raw.endsWith("*");
   const literal = prefix ? raw.slice(0, -1) : raw;
   if (/[*?#\\]/.test(literal)) return { ok: false, reason: "* 只能写在末尾，不能含 ? # 或反斜杠" };
-  if (/[\u0000-\u001f\u007f ]/.test(literal)) return { ok: false, reason: "不能含空格或控制字符" };
+  if (literal.includes(" ") || hasControl(literal))
+    return { ok: false, reason: "不能含空格或控制字符" };
   if (hasDotSegment(literal)) return { ok: false, reason: "不能含 . 或 .. 段" };
   return { ok: true, value: { raw, prefix, literal } };
 }
@@ -32,7 +42,7 @@ export function isPlainPath(path: string): boolean {
   if (!path.startsWith("/")) return false;
   if (path.includes("//")) return false;
   if (/[\\?#;]/.test(path)) return false;
-  if (/[\u0000-\u001f\u007f]/.test(path)) return false;
+  if (hasControl(path)) return false;
   if (hasDotSegment(path)) return false;
   const lower = path.toLowerCase();
   return !["%2e", "%2f", "%5c", "%00"].some((bad) => lower.includes(bad));

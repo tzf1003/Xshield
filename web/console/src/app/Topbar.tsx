@@ -51,7 +51,12 @@ export function Topbar({ onOpenPalette, onCustomRange }: Props) {
         onChange={(value: string) => setSearch({ site: value === "" ? undefined : value })}
         style={{ width: 176 }}
       />
-      <button type="button" className="search-trigger" onClick={onOpenPalette} aria-label="打开命令面板">
+      <button
+        type="button"
+        className="search-trigger"
+        onClick={onOpenPalette}
+        aria-label="打开命令面板"
+      >
         <span aria-hidden="true">⌕</span>
         <span>粘贴请求 ID、会话、路径或站点名…</span>
         <span className="kbd">{isMac ? "⌘K" : "Ctrl K"}</span>

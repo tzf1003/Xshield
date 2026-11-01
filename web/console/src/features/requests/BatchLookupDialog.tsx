@@ -45,7 +45,8 @@ export function BatchLookupDialog({ open, onClose }: Props) {
   }, [open]);
 
   const paste = useMemo(() => parsePaste(text), [text]);
-  const expectedIndex = expectedOverride === "none" ? null : (expectedOverride ?? paste.expectedColumn);
+  const expectedIndex =
+    expectedOverride === "none" ? null : (expectedOverride ?? paste.expectedColumn);
   const tableRows = useMemo(() => {
     const byId = new Map<string, string[]>();
     for (const row of paste.table?.rows ?? []) {
@@ -65,8 +66,7 @@ export function BatchLookupDialog({ open, onClose }: Props) {
     if (!result) return [];
     return result.rows.map((row) => {
       const source = tableRows.get(row.request_id);
-      const expectedRaw =
-        expectedIndex !== null && source ? source[expectedIndex] : undefined;
+      const expectedRaw = expectedIndex !== null && source ? source[expectedIndex] : undefined;
       const expected = expectedOf(expectedRaw);
       const outcome = row.summary?.outcome ?? null;
       return {
@@ -100,7 +100,15 @@ export function BatchLookupDialog({ open, onClose }: Props) {
   };
 
   const copyResult = () => {
-    const header = ["request_id", ...extraColumns.map((c) => c.header), "expected", "actual", "decision", "status", "match"];
+    const header = [
+      "request_id",
+      ...extraColumns.map((c) => c.header),
+      "expected",
+      "actual",
+      "decision",
+      "status",
+      "match",
+    ];
     const lines = rows.map((item) =>
       tsvLine([
         item.row.request_id,
@@ -120,7 +128,9 @@ export function BatchLookupDialog({ open, onClose }: Props) {
   return (
     <Modal open={open} onCancel={onClose} footer={null} width={1000} title="批量对照">
       <div className="stack">
-        <div className="field-label">① 粘贴：测试套件的 TSV、日志或任意文本（最多 {MAX_BATCH_IDS} 个 ID）</div>
+        <div className="field-label">
+          ① 粘贴：测试套件的 TSV、日志或任意文本（最多 {MAX_BATCH_IDS} 个 ID）
+        </div>
         <textarea
           className="native-input"
           style={{ height: 150, fontFamily: "var(--mono)", fontSize: 12, padding: 8 }}
@@ -130,7 +140,9 @@ export function BatchLookupDialog({ open, onClose }: Props) {
             setResult(null);
           }}
           aria-label="粘贴的内容"
-          placeholder={"x_xshield_request_id\toutcome\nreq_01a19741107477ff9224781077354552\tblocked"}
+          placeholder={
+            "x_xshield_request_id\toutcome\nreq_01a19741107477ff9224781077354552\tblocked"
+          }
         />
         <div className="row" style={{ justifyContent: "space-between" }}>
           <span className="small muted">
@@ -146,7 +158,10 @@ export function BatchLookupDialog({ open, onClose }: Props) {
                   onChange={(value: number | "none") => setExpectedOverride(value)}
                   options={[
                     { value: "none", label: "不对照" },
-                    ...paste.table.headers.map((header, index) => ({ value: index, label: header || `第 ${index + 1} 列` })),
+                    ...paste.table.headers.map((header, index) => ({
+                      value: index,
+                      label: header || `第 ${index + 1} 列`,
+                    })),
                   ]}
                   style={{ width: 160 }}
                 />
@@ -163,22 +178,34 @@ export function BatchLookupDialog({ open, onClose }: Props) {
             {lookup.isPending ? "正在对照…" : "对照 ⏎"}
           </button>
         </div>
-        {lookup.isError ? <div className="field-error" role="alert">{ERROR_TEXT.INTERNAL}</div> : null}
+        {lookup.isError ? (
+          <div className="field-error" role="alert">
+            {ERROR_TEXT.INTERNAL}
+          </div>
+        ) : null}
 
         {result ? (
           <>
             <div className="row" style={{ justifyContent: "space-between" }}>
               <span className="small">
-                ② 结果：{counts.total} 个 · 找到 {counts.found} · 查不到 {counts.missing} · 预期不一致{" "}
-                {counts.mismatch}
+                ② 结果：{counts.total} 个 · 找到 {counts.found} · 查不到 {counts.missing} ·
+                预期不一致 {counts.mismatch}
               </span>
               <span className="row" style={{ gap: 12 }}>
                 <label className="check">
-                  <input type="checkbox" checked={onlyMismatch} onChange={(e) => setOnlyMismatch(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={onlyMismatch}
+                    onChange={(e) => setOnlyMismatch(e.target.checked)}
+                  />
                   只看不一致
                 </label>
                 <label className="check">
-                  <input type="checkbox" checked={onlyMissing} onChange={(e) => setOnlyMissing(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={onlyMissing}
+                    onChange={(e) => setOnlyMissing(e.target.checked)}
+                  />
                   只看查不到
                 </label>
                 <button type="button" className="btn" onClick={copyResult}>
@@ -187,7 +214,7 @@ export function BatchLookupDialog({ open, onClose }: Props) {
               </span>
             </div>
             <div className="tbl-wrap" style={{ maxHeight: 360 }}>
-              <table className="tbl" role="grid" aria-label="对照结果">
+              <table className="tbl" aria-label="对照结果">
                 <thead>
                   <tr>
                     <th scope="col">请求 ID</th>
@@ -205,7 +232,7 @@ export function BatchLookupDialog({ open, onClose }: Props) {
                 </thead>
                 <tbody>
                   {visible.map((item) => (
-                    <tr key={item.row.request_id} role="row">
+                    <tr key={item.row.request_id}>
                       <td>
                         <RequestLink id={item.row.request_id} />
                       </td>
@@ -214,7 +241,15 @@ export function BatchLookupDialog({ open, onClose }: Props) {
                           {extra.value}
                         </td>
                       ))}
-                      <td>{item.expected === null ? <span className="dim">—</span> : item.expected === "blocked" ? "拦截" : "放行"}</td>
+                      <td>
+                        {item.expected === null ? (
+                          <span className="dim">—</span>
+                        ) : item.expected === "blocked" ? (
+                          "拦截"
+                        ) : (
+                          "放行"
+                        )}
+                      </td>
                       <td>
                         {item.outcome ? (
                           <OutcomeTag outcome={item.outcome} />
@@ -223,16 +258,22 @@ export function BatchLookupDialog({ open, onClose }: Props) {
                         )}
                       </td>
                       <td>
-                        {item.row.summary ? <DecisionTag path={item.row.summary.decision_path} /> : <span className="dim">—</span>}
+                        {item.row.summary ? (
+                          <DecisionTag path={item.row.summary.decision_path} />
+                        ) : (
+                          <span className="dim">—</span>
+                        )}
                       </td>
-                      <td className="tnum">{item.row.summary?.status ?? <span className="dim">—</span>}</td>
+                      <td className="tnum">
+                        {item.row.summary?.status ?? <span className="dim">—</span>}
+                      </td>
                       <td>
                         {item.comparison === "match" ? (
-                          <span className="hint-ok" aria-label="一致">✓ 一致</span>
+                          <span className="hint-ok">✓ 一致</span>
                         ) : item.comparison === "mismatch" ? (
-                          <span className="hint-bad" aria-label="不一致">✗ 不一致</span>
+                          <span className="hint-bad">✗ 不一致</span>
                         ) : item.comparison === "unknown" ? (
-                          <span className="dim" aria-label="无法比较">? 查不到</span>
+                          <span className="dim">? 查不到</span>
                         ) : (
                           <span className="dim">—</span>
                         )}
@@ -243,7 +284,8 @@ export function BatchLookupDialog({ open, onClose }: Props) {
               </table>
             </div>
             <div className="small dim">
-              {OUTCOME_INFO.would_block.name} 与 {OUTCOME_INFO.blocked.name} 都按“拦截”比较；未经判定按“放行”比较。
+              {OUTCOME_INFO.would_block.name} 与 {OUTCOME_INFO.blocked.name}{" "}
+              都按“拦截”比较；未经判定按“放行”比较。
             </div>
           </>
         ) : null}

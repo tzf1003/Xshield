@@ -87,9 +87,7 @@ function listOf(value: string, allowed: string[]): string | null {
 }
 
 function explainBadList(value: string, allowed: string[], label: string): string {
-  const bad = value
-    .split(",")
-    .find((item) => item.length === 0 || !allowed.includes(item));
+  const bad = value.split(",").find((item) => item.length === 0 || !allowed.includes(item));
   return `${label}无效：${bad ?? value}（可用值：${allowed.join("、")}）`;
 }
 
@@ -101,7 +99,9 @@ function parseKeyed(
   switch (key) {
     case "outcome": {
       const list = listOf(value, OUTCOMES);
-      return list ? { name: "outcome", value: list } : { error: explainBadList(value, OUTCOMES, "结论") };
+      return list
+        ? { name: "outcome", value: list }
+        : { error: explainBadList(value, OUTCOMES, "结论") };
     }
     case "decision": {
       const list = listOf(value, DECISIONS);
@@ -116,7 +116,9 @@ function parseKeyed(
     }
     case "method": {
       const upper = value.toUpperCase();
-      return METHODS.includes(upper) ? { name: "method", value: upper } : { error: `未知方法：${value}` };
+      return METHODS.includes(upper)
+        ? { name: "method", value: upper }
+        : { error: `未知方法：${value}` };
     }
     case "status": {
       if (/^[1-5]xx$/i.test(value) || /^[1-5][0-9]{2}$/.test(value)) {

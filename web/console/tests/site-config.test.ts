@@ -27,10 +27,14 @@ test("a configuration round-trips through YAML without losing a field", () => {
 test("JSON configurations are read too, and unknown fields are refused", () => {
   const json = JSON.stringify({ ...base, advanced: undefined });
   assert.equal(parseSiteText(json).ok, true);
-  const bad = parseSiteText("name: emr\nhosts: [a.example.com]\norigin: http://10.0.0.5:8080\nsession:\n  cookie: SID\nentries: [/login]\nflavour: red\n");
+  const bad = parseSiteText(
+    "name: emr\nhosts: [a.example.com]\norigin: http://10.0.0.5:8080\nsession:\n  cookie: SID\nentries: [/login]\nflavour: red\n",
+  );
   assert.equal(bad.ok, false);
   if (!bad.ok) assert.match(bad.message, /未知字段 flavour/);
-  const nested = parseSiteText("name: emr\nhosts: [a.example.com]\norigin: http://10.0.0.5:8080\nsession:\n  cookie: SID\nentries: [/login]\nadvanced:\n  jev_timeout: 3\n");
+  const nested = parseSiteText(
+    "name: emr\nhosts: [a.example.com]\norigin: http://10.0.0.5:8080\nsession:\n  cookie: SID\nentries: [/login]\nadvanced:\n  jev_timeout: 3\n",
+  );
   assert.equal(nested.ok, false);
 });
 
@@ -96,7 +100,10 @@ test("advanced parameters are checked against their documented ranges", () => {
 test("an object word as a secret field is a warning, not an error", () => {
   const result = validateSpec({ ...base, advanced: { secret_fields: ["card"] } });
   assert.deepEqual(result.errors, []);
-  assert.equal(result.warnings[0]?.message, "“card” 会让 cardId 这类对象引用也被脱敏，Jev 无法判断越权");
+  assert.equal(
+    result.warnings[0]?.message,
+    "“card” 会让 cardId 这类对象引用也被脱敏，Jev 无法判断越权",
+  );
 });
 
 test("CSV and TSV cells never start with a formula character", () => {

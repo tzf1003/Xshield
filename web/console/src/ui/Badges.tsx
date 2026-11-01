@@ -3,7 +3,16 @@
 
 import type { ContextKind, DecisionPath, JevHealth, JevSummary, Outcome } from "../api/types.ts";
 import { pct } from "../lib/format.ts";
-import { ACCESS_LABEL, ATTACK_LABEL, CONTEXT_LABEL, DECISION_INFO, FAILURE_INFO, HEALTH_LABEL, OUTCOME_INFO, type Tone } from "../lib/vocab.ts";
+import {
+  ACCESS_LABEL,
+  ATTACK_LABEL,
+  CONTEXT_LABEL,
+  DECISION_INFO,
+  FAILURE_INFO,
+  HEALTH_LABEL,
+  OUTCOME_INFO,
+  type Tone,
+} from "../lib/vocab.ts";
 
 function toneClass(tone: Tone): string {
   switch (tone) {

@@ -37,7 +37,10 @@ export function JevAnswers({ jev }: { jev: JevRecord }) {
         <span className="qconc">→ {attackTop ? ATTACK_LABEL[attackTop] : "无结果"}</span>
       </div>
       <div className="jevmeta">
-        置信度 {pct(jev.access || jev.attack ? Math.min(topValue(jev.access), topValue(jev.attack)) : null)}
+        置信度{" "}
+        {pct(
+          jev.access || jev.attack ? Math.min(topValue(jev.access), topValue(jev.attack)) : null,
+        )}
         {jev.access && jev.attack && Math.min(topValue(jev.access), topValue(jev.attack)) < 0.7 ? (
           <span className="hint-warn"> · 置信度低</span>
         ) : null}

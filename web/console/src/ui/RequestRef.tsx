@@ -18,7 +18,12 @@ export function CopyButton({ text, label = "复制" }: { text: string; label?: s
     }
   };
   return (
-    <button type="button" className="copy-btn" onClick={() => void copy()} aria-label={`${label} ${text}`}>
+    <button
+      type="button"
+      className="copy-btn"
+      onClick={() => void copy()}
+      aria-label={`${label} ${text}`}
+    >
       {done ? "已复制" : label}
     </button>
   );

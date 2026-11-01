@@ -97,7 +97,9 @@ export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null)
   const oldCred = before.session.cookie
     ? `Cookie ${before.session.cookie}`
     : `请求头 ${before.session.header ?? ""}`;
-  const newCred = after.session.cookie ? `Cookie ${after.session.cookie}` : `请求头 ${after.session.header ?? ""}`;
+  const newCred = after.session.cookie
+    ? `Cookie ${after.session.cookie}`
+    : `请求头 ${after.session.header ?? ""}`;
   if (oldCred !== newCred) changes.push(`会话凭证 ${oldCred} → ${newCred}`);
   const oldMode = before.mode ?? "observe";
   const newMode = after.mode ?? "observe";

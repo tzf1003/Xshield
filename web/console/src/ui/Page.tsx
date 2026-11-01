@@ -98,7 +98,13 @@ export function Loading({ height = 14 }: { height?: number }) {
   return <div className="skeleton" style={{ height }} aria-label="正在加载" role="status" />;
 }
 
-export function Notice({ tone = "warn", children }: { tone?: "warn" | "info" | "bad"; children: ReactNode }) {
+export function Notice({
+  tone = "warn",
+  children,
+}: {
+  tone?: "warn" | "info" | "bad";
+  children: ReactNode;
+}) {
   const cls = tone === "warn" ? "notice" : `notice ${tone}`;
   return <div className={cls}>{children}</div>;
 }

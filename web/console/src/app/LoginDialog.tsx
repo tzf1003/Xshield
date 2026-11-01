@@ -49,7 +49,11 @@ export function LoginDialog({ open, onClose }: Props) {
         </label>
         {error ? <div className="field-error">{error}</div> : null}
         <div className="row" style={{ justifyContent: "flex-end" }}>
-          <button type="submit" className="btn-primary" disabled={password.length === 0 || login.isPending}>
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={password.length === 0 || login.isPending}
+          >
             {login.isPending ? "正在登录…" : "登录"}
           </button>
         </div>

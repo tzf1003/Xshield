@@ -30,7 +30,8 @@ export function LoginPage() {
       <div className="stack" style={{ width: "min(380px, 100%)" }}>
         {window.isSecureContext ? null : (
           <div className="notice" role="note">
-            控制台需要经 HTTPS 或 localhost 访问，否则浏览器不会保存登录状态。可以用 SSH 隧道把控制台端口转发到本机。
+            控制台需要经 HTTPS 或 localhost 访问，否则浏览器不会保存登录状态。可以用 SSH
+            隧道把控制台端口转发到本机。
           </div>
         )}
         <form className="login-card" onSubmit={submit}>
@@ -54,7 +55,11 @@ export function LoginPage() {
             </div>
           ) : null}
           <div style={{ marginTop: 16 }}>
-            <button type="submit" className="btn-primary fill" disabled={password.length === 0 || login.isPending}>
+            <button
+              type="submit"
+              className="btn-primary fill"
+              disabled={password.length === 0 || login.isPending}
+            >
               {login.isPending ? "正在登录…" : "登录"}
             </button>
           </div>

@@ -138,27 +138,53 @@ export function Histogram({
 }
 
 /** A tiny trend line for a metric card; decorative, with the figure in the card's text. */
-export function Sparkline({ values, width = 120, height = 26 }: { values: number[]; width?: number; height?: number }) {
+export function Sparkline({
+  values,
+  width = 120,
+  height = 26,
+}: {
+  values: number[];
+  width?: number;
+  height?: number;
+}) {
   if (values.length < 2) return null;
   const max = Math.max(1, ...values);
   const step = width / (values.length - 1);
   const points = values
-    .map((value, index) => `${(index * step).toFixed(1)},${(height - (value / max) * (height - 3) - 1).toFixed(1)}`)
+    .map(
+      (value, index) =>
+        `${(index * step).toFixed(1)},${(height - (value / max) * (height - 3) - 1).toFixed(1)}`,
+    )
     .join(" ");
   return (
-    <svg className="chart" width={width} height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
+    <svg
+      className="chart"
+      width={width}
+      height={height}
+      viewBox={`0 0 ${width} ${height}`}
+      aria-hidden="true"
+    >
       <polyline className="spark-line" points={points} />
     </svg>
   );
 }
 
-export type AnswerSegment = { key: string; label: string; value: number; cls: "seg-pass" | "seg-fail" | "seg-unknown" };
+export type AnswerSegment = {
+  key: string;
+  label: string;
+  value: number;
+  cls: "seg-pass" | "seg-fail" | "seg-unknown";
+};
 
 /** The two Jev questions as segmented bars: pass, fail, unknown; widths follow the probabilities. */
 export function AnswerBar({ segments }: { segments: AnswerSegment[] }) {
   const total = segments.reduce((sum, segment) => sum + segment.value, 0);
   return (
-    <div className="answerbar" role="img" aria-label={segments.map((s) => `${s.label} ${pct(s.value)}`).join("，")}>
+    <div
+      className="answerbar"
+      role="img"
+      aria-label={segments.map((s) => `${s.label} ${pct(s.value)}`).join("，")}
+    >
       {segments.map((segment) => {
         const width = total > 0 ? (segment.value / total) * 100 : 0;
         if (width <= 0) return null;

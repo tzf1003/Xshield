@@ -124,7 +124,11 @@ export function CommandPalette({ open, onClose, onHelp }: Props) {
             </div>
           ) : null}
           {groups.map((group) => (
-            <div key={group.title} role="group" aria-label={group.title}>
+            <fieldset
+              key={group.title}
+              aria-label={group.title}
+              style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}
+            >
               <div className="palette-group">{group.title}</div>
               {group.items.map((item) => {
                 flatIndex += 1;
@@ -148,7 +152,7 @@ export function CommandPalette({ open, onClose, onHelp }: Props) {
                   </button>
                 );
               })}
-            </div>
+            </fieldset>
           ))}
         </div>
         <div className="palette-foot">
