@@ -16,6 +16,9 @@ use xshield_judge::context::ContextKey;
 use xshield_judge::engine::{Judge, Observation, RequestFacts};
 use xshield_judge::jev::JevClient;
 
+/// The gateway id of the origin responses the scenarios observe.
+const RID: &str = "req_00000000000000000000000000000001";
+
 struct Case {
     name: &'static str,
     method: &'static str,
@@ -84,6 +87,9 @@ async fn live_business_traffic_and_evasions() {
     judge.observe(
         &site,
         &Observation {
+            request_id: RID,
+            unread: None,
+            would_block: false,
             credential: Some("doctorA"),
             client: "10.0.0.1",
             issued_credential: None,
@@ -239,6 +245,9 @@ async fn live_acceptance_scenarios() {
         judge.observe(
             &site,
             &Observation {
+                request_id: RID,
+                unread: None,
+                would_block: false,
                 credential: Some(session),
                 client: "10.0.0.1",
                 issued_credential: None,
@@ -255,6 +264,9 @@ async fn live_acceptance_scenarios() {
     judge.observe(
         &site,
         &Observation {
+            request_id: RID,
+            unread: None,
+            would_block: false,
             credential: Some("recipient"),
             client: "10.0.0.1",
             issued_credential: None,
@@ -392,7 +404,7 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
                 },
             )
             .await;
-        let record = judgement.record.expect("record");
+        let record = judgement.record;
         let blocked = !judgement.forward;
         let detail = record.jev.as_ref().map_or_else(
             || "no model call".to_owned(),
@@ -409,7 +421,7 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
         );
         if blocked != case.expect_block {
             if let Some(jev) = &record.jev {
-                println!("  state sent: {}", jev.state);
+                println!("  state sent: {}", jev.state.as_deref().unwrap_or("none"));
             }
             wrong.push(case.name);
         }
@@ -446,6 +458,9 @@ async fn live_juice_shop_checkout_flow() {
         judge.observe(
             &site,
             &Observation {
+                request_id: RID,
+                unread: None,
+                would_block: false,
                 credential: Some("tokenA"),
                 client: "10.0.0.1",
                 issued_credential: None,
@@ -646,7 +661,7 @@ async fn live_juice_shop_sign_up_flow() {
     ] {
         judge.observe(
             &site,
-            &Observation {
+            &Observation { request_id: RID, unread: None, would_block: false,
                 credential: None,
                 client: "10.0.0.1",
                 issued_credential: None,

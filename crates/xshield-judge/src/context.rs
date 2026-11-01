@@ -85,13 +85,40 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
         .into()
 }
 
-/// Hex of the first 4 digest bytes: the log-safe session label.
+/// Hex of the first 8 digest bytes: the log-safe session label (16 digits).
 #[must_use]
 pub fn label(digest: &Digest16) -> String {
-    digest[..4].iter().fold(String::new(), |mut text, byte| {
+    digest[..8].iter().fold(String::new(), |mut text, byte| {
         let _ = write!(text, "{byte:02x}");
         text
     })
+}
+
+/// The number a gateway request id (`req_` and 32 hex digits) stands for;
+/// 0 when the text is not one.
+#[must_use]
+pub fn request_number(id: &str) -> u128 {
+    id.strip_prefix("req_")
+        .filter(|hex| hex.len() == 32)
+        .and_then(|hex| u128::from_str_radix(hex, 16).ok())
+        .unwrap_or(0)
+}
+
+/// The request id a number stands for; `None` for 0, which means unknown.
+#[must_use]
+pub fn request_text(number: u128) -> Option<String> {
+    (number != 0).then(|| format!("req_{number:032x}"))
+}
+
+/// The request whose response showed values to a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Source<'a> {
+    /// `METHOD /path`, as the state shows it.
+    pub request: &'a str,
+    /// The gateway request id as a number; 0 when unknown.
+    pub request_id: u128,
+    /// When the response was observed, Unix milliseconds.
+    pub at_ms: u64,
 }
 
 /// Where a value was seen.
@@ -101,6 +128,10 @@ pub struct Origin {
     pub field: String,
     /// The request that returned it, for example `GET /api/patients`.
     pub request: String,
+    /// That request's id as a number; 0 for values learned before a restart.
+    pub request_id: u128,
+    /// When that response was observed, Unix milliseconds; 0 when unknown.
+    pub at_ms: u64,
 }
 
 /// What this session knows about one request value.
@@ -111,6 +142,32 @@ pub struct Seen {
 }
 
 impl Seen {
+    /// Adds an origin. The same field from the same request is one origin: the
+    /// first sighting is kept and a repeat changes nothing (docs/07 section
+    /// 7.7.1). Only `(field, request)` decides a repeat, so the state's
+    /// `seen_as` stays the same however often a list is fetched.
+    fn note(&mut self, origin: Origin) {
+        if self
+            .origins
+            .iter()
+            .any(|known| known.field == origin.field && known.request == origin.request)
+        {
+            return;
+        }
+        if self.origins.len() == SOURCES_MAX {
+            // Small numbers repeat everywhere; keep the id-field origins that
+            // really identify an object and drop the noise (a stock count, an
+            // ETA) first.
+            let drop = self
+                .origins
+                .iter()
+                .position(|o| !is_id_like(&o.field))
+                .unwrap_or(0);
+            self.origins.remove(drop);
+        }
+        self.origins.push(origin);
+    }
+
     /// Whether the value is safe to fast-allow for a request to `path` under
     /// the field `key`: long, or seen under an id field of the same kind of
     /// object. Short values collide across unrelated objects (basket 1,
@@ -245,6 +302,29 @@ pub struct Recent {
     pub path: String,
     /// Origin status.
     pub status: u16,
+    /// The request id as a number; 0 when unknown.
+    pub request_id: u128,
+    /// When the response was observed, Unix milliseconds.
+    pub at_ms: u64,
+}
+
+/// An entry the session passed, and the request that passed it first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryPass {
+    /// The entry path.
+    pub path: String,
+    /// When the session first passed it, Unix milliseconds.
+    pub at_ms: u64,
+    /// The request that passed it; 0 when unknown.
+    pub request_id: u128,
+}
+
+/// A positive judgement the cache reuses until `until_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CachedAllow {
+    until_ms: u64,
+    /// The request id of the Jev allow that produced it; 0 when unknown.
+    source: u128,
 }
 
 /// Everything remembered about one session.
@@ -255,8 +335,8 @@ pub struct SessionContext {
     seen: HashMap<Digest16, Seen>,
     order: VecDeque<Digest16>,
     recent: VecDeque<Recent>,
-    entries: Vec<String>,
-    cache: HashMap<Digest16, u64>,
+    entries: Vec<EntryPass>,
+    cache: HashMap<Digest16, CachedAllow>,
 }
 
 impl SessionContext {
@@ -284,29 +364,25 @@ impl SessionContext {
         self.seen.get(&key.mac("value", value.as_bytes()))
     }
 
-    /// Records the values of a successful response to `request`.
-    pub fn remember(&mut self, key: &ContextKey, request: &str, values: &[ResponseValue]) {
+    /// Records the values of a successful response and returns how many of
+    /// them the session had not seen before.
+    pub fn remember(
+        &mut self,
+        key: &ContextKey,
+        source: &Source<'_>,
+        values: &[ResponseValue],
+    ) -> usize {
+        let mut new = 0;
         for value in values {
             let digest = key.mac("value", value.value.as_bytes());
             let origin = Origin {
                 field: value.field.clone(),
-                request: request.to_owned(),
+                request: source.request.to_owned(),
+                request_id: source.request_id,
+                at_ms: source.at_ms,
             };
             if let Some(seen) = self.seen.get_mut(&digest) {
-                if !seen.origins.contains(&origin) {
-                    if seen.origins.len() == SOURCES_MAX {
-                        // Small numbers repeat everywhere; keep the id-field
-                        // origins that really identify an object and drop
-                        // the noise (a stock count, an ETA) first.
-                        let drop = seen
-                            .origins
-                            .iter()
-                            .position(|o| !is_id_like(&o.field))
-                            .unwrap_or(0);
-                        seen.origins.remove(drop);
-                    }
-                    seen.origins.push(origin);
-                }
+                seen.note(origin);
                 continue;
             }
             if self.order.len() >= SEEN_MAX
@@ -321,7 +397,9 @@ impl SessionContext {
                 },
             );
             self.order.push_back(digest);
+            new += 1;
         }
+        new
     }
 
     /// Appends one request to the recent list.
@@ -339,38 +417,55 @@ impl SessionContext {
         self.recent.iter().skip(skip).collect()
     }
 
-    /// Notes that the session reached an entry path.
-    pub fn pass_entry(&mut self, path: &str) {
-        if self.entries.len() < ENTRIES_MAX && !self.entries.iter().any(|known| known == path) {
-            self.entries.push(path.to_owned());
+    /// Notes that the session reached an entry path. Returns `true` the first
+    /// time the session passes it.
+    pub fn pass_entry(&mut self, path: &str, at_ms: u64, request_id: u128) -> bool {
+        if self.entries.len() >= ENTRIES_MAX || self.entries.iter().any(|known| known.path == path)
+        {
+            return false;
         }
+        self.entries.push(EntryPass {
+            path: path.to_owned(),
+            at_ms,
+            request_id,
+        });
+        true
     }
 
-    /// Entry paths reached so far.
+    /// Entry paths reached so far, in the order first reached.
     #[must_use]
-    pub fn entries_passed(&self) -> &[String] {
+    pub fn entries_passed(&self) -> &[EntryPass] {
         &self.entries
     }
 
-    /// Whether `cache_key` was judged safe within [`CACHE_MS`].
+    /// The request id of the Jev allow that `cache_key` reuses, while that
+    /// judgement is within its window. `Some(0)` when that request's id is
+    /// unknown.
     #[must_use]
-    pub fn cached_allow(&self, cache_key: &Digest16, now_ms: u64) -> bool {
+    pub fn cached_allow(&self, cache_key: &Digest16, now_ms: u64) -> Option<u128> {
         self.cache
             .get(cache_key)
-            .is_some_and(|until| *until > now_ms)
+            .filter(|entry| entry.until_ms > now_ms)
+            .map(|entry| entry.source)
     }
 
-    /// Remembers a positive judgement for `ttl_ms`. Entries keep the time they
-    /// were written with, so a later change of the site's cache time does not
-    /// shorten or extend them.
-    pub fn cache_allow(&mut self, cache_key: Digest16, now_ms: u64, ttl_ms: u64) {
+    /// Remembers a positive judgement from request `source` for `ttl_ms`.
+    /// Entries keep the time they were written with, so a later change of the
+    /// site's cache time does not shorten or extend them.
+    pub fn cache_allow(&mut self, cache_key: Digest16, now_ms: u64, ttl_ms: u64, source: u128) {
         if self.cache.len() >= CACHE_MAX {
-            self.cache.retain(|_, until| *until > now_ms);
+            self.cache.retain(|_, entry| entry.until_ms > now_ms);
             if self.cache.len() >= CACHE_MAX {
                 self.cache.clear();
             }
         }
-        self.cache.insert(cache_key, now_ms + ttl_ms);
+        self.cache.insert(
+            cache_key,
+            CachedAllow {
+                until_ms: now_ms + ttl_ms,
+                source,
+            },
+        );
     }
 
     /// Number of remembered values.
@@ -453,6 +548,14 @@ mod tests {
         ContextKey::new(vec![7; 32])
     }
 
+    fn at(request: &str) -> Source<'_> {
+        Source {
+            request,
+            request_id: 0,
+            at_ms: 0,
+        }
+    }
+
     fn response(field: &str, value: &str) -> ResponseValue {
         ResponseValue {
             field: field.to_owned(),
@@ -492,7 +595,7 @@ mod tests {
         let session = store.session(id, 0);
         session.remember(
             &key,
-            "GET /api/patients",
+            &at("GET /api/patients"),
             &[response("id", "7"), response("age", "8")],
         );
         let seen = session.lookup(&key, "7").unwrap();
@@ -512,9 +615,17 @@ mod tests {
         let key = key();
         let mut store = ContextStore::new();
         let session = store.session(key.mac("session", b"cookie"), 0);
-        session.remember(&key, "GET /rest/products/search", &[response("id", "1")]);
-        session.remember(&key, "GET /api/Deliverys", &[response("id", "1")]);
-        session.remember(&key, "GET /api/Quantitys/", &[response("quantity", "1")]);
+        session.remember(
+            &key,
+            &at("GET /rest/products/search"),
+            &[response("id", "1")],
+        );
+        session.remember(&key, &at("GET /api/Deliverys"), &[response("id", "1")]);
+        session.remember(
+            &key,
+            &at("GET /api/Quantitys/"),
+            &[response("quantity", "1")],
+        );
         let seen = session.lookup(&key, "1").unwrap();
         assert!(seen.is_specific(
             "1",
@@ -534,7 +645,7 @@ mod tests {
         let key = key();
         let mut store = ContextStore::new();
         let session = store.session(key.mac("session", b"cookie"), 0);
-        session.remember(&key, "GET /api/Cards", &[response("id", "7")]);
+        session.remember(&key, &at("GET /api/Cards"), &[response("id", "7")]);
         let seen = session.lookup(&key, "7").unwrap();
         assert!(seen.is_specific("7", "/rest/basket/22/checkout", Some("paymentId"), &[]));
         assert!(!seen.is_specific("7", "/rest/basket/22/checkout", Some("addressId"), &[]));
@@ -546,6 +657,8 @@ mod tests {
             origins: vec![Origin {
                 field: "name".into(),
                 request: "GET /x".into(),
+                request_id: 0,
+                at_ms: 0,
             }],
         };
         assert!(seen.is_specific("P-0000042", "/x", None, &[]));
@@ -557,16 +670,20 @@ mod tests {
         let key = key();
         let mut store = ContextStore::new();
         let session = store.session(key.mac("session", b"cookie"), 0);
-        session.remember(&key, "GET /api/Deliverys", &[response("id", "1")]);
+        session.remember(&key, &at("GET /api/Deliverys"), &[response("id", "1")]);
         session.remember(
             &key,
-            "GET /rest/basket/22",
+            &at("GET /rest/basket/22"),
             &[response("BasketItem.id", "9"), response("BasketId", "22")],
         );
         let delivery = session.lookup(&key, "1").unwrap();
         assert!(delivery.is_specific("1", "/api/Deliverys/1", None, &[]));
         assert!(!delivery.is_specific("1", "/rest/basket/1", None, &[]));
-        session.remember(&key, "GET /rest/basket/22", &[response("Products.id", "1")]);
+        session.remember(
+            &key,
+            &at("GET /rest/basket/22"),
+            &[response("Products.id", "1")],
+        );
         let both = session.lookup(&key, "1").unwrap();
         assert!(!both.is_specific("1", "/rest/basket/1", None, &[]));
         assert!(both.is_specific("1", "/api/Products/1", None, &[]));
@@ -585,10 +702,10 @@ mod tests {
         let key = key();
         let mut session = SessionContext::new(0);
         for index in 0..=SOURCES_MAX + 2 {
-            session.remember(&key, &format!("GET /r{index}"), &[response("id", "7")]);
+            session.remember(&key, &at(&format!("GET /r{index}")), &[response("id", "7")]);
         }
         let last = format!("GET /r{}", SOURCES_MAX + 2);
-        session.remember(&key, &last, &[response("id", "7")]);
+        session.remember(&key, &at(&last), &[response("id", "7")]);
         let seen = session.lookup(&key, "7").unwrap();
         assert_eq!(seen.origins.len(), SOURCES_MAX);
         assert_eq!(seen.origins.last().unwrap().request, last);
@@ -598,11 +715,11 @@ mod tests {
     fn noise_origins_are_dropped_before_id_origins() {
         let key = key();
         let mut session = SessionContext::new(0);
-        session.remember(&key, "GET /api/Products", &[response("id", "1")]);
+        session.remember(&key, &at("GET /api/Products"), &[response("id", "1")]);
         for index in 0..SOURCES_MAX + 3 {
             session.remember(
                 &key,
-                &format!("GET /s{index}"),
+                &at(&format!("GET /s{index}")),
                 &[response("quantity", "1")],
             );
         }
@@ -618,7 +735,7 @@ mod tests {
         let batch: Vec<_> = (0..SEEN_MAX + 3)
             .map(|i| response("id", &format!("v{i}")))
             .collect();
-        session.remember(&key, "GET /x", &batch);
+        session.remember(&key, &at("GET /x"), &batch);
         assert_eq!(session.seen_len(), SEEN_MAX);
         assert!(session.lookup(&key, "v0").is_none());
         assert!(
@@ -629,10 +746,41 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_field_from_one_request_keeps_its_first_origin() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        for index in 0..10u128 {
+            let source = Source {
+                request: "GET /api/patients",
+                request_id: 100 + index,
+                at_ms: 1_000 + u64::try_from(index).unwrap(),
+            };
+            session.remember(&key, &source, &[response("id", "7")]);
+        }
+        let seen = session.lookup(&key, "7").unwrap();
+        assert_eq!(seen.origins.len(), 1);
+        assert_eq!(
+            seen.origins[0].request_id, 100,
+            "the first sighting is kept"
+        );
+        assert_eq!(seen.origins[0].at_ms, 1_000);
+        let other = Source {
+            request: "GET /api/Cards",
+            request_id: 200,
+            at_ms: 2_000,
+        };
+        session.remember(&key, &other, &[response("id", "7")]);
+        assert_eq!(session.lookup(&key, "7").unwrap().origins.len(), 2);
+    }
+
+    #[test]
     fn recent_requests_are_bounded_and_ordered() {
         let mut session = SessionContext::new(0);
         for index in 0..RECENT_MAX + 5 {
             session.record_request(Recent {
+                request_id: 0,
+                at_ms: 0,
                 method: "GET".into(),
                 path: format!("/{index}"),
                 status: 200,
@@ -648,9 +796,9 @@ mod tests {
     fn entries_are_deduplicated_and_capped() {
         let mut session = SessionContext::new(0);
         for index in 0..ENTRIES_MAX + 4 {
-            session.pass_entry(&format!("/e{}", index % (ENTRIES_MAX + 2)));
+            session.pass_entry(&format!("/e{}", index % (ENTRIES_MAX + 2)), 0, 0);
         }
-        session.pass_entry("/e0");
+        session.pass_entry("/e0", 0, 0);
         assert_eq!(session.entries_passed().len(), ENTRIES_MAX);
     }
 
@@ -659,10 +807,14 @@ mod tests {
         let key = key();
         let mut session = SessionContext::new(0);
         let cache_key = key.mac("cache", b"GET /x");
-        assert!(!session.cached_allow(&cache_key, 0));
-        session.cache_allow(cache_key, 1_000, CACHE_MS);
-        assert!(session.cached_allow(&cache_key, 1_000 + CACHE_MS - 1));
-        assert!(!session.cached_allow(&cache_key, 1_000 + CACHE_MS));
+        assert!(session.cached_allow(&cache_key, 0).is_none());
+        session.cache_allow(cache_key, 1_000, CACHE_MS, 1);
+        assert!(
+            session
+                .cached_allow(&cache_key, 1_000 + CACHE_MS - 1)
+                .is_some()
+        );
+        assert!(session.cached_allow(&cache_key, 1_000 + CACHE_MS).is_none());
     }
 
     #[test]
@@ -672,7 +824,7 @@ mod tests {
         let id = key.mac("session", b"c");
         store
             .session(id, 0)
-            .remember(&key, "GET /x", &[response("id", "7")]);
+            .remember(&key, &at("GET /x"), &[response("id", "7")]);
         assert!(store.contains(&id, IDLE_MAX_MS));
         assert!(!store.contains(&id, IDLE_MAX_MS + 1));
         let fresh = store.session(id, IDLE_MAX_MS + 1);
@@ -681,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_never_expose_more_than_four_bytes() {
-        assert_eq!(label(&[0xab; 16]), "abababab");
+    fn labels_never_expose_more_than_eight_bytes() {
+        assert_eq!(label(&[0xab; 16]), "abababababababab");
     }
 }

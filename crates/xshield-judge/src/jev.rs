@@ -25,18 +25,29 @@ const GATEWAY_ENDPOINT: &str = "https://ai-gateway.vercel.sh/typesafe/v1/systemo
 const DIRECT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 /// Default time allowed for one Jev call (docs/02 section 2.5).
 pub const TIMEOUT: Duration = Duration::from_secs(2);
+/// Most bytes of a provider reply kept in the decision log (docs/07 section 7.5.1).
+pub const REPLY_BYTES_MAX: usize = 8 * 1024;
 
-/// Why a Jev call produced no usable body. Carries no network detail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a Jev call produced no usable body. The network detail stays out; the
+/// provider's own reply to a refused call is kept, capped, for the trace.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JevFailure {
     /// The deadline passed.
     Timeout,
-    /// The provider answered 429.
-    RateLimited,
+    /// The provider answered 429, with the start of its reply.
+    RateLimited {
+        /// The reply body, at most [`REPLY_BYTES_MAX`] bytes.
+        body: Vec<u8>,
+    },
     /// Connection, TLS or protocol failure.
     Transport,
-    /// A non-200 status other than 429.
-    Http(u16),
+    /// A non-200 status other than 429, with the start of its reply.
+    Http {
+        /// The status the provider answered.
+        status: u16,
+        /// The reply body, at most [`REPLY_BYTES_MAX`] bytes.
+        body: Vec<u8>,
+    },
     /// The response exceeded the size limit.
     TooLarge,
 }
@@ -74,6 +85,8 @@ pub trait JevPort: Send + Sync {
     fn model(&self) -> &str;
     /// The route the calls take: `gateway`, `direct`, or `custom` for a private endpoint.
     fn route(&self) -> &'static str;
+    /// The host name of the endpoint, for the console's configuration view.
+    fn endpoint_host(&self) -> &str;
     /// The timeout a site gets when its `advanced` section sets none.
     fn default_timeout(&self) -> Duration;
     /// Performs the exchange within `timeout`.
@@ -86,6 +99,7 @@ type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 pub struct JevClient {
     client: HttpClient,
     endpoint: Uri,
+    host: String,
     bearer: Zeroizing<String>,
     model: String,
     route: &'static str,
@@ -128,6 +142,7 @@ impl JevClient {
             .build();
         Ok(Self {
             client: Client::builder(TokioExecutor::new()).build(connector),
+            host: host.to_owned(),
             endpoint: uri,
             bearer: Zeroizing::new(format!("Bearer {api_key}")),
             model: model.to_owned(),
@@ -207,24 +222,48 @@ impl JevClient {
             .request(request)
             .await
             .map_err(|_| JevFailure::Transport)?;
-        match response.status().as_u16() {
-            200 => {}
-            429 => return Err(JevFailure::RateLimited),
-            other => return Err(JevFailure::Http(other)),
-        }
+        let status = response.status().as_u16();
         let mut incoming = response.into_body();
-        let mut out = Vec::new();
-        while let Some(frame) = incoming.frame().await {
-            let frame = frame.map_err(|_| JevFailure::Transport)?;
-            if let Ok(data) = frame.into_data() {
-                if out.len() + data.len() > RESPONSE_BYTES_MAX {
-                    return Err(JevFailure::TooLarge);
-                }
-                out.extend_from_slice(&data);
-            }
+        if status != 200 {
+            // The start of a refused reply is evidence for the trace; a reply
+            // that cannot be read adds nothing and keeps its status.
+            let (body, _) = read_capped(&mut incoming, REPLY_BYTES_MAX)
+                .await
+                .unwrap_or_default();
+            return Err(match status {
+                429 => JevFailure::RateLimited { body },
+                other => JevFailure::Http {
+                    status: other,
+                    body,
+                },
+            });
         }
-        Ok(out)
+        let (body, overflow) = read_capped(&mut incoming, RESPONSE_BYTES_MAX).await?;
+        if overflow {
+            return Err(JevFailure::TooLarge);
+        }
+        Ok(body)
     }
+}
+
+/// Reads at most `limit` bytes of a body; `true` when more followed.
+async fn read_capped(
+    incoming: &mut hyper::body::Incoming,
+    limit: usize,
+) -> Result<(Vec<u8>, bool), JevFailure> {
+    let mut out = Vec::new();
+    while let Some(frame) = incoming.frame().await {
+        let frame = frame.map_err(|_| JevFailure::Transport)?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+        if out.len() + data.len() > limit {
+            out.extend_from_slice(&data[..limit - out.len()]);
+            return Ok((out, true));
+        }
+        out.extend_from_slice(&data);
+    }
+    Ok((out, false))
 }
 
 #[async_trait]
@@ -235,6 +274,10 @@ impl JevPort for JevClient {
 
     fn route(&self) -> &'static str {
         self.route
+    }
+
+    fn endpoint_host(&self) -> &str {
+        &self.host
     }
 
     fn default_timeout(&self) -> Duration {
@@ -320,15 +363,21 @@ mod tests {
         for (reply, expected) in [
             (
                 "HTTP/1.1 429 Too Many\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                JevFailure::RateLimited,
+                JevFailure::RateLimited { body: vec![] },
             ),
             (
                 "HTTP/1.1 500 Err\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                JevFailure::Http(500),
+                JevFailure::Http {
+                    status: 500,
+                    body: vec![],
+                },
             ),
             (
                 "HTTP/1.1 302 Found\r\nlocation: http://evil/\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                JevFailure::Http(302),
+                JevFailure::Http {
+                    status: 302,
+                    body: vec![],
+                },
             ),
         ] {
             let (url, _task) = serve(reply, Duration::ZERO).await;
