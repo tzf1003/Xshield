@@ -17,10 +17,21 @@
   const baseRender = X.render;
   X.render = function () { baseRender(); X.renderSiteSelect(); X.updateModes(); };
   $('#site-select').onchange = (e) => {
+    // The scope is written into the address by replacing the current history entry, so Back still leaves the page the user
+    // came from; where the address cannot be rewritten (sandboxed preview) the same address is navigated to instead.
     X.state.site = e.target.value;
-    try { history.replaceState(null, '', X.hashWith({ site: X.state.site === 'all' ? null : X.state.site })); } catch (err) { /* sandboxed preview: keep the scope in memory only */ }
-    X.render();
+    const next = X.hashWith({ site: X.state.site === 'all' ? null : X.state.site });
+    let replaced = true; try { history.replaceState(null, '', next); } catch (err) { replaced = false; }
+    if (replaced) X.render(); else X.go(next);
   };
+  // A plain link carries the scope too (docs/06 6.2.2): its target is rewritten before the browser follows it, so a click,
+  // a new tab and "copy link address" all keep the scope. The original target is kept, so a later scope change starts over.
+  const carryScope = (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('a[href^="#/"]') : null; if (!a) return;
+    if (a.dataset.href0 == null) a.dataset.href0 = a.getAttribute('href');
+    a.setAttribute('href', X.scoped(a.dataset.href0));
+  };
+  ['click', 'auxclick', 'contextmenu'].forEach((type) => document.addEventListener(type, carryScope, true));
   $$('.nav-item[data-href]').forEach((b) => { b.onclick = () => go(b.dataset.href); });
   $('#nav-toggle').onclick = () => { $('#app').classList.toggle('nav-collapsed'); };
   $('#search-box').onclick = () => openPalette();
@@ -70,7 +81,7 @@
     ov.appendChild(box); document.body.appendChild(ov); const input = $('input', box); const results = $('.results', box); let items = []; let active = 0;
     const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); X.dialogs = X.dialogs.filter((x) => x !== api); if (prev && prev.focus) prev.focus(); };
     const api = { close }; X.dialogs.push(api);
-    const run = (it, newTab) => { close(); let w = null; if (newTab && it.href) { try { w = window.open(location.pathname + it.href, '_blank'); } catch (e) { w = null; } } if (!w) it.run(); };
+    const run = (it, newTab) => { close(); let w = null; if (newTab && it.href) { try { w = window.open(location.pathname + X.scoped(it.href), '_blank'); } catch (e) { w = null; } } if (!w) it.run(); };
     const add = (group, title, sub, href, fn) => items.push({ group, title, sub, href, run: fn || (() => go(href)) });
     function build() {
       const v = input.value.trim(); items = []; const ids = [...new Set(v.match(/req_[0-9a-f]{32}/g) || [])];

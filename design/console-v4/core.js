@@ -258,7 +258,15 @@
     const raw = (location.hash || '#/').slice(1); const i = raw.indexOf('?');
     return { parts: (i < 0 ? raw : raw.slice(0, i)).split('/').filter(Boolean).map(decodeURIComponent), q: new URLSearchParams(i < 0 ? '' : raw.slice(i + 1)) };
   };
-  X.go = (hash) => { if (location.hash === hash) X.render(); else location.hash = hash; };
+  // docs/06 6.2.2: the site scope lives in the address and nowhere else (no `site` means all sites). A link or button that
+  // does not name a site carries the current scope to its target, so Back and Forward return to the scope of that page.
+  X.scoped = (hash) => {
+    if (typeof hash !== 'string' || hash[0] !== '#' || X.state.site === 'all') return hash;
+    const i = hash.indexOf('?');
+    if (i >= 0 && new URLSearchParams(hash.slice(i + 1)).has('site')) return hash;
+    return `${hash}${i < 0 ? '?' : '&'}site=${encodeURIComponent(X.state.site)}`;
+  };
+  X.go = (hash) => { const next = X.scoped(hash); if (location.hash === next) X.render(); else location.hash = next; };
   X.hashWith = (patch, base) => {
     const { parts, q } = base || X.parseHash(); const nq = new URLSearchParams(q.toString());
     Object.keys(patch).forEach((k) => { if (patch[k] == null || patch[k] === '') nq.delete(k); else nq.set(k, patch[k]); });
@@ -274,10 +282,9 @@
   X.state = { site: 'all' };
   X.render = () => {
     const page = $('#page'); const { parts, q } = X.parseHash(); const key = parts[0] || 'overview';
-    // docs/06 6.2.2: the site scope lives in the URL (`site`, default all sites) and persists across pages.
+    // The address is the only source of the scope (see X.scoped): no `site`, or one that names no site, means all sites.
     const urlSite = q.get('site');
-    if (urlSite && (urlSite === 'all' || X.sites.some((s) => s.name === urlSite))) X.state.site = urlSite;
-    else if (!urlSite && X.state.site !== 'all') { try { history.replaceState(null, '', X.hashWith({ site: X.state.site })); } catch (e) { /* sandboxed preview: keep the scope in memory only */ } }
+    X.state.site = urlSite && X.sites.some((s) => s.name === urlSite) ? urlSite : 'all';
     if (X.routeKey === 'requests' && !X.parseHashPrev) X.scroll.requests = page.scrollTop;
     X.closePopover();
     $$('.nav-item[data-route]').forEach((b) => b.classList.toggle('active', b.dataset.route === key));
@@ -406,7 +413,13 @@
   const hostOk = (x) => x.length > 0 && x.length <= 253 && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(x) && !x.includes('..');
   const originOk = (o) => { const m = /^https?:\/\/([^:/]*)(?::(\d*))?$/.exec(o || ''); return !!m && hostOk(m[1]) && (m[2] == null || (m[2].length >= 1 && m[2].length <= 5)); };
   const tokenOk = (t) => /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(t || '');
-  const pathOk = (p) => p.length <= 256 && p.startsWith('/') && !/[?#\\\s\x00-\x1f\x7f]/.test(p) && !p.slice(0, -1).includes('*') && !p.split('/').some((seg) => seg === '.' || seg === '..');
+  // PathPattern::parse: the length is UTF-8 bytes (a Chinese character counts 3, an emoji 4), not String.length; a space and
+  // the ASCII control bytes are rejected, other whitespace is not; everything but the optional last `*` is checked as the literal.
+  const utf8Len = (s) => new TextEncoder().encode(s).length;
+  const pathOk = (p) => {
+    const literal = p.endsWith('*') ? p.slice(0, -1) : p;
+    return p.length > 0 && utf8Len(p) <= 256 && p.startsWith('/') && !/[*?#\\ \x00-\x1f\x7f]/.test(literal) && !literal.split('/').some((seg) => seg === '.' || seg === '..');
+  };
   X.validateSpec = (spec) => {
     const errors = []; const warnings = []; const add = (g, f, msg) => errors.push({ group: g, field: f, msg });
     if (!/^[a-z0-9_-]{1,64}$/.test(spec.name || '')) add('basic', 'name', '站点名只能用小写字母、数字、-、_，最长 64 个字符');
@@ -415,7 +428,7 @@
     if (!['observe', 'enforce'].includes(spec.mode)) add('mode', 'mode', '模式只能是 observe（观察）或 enforce（拦截）');
     if (!['allow', 'deny'].includes(spec.on_jev_unavailable)) add('mode', 'on_jev_unavailable', 'Jev 不可用时只能是 allow（放行）或 deny（拒绝）');
     const sess = spec.session || {}; if ((!sess.cookie && !sess.header) || (sess.cookie && sess.header) || !tokenOk(sess.cookie || sess.header)) add('session', 'session', '会话凭证需要一个有效的 Cookie 名或请求头名（字母、数字和 !#$%&\'*+-.^_`|~，最长 64）');
-    if (!spec.entries.length || spec.entries.length > 64 || spec.entries.some((p) => !pathOk(p))) add('entries', 'entries', '入口至少一条、最多 64 条；每条以 / 开头，* 只能在末尾，不能含查询串、. 或 .. 段');
+    if (!spec.entries.length || spec.entries.length > 64 || spec.entries.some((p) => !pathOk(p))) add('entries', 'entries', '入口至少一条、最多 64 条；每条以 / 开头、最长 256 字节（一个汉字算 3 个），* 只能在末尾，不能含查询串、空格、. 或 .. 段');
     if (spec.bypass.length > 64 || spec.bypass.some((p) => !pathOk(p))) add('bypass', 'bypass', '绕过最多 64 条，规则格式同入口');
     const a = spec.advanced || {}; const range = (k, lo, hi, label) => { if (a[k] != null && (!Number.isInteger(a[k]) || a[k] < lo || a[k] > hi)) add('advanced', k, `${label}需在 ${lo}–${hi} 之间`); };
     range('jev_timeout_ms', 100, 30000, 'Jev 超时（ms）'); range('session_calls_per_minute', 1, 600, '会话调用上限'); range('address_calls_per_minute', 1, 600, '地址调用上限'); range('allow_cache_minutes', 0, 60, '放行缓存时长（分钟）');

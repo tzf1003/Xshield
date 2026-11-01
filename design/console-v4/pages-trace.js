@@ -101,7 +101,7 @@
     const t = M.idTime(id); const now = X.now();
     if (now - t > 7 * 86400000) return `生成于 ${X.fmtFull(t).slice(0, 16)}，已超过 7 天保留期`;
     if (t > now + 60000 || t < now - 40 * 86400000) return 'ID 时间异常，可能不是本系统生成的';
-    for (const e of M.SYSTEM.edges) for (const g of e.gaps || []) { if (t >= g.from_ms && t <= g.to_ms && g.dropped > 0) return `生成于 ${X.fmtHMS(t)}，当时 ${e.edge} 丢失了 ${g.dropped} 条记录`; }
+    for (const e of M.SYSTEM.edges) for (const g of e.gaps || []) { if (t >= g.from_ms && t <= g.to_ms && X.gapLost(g) > 0) return `生成于 ${X.fmtHMS(t)}，当时 ${e.edge} 丢失了 ${X.gapLost(g)} 条记录（${X.gapCause(g)}）`; }
     return '可能来自其他环境的网关';
   }
   X.notFoundReason = notFoundReason;
@@ -124,7 +124,7 @@
   function attentionItems() {
     const items = []; const st = X.computeStatus();
     st.problems.forEach((p) => items.push({ lvl: p.level, msg: p.text, acts: [[p.act, p.href]] }));
-    M.SYSTEM.edges.forEach((e) => (e.gaps || []).forEach((g) => { if (!g.dropped && g.dropped_bypass) items.push({ lvl: 'info', msg: `${e.edge} 在队列压力下丢弃了 ${n(g.dropped_bypass)} 条绕过记录（静态资源），判定记录不受影响`, acts: [['查看系统', '#/system?tab=storage']] }); }));
+    M.SYSTEM.edges.forEach((e) => (e.gaps || []).forEach((g) => { if (!X.gapLost(g) && g.dropped_bypass) items.push({ lvl: 'info', msg: `${e.edge} 在队列压力下丢弃了 ${n(g.dropped_bypass)} 条绕过记录（静态资源），判定记录不受影响`, acts: [['查看系统', '#/system?tab=storage']] }); }));
     X.sites.forEach((s) => {
       if (X.state.site !== 'all' && X.state.site !== s.name) return;
       if (s.mode === 'observe' && s.would_block_24h) {
@@ -747,7 +747,7 @@
     page.appendChild(head);
     const f = { judged: (r) => isJudged(r), jev: (r) => !!r.jev, blocks: (r) => ['blocked', 'would_block'].includes(r.outcome) };
     if (only && f[only]) rows = rows.filter(f[only]);
-    const gaps = []; M.SYSTEM.edges.forEach((e) => (e.gaps || []).forEach((g) => { if (g.dropped > 0) gaps.push(Object.assign({ edge: e.edge }, g)); }));
+    const gaps = []; M.SYSTEM.edges.forEach((e) => (e.gaps || []).forEach((g) => { if (X.gapLost(g) > 0) gaps.push(Object.assign({ edge: e.edge }, g)); }));
     const maxLearn = Math.max(...rows.map((r) => (r.trace.response && r.trace.response.new_values) || 0), 1);
     const split = h('<div class="split reqsplit nopeek"></div>'); const left = h('<div class="leftcol"></div>'); const peekCol = h('<div class="peekcol"></div>');
     const tl = h('<div class="card"><div class="timeline" role="list"></div></div>'); const tlEl = $('.timeline', tl);

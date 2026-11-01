@@ -859,7 +859,7 @@ web/console/src/
 
 ### 7.10.3 路由与 URL 状态
 
-筛选、标签页、视图模式都放在 URL 查询参数里（TanStack Router `validateSearch`，手写校验函数，不引入 zod），刷新、后退、复制链接都能还原。路由表见 [06.2](06-console-ui.md#62-信息架构)。全局站点范围 `site` 也放在 URL，并在 `localStorage` 记住上一次的选择。
+筛选、标签页、视图模式都放在 URL 查询参数里（TanStack Router `validateSearch`，手写校验函数，不引入 zod），刷新、后退、复制链接都能还原。路由表见 [06.2](06-console-ui.md#62-信息架构)。全局范围（`site`、`range`、自定义的 `since`/`until`）也只放在 URL，不存 `localStorage`：地址里没有 `site` 就是全部站点。页内链接、导航按钮、命令面板和快捷键跳转到不带范围的地址时，把当前范围带过去（`keepScope`）；顶栏切换站点用替换历史项，不新增。这样后退、前进回到的地址就是当时的范围，不会被内存里“上一次的选择”改写。
 
 ### 7.10.4 数据获取
 
@@ -898,7 +898,7 @@ web/console/src/
 
 ### 7.10.8 测试
 
-- 单元（`node --test`）：`filter-dsl.ts` 解析与序列化往返；`explain.ts` 覆盖每种判定路径和失败码；`patterns.ts` 与 Rust `PathPattern` 共用一组用例（从 `crates/xshield-core/src/context/config.rs` 的测试复制，含 `;` 路径参数）；`site-validate.ts` 的 `advanced` 范围与词规则，Host（不带端口）、源站地址、凭证名和路径规则与 Rust 的 `valid_host`、`valid_origin`、`valid_token`、`PathPattern::parse` 共用一组边界用例（Host 带端口或含 `..`、源站地址带路径或端口越界、路径含 `\\`、超过 256 字节）；`align.ts` 处理裁剪（`seen_as` 比 `sources` 短仍对得上）、次序互换（对不上）、数组值和对不上时的 `aligned: false`（7.5.2）；实时模式的合并去重（按 `request_id`，回看窗口内重复行不重复插入）；YAML↔JSON 往返；CSV 防公式注入。
+- 单元（`node --test`）：`filter-dsl.ts` 解析与序列化往返；`explain.ts` 覆盖每种判定路径和失败码；`patterns.ts` 与 Rust `PathPattern` 共用一组用例（从 `crates/xshield-core/src/context/config.rs` 的测试复制，含 `;` 路径参数）；`site-validate.ts` 的 `advanced` 范围与词规则，Host（不带端口）、源站地址、凭证名和路径规则与 Rust 的 `valid_host`、`valid_origin`、`valid_token`、`PathPattern::parse` 共用一组边界用例（Host 带端口或含 `..`、源站地址带路径或端口越界、路径含 `\\`、超过 256 字节；路径长度按 UTF-8 字节算（`TextEncoder`），不是 `String.length`，中文、emoji 跨过 256 字节的用例要有；Rust 只拒绝空格和 ASCII 控制字符，不拒绝全角空格等其他空白）；`scope.ts` 的 `keepScope` 把当前范围带到不含 `site` 的地址、已含 `site` 的地址不改，缺省的 `site` 读成全部站点；`align.ts` 处理裁剪（`seen_as` 比 `sources` 短仍对得上）、次序互换（对不上）、数组值和对不上时的 `aligned: false`（7.5.2）；实时模式的合并去重（按 `request_id`，回看窗口内重复行不重复插入）；YAML↔JSON 往返；CSV 防公式注入。
 - 端到端（Playwright，`page.route` 返回固定数据，不需要后端）：登录；⌘K 输入请求 ID 打开详情；筛选本应拦截并用 j/k、Enter 浏览；Jev 视图三种模式切换和来源跳转；从无会话记录“登记为入口”、看影响预估、保存、等到“已生效”；改 Jev 超时并看影响预估；版本差异与回滚；观察切拦截；粘贴 TSV 批量对照。每个页面跑一次 axe，明暗两种主题。
 - 契约：Rust 侧对 `DecisionRecord`、API 响应做 serde 往返测试，样例 JSON 与前端端到端测试使用同一批文件（放在 `web/console/tests/fixtures/`）。
 
