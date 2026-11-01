@@ -2008,10 +2008,6 @@ pub enum PublishError {
     Json(serde_json::Error),
     /// `ClickHouse` query or insert failed.
     ClickHouse(clickhouse::error::Error),
-    /// `PostgreSQL` outbox lease or acknowledgement failed.
-    Postgres(xshield_postgres::StoreError),
-    /// A claimed outbox row no longer belongs to this publisher lease.
-    OutboxLeaseLost,
 }
 
 impl fmt::Display for PublishError {
@@ -2032,8 +2028,6 @@ impl fmt::Display for PublishError {
             Self::Io(_) => formatter.write_str("publisher storage failed"),
             Self::Json(_) => formatter.write_str("publisher JSON processing failed"),
             Self::ClickHouse(_) => formatter.write_str("audit index unavailable"),
-            Self::Postgres(_) => formatter.write_str("outbox store unavailable"),
-            Self::OutboxLeaseLost => formatter.write_str("outbox delivery lease lost"),
         }
     }
 }
@@ -2045,7 +2039,6 @@ impl std::error::Error for PublishError {
             Self::Io(error) => Some(error),
             Self::Json(error) => Some(error),
             Self::ClickHouse(error) => Some(error),
-            Self::Postgres(error) => Some(error),
             _ => None,
         }
     }
@@ -2072,12 +2065,6 @@ impl From<serde_json::Error> for PublishError {
 impl From<clickhouse::error::Error> for PublishError {
     fn from(value: clickhouse::error::Error) -> Self {
         Self::ClickHouse(value)
-    }
-}
-
-impl From<xshield_postgres::StoreError> for PublishError {
-    fn from(value: xshield_postgres::StoreError) -> Self {
-        Self::Postgres(value)
     }
 }
 
