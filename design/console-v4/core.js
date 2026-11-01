@@ -381,6 +381,23 @@
     const lines = text.split('\n').map((raw, i) => ({ raw: raw.replace(/\s+#.*$/, '').replace(/\s+$/, ''), i: i + 1 })).filter((l) => l.raw.trim() && !l.raw.trim().startsWith('#'));
     let pos = 0; const ind = (s) => s.match(/^ */)[0].length;
     const fail = (l, msg) => { throw { line: l.i, msg }; };
+    const at = {}; // the line of each key, by path (`hosts`, `session.cookie`), for the shape errors below
+    const isStr = (v) => typeof v === 'string';
+    const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+    // Every field has one type. A wrong one stops the parse at its key, so nothing after this has to guess what a field holds
+    // (a number, a nested list, one text where a list belongs): the same check the console runs after the YAML library.
+    const shape = (obj) => {
+      const bad = (key, msg) => fail({ i: at[key] || 1 }, msg);
+      if (Array.isArray(obj)) fail(lines[0], '最外层要写成“键: 值”，不是列表');
+      ['name', 'origin', 'mode', 'on_jev_unavailable'].forEach((k) => { if (obj[k] != null && !isStr(obj[k])) bad(k, `${k} 要写成文本，不是数字或列表（纯数字的值请加引号）`); });
+      ['hosts', 'entries', 'bypass'].forEach((k) => { if (obj[k] != null && !(Array.isArray(obj[k]) && obj[k].every(isStr))) bad(k, `${k} 要写成文本列表：[a, b]，或每行一个“- 值”（数字和嵌套列表不行，纯数字的值请加引号）`); });
+      if (obj.session != null && !isObj(obj.session)) bad('session', 'session 下面要缩进写 cookie: 名称 或 header: 名称');
+      ['cookie', 'header'].forEach((k) => { const v = isObj(obj.session) ? obj.session[k] : null; if (v != null && !isStr(v)) bad(`session.${k}`, `session.${k} 要写成文本（纯数字的值请加引号）`); });
+      if (obj.advanced != null && !isObj(obj.advanced)) bad('advanced', 'advanced 下面要缩进写“键: 值”');
+      const a = isObj(obj.advanced) ? obj.advanced : {};
+      if (Array.isArray(a.secret_fields) && !a.secret_fields.every(isStr)) bad('advanced.secret_fields', 'secret_fields 里的每个词都要写成文本');
+      if (a.synonyms != null && !(Array.isArray(a.synonyms) && a.synonyms.every((p) => isStr(p) || (Array.isArray(p) && p.every(isStr))))) bad('advanced.synonyms', 'synonyms 要写成列表，每项两个词，例如 - [user, member]');
+    };
     const scalar = (s, l) => {
       s = s.trim();
       if (s.startsWith('[')) { if (!s.endsWith(']')) fail(l, '列表缺少右方括号 ]'); const inner = s.slice(1, -1).trim(); return inner ? inner.split(',').map((x) => scalar(x, l)) : []; }
@@ -400,7 +417,7 @@
         if (!m) fail(l, '这一行不是“键: 值”的格式');
         if (allowed && !allowed.includes(m[1])) fail(l, `不认识的字段 ${m[1]}${path ? `（在 ${path} 下）` : ''}`);
         if (m[1] in obj) fail(l, `字段 ${m[1]} 重复`);
-        pos += 1;
+        pos += 1; at[path ? `${path}.${m[1]}` : m[1]] = l.i;
         if (m[2] === '') obj[m[1]] = pos < lines.length && ind(lines[pos].raw) > indent ? block(ind(lines[pos].raw), m[1] === 'advanced' ? ADV_KEYS : m[1] === 'session' ? ['cookie', 'header'] : null, m[1]) : null;
         else obj[m[1]] = scalar(m[2], l);
       }
@@ -411,6 +428,7 @@
       if (!lines.length) return { error: { line: 1, msg: '内容为空' } };
       const obj = block(ind(lines[0].raw), TOP_KEYS, '');
       if (pos < lines.length) fail(lines[pos], '缩进与上一级不一致');
+      shape(obj);
       const spec = { name: obj.name || '', hosts: obj.hosts || [], origin: obj.origin || '', session: obj.session || {}, entries: obj.entries || [], bypass: obj.bypass || [], mode: obj.mode || 'observe', on_jev_unavailable: obj.on_jev_unavailable || 'deny', advanced: obj.advanced || {} };
       if (spec.advanced.synonyms) spec.advanced.synonyms = spec.advanced.synonyms.map((p) => (Array.isArray(p) ? p : String(p).split(/\s*,\s*/)));
       if (spec.advanced.secret_fields && !Array.isArray(spec.advanced.secret_fields)) spec.advanced.secret_fields = [String(spec.advanced.secret_fields)];
@@ -418,14 +436,16 @@
     } catch (e) { if (e && e.line) return { error: e }; throw e; }
   };
   // These mirror crates/xshield-core/src/context/config.rs (valid_host, valid_origin, valid_token, PathPattern::parse).
-  const hostOk = (x) => x.length > 0 && x.length <= 253 && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(x) && !x.includes('..');
-  const originOk = (o) => { const m = /^https?:\/\/([^:/]*)(?::(\d*))?$/.exec(o || ''); return !!m && hostOk(m[1]) && (m[2] == null || (m[2].length >= 1 && m[2].length <= 5)); };
-  const tokenOk = (t) => /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(t || '');
+  // Each one answers false for anything that is not text, so a value of the wrong type is a validation error, not an exception.
+  const hostOk = (x) => typeof x === 'string' && x.length > 0 && x.length <= 253 && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(x) && !x.includes('..');
+  const originOk = (o) => { const m = typeof o === 'string' ? /^https?:\/\/([^:/]*)(?::(\d*))?$/.exec(o) : null; return !!m && hostOk(m[1]) && (m[2] == null || (m[2].length >= 1 && m[2].length <= 5)); };
+  const tokenOk = (t) => typeof t === 'string' && /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(t);
   // PathPattern::parse. The length is UTF-8 bytes (a Chinese character counts 3, an emoji 4), not String.length; only the ASCII
   // space and the ASCII control bytes count as whitespace; everything but the optional last `*` is checked as the literal.
   // The form's add-rule box and the validator share this, and the box shows the reason for the first rule that is broken.
   const utf8Len = (s) => new TextEncoder().encode(s).length;
   X.pathError = (p) => {
+    if (typeof p !== 'string') return '规则要写成文本';
     const literal = p.endsWith('*') ? p.slice(0, -1) : p;
     if (!p.startsWith('/')) return '规则以 / 开头';
     if (utf8Len(p) > 256) return '规则最长 256 字节（一个汉字算 3 个）';
@@ -438,20 +458,25 @@
   const pathOk = (p) => !X.pathError(p);
   X.validateSpec = (spec) => {
     const errors = []; const warnings = []; const add = (g, f, msg) => errors.push({ group: g, field: f, msg });
-    if (!/^[a-z0-9_-]{1,64}$/.test(spec.name || '')) add('basic', 'name', '站点名只能用小写字母、数字、-、_，最长 64 个字符');
-    if (!spec.hosts.length || spec.hosts.length > 16 || spec.hosts.some((x) => !hostOk(x))) add('basic', 'hosts', 'Host 不能为空，最多 16 个，每个必须是有效的主机名（不带端口）');
+    // The spec may come from pasted YAML or from a draft; a field of the wrong type is an error on that field, never an exception.
+    const strs = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+    const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+    if (typeof spec.name !== 'string' || !/^[a-z0-9_-]{1,64}$/.test(spec.name)) add('basic', 'name', '站点名只能用小写字母、数字、-、_，最长 64 个字符');
+    if (!strs(spec.hosts) || !spec.hosts.length || spec.hosts.length > 16 || spec.hosts.some((x) => !hostOk(x))) add('basic', 'hosts', 'Host 不能为空，最多 16 个，每个必须是有效的主机名（不带端口）');
     if (!originOk(spec.origin)) add('basic', 'origin', '源站地址必须是 http://主机[:端口] 或 https://主机[:端口]，不带路径');
     if (!['observe', 'enforce'].includes(spec.mode)) add('mode', 'mode', '模式只能是 observe（观察）或 enforce（拦截）');
     if (!['allow', 'deny'].includes(spec.on_jev_unavailable)) add('mode', 'on_jev_unavailable', 'Jev 不可用时只能是 allow（放行）或 deny（拒绝）');
-    const sess = spec.session || {}; if ((!sess.cookie && !sess.header) || (sess.cookie && sess.header) || !tokenOk(sess.cookie || sess.header)) add('session', 'session', '会话凭证需要一个有效的 Cookie 名或请求头名（字母、数字和 !#$%&\'*+-.^_`|~，最长 64）');
-    if (!spec.entries.length || spec.entries.length > 64 || spec.entries.some((p) => !pathOk(p))) add('entries', 'entries', '入口至少一条、最多 64 条；每条以 / 开头、最长 256 字节（一个汉字算 3 个），* 只能在末尾，不能含查询串、空格、. 或 .. 段');
-    if (spec.bypass.length > 64 || spec.bypass.some((p) => !pathOk(p))) add('bypass', 'bypass', '绕过最多 64 条，规则格式同入口');
-    const a = spec.advanced || {}; const range = (k, lo, hi, label) => { if (a[k] != null && (!Number.isInteger(a[k]) || a[k] < lo || a[k] > hi)) add('advanced', k, `${label}需在 ${lo}–${hi} 之间`); };
+    const sess = isObj(spec.session) ? spec.session : {}; if ((!sess.cookie && !sess.header) || (sess.cookie && sess.header) || !tokenOk(sess.cookie || sess.header)) add('session', 'session', '会话凭证需要一个有效的 Cookie 名或请求头名（字母、数字和 !#$%&\'*+-.^_`|~，最长 64）');
+    if (!strs(spec.entries) || !spec.entries.length || spec.entries.length > 64 || spec.entries.some((p) => !pathOk(p))) add('entries', 'entries', '入口至少一条、最多 64 条；每条以 / 开头、最长 256 字节（一个汉字算 3 个），* 只能在末尾，不能含查询串、空格、. 或 .. 段');
+    if (!strs(spec.bypass) || spec.bypass.length > 64 || spec.bypass.some((p) => !pathOk(p))) add('bypass', 'bypass', '绕过最多 64 条，规则格式同入口');
+    const a = isObj(spec.advanced) ? spec.advanced : {}; const range = (k, lo, hi, label) => { if (a[k] != null && (!Number.isInteger(a[k]) || a[k] < lo || a[k] > hi)) add('advanced', k, `${label}需在 ${lo}–${hi} 之间`); };
+    if (spec.advanced != null && !isObj(spec.advanced)) add('advanced', 'advanced', '高级参数要写成“键: 值”');
     range('jev_timeout_ms', 100, 30000, 'Jev 超时（ms）'); range('session_calls_per_minute', 1, 600, '会话调用上限'); range('address_calls_per_minute', 1, 600, '地址调用上限'); range('allow_cache_minutes', 0, 60, '放行缓存时长（分钟）');
-    (a.secret_fields || []).forEach((w) => { if (!/^[a-z0-9_-]{3,32}$/.test(w)) add('advanced', 'secret_fields', `脱敏词 ${w} 需为 3–32 个字符的小写字母、数字、_ 或 -`); });
-    if ((a.secret_fields || []).length > 32) add('advanced', 'secret_fields', '追加脱敏词最多 32 个');
-    (a.synonyms || []).forEach((p) => { if (p.length !== 2 || p.some((w) => !/^[a-z]{3,24}$/.test(w)) || p[0] === p[1]) add('advanced', 'synonyms', `同义词 ${p.join(' ↔ ')} 需为两个不同的 3–24 位小写字母词`); });
-    if (spec.entries.some((p) => p === '/*' || /^\/[^/]*\/\*$/.test(p) && p.split('/').length <= 3 && p.endsWith('/*') && p.length <= 6)) warnings.push({ group: 'entries', msg: '前缀入口会放大无会话可达的范围' });
+    if (a.secret_fields != null && !strs(a.secret_fields)) add('advanced', 'secret_fields', '脱敏词要写成文本列表');
+    else { (a.secret_fields || []).forEach((w) => { if (!/^[a-z0-9_-]{3,32}$/.test(w)) add('advanced', 'secret_fields', `脱敏词 ${w} 需为 3–32 个字符的小写字母、数字、_ 或 -`); }); if ((a.secret_fields || []).length > 32) add('advanced', 'secret_fields', '追加脱敏词最多 32 个'); }
+    if (a.synonyms != null && !(Array.isArray(a.synonyms) && a.synonyms.every(strs))) add('advanced', 'synonyms', '同义词要写成两个词一组的列表');
+    else (a.synonyms || []).forEach((p) => { if (p.length !== 2 || p.some((w) => !/^[a-z]{3,24}$/.test(w)) || p[0] === p[1]) add('advanced', 'synonyms', `同义词 ${p.join(' ↔ ')} 需为两个不同的 3–24 位小写字母词`); });
+    if (strs(spec.entries) && spec.entries.some((p) => p === '/*' || /^\/[^/]*\/\*$/.test(p) && p.split('/').length <= 3 && p.endsWith('/*') && p.length <= 6)) warnings.push({ group: 'entries', msg: '前缀入口会放大无会话可达的范围' });
     return { errors, warnings };
   };
   // Mirrors PathPattern: odd spellings never match any entry or bypass rule.
