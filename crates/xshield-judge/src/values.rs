@@ -63,14 +63,21 @@ pub fn is_id_like(field: &str) -> bool {
         .any(|suffix| lower.ends_with(suffix))
 }
 
-/// Whether a request value sits where an object reference would: a path
-/// segment, or a field whose name reads like an id, an owner or a file.
+/// What a request value is for the access question: `reference` where an
+/// object reference would sit (an id-like path segment, or a field whose name
+/// reads like an id, an owner or a file), `route` for a plain-word path
+/// segment (a collection name such as `Addresss`, or occasionally a person's
+/// name), `input` for everything else.
 #[must_use]
-pub fn is_reference_position(at: &str, key: Option<&str>) -> bool {
+pub fn value_kind(at: &str, key: Option<&str>, value: &str) -> &'static str {
     if at.starts_with("path[") {
-        return true;
+        return if value.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+            "route"
+        } else {
+            "reference"
+        };
     }
-    key.is_some_and(|key| {
+    let reference = key.is_some_and(|key| {
         let lower = key.to_ascii_lowercase();
         is_id_like(key)
             || is_identity_key(key)
@@ -79,7 +86,8 @@ pub fn is_reference_position(at: &str, key: Option<&str>) -> bool {
             ]
             .iter()
             .any(|word| lower.contains(word))
-    })
+    });
+    if reference { "reference" } else { "input" }
 }
 
 fn is_identity_key(key: &str) -> bool {
@@ -128,6 +136,38 @@ fn is_route_word(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphabetic() || byte == b'_' || byte == b'-')
 }
 
+/// An ISO date or time (`2026-11-01`, `2026-11-01T10:20:30Z`) or a JavaScript
+/// date string (`Sun Nov 01 2026`): digits, letters of a fixed shape and a few
+/// separators, so neither an object name nor a payload.
+fn is_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let iso = bytes.len() >= 10
+        && bytes.len() <= 32
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+        && bytes[10..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || b" :.+-TZ".contains(byte));
+    let words: Vec<&str> = value.split(' ').collect();
+    let js = words.len() == 4
+        && words[0].len() == 3
+        && words[1].len() == 3
+        && words[0]
+            .bytes()
+            .chain(words[1].bytes())
+            .all(|b| b.is_ascii_alphabetic())
+        && words[2].len() == 2
+        && words[3].len() == 4
+        && words[2]
+            .bytes()
+            .chain(words[3].bytes())
+            .all(|b| b.is_ascii_digit());
+    iso || js
+}
+
 fn inert_value(key: Option<&str>, value: &str) -> bool {
     match key {
         None => is_word(value),
@@ -135,7 +175,7 @@ fn inert_value(key: Option<&str>, value: &str) -> bool {
             if is_paging_key(key) {
                 return value.len() <= 6 && value.bytes().all(|byte| byte.is_ascii_digit());
             }
-            is_word(value) && !is_id_like(key) && !is_identity_key(key)
+            (is_word(value) || is_date(value)) && !is_id_like(key) && !is_identity_key(key)
         }
     }
 }
@@ -522,6 +562,22 @@ mod tests {
         assert!(!request.values[2].inert);
         let request = extract_request("/api/patients/patient-S-shared", None, None, b"");
         assert!(!request.values[2].inert);
+    }
+
+    #[test]
+    fn dates_are_inert_unless_they_travel_under_an_id_key() {
+        let request = extract_request(
+            "/api/Products/1",
+            Some("d=Sun%20Nov%2001%202026&since=2026-11-01T10%3A20%3A30Z&owner_id=2026-11-01"),
+            None,
+            b"",
+        );
+        let got = values(&request);
+        assert!(got.contains(&("query.d", "Sun Nov 01 2026", true)));
+        assert!(got.contains(&("query.since", "2026-11-01T10:20:30Z", true)));
+        assert!(got.contains(&("query.owner_id", "2026-11-01", false)));
+        let request = extract_request("/x", Some("d=Sun%20Nov%2001%202026%27%20OR%201"), None, b"");
+        assert!(!request.values[1].inert);
     }
 
     #[test]

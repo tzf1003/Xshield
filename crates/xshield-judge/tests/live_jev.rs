@@ -461,6 +461,11 @@ async fn live_juice_shop_checkout_flow() {
         1_000,
     );
     observe(
+        "/rest/products/search",
+        br#"{"status":"success","data":[{"id":1,"name":"Apple Juice (1000ml)","price":1.99},{"id":2,"name":"Orange Juice (1000ml)","price":2.99}]}"#,
+        999,
+    );
+    observe(
         "/api/Quantitys/",
         br#"{"status":"success","data":[{"ProductId":1,"id":1,"quantity":138},{"ProductId":2,"id":2,"quantity":8}]}"#,
         1_001,
@@ -515,6 +520,50 @@ async fn live_juice_shop_checkout_flow() {
             r#"{"fullName":"Test User","cardNum":4111111111111111,"expMonth":2,"expYear":2099}"#,
             Some("tokenA"),
             false,
+        ),
+        get("address list", "/api/Addresss", None, Some("tokenA"), false),
+        get(
+            "delivery list",
+            "/api/Deliverys",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get("card list", "/api/Cards", None, Some("tokenA"), false),
+        get(
+            "quantity list",
+            "/api/Quantitys/",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get(
+            "product by shown id",
+            "/api/Products/1",
+            Some("d=Sun%20Nov%2001%202026"),
+            Some("tokenA"),
+            false,
+        ),
+        post(
+            "add to own basket",
+            "/api/BasketItems/",
+            r#"{"ProductId":1,"BasketId":"22","quantity":1}"#,
+            Some("tokenA"),
+            false,
+        ),
+        post(
+            "add to someone else's basket",
+            "/api/BasketItems/",
+            r#"{"ProductId":1,"BasketId":"1","quantity":1}"#,
+            Some("tokenA"),
+            true,
+        ),
+        get(
+            "user by name never shown",
+            "/api/users/Alice",
+            None,
+            Some("tokenA"),
+            true,
         ),
         post(
             "neutral key names another account",
