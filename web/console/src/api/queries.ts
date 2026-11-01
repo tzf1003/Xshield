@@ -76,7 +76,7 @@ export function useVersions(name: string | null) {
 }
 
 export function useSystem() {
-  return useQuery({ queryKey: keys.system, queryFn: api.system, refetchInterval: 15_000 });
+  return useQuery({ queryKey: keys.system, queryFn: api.system });
 }
 
 export function useJevStatus() {

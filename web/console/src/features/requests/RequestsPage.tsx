@@ -260,9 +260,10 @@ export function RequestsPage() {
     return items;
   };
 
-  const gaps = (system.data?.storage.gaps ?? []).filter(
-    (gap) => gap.to_millis >= scope.since && gap.from_millis <= scope.until,
-  );
+  const gaps = (system.data?.edges ?? [])
+    .flatMap((edge) => edge.gaps.map((gap) => ({ ...gap, edge: edge.edge })))
+    .filter((gap) => gap.to_ms >= scope.since && gap.from_ms <= scope.until);
+  const firstGap = gaps[0];
   const rangeLabel =
     scope.range === "custom" ? "自定义时间范围" : `最近 ${RANGE_LABEL[scope.range]}`;
   const showDate = scope.until - scope.since > 24 * 60 * 60 * 1000;
@@ -351,11 +352,11 @@ export function RequestsPage() {
         liveDisabled={false}
       />
 
-      {gaps.length > 0 ? (
+      {firstGap ? (
         <Notice tone="warn">
-          {fmtClock(gaps[0]?.from_millis ?? 0)}–{fmtClock(gaps[0]?.to_millis ?? 0)} {gaps[0]?.edge}{" "}
-          有 {gaps[0]?.rows} 条记录未写入（
-          {gaps[0]?.reason === "queue_full" ? "队列满" : "写入出错"}
+          {fmtClock(firstGap.from_ms)}–{fmtClock(firstGap.to_ms)} {firstGap.edge} 有{" "}
+          {firstGap.dropped + firstGap.dropped_bypass + firstGap.write_errors}{" "}
+          条记录未写入（队列丢弃 {firstGap.dropped}，写入出错 {firstGap.write_errors}
           ），这段时间的请求可能查不到 · <Link to="/system">查看系统</Link>
         </Notice>
       ) : null}

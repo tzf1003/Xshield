@@ -7,6 +7,7 @@
 
 import type { Page } from "@playwright/test";
 import type {
+  DecisionPath,
   EdgeLoad,
   EdgeRollout,
   ImpactPreview,
@@ -375,25 +376,29 @@ function listRequests(call: Call): Answer {
   return ok({
     rows: page,
     next_cursor: rest.length > limit && last !== undefined ? `${last.at_millis}.${last.id}` : null,
-    max_id: rows.reduce((max, row) => Math.max(max, row.id), 0),
   });
 }
 
-function tally<T extends string>(values: T[]): Partial<Record<T, number>> {
-  const out: Partial<Record<T, number>> = {};
-  for (const value of values) out[value] = (out[value] ?? 0) + 1;
-  return out;
-}
-
+/** RequestCounts (types.ts): every count is over judged rows, except bypass and unknown-site, counted apart. */
 function countRequests(call: Call): Answer {
   const rows = matchRows(call.params, true);
+  const judged = rows.filter((row) => !HIDDEN_PATHS.has(row.decision_path));
+  const outcomeCount = (outcome: Outcome): number => judged.filter((row) => row.outcome === outcome).length;
+  const pathCount = (path: DecisionPath): number => rows.filter((row) => row.decision_path === path).length;
+  const blocked = outcomeCount("blocked");
+  const wouldBlock = outcomeCount("would_block");
+  const unjudged = outcomeCount("unjudged");
   return ok({
-    total: rows.length,
-    by_outcome: tally<Outcome>(rows.map((row) => row.outcome)),
-    by_decision_path: tally(rows.map((row) => row.decision_path)),
-    jev_calls: rows.filter((row) => row.jev !== null).length,
+    judged: judged.length,
+    attention: blocked + wouldBlock + unjudged,
+    blocked,
+    would_block: wouldBlock,
+    unjudged,
+    jev: judged.filter((row) => row.jev !== null).length,
+    no_session: pathCount("no_session"),
+    bypass: pathCount("bypass"),
+    unknown_site: pathCount("unknown_site"),
     complete: true,
-    scanned: rows.length,
   });
 }
 

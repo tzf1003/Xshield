@@ -25,7 +25,7 @@ export function problemText(problem: GatewayProblem): string {
     case "version_behind":
       return `${problem.site} v${problem.expected} 保存后未生效，${problem.edge} 仍是 v${problem.loaded}`;
     case "log_gap":
-      return `${problem.edge} ${fmtClock(problem.from_ms)}–${fmtClock(problem.to_ms)} 有 ${problem.dropped} 条记录未写入`;
+      return `${problem.edge} ${fmtClock(problem.from_ms)}–${fmtClock(problem.to_ms)} 有 ${problem.dropped + problem.dropped_bypass + problem.write_errors} 条记录未写入（队列丢弃 ${problem.dropped}，压力下丢弃绕过简记录 ${problem.dropped_bypass}，写入出错 ${problem.write_errors}）`;
     case "queue_pressure":
       return `${problem.edge} 发送队列 ${problem.queue} / ${problem.capacity}`;
     case "partition_missing":

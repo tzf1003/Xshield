@@ -210,8 +210,5 @@
       "unavailable": 1
     }
   ],
-  "low_confidence": 60,
-  "slower_than_p95": 24,
-  "trimmed": 7,
   "complete": true
 }

@@ -687,7 +687,11 @@ export interface EdgeStatus {
   queue: number;
   written: number;
   dropped: number;
+  /** Bypass rows dropped under queue pressure (docs/07 7.7.4). */
+  dropped_bypass: number;
   write_errors: number;
+  /** Loss history: merged minutes with lost records, the newest 50 (docs/07 7.7.4). */
+  gaps: LogGap[];
   /** Per site: the version it loaded, or the error code that made it refuse the site. */
   sites: Record<string, { version?: number; error?: string }>;
   jev: JevConfig;
@@ -699,12 +703,13 @@ export interface Partition {
   bytes: number;
 }
 
+/** One loss window of a gateway: consecutive minutes with lost records, merged (docs/07 7.7.4). */
 export interface LogGap {
-  edge: string;
-  from_millis: number;
-  to_millis: number;
-  rows: number;
-  reason: "queue_full" | "write_error";
+  from_ms: number;
+  to_ms: number;
+  dropped: number;
+  dropped_bypass: number;
+  write_errors: number;
 }
 
 export interface FixedParams {
@@ -728,7 +733,6 @@ export interface SystemInfo {
     retention_days: number;
     earliest_millis: number | null;
     partitions: Partition[];
-    gaps: LogGap[];
   };
   params: {
     site_overridable: Required<
