@@ -564,17 +564,6 @@ fn access_listing_publishes_scoped_facts_from_authenticated_journal() {
     assert_eq!(row.is_terminal, 0);
     assert_eq!(row.http_status, None);
     assert_eq!(row.origin_state, "");
-    assert!(
-        IndexRow::parse_outbox(
-            &serde_json::to_vec(&value).unwrap(),
-            &EventId::parse(EVENT).unwrap(),
-            1,
-            BOOT,
-            "1".repeat(64),
-            TimeDelta::days(30),
-        )
-        .is_err()
-    );
     for (field, content) in [
         ("producer_id", json!("evidence-access")),
         ("producer_boot_id", json!(REQUEST)),
@@ -776,17 +765,6 @@ fn access_details_publish_scoped_metadata_only_from_the_management_journal() {
     assert_eq!(row.is_terminal, 0);
     assert_eq!(row.http_status, None);
     assert_eq!(row.origin_state, "");
-    assert!(
-        IndexRow::parse_outbox(
-            &serde_json::to_vec(&value).unwrap(),
-            &EventId::parse(EVENT).unwrap(),
-            1,
-            BOOT,
-            "1".repeat(64),
-            TimeDelta::days(30),
-        )
-        .is_err()
-    );
     for (field, content) in [
         ("producer_id", json!("evidence-access")),
         ("request_id", Value::Null),
@@ -1424,17 +1402,6 @@ fn hold_management_successes_bind_targets_and_keep_journal_semantics() {
             assert_eq!(row.evidence_refs, [ARTIFACT]);
             assert_eq!(row.origin_state, "");
             assert_eq!(row.operation_id, "");
-            assert!(
-                IndexRow::parse_outbox(
-                    &serde_json::to_vec(&value).unwrap(),
-                    &EventId::parse(EVENT).unwrap(),
-                    1,
-                    BOOT,
-                    "1".repeat(64),
-                    TimeDelta::days(30),
-                )
-                .is_err()
-            );
         }
     }
 }
@@ -1971,19 +1938,6 @@ fn export_listing_publishes_scoped_facts_from_authenticated_journal() {
     assert_eq!(row.is_terminal, 0);
     assert_eq!(row.http_status, None);
     assert_eq!(row.origin_state, "");
-    // The management journal is the only source of this event; an outbox
-    // envelope with the same body must not be accepted as a transaction fact.
-    assert!(
-        IndexRow::parse_outbox(
-            &serde_json::to_vec(&value).unwrap(),
-            &EventId::parse(EVENT).unwrap(),
-            1,
-            BOOT,
-            "1".repeat(64),
-            TimeDelta::days(30),
-        )
-        .is_err()
-    );
     for (field, content) in [
         ("producer_id", json!("investigation-export")),
         ("producer_boot_id", json!(REQUEST)),

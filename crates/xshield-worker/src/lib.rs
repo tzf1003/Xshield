@@ -24,27 +24,12 @@ use xshield_audit::{
 };
 use xshield_core::domain::{EventId, ModelCallId, PolicyRevision, RequestId, SiteId, TenantId};
 
-pub mod agent_site_client;
-pub mod calibration_audit;
-pub mod calibration_evaluator;
-mod calibration_vault_reader;
 mod control_audit;
 mod gateway_audit;
 mod local_request;
-pub mod model_eval;
-mod outbox;
+mod model_eval;
 mod search;
-pub use calibration_vault_reader::{
-    CalibrationEvidenceContent, CalibrationEvidenceReadError, LocalCalibrationEvidenceReader,
-};
 pub use local_request::{query_local_request_events, query_local_request_summary};
-pub use outbox::{
-    OutboxPublishReport, OutboxPublisherConfig, publish_calibration_outbox_batch,
-    publish_case_outbox_batch, publish_evidence_access_outbox_batch,
-    publish_evidence_catalog_outbox_batch, publish_evidence_retention_outbox_batch,
-    publish_grant_outbox_batch, publish_identity_outbox_batch, publish_response_grant_outbox_batch,
-    publish_share_grant_outbox_batch, publish_ui_action_outbox_batch,
-};
 pub use search::{
     AgentRunEventSummary, AgentRunSummary, AuditSearchResult, DISCOVERED_ROUTES_LIMIT_MAX,
     DiscoveredRouteSummary, DiscoveredRoutesPlan, DiscoveredRoutesPlanError,
@@ -915,14 +900,8 @@ struct IndexRow {
     ingest_revision: u64,
 }
 
-#[derive(Clone, Copy)]
-enum ParseSource {
-    Journal,
-    Outbox,
-}
-
-/// Parses common v3 envelope fields that the authenticated journal/outbox
-/// metadata must bind before a source-specific payload parser is selected.
+/// Parses common envelope fields that the authenticated journal metadata
+/// must bind before a payload-specific parser is selected.
 fn parse_authenticated_wire_event(
     bytes: &[u8],
     authenticated_event_id: &EventId,
@@ -976,45 +955,6 @@ impl IndexRow {
         digest: String,
         metadata_retention: TimeDelta,
     ) -> Result<Self, PublishError> {
-        Self::parse_with(
-            bytes,
-            authenticated_event_id,
-            authenticated_sequence,
-            authenticated_boot_id,
-            digest,
-            metadata_retention,
-            ParseSource::Journal,
-        )
-    }
-
-    fn parse_outbox(
-        bytes: &[u8],
-        authenticated_event_id: &EventId,
-        authenticated_sequence: u64,
-        authenticated_boot_id: &str,
-        digest: String,
-        metadata_retention: TimeDelta,
-    ) -> Result<Self, PublishError> {
-        Self::parse_with(
-            bytes,
-            authenticated_event_id,
-            authenticated_sequence,
-            authenticated_boot_id,
-            digest,
-            metadata_retention,
-            ParseSource::Outbox,
-        )
-    }
-
-    fn parse_with(
-        bytes: &[u8],
-        authenticated_event_id: &EventId,
-        authenticated_sequence: u64,
-        authenticated_boot_id: &str,
-        digest: String,
-        metadata_retention: TimeDelta,
-        source: ParseSource,
-    ) -> Result<Self, PublishError> {
         let event = parse_authenticated_wire_event(
             bytes,
             authenticated_event_id,
@@ -1030,27 +970,14 @@ impl IndexRow {
         let retention_expires_at = occurred_at
             .checked_add_signed(metadata_retention)
             .ok_or(PublishError::InvalidEvent)?;
-        let summary = match source {
-            ParseSource::Journal if calibration_audit::supports(&event.event_type) => {
-                calibration_audit::parse(&event)?
-            }
-            ParseSource::Journal if control_audit::supports(&event.event_type) => {
-                control_audit::parse(&event)?
-            }
-            // Transactional outbox facts are never valid in a local journal.
-            // Without this source gate, an attacker-controlled journal payload
-            // could bypass a dedicated journal parser by naming an outbox type.
-            ParseSource::Journal if outbox::supports(&event.event_type) => {
-                return Err(PublishError::UnsupportedEventType);
-            }
+        let summary = if control_audit::supports(&event.event_type) {
+            control_audit::parse(&event)?
+        } else if gateway_audit::supports(&event) {
             // Gateway shapes that extend the generic stage payload or have no
             // generic equivalent keep their own closed parsers.
-            ParseSource::Journal if gateway_audit::supports(&event) => {
-                gateway_audit::parse(&event)?
-            }
-            ParseSource::Journal => PayloadSummary::parse(&event.event_type, event.payload.get())?,
-            ParseSource::Outbox if outbox::supports(&event.event_type) => outbox::parse(&event)?,
-            ParseSource::Outbox => return Err(PublishError::UnsupportedEventType),
+            gateway_audit::parse(&event)?
+        } else {
+            PayloadSummary::parse(&event.event_type, event.payload.get())?
         };
         let ingest_revision = digest_revision(&digest)?;
         Ok(Self {
