@@ -1,20 +1,15 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3860,
-  "passed_count": 3860,
+  "checks_total": 3844,
+  "passed_count": 3844,
   "acceptance_cases": {
     "total": 78,
-    "planned": 7,
-    "partial": 60,
-    "automated": 11
+    "planned": 54,
+    "partial": 22,
+    "automated": 2
   },
   "checks": [
-    {
-      "name": "json:deploy/helm/xshield/values.schema.json",
-      "passed": true,
-      "detail": ""
-    },
     {
       "name": "json:dev/keycloak/xshield-dev-realm.json",
       "passed": true,
@@ -187,41 +182,6 @@
     },
     {
       "name": "json:web/console/tsconfig.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "yaml:deploy/compose/compose.smoke.yaml",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "yaml:deploy/compose/compose.yaml",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "yaml:deploy/helm/smoke/deps.yaml",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "yaml:deploy/helm/smoke/values.yaml",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "yaml:deploy/helm/xshield/Chart.yaml",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "yaml:deploy/helm/xshield/values-ha.yaml",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "yaml:deploy/helm/xshield/values.yaml",
       "passed": true,
       "detail": ""
     },
@@ -19131,51 +19091,6 @@
       "detail": ""
     },
     {
-      "name": "link:deploy/compose/README.md:../../docs/04-deployment-testing.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:deploy/compose/README.md:../../docs/05-v3-removal.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:deploy/compose/README.md:../../web/console/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:deploy/helm/README.md:../../docs/05-v3-removal.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:deploy/helm/README.md:../../web/console/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:deploy/prometheus/README.md:../../docs/05-v3-removal.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:deploy/systemd/README.md:../../docs/05-v3-removal.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:deploy/systemd/README.md:../compose/",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:deploy/systemd/README.md:../../web/console/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
       "name": "link:docs/00-overview.md:05-v3-removal.md",
       "passed": true,
       "detail": ""
@@ -19297,6 +19212,11 @@
     },
     {
       "name": "link:docs/05-v3-removal.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/05-v3-removal.md:04-deployment-testing.md",
       "passed": true,
       "detail": ""
     },

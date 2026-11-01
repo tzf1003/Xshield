@@ -23,14 +23,14 @@ Xshield 部署在源站前面，记住每个登录会话正常走过的路（从
 
 ## 仓库地图
 
-`crates/`（Rust：`xshield-gateway` 网关、`xshield-control` 控制面、`xshield-core` 领域逻辑，其余 crate 按 05 删除）、`web/console`（控制台）、`migrations/`（PostgreSQL 迁移）、`scripts/`（验证与回归脚本）、`tests/`（靶场与集成回归）、`deploy/`（参考部署）、`docs/`（v4 设计文档）。
+`crates/`（Rust：`xshield-edge` 数据面、`xshield-judge` 模型判定、`xshield-control` 控制面、`xshield-core` 领域逻辑，其余 crate 按 05 删除）、`web/console`（控制台）、`migrations/`（PostgreSQL 迁移）、`scripts/`（验证与回归脚本）、`tests/`（靶场与集成回归）、`docs/`（v4 设计文档）。
 
 ## 运行与验证（当前 v3 代码）
 
 ```bash
 python3 -m pip install -r scripts/requirements.txt
 python3 scripts/validate_library.py     # Schema、样例与文档链接
-scripts/verify_all.sh                    # fmt、clippy、测试、PostgreSQL、真实二进制与控制台
+scripts/verify_all.sh                    # fmt、clippy、测试、PostgreSQL、探针单测与控制台
 ./dev.sh                                 # 本地开发栈
 ```
 

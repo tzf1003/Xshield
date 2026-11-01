@@ -17,12 +17,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-pingora = { version = "=0.9.0", default-features = false, features = ["openssl", "proxy"] }
 serde_json = "1"
 xshield-audit = { path = "../crates/xshield-audit" }
 xshield-core = { path = "../crates/xshield-core" }
-xshield-gateway = { path = "../crates/xshield-gateway" }
-zeroize = "1"
 
 # The product workspace's lints (../Cargo.toml).
 [lints.rust]
@@ -37,64 +34,8 @@ assert_is_empty = "allow"
 debug = 1
 
 [[bin]]
-name = "proxy_header"
-path = "fuzz_targets/proxy_header.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "path_shape"
 path = "fuzz_targets/path_shape.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "route_admission"
-path = "fuzz_targets/route_admission.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "query_pagination"
-path = "fuzz_targets/query_pagination.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "routing_authority"
-path = "fuzz_targets/routing_authority.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "request_crypto"
-path = "fuzz_targets/request_crypto.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "auth_binding"
-path = "fuzz_targets/auth_binding.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "strict_json"
-path = "fuzz_targets/strict_json.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "sensor_batch"
-path = "fuzz_targets/sensor_batch.rs"
 test = false
 doc = false
 bench = false

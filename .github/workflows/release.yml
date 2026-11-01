@@ -68,7 +68,7 @@ jobs:
           # grep -q would exit at the first match and, under pipefail, the
           # SIGPIPE it gives git show would read as "no match".
           git show "$sha:CHANGELOG.md" | grep "^$heading" >/dev/null || fail "CHANGELOG.md at $sha has no '$heading' heading"
-          for manifest in crates/xshield-gateway/Cargo.toml; do
+          for manifest in crates/xshield-edge/Cargo.toml; do
             git show "$sha:$manifest" | grep -E "^version: ?\"?$VERSION\"?$|^version = \"$VERSION\"$" >/dev/null \
               || fail "$manifest at $sha is not version $VERSION"
           done
