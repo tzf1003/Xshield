@@ -1,0 +1,88 @@
+{
+  "name": "juice",
+  "hosts": [
+    "juice.example.com"
+  ],
+  "origin": "http://10.0.0.9:3000",
+  "mode": "observe",
+  "version": 7,
+  "updated_at": "2026-11-01T12:40:00Z",
+  "observing_since_millis": 1793006400000,
+  "loaded_version": 7,
+  "edges": [
+    {
+      "edge": "edge-1",
+      "version": 7,
+      "error": null,
+      "loaded_at_millis": 1793536802000
+    },
+    {
+      "edge": "edge-2",
+      "version": 7,
+      "error": null,
+      "loaded_at_millis": 1793536803000
+    },
+    {
+      "edge": "edge-3",
+      "version": 7,
+      "error": null,
+      "loaded_at_millis": 1793536803000
+    }
+  ],
+  "rollout": {
+    "version": 7,
+    "edges_online": 2,
+    "edges_loaded": 2,
+    "edges": [
+      {
+        "edge": "edge-1",
+        "online": true,
+        "loaded_version": 7,
+        "error": null
+      },
+      {
+        "edge": "edge-2",
+        "online": true,
+        "loaded_version": 7,
+        "error": null
+      },
+      {
+        "edge": "edge-3",
+        "online": false,
+        "loaded_version": 7,
+        "error": null
+      }
+    ]
+  },
+  "requests_24h": 8392,
+  "unjudged_24h": 0,
+  "jev_timeouts_24h": 0,
+  "call_limits_24h": 0,
+  "blocked_24h": 2,
+  "would_block_24h": 14,
+  "jev_calls_24h": 66,
+  "suggestions": 2,
+  "spec": {
+    "name": "juice",
+    "hosts": [
+      "juice.example.com"
+    ],
+    "origin": "http://10.0.0.9:3000",
+    "session": {
+      "header": "Authorization"
+    },
+    "entries": [
+      "/rest/user/login",
+      "/api/Products",
+      "/rest/products/search"
+    ],
+    "bypass": [
+      "/assets/*",
+      "/favicon.ico"
+    ],
+    "mode": "observe",
+    "on_jev_unavailable": "deny",
+    "advanced": {}
+  },
+  "created_at": "2026-10-26T09:20:00Z"
+}

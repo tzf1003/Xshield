@@ -1,0 +1,76 @@
+{
+  "rows": [
+    {
+      "label": "a913ee40771c2b05",
+      "context": "session",
+      "site": "emr",
+      "first_at_millis": 1793536830000,
+      "last_at_millis": 1793539170000,
+      "requests": 10,
+      "jev_calls": 3,
+      "blocked": 3,
+      "would_block": 0,
+      "issued_by": "req_01a1971fb5007b85b90bc19cf645db77"
+    },
+    {
+      "label": "7c1e9a40d2b35f61",
+      "context": "session",
+      "site": "juice",
+      "first_at_millis": 1793536428600,
+      "last_at_millis": 1793539062000,
+      "requests": 16,
+      "jev_calls": 1,
+      "blocked": 1,
+      "would_block": 1,
+      "issued_by": "req_01a1971a07e079639a823d4257b43172"
+    },
+    {
+      "label": "b0ffee1234567890",
+      "context": "session",
+      "site": "emr",
+      "first_at_millis": 1793538720000,
+      "last_at_millis": 1793538750000,
+      "requests": 2,
+      "jev_calls": 1,
+      "blocked": 1,
+      "would_block": 0,
+      "issued_by": null
+    },
+    {
+      "label": "e4d0f2a1c9b87365",
+      "context": "address",
+      "site": "juice",
+      "first_at_millis": 1793536530000,
+      "last_at_millis": 1793537700000,
+      "requests": 2,
+      "jev_calls": 2,
+      "blocked": 0,
+      "would_block": 1,
+      "issued_by": null
+    },
+    {
+      "label": "5e0d1c93a7b4f226",
+      "context": "address",
+      "site": "emr",
+      "first_at_millis": 1793536740000,
+      "last_at_millis": 1793536800000,
+      "requests": 2,
+      "jev_calls": 0,
+      "blocked": 0,
+      "would_block": 0,
+      "issued_by": null
+    },
+    {
+      "label": "b19e0c7a53d2f408",
+      "context": "address",
+      "site": "juice",
+      "first_at_millis": 1793536380000,
+      "last_at_millis": 1793536428000,
+      "requests": 3,
+      "jev_calls": 1,
+      "blocked": 0,
+      "would_block": 0,
+      "issued_by": null
+    }
+  ]
+}

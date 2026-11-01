@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3844,
-  "passed_count": 3844,
+  "checks_total": 3950,
+  "passed_count": 3950,
   "acceptance_cases": {
     "total": 78,
     "planned": 61,
@@ -172,6 +172,126 @@
     },
     {
       "name": "json:web/console/package.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/counts.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/evidence.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/insights.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/jev-stats.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/jev-status.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/lookup.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/preview.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/prompt.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/request-detail-req_01a1973940107ebea1af2c54ce635f38.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/request-detail-req_01a1973ed5c0732b8f29804d7fc746d3.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/requests.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/session-timeline.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/session.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/sessions.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/site-emr.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/site-juice.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/sites.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/status-down.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/status.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/summary.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/system.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/timeseries.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/versions-emr.json",
       "passed": true,
       "detail": ""
     },
@@ -19046,6 +19166,26 @@
       "detail": ""
     },
     {
+      "name": "fences:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "fences:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:docs/05-v3-removal.md",
       "passed": true,
       "detail": ""
@@ -19086,6 +19226,31 @@
       "detail": ""
     },
     {
+      "name": "link:README.md:docs/06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:design/console-v4/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:design/console-v4/README.md:../../docs/06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:design/console-v4/README.md:../../docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/00-overview.md:05-v3-removal.md",
       "passed": true,
       "detail": ""
@@ -19116,7 +19281,22 @@
       "detail": ""
     },
     {
+      "name": "link:docs/01-request-flow.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/01-request-flow.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/01-request-flow.md:02-jev.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/01-request-flow.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -19126,7 +19306,7 @@
       "detail": ""
     },
     {
-      "name": "link:docs/02-jev.md:01-request-flow.md",
+      "name": "link:docs/01-request-flow.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -19136,7 +19316,37 @@
       "detail": ""
     },
     {
-      "name": "link:docs/03-admin-config-audit.md:05-v3-removal.md",
+      "name": "link:docs/02-jev.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/02-jev.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/02-jev.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/02-jev.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -19147,6 +19357,36 @@
     },
     {
       "name": "link:docs/03-admin-config-audit.md:05-v3-removal.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:05-v3-removal.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -19206,6 +19446,21 @@
       "detail": ""
     },
     {
+      "name": "link:docs/05-v3-removal.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/05-v3-removal.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/05-v3-removal.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/05-v3-removal.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
@@ -19221,12 +19476,287 @@
       "detail": ""
     },
     {
-      "name": "link:web/console/README.md:../../docs/03-admin-config-audit.md",
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:web/console/README.md:../../docs/03-admin-config-audit.md",
+      "name": "link:docs/06-console-ui.md:../design/console-v4/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:02-jev.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:../design/console-v4/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/06-console-ui.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:../design/console-v4/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:02-jev.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:02-jev.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:05-v3-removal.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:web/console/README.md:../../docs/06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:web/console/README.md:../../docs/07-console-architecture.md",
       "passed": true,
       "detail": ""
     }

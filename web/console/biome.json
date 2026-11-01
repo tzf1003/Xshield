@@ -11,7 +11,8 @@
       "vite.config.ts",
       "playwright.config.ts",
       "tsconfig.json",
-      "biome.json"
+      "biome.json",
+      "!tests/fixtures/**"
     ]
   },
   "formatter": {
@@ -29,43 +30,21 @@
       "preset": "recommended",
       "suspicious": {
         "noExplicitAny": "error",
-        "noArrayIndexKey": "warn",
-        "useIterableCallbackReturn": "warn"
+        "noArrayIndexKey": "error",
+        "useIterableCallbackReturn": "error"
       },
       "correctness": {
-        "useExhaustiveDependencies": "warn",
-        "useJsxKeyInIterable": "warn",
-        "noUnsafeOptionalChaining": "warn"
+        "useExhaustiveDependencies": "error",
+        "useJsxKeyInIterable": "error",
+        "noUnsafeOptionalChaining": "error"
       },
       "a11y": {
-        "useButtonType": "warn",
-        "useAriaPropsSupportedByRole": "warn"
+        "useButtonType": "error",
+        "useAriaPropsSupportedByRole": "error"
+      },
+      "style": {
+        "noNonNullAssertion": "error"
       }
     }
-  },
-  "overrides": [
-    {
-      "includes": ["src/pages/**", "src/components/**", "src/Shell.tsx", "src/router.tsx"],
-      "linter": {
-        "rules": {
-          "suspicious": {
-            "noArrayIndexKey": "error",
-            "useIterableCallbackReturn": "error"
-          },
-          "correctness": {
-            "useExhaustiveDependencies": "error",
-            "useJsxKeyInIterable": "error",
-            "noUnsafeOptionalChaining": "error"
-          },
-          "a11y": {
-            "useButtonType": "error",
-            "useAriaPropsSupportedByRole": "error"
-          },
-          "style": {
-            "noNonNullAssertion": "error"
-          }
-        }
-      }
-    }
-  ]
+  }
 }

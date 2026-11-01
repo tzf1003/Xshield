@@ -1,0 +1,183 @@
+{
+  "control_build": "v4.0.0-rc1",
+  "postgres": "16.4",
+  "edges": [
+    {
+      "edge": "edge-1",
+      "online": true,
+      "started_at": "2026-11-01T13:00:00Z",
+      "seen_at": "2026-11-01T13:19:59.800Z",
+      "build": "v4.0.0-rc1",
+      "listen": ":8443",
+      "tls": true,
+      "sessions": 1841,
+      "queue": 3,
+      "written": 1820422,
+      "dropped": 31,
+      "dropped_bypass": 6,
+      "write_errors": 0,
+      "gaps": [
+        {
+          "from_ms": 1793538600000,
+          "to_ms": 1793538720000,
+          "dropped": 31,
+          "dropped_bypass": 6,
+          "write_errors": 0
+        }
+      ],
+      "sites": {
+        "emr": {
+          "version": 13
+        },
+        "juice": {
+          "version": 7
+        }
+      },
+      "jev": {
+        "route": "gateway",
+        "endpoint_host": "ai-gateway.vercel.sh",
+        "model": "typesafe-ai/jev",
+        "default_timeout_ms": 2000,
+        "prompt": "jq_5c2e81d07a4b9f13"
+      }
+    },
+    {
+      "edge": "edge-2",
+      "online": true,
+      "started_at": "2026-10-31T11:20:00Z",
+      "seen_at": "2026-11-01T13:19:56Z",
+      "build": "v4.0.0-rc1",
+      "listen": ":8443",
+      "tls": true,
+      "sessions": 1602,
+      "queue": 1200,
+      "written": 1603011,
+      "dropped": 0,
+      "dropped_bypass": 0,
+      "write_errors": 5,
+      "gaps": [
+        {
+          "from_ms": 1793445600000,
+          "to_ms": 1793445960000,
+          "dropped": 0,
+          "dropped_bypass": 0,
+          "write_errors": 5
+        }
+      ],
+      "sites": {
+        "emr": {
+          "version": 12
+        },
+        "juice": {
+          "version": 7
+        }
+      },
+      "jev": {
+        "route": "gateway",
+        "endpoint_host": "ai-gateway.vercel.sh",
+        "model": "typesafe-ai/jev",
+        "default_timeout_ms": 2000,
+        "prompt": "jq_5c2e81d07a4b9f13"
+      }
+    },
+    {
+      "edge": "edge-3",
+      "online": false,
+      "started_at": "2026-10-31T11:20:00Z",
+      "seen_at": "2026-11-01T13:17:00Z",
+      "build": "v4.0.0-rc1",
+      "listen": ":8443",
+      "tls": true,
+      "sessions": 0,
+      "queue": 0,
+      "written": 412004,
+      "dropped": 0,
+      "dropped_bypass": 0,
+      "write_errors": 0,
+      "gaps": [],
+      "sites": {
+        "emr": {
+          "version": 12
+        },
+        "juice": {
+          "version": 7
+        }
+      },
+      "jev": {
+        "route": "gateway",
+        "endpoint_host": "ai-gateway.vercel.sh",
+        "model": "typesafe-ai/jev",
+        "default_timeout_ms": 2000,
+        "prompt": "jq_5c2e81d07a4b9f13"
+      }
+    }
+  ],
+  "storage": {
+    "retention_days": 7,
+    "earliest_millis": 1792977600000,
+    "partitions": [
+      {
+        "name": "decision_log_p20261030",
+        "rows": 1904221,
+        "bytes": 1551000000
+      },
+      {
+        "name": "decision_log_p20261031",
+        "rows": 1988010,
+        "bytes": 1620000000
+      },
+      {
+        "name": "decision_log_p20261101",
+        "rows": 1402233,
+        "bytes": 1181116006
+      },
+      {
+        "name": "decision_log_p20261102",
+        "rows": 0,
+        "bytes": 0
+      },
+      {
+        "name": "decision_log_p20261103",
+        "rows": 0,
+        "bytes": 0
+      }
+    ]
+  },
+  "params": {
+    "site_overridable": {
+      "jev_timeout_ms": 2000,
+      "session_calls_per_minute": 60,
+      "address_calls_per_minute": 30,
+      "allow_cache_minutes": 10,
+      "secret_fields": [
+        "authorization",
+        "credential",
+        "cvv",
+        "otp",
+        "passwd",
+        "password",
+        "pwd",
+        "secret",
+        "token"
+      ],
+      "synonyms": [
+        [
+          "card",
+          "payment"
+        ]
+      ]
+    },
+    "fixed": {
+      "seen_max": 5000,
+      "sources_max": 6,
+      "recent_max": 50,
+      "idle_hours": 24,
+      "sessions_max": 20000,
+      "long_value_chars": 8,
+      "state_bytes_max": 8192,
+      "request_body_max": 49152,
+      "response_parse_max": 1048576,
+      "request_values_max": 200
+    }
+  }
+}

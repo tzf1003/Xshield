@@ -1,0 +1,401 @@
+{
+  "versions": [
+    {
+      "version": 13,
+      "change": "update",
+      "rollback_of": null,
+      "note": "追加脱敏字段 ssn",
+      "changed_at": "2026-11-01T13:17:30Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "enforce",
+        "on_jev_unavailable": "deny",
+        "advanced": {
+          "jev_timeout_ms": 3000,
+          "secret_fields": [
+            "idcard",
+            "ssn"
+          ]
+        }
+      }
+    },
+    {
+      "version": 12,
+      "change": "rollback",
+      "rollback_of": 10,
+      "note": "回滚到 v10：撤销误登记的入口",
+      "changed_at": "2026-11-01T12:08:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "enforce",
+        "on_jev_unavailable": "deny",
+        "advanced": {
+          "jev_timeout_ms": 3000,
+          "secret_fields": [
+            "idcard"
+          ]
+        }
+      }
+    },
+    {
+      "version": 11,
+      "change": "update",
+      "rollback_of": null,
+      "note": "误登记 /api/admin 入口",
+      "changed_at": "2026-11-01T10:27:12Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients",
+          "/api/admin"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "enforce",
+        "on_jev_unavailable": "deny",
+        "advanced": {
+          "jev_timeout_ms": 3000,
+          "secret_fields": [
+            "idcard"
+          ]
+        }
+      }
+    },
+    {
+      "version": 10,
+      "change": "update",
+      "rollback_of": null,
+      "note": "Jev 超时调到 3000 ms（超时占比超过 1%）",
+      "changed_at": "2026-11-01T06:08:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "enforce",
+        "on_jev_unavailable": "deny",
+        "advanced": {
+          "jev_timeout_ms": 3000,
+          "secret_fields": [
+            "idcard"
+          ]
+        }
+      }
+    },
+    {
+      "version": 9,
+      "change": "update",
+      "rollback_of": null,
+      "note": "追加脱敏字段 idcard",
+      "changed_at": "2026-10-31T22:56:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "enforce",
+        "on_jev_unavailable": "deny",
+        "advanced": {
+          "jev_timeout_ms": 2500,
+          "secret_fields": [
+            "idcard"
+          ]
+        }
+      }
+    },
+    {
+      "version": 8,
+      "change": "update",
+      "rollback_of": null,
+      "note": "Jev 超时调到 2500 ms（p95 接近 2 s）",
+      "changed_at": "2026-10-31T13:20:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "enforce",
+        "on_jev_unavailable": "deny",
+        "advanced": {
+          "jev_timeout_ms": 2500
+        }
+      }
+    },
+    {
+      "version": 7,
+      "change": "update",
+      "rollback_of": null,
+      "note": "切换到拦截模式（生成 v7）",
+      "changed_at": "2026-10-31T01:20:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "enforce",
+        "on_jev_unavailable": "deny",
+        "advanced": {
+          "jev_timeout_ms": 2000
+        }
+      }
+    },
+    {
+      "version": 6,
+      "change": "update",
+      "rollback_of": null,
+      "note": "Jev 超时显式写为 2000 ms",
+      "changed_at": "2026-10-30T13:20:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "observe",
+        "on_jev_unavailable": "deny",
+        "advanced": {
+          "jev_timeout_ms": 2000
+        }
+      }
+    },
+    {
+      "version": 5,
+      "change": "update",
+      "rollback_of": null,
+      "note": "favicon 加入绕过",
+      "changed_at": "2026-10-29T08:32:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*",
+          "/favicon.ico"
+        ],
+        "mode": "observe",
+        "on_jev_unavailable": "deny",
+        "advanced": {}
+      }
+    },
+    {
+      "version": 4,
+      "change": "update",
+      "rollback_of": null,
+      "note": "静态资源加入绕过",
+      "changed_at": "2026-10-28T10:56:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [
+          "/static/*"
+        ],
+        "mode": "observe",
+        "on_jev_unavailable": "deny",
+        "advanced": {}
+      }
+    },
+    {
+      "version": 3,
+      "change": "update",
+      "rollback_of": null,
+      "note": "登记患者列表入口 /api/patients",
+      "changed_at": "2026-10-27T03:44:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home",
+          "/api/patients"
+        ],
+        "bypass": [],
+        "mode": "observe",
+        "on_jev_unavailable": "deny",
+        "advanced": {}
+      }
+    },
+    {
+      "version": 2,
+      "change": "update",
+      "rollback_of": null,
+      "note": "登记首页入口 /api/home",
+      "changed_at": "2026-10-26T13:20:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login",
+          "/api/home"
+        ],
+        "bypass": [],
+        "mode": "observe",
+        "on_jev_unavailable": "deny",
+        "advanced": {}
+      }
+    },
+    {
+      "version": 1,
+      "change": "create",
+      "rollback_of": null,
+      "note": "创建站点（观察模式）",
+      "changed_at": "2026-10-26T01:20:00Z",
+      "spec": {
+        "name": "emr",
+        "hosts": [
+          "emr.example.com"
+        ],
+        "origin": "http://10.0.0.5:8080",
+        "session": {
+          "header": "Authorization"
+        },
+        "entries": [
+          "/login"
+        ],
+        "bypass": [],
+        "mode": "observe",
+        "on_jev_unavailable": "deny",
+        "advanced": {}
+      }
+    }
+  ]
+}

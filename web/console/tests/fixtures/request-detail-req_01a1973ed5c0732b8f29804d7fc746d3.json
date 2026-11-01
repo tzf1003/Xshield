@@ -1,0 +1,244 @@
+{
+  "summary": {
+    "id": 91137,
+    "request_id": "req_01a1973ed5c0732b8f29804d7fc746d3",
+    "at_millis": 1793538840000,
+    "site": "emr",
+    "site_version": 12,
+    "method": "POST",
+    "host": "emr.example.com",
+    "path": "/api/patients/search",
+    "query": null,
+    "status": 403,
+    "decision_path": "jev_deny",
+    "outcome": "blocked",
+    "session": "a913ee40771c2b05",
+    "context": "session",
+    "client": "10.2.0.44",
+    "total_ms": 540,
+    "jev": {
+      "access": "ALLOW",
+      "attack": "ATTACK",
+      "confidence": 0.88,
+      "ms": 470,
+      "failure": null
+    }
+  },
+  "edge": "edge-1",
+  "trace": {
+    "v": 1,
+    "entry": null,
+    "bypass": null,
+    "refused": "forbidden",
+    "values_truncated": false,
+    "values": [
+      {
+        "at": "path[0]",
+        "key": null,
+        "value": "api",
+        "kind": "route",
+        "inert": true,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "path[1]",
+        "key": null,
+        "value": "patients",
+        "kind": "route",
+        "inert": true,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "path[2]",
+        "key": null,
+        "value": "search",
+        "kind": "route",
+        "inert": true,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "body.q",
+        "key": "q",
+        "value": "x' OR sleep(5)=0 --",
+        "kind": "input",
+        "inert": false,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      }
+    ],
+    "session": {
+      "age_seconds": 2040,
+      "known_values": 140,
+      "entries_passed": [
+        {
+          "path": "/login",
+          "at_millis": 1793536800000,
+          "request_id": "req_01a1971fb5007b85b90bc19cf645db77"
+        },
+        {
+          "path": "/api/home",
+          "at_millis": 1793536830000,
+          "request_id": "req_01a197202a307cf98d3045959f209186"
+        },
+        {
+          "path": "/api/patients",
+          "at_millis": 1793536860000,
+          "request_id": "req_01a197209f607d7bbf9efc8697060c2e"
+        }
+      ],
+      "recent": [
+        {
+          "method": "GET",
+          "path": "/api/home",
+          "status": 200,
+          "request_id": "req_01a197202a307cf98d3045959f209186",
+          "at_millis": 1793536830000
+        },
+        {
+          "method": "GET",
+          "path": "/api/patients",
+          "status": 200,
+          "request_id": "req_01a197209f607d7bbf9efc8697060c2e",
+          "at_millis": 1793536860000
+        },
+        {
+          "method": "GET",
+          "path": "/api/patients/7",
+          "status": 200,
+          "request_id": "req_01a1972189c0770689c340fe75683134",
+          "at_millis": 1793536920000
+        },
+        {
+          "method": "GET",
+          "path": "/api/patients/7",
+          "status": 200,
+          "request_id": "req_01a197235e807dd8b5f5b9b864bb7d13",
+          "at_millis": 1793537040000
+        },
+        {
+          "method": "GET",
+          "path": "/api/patients/8",
+          "status": 403,
+          "request_id": "req_01a197261da07cc7a5f76639796781ad",
+          "at_millis": 1793537220000
+        },
+        {
+          "method": "GET",
+          "path": "/api/patients",
+          "status": 200,
+          "request_id": "req_01a1973204807054a82075e6b298fb37",
+          "at_millis": 1793538000000
+        }
+      ]
+    },
+    "cache_source": null,
+    "timing": {
+      "total_ms": 540,
+      "judge_ms": 480,
+      "origin_ms": null
+    },
+    "response": {
+      "content_type": null,
+      "bytes": 0,
+      "observed": "skipped",
+      "skip": "not_forwarded",
+      "values": 0,
+      "new_values": 0,
+      "fields": [],
+      "issued_session": null,
+      "entry_passed": false,
+      "after_would_block": false
+    },
+    "upstream_error": null
+  },
+  "jev": {
+    "state": "{\"entry\":{\"matched\":false},\"session\":{\"age_seconds\":2040,\"entries_passed\":[\"/login\",\"/api/home\",\"/api/patients\"]},\"recent\":[{\"method\":\"GET\",\"path\":\"/api/home\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/patients\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/patients/7\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/patients/7\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/patients/8\",\"status\":403},{\"method\":\"GET\",\"path\":\"/api/patients\",\"status\":200}],\"request\":{\"method\":\"POST\",\"path\":\"/api/patients/search\",\"values\":[{\"at\":\"body.q\",\"kind\":\"input\",\"value\":\"x' OR sleep(5)=0 --\",\"seen_as\":[]}]}}",
+    "prompt": "jq_5c2e81d07a4b9f13",
+    "model": "typesafe-ai/jev",
+    "route": "gateway",
+    "timeout_ms": 3000,
+    "trim": 0,
+    "request_bytes": 1700,
+    "http_status": 200,
+    "response": "{\"access\":{\"ALLOW\":0.88,\"DENY\":0.11,\"UNKNOWN\":0.01},\"attack\":{\"BENIGN\":0.04,\"ATTACK\":0.95,\"UNKNOWN\":0.01}}",
+    "usage": {
+      "input_tokens": 760,
+      "output_tokens": 12
+    },
+    "access": {
+      "ALLOW": 0.88,
+      "DENY": 0.11,
+      "UNKNOWN": 0.01
+    },
+    "attack": {
+      "BENIGN": 0.04,
+      "ATTACK": 0.95,
+      "UNKNOWN": 0.01
+    },
+    "conclusion": "deny",
+    "millis": 470,
+    "failure": null
+  },
+  "neighbors": {
+    "prev": "req_01a1973204807054a82075e6b298fb37",
+    "next": "req_01a1973fc0207473867f47fb0daa45f3"
+  },
+  "sources": {
+    "req_01a197202a307cf98d3045959f209186": {
+      "method": "GET",
+      "path": "/api/home",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536830000
+    },
+    "req_01a197209f607d7bbf9efc8697060c2e": {
+      "method": "GET",
+      "path": "/api/patients",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536860000
+    },
+    "req_01a1972189c0770689c340fe75683134": {
+      "method": "GET",
+      "path": "/api/patients/7",
+      "status": 200,
+      "decision_path": "jev_allow",
+      "at_millis": 1793536920000
+    },
+    "req_01a197235e807dd8b5f5b9b864bb7d13": {
+      "method": "GET",
+      "path": "/api/patients/7",
+      "status": 200,
+      "decision_path": "cached_allow",
+      "at_millis": 1793537040000
+    },
+    "req_01a197261da07cc7a5f76639796781ad": {
+      "method": "GET",
+      "path": "/api/patients/8",
+      "status": 403,
+      "decision_path": "jev_deny",
+      "at_millis": 1793537220000
+    },
+    "req_01a1973204807054a82075e6b298fb37": {
+      "method": "GET",
+      "path": "/api/patients",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793538000000
+    },
+    "req_01a1971fb5007b85b90bc19cf645db77": {
+      "method": "POST",
+      "path": "/login",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536800000
+    }
+  }
+}

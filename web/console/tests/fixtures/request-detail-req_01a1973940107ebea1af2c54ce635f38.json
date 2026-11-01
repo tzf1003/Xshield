@@ -1,0 +1,310 @@
+{
+  "summary": {
+    "id": 91129,
+    "request_id": "req_01a1973940107ebea1af2c54ce635f38",
+    "at_millis": 1793538474000,
+    "site": "juice",
+    "site_version": 7,
+    "method": "GET",
+    "host": "juice.example.com",
+    "path": "/rest/basket/6",
+    "query": null,
+    "status": 200,
+    "decision_path": "jev_deny",
+    "outcome": "would_block",
+    "session": "7c1e9a40d2b35f61",
+    "context": "session",
+    "client": "192.168.1.20",
+    "total_ms": 812,
+    "jev": {
+      "access": "DENY",
+      "attack": "BENIGN",
+      "confidence": 0.86,
+      "ms": 512,
+      "failure": null
+    }
+  },
+  "edge": "edge-1",
+  "trace": {
+    "v": 1,
+    "entry": null,
+    "bypass": null,
+    "refused": null,
+    "values_truncated": false,
+    "values": [
+      {
+        "at": "path[0]",
+        "key": null,
+        "value": "rest",
+        "kind": "route",
+        "inert": true,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "path[1]",
+        "key": null,
+        "value": "basket",
+        "kind": "route",
+        "inert": true,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "path[2]",
+        "key": null,
+        "value": "6",
+        "kind": "reference",
+        "inert": false,
+        "seen": true,
+        "verified": false,
+        "sources": [
+          {
+            "field": "quantity",
+            "request": "GET /rest/basket/1",
+            "request_id": "req_01a1973698607cce885df41a7ec7609b",
+            "at_millis": 1793538300000
+          }
+        ]
+      }
+    ],
+    "session": {
+      "age_seconds": 2046,
+      "known_values": 318,
+      "entries_passed": [
+        {
+          "path": "/rest/user/login",
+          "at_millis": 1793536428000,
+          "request_id": "req_01a1971a07e079639a823d4257b43172"
+        },
+        {
+          "path": "/api/Products",
+          "at_millis": 1793536429200,
+          "request_id": "req_01a1971a0c9079f0b1804e1ac47d7940"
+        },
+        {
+          "path": "/rest/products/search",
+          "at_millis": 1793537076000,
+          "request_id": "req_01a19723eb2073919f5069e3cfd7f5db"
+        }
+      ],
+      "recent": [
+        {
+          "method": "GET",
+          "path": "/rest/user/whoami",
+          "status": 200,
+          "request_id": "req_01a1971a0a3871eb95ffa057b989b1a9",
+          "at_millis": 1793536428600
+        },
+        {
+          "method": "GET",
+          "path": "/api/Products",
+          "status": 200,
+          "request_id": "req_01a1971a0c9079f0b1804e1ac47d7940",
+          "at_millis": 1793536429200
+        },
+        {
+          "method": "GET",
+          "path": "/rest/basket/1",
+          "status": 200,
+          "request_id": "req_01a1971a0ee87923b496ee2b2f194b85",
+          "at_millis": 1793536429800
+        },
+        {
+          "method": "GET",
+          "path": "/api/Products/12",
+          "status": 200,
+          "request_id": "req_01a1971a1f507a9aa0bc69e265aa31b3",
+          "at_millis": 1793536434000
+        },
+        {
+          "method": "GET",
+          "path": "/rest/basket/1",
+          "status": 200,
+          "request_id": "req_01a1971a4e307a8dbbb153573aa2faa5",
+          "at_millis": 1793536446000
+        },
+        {
+          "method": "GET",
+          "path": "/rest/products/search",
+          "status": 200,
+          "request_id": "req_01a19723eb2073919f5069e3cfd7f5db",
+          "at_millis": 1793537076000
+        },
+        {
+          "method": "GET",
+          "path": "/api/Products/12",
+          "status": 200,
+          "request_id": "req_01a197241a007cb6b228af21743b8f06",
+          "at_millis": 1793537088000
+        },
+        {
+          "method": "GET",
+          "path": "/rest/user/whoami",
+          "status": 200,
+          "request_id": "req_01a1973204807f0b894227939e275a8a",
+          "at_millis": 1793538000000
+        },
+        {
+          "method": "POST",
+          "path": "/api/Feedbacks",
+          "status": 413,
+          "request_id": "req_01a19733d9407e82babe9db0a3e5832a",
+          "at_millis": 1793538120000
+        },
+        {
+          "method": "GET",
+          "path": "/rest/basket/1",
+          "status": 200,
+          "request_id": "req_01a1973698607cce885df41a7ec7609b",
+          "at_millis": 1793538300000
+        }
+      ]
+    },
+    "cache_source": null,
+    "timing": {
+      "total_ms": 812,
+      "judge_ms": 515,
+      "origin_ms": 290
+    },
+    "response": {
+      "content_type": "application/json",
+      "bytes": 1832,
+      "observed": "json",
+      "skip": null,
+      "values": 14,
+      "new_values": 9,
+      "fields": [
+        [
+          "id",
+          3
+        ],
+        [
+          "name",
+          3
+        ],
+        [
+          "price",
+          3
+        ]
+      ],
+      "issued_session": null,
+      "entry_passed": false,
+      "after_would_block": true
+    },
+    "upstream_error": null
+  },
+  "jev": {
+    "state": "{\"entry\":{\"matched\":false},\"session\":{\"age_seconds\":2046,\"entries_passed\":[\"/rest/user/login\",\"/api/Products\",\"/rest/products/search\"]},\"recent\":[{\"method\":\"GET\",\"path\":\"/rest/user/whoami\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products/12\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/products/search\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products/12\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/user/whoami\",\"status\":200},{\"method\":\"POST\",\"path\":\"/api/Feedbacks\",\"status\":413},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200}],\"request\":{\"method\":\"GET\",\"path\":\"/rest/basket/6\",\"values\":[{\"at\":\"path[2]\",\"kind\":\"reference\",\"value\":\"6\",\"seen_as\":[\"quantity @ GET /rest/basket/1\"]}]}}",
+    "prompt": "jq_5c2e81d07a4b9f13",
+    "model": "typesafe-ai/jev",
+    "route": "gateway",
+    "timeout_ms": 2000,
+    "trim": 0,
+    "request_bytes": 3412,
+    "http_status": 200,
+    "response": "{\"access\":{\"ALLOW\":0.1203,\"DENY\":0.8612,\"UNKNOWN\":0.0185},\"attack\":{\"BENIGN\":0.9901,\"ATTACK\":0.0071,\"UNKNOWN\":0.0028}}",
+    "usage": {
+      "input_tokens": 1021,
+      "output_tokens": 12
+    },
+    "access": {
+      "ALLOW": 0.1203,
+      "DENY": 0.8612,
+      "UNKNOWN": 0.0185
+    },
+    "attack": {
+      "BENIGN": 0.9901,
+      "ATTACK": 0.0071,
+      "UNKNOWN": 0.0028
+    },
+    "conclusion": "deny",
+    "millis": 512,
+    "failure": null
+  },
+  "neighbors": {
+    "prev": "req_01a1973698607cce885df41a7ec7609b",
+    "next": "req_01a19739e4207e4f8519322900fd8643"
+  },
+  "sources": {
+    "req_01a1973698607cce885df41a7ec7609b": {
+      "method": "GET",
+      "path": "/rest/basket/1",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793538300000
+    },
+    "req_01a1971a0a3871eb95ffa057b989b1a9": {
+      "method": "GET",
+      "path": "/rest/user/whoami",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536428600
+    },
+    "req_01a1971a0c9079f0b1804e1ac47d7940": {
+      "method": "GET",
+      "path": "/api/Products",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536429200
+    },
+    "req_01a1971a0ee87923b496ee2b2f194b85": {
+      "method": "GET",
+      "path": "/rest/basket/1",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536429800
+    },
+    "req_01a1971a1f507a9aa0bc69e265aa31b3": {
+      "method": "GET",
+      "path": "/api/Products/12",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536434000
+    },
+    "req_01a1971a4e307a8dbbb153573aa2faa5": {
+      "method": "GET",
+      "path": "/rest/basket/1",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536446000
+    },
+    "req_01a19723eb2073919f5069e3cfd7f5db": {
+      "method": "GET",
+      "path": "/rest/products/search",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793537076000
+    },
+    "req_01a197241a007cb6b228af21743b8f06": {
+      "method": "GET",
+      "path": "/api/Products/12",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793537088000
+    },
+    "req_01a1973204807f0b894227939e275a8a": {
+      "method": "GET",
+      "path": "/rest/user/whoami",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793538000000
+    },
+    "req_01a19733d9407e82babe9db0a3e5832a": {
+      "method": "POST",
+      "path": "/api/Feedbacks",
+      "status": 413,
+      "decision_path": "body_not_inspectable",
+      "at_millis": 1793538120000
+    },
+    "req_01a1971a07e079639a823d4257b43172": {
+      "method": "POST",
+      "path": "/rest/user/login",
+      "status": 200,
+      "decision_path": "jev_allow",
+      "at_millis": 1793536428000
+    }
+  }
+}

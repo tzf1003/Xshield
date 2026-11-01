@@ -1,44 +1,27 @@
-import "@fontsource/ibm-plex-sans/400.css";
-import "@fontsource/ibm-plex-sans/600.css";
-import "@fontsource/jetbrains-mono/400.css";
-import "./style.css";
-
+import "./styles/global.css";
+import { QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider } from "@tanstack/react-router";
+import { App as AntdApp } from "antd";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { ConfigProvider } from "antd";
-import zhCN from "antd/locale/zh_CN";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider } from "@tanstack/react-router";
-import { onUnauthorized } from "./api.ts";
-import { createAppRouter } from "./router.tsx";
+import { queryClient } from "./api/query-client.ts";
+import { router } from "./app/router.tsx";
+import { ThemeProvider, applyStoredAttributes } from "./theme/ThemeProvider.tsx";
 
-const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
-});
+// Density and theme are written to the root before the first paint, so a stored choice never flashes.
+applyStoredAttributes();
 
-const router = createAppRouter({ queryClient });
+const container = document.getElementById("root");
+if (!container) throw new Error("#root is missing from index.html");
 
-// A 401 from any API call (session expired mid-use) sends the operator back to /login, no
-// matter which page or query triggered it.
-onUnauthorized(() => {
-  if (router.state.location.pathname !== "/login") {
-    router.navigate({ to: "/login" });
-  }
-});
-
-const root = document.getElementById("root");
-if (root) {
-  createRoot(root).render(
-    <StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <ConfigProvider
-          locale={zhCN}
-          button={{ autoInsertSpace: false }}
-          theme={{ token: { colorPrimary: "#0958d9" } }}
-        >
+createRoot(container).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <AntdApp>
           <RouterProvider router={router} />
-        </ConfigProvider>
-      </QueryClientProvider>
-    </StrictMode>,
-  );
-}
+        </AntdApp>
+      </ThemeProvider>
+    </QueryClientProvider>
+  </StrictMode>,
+);

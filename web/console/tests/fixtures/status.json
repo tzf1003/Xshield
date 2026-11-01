@@ -1,0 +1,43 @@
+{
+  "gateway": {
+    "light": "warn",
+    "edges": {
+      "online": 2,
+      "total": 3
+    },
+    "problems": [
+      {
+        "kind": "version_behind",
+        "edge": "edge-2",
+        "site": "emr",
+        "expected": 13,
+        "loaded": 12,
+        "saved_at_millis": 1793539050000
+      },
+      {
+        "kind": "log_gap",
+        "edge": "edge-1",
+        "from_ms": 1793538600000,
+        "to_ms": 1793538720000,
+        "dropped": 31,
+        "dropped_bypass": 6,
+        "write_errors": 0
+      }
+    ]
+  },
+  "jev": {
+    "health": "ok",
+    "window_minutes": 5,
+    "calls": 42,
+    "ok": 42,
+    "failures": {},
+    "p50_ms": 540,
+    "p95_ms": 910,
+    "last_ok_at": "2026-11-01T13:17:30Z",
+    "last_failure": {
+      "at": "2026-11-01T13:02:00Z",
+      "failure": "JEV_TIMEOUT",
+      "site": "emr"
+    }
+  }
+}

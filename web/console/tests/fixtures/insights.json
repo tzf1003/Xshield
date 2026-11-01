@@ -1,0 +1,56 @@
+{
+  "window_hours": 24,
+  "suggestions": [
+    {
+      "id": "entry_candidate:GET:/rest/admin/application-configuration",
+      "kind": "entry_candidate",
+      "method": "GET",
+      "path": "/rest/admin/application-configuration",
+      "count": 312,
+      "sample": "req_01a1971fb50073a59298767186c1a22f",
+      "actions": [
+        {
+          "label": "exact",
+          "add_entry": "/rest/admin/application-configuration",
+          "matches": 312
+        }
+      ],
+      "reason": "未登录时前端就会请求这个接口，目前全部按“无会话”记为本应拦截。登记为入口后，未登录请求会按入口判定。"
+    },
+    {
+      "id": "bypass_candidate:GET:/assets/i18n/en.json",
+      "kind": "bypass_candidate",
+      "method": "GET",
+      "path": "/assets/i18n/en.json",
+      "count": 401,
+      "sample": "req_01a19728dcc071aab225b9e0f5d7b63f",
+      "actions": [
+        {
+          "label": "prefix",
+          "add_bypass": "/assets/*",
+          "matches": 892
+        },
+        {
+          "label": "exact",
+          "add_bypass": "/assets/i18n/en.json",
+          "matches": 401
+        }
+      ],
+      "reason": "国际化资源文件，属于静态资源，不需要判定。按目录加入 /assets/* 后，同目录下的请求都不再判定。"
+    }
+  ],
+  "readiness": {
+    "observing_since_millis": 1793006400000,
+    "would_block": {
+      "jev_deny": 11,
+      "no_session": 3
+    },
+    "open_suggestions": 2,
+    "jev_health": "ok",
+    "jev_p95_ms": 760,
+    "jev_timeout_ratio": 0,
+    "after_would_block_refs": 5,
+    "on_jev_unavailable": "deny"
+  },
+  "complete": true
+}

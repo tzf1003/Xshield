@@ -1,0 +1,54 @@
+{
+  "window_hours": 24,
+  "jev": {
+    "calls": 412,
+    "p50_ms": 562,
+    "p95_ms": 1813,
+    "p99_ms": 2888,
+    "timeouts": 3,
+    "timeout_ms_used": 3000
+  },
+  "call_limit": {
+    "session_peak": 22,
+    "address_peak": 41,
+    "session_hits": 0,
+    "address_hits": 11
+  },
+  "cache": {
+    "cached_allows": 86
+  },
+  "histogram": [
+    2,
+    9,
+    28,
+    54,
+    71,
+    68,
+    50,
+    31,
+    21,
+    14,
+    10,
+    8,
+    6,
+    5,
+    4,
+    4,
+    3,
+    3,
+    3,
+    2,
+    2,
+    2,
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    3
+  ],
+  "histogram_bucket_ms": 100
+}
