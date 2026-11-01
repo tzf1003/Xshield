@@ -160,7 +160,7 @@
       if (behind.length && now - s.saved_at > X.BEHIND_MS) problems.push({ kind: 'version_behind', level: 'serious', text: `${s.name} v${s.version} 保存后仍有 ${behind.length}/${ro.edges_online} 个网关没加载（${behind.map((e) => `${e.edge} 停在 v${e.version}`).join('、')}）`, href: '#/system?tab=edges', act: '查看系统' });
     });
     edges.forEach((e) => (e.gaps || []).forEach((g) => {
-      if (X.gapLost(g) > 0 && now - g.to_ms < 15 * 60000) problems.push({ kind: 'log_gap', level: 'serious', text: `${e.edge} 在 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} 有 ${X.gapLost(g)} 条判定记录未写入（${X.gapCause(g)}），这段时间的请求可能查不到`, href: `#/requests?since=${g.from_ms}&until=${g.to_ms}&scope=all`, act: '查看缺口' });
+      if (X.gapLost(g) > 0 && now - g.to_ms < 15 * 60000) problems.push({ kind: 'log_gap', level: 'serious', text: `${e.edge} 在 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} 有 ${X.gapLost(g)} 条判定记录未写入（${X.gapCause(g)}），这段时间的请求可能查不到`, href: `#/requests?range=custom&since=${g.from_ms}&until=${g.to_ms}&scope=all`, act: '查看缺口' });
     }));
     edges.forEach((e) => { if (e.online && e.queue / M.SYSTEM.params.fixed.queue_capacity > 0.8) problems.push({ kind: 'queue_pressure', level: 'warn', text: `${e.edge} 发送队列超过 80%`, href: '#/system?tab=edges', act: '查看系统' }); });
     const order = { serious: 0, warn: 1, info: 2 }; problems.sort((a, b) => order[a.level] - order[b.level]);
@@ -266,6 +266,8 @@
     if (i >= 0 && new URLSearchParams(hash.slice(i + 1)).has('site')) return hash;
     return `${hash}${i < 0 ? '?' : '&'}site=${encodeURIComponent(X.state.site)}`;
   };
+  // A custom time window is `range=custom` with `since`/`until` in Unix ms (docs/06 6.2.2); without `range=custom` they are not read.
+  X.customWindow = (q) => (q.get('range') === 'custom' && q.get('since') ? { since: Number(q.get('since')) || 0, until: Number(q.get('until')) || Infinity } : null);
   X.go = (hash) => { const next = X.scoped(hash); if (location.hash === next) X.render(); else location.hash = next; };
   X.hashWith = (patch, base) => {
     const { parts, q } = base || X.parseHash(); const nq = new URLSearchParams(q.toString());
@@ -413,13 +415,21 @@
   const hostOk = (x) => x.length > 0 && x.length <= 253 && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(x) && !x.includes('..');
   const originOk = (o) => { const m = /^https?:\/\/([^:/]*)(?::(\d*))?$/.exec(o || ''); return !!m && hostOk(m[1]) && (m[2] == null || (m[2].length >= 1 && m[2].length <= 5)); };
   const tokenOk = (t) => /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(t || '');
-  // PathPattern::parse: the length is UTF-8 bytes (a Chinese character counts 3, an emoji 4), not String.length; a space and
-  // the ASCII control bytes are rejected, other whitespace is not; everything but the optional last `*` is checked as the literal.
+  // PathPattern::parse. The length is UTF-8 bytes (a Chinese character counts 3, an emoji 4), not String.length; only the ASCII
+  // space and the ASCII control bytes count as whitespace; everything but the optional last `*` is checked as the literal.
+  // The form's add-rule box and the validator share this, and the box shows the reason for the first rule that is broken.
   const utf8Len = (s) => new TextEncoder().encode(s).length;
-  const pathOk = (p) => {
+  X.pathError = (p) => {
     const literal = p.endsWith('*') ? p.slice(0, -1) : p;
-    return p.length > 0 && utf8Len(p) <= 256 && p.startsWith('/') && !/[*?#\\ \x00-\x1f\x7f]/.test(literal) && !literal.split('/').some((seg) => seg === '.' || seg === '..');
+    if (!p.startsWith('/')) return '规则以 / 开头';
+    if (utf8Len(p) > 256) return '规则最长 256 字节（一个汉字算 3 个）';
+    if (/[?#\\]/.test(literal)) return '规则不能含查询串（? 或 #）或反斜杠';
+    if (/[ \x00-\x1f\x7f]/.test(literal)) return '规则不能含空格或控制字符';
+    if (literal.includes('*')) return '* 只能在末尾';
+    if (literal.split('/').some((seg) => seg === '.' || seg === '..')) return '不能含 . 或 .. 段';
+    return null;
   };
+  const pathOk = (p) => !X.pathError(p);
   X.validateSpec = (spec) => {
     const errors = []; const warnings = []; const add = (g, f, msg) => errors.push({ group: g, field: f, msg });
     if (!/^[a-z0-9_-]{1,64}$/.test(spec.name || '')) add('basic', 'name', '站点名只能用小写字母、数字、-、_，最长 64 个字符');

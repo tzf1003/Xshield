@@ -42,13 +42,13 @@
 
 ### 6.2.2 路由
 
-所有页面状态放在 URL 查询参数里（[07.10.3](07-console-architecture.md#7103-路由与-url-状态)）。全局参数 `site`（站点范围，缺省为全部站点）和 `range`（时间范围，缺省 `24h`）在各页之间保持：范围只存在于 URL 里，页内链接、导航按钮、命令面板和快捷键跳转时把当前范围带到目标地址，所以浏览器后退会回到原来页面的范围；地址里没有 `site` 就是全部站点，不会因为“上次选过”而变。
+所有页面状态放在 URL 查询参数里（[07.10.3](07-console-architecture.md#7103-路由与-url-状态)）。全局参数 `site`（站点范围，缺省为全部站点）和 `range`（时间范围：`15m`、`1h`、`6h`、`24h`、`7d` 或 `custom`，缺省 `24h`；`range=custom` 时用 `since`、`until` 给出起止，Unix 毫秒，最长 7 天）在各页之间保持：打开某个具体时间段的链接（日志缺口的“查看缺口”、趋势图上的一段）写成 `range=custom&since=…&until=…`，所以这段时间也会跟着跳转带到别的页。范围只存在于 URL 里，页内链接、导航按钮、命令面板和快捷键跳转时把当前范围带到目标地址，所以浏览器后退会回到原来页面的范围；地址里没有 `site` 就是全部站点，不会因为“上次选过”而变。
 
 | 路由 | 页面 | 页面自己的查询参数 |
 |---|---|---|
 | `/login` | 登录 | `next`：登录后返回的地址（只接受以 `/` 开头的站内路径） |
 | `/` | 总览 | — |
-| `/requests` | 请求追溯 | `q`（条件语法）、`chip`（快捷筛选）、`scope=all`（含绕过和未知站点的请求）、`since`/`until`（自定义时间窗，Unix 毫秒）、`peek`（预览面板打开的请求 ID）、`live=1` |
+| `/requests` | 请求追溯 | `q`（条件语法）、`chip`（快捷筛选）、`scope=all`（含绕过和未知站点的请求）、`peek`（预览面板打开的请求 ID）、`live=1` |
 | `/requests/$requestId` | 请求详情 | `tab=pipeline｜values｜jev｜session｜raw`、`jev_view=structured｜json｜raw｜prompt`、`jev_doc=state｜body｜response`（JSON、原文视图看哪一份）、`hl`（高亮的值序号） |
 | `/sessions` | 会话列表 | `flag=blocked｜jev`、`q`（会话标签前缀） |
 | `/sessions/$label` | 会话时间线 | `only=judged｜jev｜blocks`、`at`（滚动定位到的请求 ID） |

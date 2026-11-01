@@ -69,7 +69,7 @@
     const dsl = X.parseDsl(q.get('q') || ''); const all = q.get('scope') === 'all';
     const lookup = dsl.conds.some((c) => c.k === 'id' || c.k === 'session' || (c.k === 'path' && c.v.some((p) => !p.endsWith('*'))));
     const wantsExcluded = dsl.conds.some((c) => c.k === 'decision' && c.v.some((v) => v === 'unknown_site' || v === 'bypass'));
-    const since = Number(q.get('since')) || 0; const until = Number(q.get('until')) || Infinity;
+    const win = X.customWindow(q) || { since: 0, until: Infinity }; const since = win.since; const until = win.until;
     let rows = M.RECORDS.slice();
     if (X.state.site !== 'all') rows = rows.filter((r) => r.site === X.state.site);
     rows = rows.filter((r) => r.at_millis >= since && r.at_millis <= until);
@@ -87,7 +87,7 @@
 
   // ================================================================ status wording for gaps
   function gapBanners(q) {
-    const out = []; const since = Number(q.get('since')) || 0; const until = Number(q.get('until')) || Infinity;
+    const out = []; const win = X.customWindow(q) || { since: 0, until: Infinity }; const since = win.since; const until = win.until;
     M.SYSTEM.edges.forEach((e) => (e.gaps || []).forEach((g) => {
       if (g.to_ms < since || g.from_ms > until) return;
       if (X.state.site !== 'all' && false) return;
@@ -307,8 +307,9 @@
       X.popover(e.currentTarget, box);
     };
     if (base.autoIncluded) page.appendChild(h('<div class="notice soft">已包含绕过请求：按请求 ID、会话或精确路径查找时不隐藏绕过记录。</div>'));
-    if (q.get('since')) {
-      const nb = h(`<div class="notice soft">时间窗 ${X.fmtHMS(Number(q.get('since')))}–${X.fmtHMS(Number(q.get('until')))} · <a href="${esc(X.hashWith({ since: null, until: null }))}">清除</a></div>`); page.appendChild(nb);
+    const cw = X.customWindow(q);
+    if (cw) {
+      const nb = h(`<div class="notice soft">时间窗 ${X.fmtHMS(cw.since)}–${X.fmtHMS(cw.until)} · <a href="${esc(X.hashWith({ range: null, since: null, until: null }))}">清除</a></div>`); page.appendChild(nb);
     }
     const banners = gapBanners(q);
     banners.forEach((b) => page.appendChild(h(`<div class="banner ${b.kind}" role="status"><span class="bi">${b.kind === 'lost' ? '▲' : 'i'}</span><span>${esc(b.text)} · <a href="${esc(b.href)}">${esc(b.act)}</a></span></div>`)));

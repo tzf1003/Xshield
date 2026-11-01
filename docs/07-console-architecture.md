@@ -859,7 +859,7 @@ web/console/src/
 
 ### 7.10.3 路由与 URL 状态
 
-筛选、标签页、视图模式都放在 URL 查询参数里（TanStack Router `validateSearch`，手写校验函数，不引入 zod），刷新、后退、复制链接都能还原。路由表见 [06.2](06-console-ui.md#62-信息架构)。全局范围（`site`、`range`、自定义的 `since`/`until`）也只放在 URL，不存 `localStorage`：地址里没有 `site` 就是全部站点。页内链接、导航按钮、命令面板和快捷键跳转到不带范围的地址时，把当前范围带过去（`keepScope`）；顶栏切换站点用替换历史项，不新增。这样后退、前进回到的地址就是当时的范围，不会被内存里“上一次的选择”改写。
+筛选、标签页、视图模式都放在 URL 查询参数里（TanStack Router `validateSearch`，手写校验函数，不引入 zod），刷新、后退、复制链接都能还原。路由表见 [06.2](06-console-ui.md#62-信息架构)。全局范围（`site`、`range`，以及 `range=custom` 时的 `since`/`until`；06.2.2）也只放在 URL，不存 `localStorage`：`since`/`until` 只在 `range=custom` 时读，其余情况读成缺省；地址里没有 `site` 就是全部站点。页内链接、导航按钮、命令面板和快捷键跳转到不带范围的地址时，把当前范围带过去（`keepScope`）；顶栏切换站点用替换历史项，不新增。这样后退、前进回到的地址就是当时的范围，不会被内存里“上一次的选择”改写。
 
 ### 7.10.4 数据获取
 
