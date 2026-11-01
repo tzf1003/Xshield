@@ -1,98 +1,122 @@
-import { ConfigProvider } from "antd";
+import { ConfigProvider, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import {
-  createContext,
-  type ReactNode,
-  useCallback,
-  useContext,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useState,
-} from "react";
-import { antdThemeConfig } from "./antd.ts";
-import {
-  documentAttributes,
-  preferenceStorage,
-  readDensityPreference,
-  readThemePreference,
-  resolveThemeMode,
-  writeDensityPreference,
-  writeThemePreference,
-} from "./preference.ts";
-import type { DensityPreference, ThemeMode, ThemePreference } from "./tokens.ts";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { type Density, palettes, type ThemeMode, type ThemePreference } from "./tokens.ts";
 
-const darkQuery = "(prefers-color-scheme: dark)";
+const THEME_KEY = "xshield.console.theme";
+const DENSITY_KEY = "xshield.console.density";
+const DARK_QUERY = "(prefers-color-scheme: dark)";
 
-export type ThemeContextValue = {
+type ThemeContextValue = {
   preference: ThemePreference;
-  /** The mode actually rendered (the system preference resolved). */
   mode: ThemeMode;
-  density: DensityPreference;
+  density: Density;
   setPreference: (value: ThemePreference) => void;
-  setDensity: (value: DensityPreference) => void;
+  setDensity: (value: Density) => void;
 };
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
-function systemPrefersDark(): boolean {
+function readStored(key: string): string | null {
   try {
-    return typeof window !== "undefined" && window.matchMedia(darkQuery).matches;
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string | null) {
+  try {
+    if (value === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch {
+    // Storage may be blocked; the preference then lasts for this page only.
+  }
+}
+
+function systemDark(): boolean {
+  try {
+    return window.matchMedia(DARK_QUERY).matches;
   } catch {
     return false;
   }
 }
 
-function applyAttributes(preference: ThemePreference, density: DensityPreference) {
-  const attributes = documentAttributes(preference, density);
+function parsePreference(raw: string | null): ThemePreference {
+  return raw === "light" || raw === "dark" ? raw : "system";
+}
+
+function parseDensity(raw: string | null): Density {
+  return raw === "compact" ? "compact" : "comfortable";
+}
+
+/** Applied before the first render so a stored choice never flashes the other theme. */
+export function applyStoredAttributes() {
+  const preference = parsePreference(readStored(THEME_KEY));
   const root = document.documentElement;
-  if (attributes.theme) root.setAttribute("data-theme", attributes.theme);
-  else root.removeAttribute("data-theme");
-  if (attributes.density) root.setAttribute("data-density", attributes.density);
-  else root.removeAttribute("data-density");
+  if (preference === "system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", preference);
+  root.setAttribute("data-density", parseDensity(readStored(DENSITY_KEY)));
 }
 
-/** Runs before the first React render so an explicit choice never flashes the other theme. */
-export function applyStoredThemeAttributes() {
-  const storage = preferenceStorage();
-  applyAttributes(readThemePreference(storage), readDensityPreference(storage));
-}
-
-export function ThemeProvider({ children, cspNonce }: { children: ReactNode; cspNonce?: string }) {
+export function ThemeProvider({ children }: { children: ReactNode }) {
   const [preference, setPreferenceState] = useState<ThemePreference>(() =>
-    readThemePreference(preferenceStorage()),
+    parsePreference(readStored(THEME_KEY)),
   );
-  const [density, setDensityState] = useState<DensityPreference>(() =>
-    readDensityPreference(preferenceStorage()),
-  );
-  const [systemDark, setSystemDark] = useState(systemPrefersDark);
+  const [density, setDensityState] = useState<Density>(() => parseDensity(readStored(DENSITY_KEY)));
+  const [dark, setDark] = useState<boolean>(systemDark);
 
   useEffect(() => {
-    let query: MediaQueryList;
+    let query: MediaQueryList | null = null;
     try {
-      query = window.matchMedia(darkQuery);
+      query = window.matchMedia(DARK_QUERY);
     } catch {
-      return;
+      query = null;
     }
-    const onChange = () => setSystemDark(query.matches);
-    onChange();
+    if (!query) return undefined;
+    const onChange = () => setDark(query?.matches ?? false);
     query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
+    return () => query?.removeEventListener("change", onChange);
   }, []);
 
-  useLayoutEffect(() => applyAttributes(preference, density), [preference, density]);
+  const mode: ThemeMode = preference === "system" ? (dark ? "dark" : "light") : preference;
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (preference === "system") root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", preference);
+    root.setAttribute("data-density", density);
+  }, [preference, density]);
 
   const setPreference = useCallback((value: ThemePreference) => {
     setPreferenceState(value);
-    writeThemePreference(preferenceStorage(), value);
-  }, []);
-  const setDensity = useCallback((value: DensityPreference) => {
-    setDensityState(value);
-    writeDensityPreference(preferenceStorage(), value);
+    writeStored(THEME_KEY, value === "system" ? null : value);
   }, []);
 
-  const mode = resolveThemeMode(preference, systemDark);
-  const antd = useMemo(() => antdThemeConfig(mode, density), [mode, density]);
+  const setDensity = useCallback((value: Density) => {
+    setDensityState(value);
+    writeStored(DENSITY_KEY, value === "comfortable" ? null : value);
+  }, []);
+
+  const antdConfig = useMemo(() => {
+    const palette = palettes[mode];
+    return {
+      algorithm: [
+        mode === "dark" ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+        ...(density === "compact" ? [antdTheme.compactAlgorithm] : []),
+      ],
+      token: {
+        colorPrimary: palette?.accent,
+        colorBgBase: palette?.surface,
+        colorTextBase: palette?.ink,
+        colorBorder: palette?.borderStrong,
+        borderRadius: 6,
+        borderRadiusLG: 10,
+        fontFamily: 'system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+      },
+    };
+  }, [mode, density]);
+
   const value = useMemo(
     () => ({ preference, mode, density, setPreference, setDensity }),
     [preference, mode, density, setPreference, setDensity],
@@ -100,14 +124,7 @@ export function ThemeProvider({ children, cspNonce }: { children: ReactNode; csp
 
   return (
     <ThemeContext.Provider value={value}>
-      <ConfigProvider
-        locale={zhCN}
-        componentSize="middle"
-        // antd would insert a space between two CJK characters ("连 接"), breaking the accessible name.
-        button={{ autoInsertSpace: false }}
-        csp={cspNonce ? { nonce: cspNonce } : undefined}
-        theme={antd}
-      >
+      <ConfigProvider locale={zhCN} theme={antdConfig}>
         {children}
       </ConfigProvider>
     </ThemeContext.Provider>
@@ -116,6 +133,6 @@ export function ThemeProvider({ children, cspNonce }: { children: ReactNode; csp
 
 export function useTheme(): ThemeContextValue {
   const value = useContext(ThemeContext);
-  if (!value) throw new Error("useTheme requires ThemeProvider");
+  if (!value) throw new Error("useTheme outside ThemeProvider");
   return value;
 }

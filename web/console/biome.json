@@ -7,12 +7,12 @@
     "ignoreUnknown": true,
     "includes": [
       "src/**",
-      "!src/theme/tokens.generated.css",
       "tests/**",
       "vite.config.ts",
       "playwright.config.ts",
       "tsconfig.json",
-      "biome.json"
+      "biome.json",
+      "!tests/fixtures/**"
     ]
   },
   "formatter": {
@@ -30,63 +30,21 @@
       "preset": "recommended",
       "suspicious": {
         "noExplicitAny": "error",
-        "noArrayIndexKey": "warn",
-        "useIterableCallbackReturn": "warn"
+        "noArrayIndexKey": "error",
+        "useIterableCallbackReturn": "error"
       },
       "correctness": {
-        "useExhaustiveDependencies": "warn",
-        "useJsxKeyInIterable": "warn",
-        "noUnsafeOptionalChaining": "warn"
+        "useExhaustiveDependencies": "error",
+        "useJsxKeyInIterable": "error",
+        "noUnsafeOptionalChaining": "error"
       },
       "a11y": {
-        "useButtonType": "warn",
-        "useAriaPropsSupportedByRole": "warn"
+        "useButtonType": "error",
+        "useAriaPropsSupportedByRole": "error"
+      },
+      "style": {
+        "noNonNullAssertion": "error"
       }
     }
-  },
-  "overrides": [
-    {
-      "includes": [
-        "src/security/**",
-        "src/theme/**",
-        "src/shell/**",
-        "src/router/**",
-        "src/pages/**",
-        "src/work/**",
-        "src/operations/**",
-        "src/sites/**",
-        "src/ui/**"
-      ],
-      "linter": {
-        "rules": {
-          "suspicious": {
-            "noArrayIndexKey": "error",
-            "useIterableCallbackReturn": "error"
-          },
-          "correctness": {
-            "useExhaustiveDependencies": "error",
-            "useJsxKeyInIterable": "error",
-            "noUnsafeOptionalChaining": "error"
-          },
-          "a11y": {
-            "useButtonType": "error",
-            "useAriaPropsSupportedByRole": "error"
-          },
-          "style": {
-            "noNonNullAssertion": "error"
-          }
-        }
-      }
-    },
-    {
-      "includes": ["src/api.ts", "src/api-contract.ts", "src/search.ts"],
-      "linter": {
-        "rules": {
-          "suspicious": {
-            "noControlCharactersInRegex": "off"
-          }
-        }
-      }
-    }
-  ]
+  }
 }

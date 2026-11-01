@@ -1,65 +1,32 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Parallel worktrees pick distinct port pairs: XSHIELD_E2E_PORT and the next port.
-const machinePort = Number(process.env.XSHIELD_E2E_PORT ?? 5175);
-const sessionPort = machinePort + 1;
-const machineOrigin = `http://127.0.0.1:${machinePort}`;
-const sessionOrigin = `http://127.0.0.1:${sessionPort}`;
+// Parallel worktrees pick a distinct port via XSHIELD_E2E_PORT.
+const port = Number(process.env.XSHIELD_E2E_PORT ?? 5175);
+const baseURL = `http://127.0.0.1:${port}`;
 
+// Every spec runs against fixed JSON served by page.route (tests/helpers/mock-api.ts), so no
+// backend is needed. The same files in tests/fixtures are the contract the Rust side round-trips.
 export default defineConfig({
   testDir: "./tests",
   testMatch: "**/*.spec.ts",
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
-  // The mocked control API tells a StrictMode duplicate read from a real one by a short abort
-  // window (tests/control-mock.ts), which a slow shared runner can miss. Two CI retries absorb
-  // that (the first hosted run passed five specs only on the one retry and failed four
-  // that did not); a deterministic failure still fails every attempt and a passed retry is reported
-  // flaky.
   retries: process.env.CI ? 2 : 0,
-  workers: 2,
   reporter: "list",
-  use: { baseURL: machineOrigin, trace: "off", screenshot: "off" },
-  projects: [
-    {
-      name: "chromium",
-      testIgnore: [
-        "**/browser-session.spec.ts",
-        "**/shell-session.spec.ts",
-        "**/work-session.spec.ts",
-        "**/site-roles.spec.ts",
-        "**/site-release-session.spec.ts",
-        "**/operations-session.spec.ts",
-        "**/api-keys-session.spec.ts",
-      ],
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
-      name: "browser-session",
-      testMatch: [
-        "**/browser-session.spec.ts",
-        "**/shell-session.spec.ts",
-        "**/work-session.spec.ts",
-        "**/site-roles.spec.ts",
-        "**/site-release-session.spec.ts",
-        "**/operations-session.spec.ts",
-        "**/api-keys-session.spec.ts",
-      ],
-      use: { ...devices["Desktop Chrome"], baseURL: sessionOrigin },
-    },
-  ],
-  webServer: [
-    {
-      command: `VITE_XSHIELD_E2E_MACHINE_LOGIN=1 npx vite --host 127.0.0.1 --port ${machinePort} --strictPort`,
-      url: machineOrigin,
-      reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
-    },
-    {
-      command: `VITE_XSHIELD_E2E_MACHINE_LOGIN=0 npx vite --host 127.0.0.1 --port ${sessionPort} --strictPort`,
-      url: sessionOrigin,
-      reuseExistingServer: !process.env.CI,
-      timeout: 30_000,
-    },
-  ],
+  timeout: 30_000,
+  expect: { timeout: 8_000 },
+  use: {
+    baseURL,
+    trace: "off",
+    screenshot: "off",
+    locale: "zh-CN",
+    timezoneId: "Asia/Shanghai",
+  },
+  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  webServer: {
+    command: `npx vite --host 127.0.0.1 --port ${port} --strictPort`,
+    url: baseURL,
+    reuseExistingServer: !process.env.CI,
+    timeout: 60_000,
+  },
 });
