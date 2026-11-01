@@ -4215,6 +4215,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "xshield-judge"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "xshield-core",
+ "zeroize",
+]
+
+[[package]]
 name = "xshield-postgres"
 version = "0.1.1"
 dependencies = [
