@@ -686,7 +686,7 @@ pub async fn run_decision_log_retention_loop(pool: PgPool) {
             .saturating_sub(DECISION_LOG_RETENTION_SECS.saturating_mul(1000));
         match decision_log_store::purge_older_than(&pool, cutoff_millis).await {
             Ok(count) => {
-                eprintln!("xshield-control: purged {count} decision log rows older than 7 days")
+                eprintln!("xshield-control: purged {count} decision log rows older than 7 days");
             }
             Err(error) => eprintln!("xshield-control: decision log purge failed: {error}"),
         }
