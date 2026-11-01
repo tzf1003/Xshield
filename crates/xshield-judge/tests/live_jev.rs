@@ -516,6 +516,13 @@ async fn live_juice_shop_checkout_flow() {
             Some("tokenA"),
             false,
         ),
+        post(
+            "neutral key names another account",
+            "/rest/wallet/transfer",
+            r#"{"to":"user-1042","amount":5}"#,
+            Some("tokenA"),
+            true,
+        ),
         get(
             "basket of someone else",
             "/rest/basket/1",
