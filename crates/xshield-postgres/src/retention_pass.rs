@@ -1,12 +1,16 @@
 //! One bounded maintenance pass over expired and orphan evidence ciphertext.
 //!
-//! Shared by the one-shot `xshield-evidence-retain` command (xshield-worker) and the gateway's
-//! optional in-process retention loop. Every phase first commits a purge
-//! intent, then lets the vault re-verify and delete, then commits the outcome,
-//! so an interrupted pass is retried by the next one. The caller owns the
-//! coordination with writers of the same root: the command holds the root's
-//! exclusive lock, the gateway runs beside its own single writer, whose
-//! in-flight ciphertext is younger than the orphan grace.
+//! The one-shot `xshield-evidence-retain` command (xshield-worker) and the v3
+//! gateway's optional in-process retention loop that used to call this were
+//! both deleted with v3 (docs/05 §5.2); nothing in the workspace calls this
+//! module today. It is kept, unreferenced, for whichever v4 evidence-cleanup
+//! path (if any) replaces them. Every phase first commits a purge intent,
+//! then lets the vault re-verify and delete, then commits the outcome, so an
+//! interrupted pass is retried by the next one. The caller owns the
+//! coordination with writers of the same root: a command-line caller would
+//! hold the root's exclusive lock, an in-process caller would run beside its
+//! own single writer, whose in-flight ciphertext is younger than the orphan
+//! grace.
 
 use crate::{
     CalibrationLineageReviewOrphanPurgeResult, CalibrationLineageReviewPurgeResult,
