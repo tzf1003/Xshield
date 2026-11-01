@@ -172,7 +172,7 @@ test("a log gap that lost decision records is serious and opens the gap list", a
   await mockApi(page);
   await openOverview(page);
 
-  const gap = rowWith(page, "edge-1 21:10–21:12 有 31 条判定记录未写入（队列满 31）");
+  const gap = rowWith(page, "edge-1 21:10–21:12 有 31 条判定记录未写入（队列满）");
   await expect(gap).toContainText("严重");
   await expect(gap).toContainText("这段时间的请求可能查不到");
   await follow(gap, "查看缺口");

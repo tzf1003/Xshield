@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import type { GatewayProblem, JevHealth, StatusResponse } from "../src/api/types.ts";
 import { fmtClock } from "../src/lib/format.ts";
-import { gatewayLight, jevLight, problemText } from "../src/lib/health.ts";
+import { gatewayLight, jevLight, lostReasons, problemText } from "../src/lib/health.ts";
 import { FIXTURE_NOW_MS, status, statusDown } from "./helpers/fixtures.ts";
 
 type LogGapProblem = Extract<GatewayProblem, { kind: "log_gap" }>;
@@ -38,7 +38,7 @@ test("the gateway light takes its colour from the server and counts the online e
   const gap = gapOf(status);
   assert.deepEqual(light.lines, [
     "emr v13 保存后未生效，edge-2 仍是 v12",
-    `edge-1 ${fmtClock(gap.from_ms)}–${fmtClock(gap.to_ms)} 有 31 条判定记录未写入（队列满 31）`,
+    `edge-1 ${fmtClock(gap.from_ms)}–${fmtClock(gap.to_ms)} 有 31 条判定记录未写入（队列满）`,
   ]);
 });
 
@@ -92,24 +92,27 @@ test("each problem kind has its own sentence", () => {
   );
 });
 
-test("the log gap sentence counts the lost decisions and names their causes", () => {
+test("the log gap sentence counts the lost decisions and names their causes in words", () => {
+  // The count is dropped + write_errors; the brackets hold only the cause, never a number (docs/06 6.3.2).
+  const span = `${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)}`;
+  assert.equal(gapSentence(31, 6, 0), `edge-1 ${span} 有 31 条判定记录未写入（队列满）`);
+  assert.equal(gapSentence(0, 0, 5), `edge-1 ${span} 有 5 条判定记录未写入（写入失败）`);
+  assert.equal(gapSentence(2, 0, 3), `edge-1 ${span} 有 5 条判定记录未写入（队列满、写入失败）`);
+});
+
+test("bypass records dropped under pressure are a note, not lost decisions", () => {
   // Bypass records dropped under pressure are not lost decisions (docs/07 7.7.4): they get their own note.
   assert.equal(
-    gapSentence(31, 6, 0),
-    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 31 条判定记录未写入（队列满 31）`,
-  );
-  assert.equal(
-    gapSentence(0, 0, 5),
-    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 5 条判定记录未写入（写入失败 5）`,
-  );
-  assert.equal(
-    gapSentence(2, 0, 3),
-    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 有 5 条判定记录未写入（队列满 2、写入失败 3）`,
-  );
-  assert.equal(
     gapSentence(0, 6, 0),
-    `edge-1 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 丢弃了 6 条绕过记录，判定记录不受影响`,
+    `edge-1 在 ${fmtClock(GAP_FROM)}–${fmtClock(GAP_TO)} 丢弃了 6 条绕过记录，判定记录不受影响`,
   );
+});
+
+test("the cause words come from the lost counts alone", () => {
+  assert.equal(lostReasons({ dropped: 0, write_errors: 0 }), "");
+  assert.equal(lostReasons({ dropped: 1, write_errors: 0 }), "队列满");
+  assert.equal(lostReasons({ dropped: 0, write_errors: 1 }), "写入失败");
+  assert.equal(lostReasons({ dropped: 9, write_errors: 4 }), "队列满、写入失败");
 });
 
 test("the Jev light reads the health word, the window and the latency", () => {

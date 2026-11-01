@@ -21,6 +21,7 @@ import type {
 } from "../../api/types.ts";
 import { type AlignedValue, alignRecent, alignValues, seenAsAligned } from "../../lib/align.ts";
 import { topOf } from "../../lib/explain.ts";
+import { lostReasons } from "../../lib/health.ts";
 import { fmtBytes, fmtElapsed, fmtInt, pct } from "../../lib/format.ts";
 import {
   isRequestId,
@@ -722,8 +723,12 @@ export function missingReason(
   if (millis === null) return "这不是本系统生成的请求 ID 格式（req_ 加 32 位十六进制）。";
   if (millis > now + 60_000) return "ID 时间异常，可能不是本系统生成的。";
   if (now - millis > RETENTION_MS) return `生成于 ${localDay(millis)}，已超过 7 天保留期。`;
-  const gap = gaps.find((item) => millis >= item.from_ms && millis <= item.to_ms);
+  // Only a gap that lost decision records explains a missing ID; bypass drops do not (docs/06 6.7.2).
+  const gap = gaps.find(
+    (item) =>
+      millis >= item.from_ms && millis <= item.to_ms && item.dropped + item.write_errors > 0,
+  );
   if (gap)
-    return `当时 ${gap.edge} 丢失了 ${fmtInt(gap.dropped)} 条记录，这段时间的请求可能查不到。`;
+    return `当时 ${gap.edge} 丢失了 ${fmtInt(gap.dropped + gap.write_errors)} 条记录（${lostReasons(gap)}），这段时间的请求可能查不到。`;
   return "可能来自其他环境的网关。";
 }

@@ -71,3 +71,13 @@ test("path rule: the 256-byte limit counts bytes, so 86 CJK characters are refus
   assert.equal(parsePattern(`/${"中".repeat(85)}`).ok, true);
   assert.equal(parsePattern(`/${"中".repeat(86)}`).ok, false);
 });
+
+test("path rule: an emoji is four bytes, and only ASCII spaces and control bytes are refused", () => {
+  // 1 + 63 * 4 = 253 bytes is accepted, 1 + 64 * 4 = 257 is not.
+  assert.equal(parsePattern(`/${"\u{1F600}".repeat(63)}`).ok, true);
+  assert.equal(parsePattern(`/${"\u{1F600}".repeat(64)}`).ok, false);
+  // U+3000 (the ideographic space) is not an ASCII space, so the gateway accepts it inside a rule.
+  assert.equal(parsePattern("/a　b").ok, true);
+  assert.equal(parsePattern("/a\tb").ok, false);
+  assert.equal(parsePattern("/a b").ok, false);
+});

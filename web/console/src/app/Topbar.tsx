@@ -48,7 +48,9 @@ export function Topbar({ onOpenPalette, onCustomRange }: Props) {
         aria-label="站点范围"
         value={global.site ?? ""}
         options={siteOptions}
-        onChange={(value: string) => setSearch({ site: value === "" ? undefined : value })}
+        // The scope selector replaces the history entry, so Back returns to the scope of the page it
+        // returns to (docs/06 6.2.2).
+        onChange={(value: string) => setSearch({ site: value === "" ? undefined : value }, true)}
         style={{ width: 176 }}
       />
       <button

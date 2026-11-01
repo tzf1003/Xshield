@@ -122,7 +122,7 @@ test("a request ID the gateway does not hold shows the not-found state, with the
   await expect(page.getByText("找不到这个请求")).toBeVisible();
   await expect(page.getByText(lost)).toBeVisible();
   await expect(
-    page.getByText("当时 edge-1 丢失了 31 条记录，这段时间的请求可能查不到。"),
+    page.getByText("当时 edge-1 丢失了 31 条记录（队列满），这段时间的请求可能查不到。"),
   ).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/requests/${lost}$`));
   await expect(page.getByRole("link", { name: "返回请求追溯" })).toBeVisible();

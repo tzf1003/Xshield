@@ -369,11 +369,16 @@ export function RequestsPage() {
 
       {gapNotice ? (
         <Notice tone={gapNotice.tone}>
-          {hm(gapNotice.gap.from_ms)}–{hm(gapNotice.gap.to_ms)} {gapNotice.gap.edge}
           {gapNotice.lost > 0 ? (
-            ` 有 ${fmtInt(gapNotice.lost)} 条判定记录未写入（${lostReasons(gapNotice.gap)}），这段时间的请求可能查不到 · `
+            <>
+              {hm(gapNotice.gap.from_ms)}–{hm(gapNotice.gap.to_ms)} {gapNotice.gap.edge}
+              {` 有 ${fmtInt(gapNotice.lost)} 条判定记录未写入（${lostReasons(gapNotice.gap)}），这段时间的请求可能查不到 · `}
+            </>
           ) : (
-            <> 丢弃了 {fmtInt(gapNotice.gap.dropped_bypass)} 条绕过记录，判定记录不受影响 · </>
+            <>
+              {gapNotice.gap.edge} 在 {hm(gapNotice.gap.from_ms)}–{hm(gapNotice.gap.to_ms)} 丢弃了{" "}
+              {fmtInt(gapNotice.gap.dropped_bypass)} 条绕过记录，判定记录不受影响 ·{" "}
+            </>
           )}
           <Link to="/system">查看系统</Link>
           <div className="small dim">

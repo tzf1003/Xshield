@@ -18,7 +18,7 @@ import type {
 } from "../../api/types.ts";
 import type { ChipId, RequestsSearch, SiteTab, SystemTab } from "../../app/search-schema.ts";
 import { fmtInt } from "../../lib/format.ts";
-import { problemText } from "../../lib/health.ts";
+import { lostReasons, problemText } from "../../lib/health.ts";
 import { isSiteName } from "../../lib/ids.ts";
 import { DECISION_INFO, FAILURE_INFO, HEALTH_LABEL, SUGGESTION_INFO } from "../../lib/vocab.ts";
 import { hm } from "./clock.ts";
@@ -172,15 +172,12 @@ function logGapItems(
   const items: AttentionItem[] = [];
   const lost = problem.dropped + problem.write_errors;
   if (lost > 0) {
-    const reasons: string[] = [];
-    if (problem.dropped > 0) reasons.push(`队列满 ${fmtInt(problem.dropped)}`);
-    if (problem.write_errors > 0) reasons.push(`写入失败 ${fmtInt(problem.write_errors)}`);
     const since = problem.from_ms;
     const until = Math.max(problem.to_ms, problem.from_ms + MIN_WINDOW_MS);
     items.push({
       key,
       level: "serious",
-      text: `${problem.edge} ${hm(problem.from_ms)}–${hm(problem.to_ms)} 有 ${fmtInt(lost)} 条判定记录未写入（${reasons.join("、")}），这段时间的请求可能查不到`,
+      text: `${problem.edge} ${hm(problem.from_ms)}–${hm(problem.to_ms)} 有 ${fmtInt(lost)} 条判定记录未写入（${lostReasons(problem)}），这段时间的请求可能查不到`,
       actions: [
         { label: "查看缺口", target: toSystem("storage") },
         {

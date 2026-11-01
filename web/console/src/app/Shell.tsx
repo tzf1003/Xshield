@@ -2,9 +2,8 @@
 // dialogs that can open from anywhere (command palette, shortcuts, custom range, login).
 
 import { Outlet, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { onUnauthorized } from "../api/client.ts";
-import { useSites } from "../api/queries.ts";
 import { readText, writeText } from "../lib/storage.ts";
 import { CommandPalette } from "./CommandPalette.tsx";
 import { hrefFor } from "./href.ts";
@@ -14,12 +13,10 @@ import { RangeDialog } from "./RangeDialog.tsx";
 import { ShortcutHelp } from "./ShortcutHelp.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { Topbar } from "./Topbar.tsx";
-import { useGlobalSearch, useSetSearch } from "./scope.ts";
 
 export type DialogName = "palette" | "help" | "range" | "login";
 
 const NAV_KEY = "xshield.console.nav";
-const SITE_KEY = "xshield.console.site";
 /** The `g` chord (docs/06 6.3.4): `g` then a letter jumps to a page within a second. */
 const CHORDS: Record<string, string> = {
   o: "/",
@@ -32,9 +29,6 @@ const CHORDS: Record<string, string> = {
 
 export function Shell() {
   const navigate = useNavigate();
-  const global = useGlobalSearch();
-  const setSearch = useSetSearch();
-  const sites = useSites();
   // Below 1024 px the navigation starts as the icon rail (docs/06 6.8.1); the user can still open it.
   const [collapsed, setCollapsed] = useState(
     () =>
@@ -42,21 +36,6 @@ export function Shell() {
       (typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches),
   );
   const [dialog, setDialog] = useState<DialogName | null>(null);
-  const restored = useRef(false);
-
-  // The last site chosen is remembered and restored when a page opens without one (docs/06 6.3.2).
-  useEffect(() => {
-    if (restored.current || !sites.data) return;
-    restored.current = true;
-    if (global.site) {
-      writeText(SITE_KEY, global.site);
-      return;
-    }
-    const last = readText(SITE_KEY);
-    if (last && sites.data.sites.some((site) => site.name === last)) {
-      setSearch({ site: last }, true);
-    }
-  }, [sites.data, global.site, setSearch]);
 
   useEffect(() => onUnauthorized(() => setDialog((open) => open ?? "login")), []);
 

@@ -17,11 +17,14 @@ export type Light = { tone: Tone; label: string; lines: string[] };
 
 const GATEWAY_TONE: Record<GatewayLight, Tone> = { ok: "ok", warn: "warn", down: "down" };
 
-/** The reasons a gap lost decision records, in words: `队列满 3、写入失败 1` (docs/07 7.7.4). */
+/**
+ * The cause a gap names in brackets after its count, in words: 队列满, 写入失败, or both (docs/06, the log
+ * gap notice). The count itself is `dropped + write_errors`.
+ */
 export function lostReasons(gap: { dropped: number; write_errors: number }): string {
   const reasons: string[] = [];
-  if (gap.dropped > 0) reasons.push(`队列满 ${fmtInt(gap.dropped)}`);
-  if (gap.write_errors > 0) reasons.push(`写入失败 ${fmtInt(gap.write_errors)}`);
+  if (gap.dropped > 0) reasons.push("队列满");
+  if (gap.write_errors > 0) reasons.push("写入失败");
   return reasons.join("、");
 }
 
@@ -33,12 +36,12 @@ export function problemText(problem: GatewayProblem): string {
     case "version_behind":
       return `${problem.site} v${problem.expected} 保存后未生效，${problem.edge} 仍是 v${problem.loaded}`;
     case "log_gap": {
-      const span = `${problem.edge} ${fmtClock(problem.from_ms)}–${fmtClock(problem.to_ms)}`;
       const lost = problem.dropped + problem.write_errors;
-      // Bypass records dropped under pressure are a note, not lost decisions (docs/06 6.4.2).
+      const span = `${fmtClock(problem.from_ms)}–${fmtClock(problem.to_ms)}`;
+      // Bypass records dropped under pressure are a note, not lost decisions (docs/06, the log gap notice).
       if (lost === 0)
-        return `${span} 丢弃了 ${fmtInt(problem.dropped_bypass)} 条绕过记录，判定记录不受影响`;
-      return `${span} 有 ${fmtInt(lost)} 条判定记录未写入（${lostReasons(problem)}）`;
+        return `${problem.edge} 在 ${span} 丢弃了 ${fmtInt(problem.dropped_bypass)} 条绕过记录，判定记录不受影响`;
+      return `${problem.edge} ${span} 有 ${fmtInt(lost)} 条判定记录未写入（${lostReasons(problem)}）`;
     }
     case "queue_pressure":
       return `${problem.edge} 发送队列 ${problem.queue} / ${problem.capacity}`;
