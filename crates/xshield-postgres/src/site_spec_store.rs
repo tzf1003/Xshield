@@ -351,23 +351,37 @@ pub async fn rollback(
 mod tests {
     // These storage-layer tests need a reachable PostgreSQL instance, which
     // this sandbox does not have. They document the expected behaviour and
-    // are exercised in an environment with `XSHIELD_DATABASE_URL` set.
+    // are exercised in an environment with `XSHIELD_TEST_DATABASE_URL` set.
 
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    const MINIMAL: &str = r#"{
-        "name": "emr",
-        "hosts": ["emr.example.com"],
-        "origin": "http://10.0.0.5:8080",
-        "session": {"cookie": "SESSIONID"},
-        "entries": ["/login"]
-    }"#;
+    // Each test gets its own site name: the tests share one database and can
+    // run concurrently, and `create` rejects a name that already exists.
+    fn minimal_spec(name: &str) -> SiteSpec {
+        let host = name.replace('_', "-");
+        SiteSpec::from_json(&format!(
+            r#"{{
+                "name": "{name}",
+                "hosts": ["{host}.example.com"],
+                "origin": "http://10.0.0.5:8080",
+                "session": {{"cookie": "SESSIONID"}},
+                "entries": ["/login"]
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    fn unique_name(prefix: &str) -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        format!("{prefix}_{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
 
     #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn create_then_get_round_trips() {
         let pool = connect_test_pool().await;
-        let spec = SiteSpec::from_json(MINIMAL).unwrap();
+        let spec = minimal_spec(&unique_name("create_then_get"));
         let created = create(&pool, &spec).await.unwrap();
         assert_eq!(created.spec, spec);
         let fetched = get(&pool, spec.name()).await.unwrap().unwrap();
@@ -375,28 +389,28 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn create_twice_is_already_exists() {
         let pool = connect_test_pool().await;
-        let spec = SiteSpec::from_json(MINIMAL).unwrap();
+        let spec = minimal_spec(&unique_name("create_twice"));
         create(&pool, &spec).await.unwrap();
         let error = create(&pool, &spec).await.unwrap_err();
         assert!(matches!(error, SiteSpecStoreError::AlreadyExists));
     }
 
     #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn update_missing_site_is_none() {
         let pool = connect_test_pool().await;
-        let spec = SiteSpec::from_json(MINIMAL).unwrap();
+        let spec = minimal_spec(&unique_name("update_missing"));
         assert!(update(&pool, "missing", &spec).await.unwrap().is_none());
     }
 
     #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn rollback_to_deleted_target_is_rejected() {
         let pool = connect_test_pool().await;
-        let spec = SiteSpec::from_json(MINIMAL).unwrap();
+        let spec = minimal_spec(&unique_name("rollback_deleted"));
         create(&pool, &spec).await.unwrap();
         delete(&pool, spec.name()).await.unwrap();
         let entries = history(&pool, spec.name(), 50).await.unwrap();
@@ -408,7 +422,7 @@ mod tests {
     }
 
     async fn connect_test_pool() -> PgPool {
-        let url = std::env::var("XSHIELD_DATABASE_URL").expect("XSHIELD_DATABASE_URL");
+        let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
         PgPool::connect(&url).await.expect("connect")
     }
 }

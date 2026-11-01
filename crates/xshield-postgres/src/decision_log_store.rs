@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn insert_then_get_round_trips() {
         let pool = connect_test_pool().await;
         let record = DecisionRecord {
@@ -400,7 +400,7 @@ mod tests {
     }
 
     async fn connect_test_pool() -> PgPool {
-        let url = std::env::var("XSHIELD_DATABASE_URL").expect("XSHIELD_DATABASE_URL");
+        let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
         PgPool::connect(&url).await.expect("connect")
     }
 }
