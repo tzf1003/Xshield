@@ -115,7 +115,7 @@
       card.appendChild(h(`<div class="failcard"><div class="fhead"><span class="fcode mono">${esc(j.failure)}</span><b>${esc(desc[0])}</b></div><div class="muted">${esc(desc[1])}${noCall ? '。<b>这次没有发出调用。</b>' : ''}</div>
         <div class="kv"><div class="k">HTTP 状态</div><div>${j.http_status == null ? '—（没有收到响应）' : j.http_status}</div><div class="k">耗时</div><div class="tnum">${noCall ? '—' : `${j.millis} ms / 超时 ${j.timeout_ms} ms（${j.timeout_ms === M.SYSTEM.params.site_overridable.jev_timeout_ms ? '默认' : '站点设置'}）`}</div><div class="k">怎么处理的</div><div>${esc(handling)} ${X.outPill(r.outcome)}</div></div>
         ${noCall ? `<a class="btn sm" href="#/sites/${esc(r.site)}?tab=config&group=advanced">${j.failure === 'JEV_CALL_LIMIT' ? '查看调用上限' : '查看高级判定参数'}</a>` : ''}</div>`));
-      if (j.failure === 'JEV_TIMEOUT') card.appendChild(h(`<div class="dim small" style="margin-top:8px">${site ? `本站点 24 小时 p99 ${M.EVIDENCE[site.name].jev.p99_ms} ms，超时设置 ${j.timeout_ms} ms。` : ''}可以在“相关”栏用“调整 Jev 超时…”按证据改值。</div>`));
+      if (j.failure === 'JEV_TIMEOUT') card.appendChild(h(`<div class="dim small" style="margin-top:8px">${site ? `本站点 24 小时 p99 ${X.evidence(site.name).jev.p99_ms} ms，超时设置 ${j.timeout_ms} ms。` : ''}可以在“相关”栏用“调整 Jev 超时…”按证据改值。</div>`));
       return card;
     }
     const top = { a: X.argmax(j.access), t: X.argmax(j.attack) }; const conf = r.jev.confidence;
@@ -134,7 +134,11 @@
   // ---------------------------------------------------------------- views
   function alignInfo(r, state) {
     const tv = (r.trace.values || []).filter((v) => !v.inert); const sv = state.request.values; let ok = tv.length === sv.length;
-    if (ok) sv.forEach((v, i) => { if (v.at !== tv[i].at || (v.seen_as || []).length !== (tv[i].sources || []).length) ok = false; });
+    if (ok) sv.forEach((v, i) => {
+      const src = tv[i].sources || []; const seen = v.seen_as || [];
+      // A trimmed trace may keep fewer sources than state sent; then only the common prefix is compared.
+      if (v.at !== tv[i].at || (seen.length > src.length && !r.trace.trimmed) || seen.slice(0, src.length).some((label, k) => label !== `${src[k].field} @ ${src[k].request}`)) ok = false;
+    });
     return { ok, tv };
   }
   function structuredView(r, state, q) {
@@ -198,7 +202,9 @@
     const which = q.get('jev_doc') || 'state'; const d = docOf(r, which); const wrap = h('<div class="card jsonv"></div>');
     wrap.appendChild(docBar(which, d, true));
     if (!d.text) { wrap.appendChild(h('<div class="empty">没有响应</div>')); return wrap; }
-    const tree = X.jsonTree(JSON.parse(d.text), { open: which === 'state' ? ['request'] : which === 'body' ? ['state.request'] : ['answers'] });
+    let parsed; try { parsed = JSON.parse(d.text); } catch (e) { parsed = undefined; }
+    if (parsed === undefined) { wrap.appendChild(h(`<div class="notice">这份内容不是合法的 JSON（例如 JEV_RESPONSE_INVALID 时保存下来的原始响应）。下面原样显示，逐字节内容也可以在“原文”视图里看。</div>`)); const pre = h('<pre class="rawpre" style="padding:8px 12px;white-space:pre-wrap;word-break:break-all"></pre>'); pre.textContent = d.text; wrap.appendChild(pre); return wrap; }
+    const tree = X.jsonTree(parsed, { open: which === 'state' ? ['request'] : which === 'body' ? ['state.request'] : ['answers'] });
     const bar2 = h('<div class="toolrow"><button type="button" class="linkbtn" id="ex">全部展开</button><button type="button" class="linkbtn" id="co">全部折叠</button><span class="dim small">点击键名复制路径，例如 request.values[0].seen_as</span></div>');
     $('#ex', bar2).onclick = tree.expandAll; $('#co', bar2).onclick = tree.collapseAll; wrap.appendChild(bar2); wrap.appendChild(tree.el); srch.rebind(tree.el);
     return wrap;
@@ -284,14 +290,14 @@
   // ---------------------------------------------------------------- Jev calls page
   X.route((p) => p[0] === 'jev', (page, parts, q) => {
     page.appendChild(X.pageHead('Jev 调用', `${X.scopeLabel()} · 最近 24 小时`));
-    const js = M.JEV_STATUS; const names = X.state.site === 'all' ? ['emr', 'juice'] : [X.state.site]; const ev = names.map((nm) => M.EVIDENCE[nm]);
+    const js = M.JEV_STATUS; const names = X.state.site === 'all' ? X.sites.map((st) => st.name) : [X.state.site]; const ev = names.map((nm) => X.evidence(nm));
     const row = h('<div class="grid jev-grid" style="margin-bottom:16px"></div>');
     const hl = { ok: '正常', idle: '空闲', degraded: '降级', down: '不可用' }[js.health];
     row.appendChild(h(`<div class="card"><h2>健康</h2><div class="healthline"><span class="dot ${js.health === 'ok' ? 'ok' : js.health}" aria-hidden="true"></span><b>${hl}</b> · 最近 ${js.window_minutes} 分钟 ${js.calls} 次，全部成功</div>
       <div class="muted" style="margin-top:6px;font-size:13px;line-height:1.7">p50 ${js.p50_ms} ms · p95 ${js.p95_ms} ms<br>${esc(js.config.model)} · ${esc(X.ROUTE_N[js.config.route])}<br>默认超时 ${js.config.default_timeout_ms} ms · 指令 <span class="mono">${esc(js.config.prompt)}</span><br>最后一次失败 ${X.fmtHMS(Date.parse(js.last_failure.at))} ${esc(X.failName(js.last_failure.failure))}（${esc(js.last_failure.site)}）</div></div>`));
     const merged = []; ev.forEach((e) => e.histogram.forEach((c, i) => { merged[i] = (merged[i] || 0) + c; }));
     const marks = [{ at: js.config.default_timeout_ms / 100, label: `默认 ${js.config.default_timeout_ms / 1000} s`, left: true }];
-    names.forEach((nm) => { const t = M.EVIDENCE[nm].jev.timeout_ms_used; if (t !== js.config.default_timeout_ms) marks.push({ at: t / 100, label: `${nm} ${t / 1000} s`, dash: true, left: true }); });
+    names.forEach((nm) => { const t = X.evidence(nm).jev.timeout_ms_used; if (t !== js.config.default_timeout_ms) marks.push({ at: t / 100, label: `${nm} ${t / 1000} s`, dash: true, left: true }); });
     const latency = X.histogram(merged, { marks, ticks: [0, 10, 20, 30].filter((t) => t <= merged.length).map((t) => ({ at: t, label: t === 0 ? '0' : `${t / 10} s` })), label: '耗时分布，100 毫秒一档', tip: (i, c) => `${i * 100}–${i * 100 + 100} ms：${c} 次` });
     row.appendChild(X.chartCard('耗时分布（100 ms 一档）', latency, merged.map((c, i) => [`${i * 100}–${i * 100 + 100} ms`, c]), ['区间', '调用数']));
     const conf = [2, 1, 1, 3, 6, 11, 22, 60, 140, 232]; const low = conf.slice(0, 7).reduce((a, b) => a + b, 0);
@@ -299,8 +305,8 @@
     page.appendChild(row);
 
     const all = M.RECORDS.filter((r) => r.jev && (X.state.site === 'all' || r.site === X.state.site));
-    const p95 = X.state.site === 'all' ? 1820 : M.EVIDENCE[X.state.site].jev.p95_ms;
-    const CH = [['', '全部', () => true], ['deny', '拒绝', (r) => r.jevFull.conclusion === 'deny'], ['allow', '通过', (r) => r.jevFull.conclusion === 'allow'], ['fail', '失败', (r) => !!r.jev.failure], ['low', '置信度低', (r) => r.jev.confidence != null && r.jev.confidence < 0.7], ['slow', '慢于 p95', (r) => r.jev.ms > p95 * 0.5 && !r.jev.failure && r.jev.ms >= 540], ['trim', '裁剪过', (r) => r.jevFull.trim > 0]];
+    const p95Of = (r) => X.evidence(r.site).jev.p95_ms;
+    const CH = [['', '全部', () => true], ['deny', '拒绝', (r) => r.jevFull.conclusion === 'deny'], ['allow', '通过', (r) => r.jevFull.conclusion === 'allow'], ['fail', '失败', (r) => !!r.jev.failure], ['low', '置信度低', (r) => r.jev.confidence != null && r.jev.confidence < 0.7], ['slow', '慢于 p95', (r) => !r.jev.failure && r.jev.ms > p95Of(r)], ['trim', '裁剪过', (r) => r.jevFull.trim > 0]];
     const chip = q.get('chip') || ''; const dsl = X.parseDsl(q.get('q') || '');
     const chips = h('<div class="chips" role="group"></div>');
     CH.forEach(([k, l, f]) => { const c = h(`<button type="button" class="chip ${chip === k ? 'active' : ''}" aria-pressed="${chip === k}">${l} <span class="n">${all.filter(f).length}</span></button>`); c.onclick = () => X.setQuery({ chip: k }); chips.appendChild(c); });
@@ -309,7 +315,7 @@
     fb.querySelector('input').onkeydown = (e) => { if (e.key === 'Enter') X.setQuery({ q: e.target.value.trim() }); }; page.appendChild(fb);
     if (dsl.errors.length) page.appendChild(h(`<div class="dslerr" role="alert">${dsl.errors.map((e) => `<span class="mono">${esc(e.tok)}</span> ${esc(e.msg)}`).join('；')}</div>`));
     const f = (CH.find((c) => c[0] === chip) || CH[0])[2];
-    const rows = all.filter(f).filter((r) => { const probe = new URLSearchParams(); void probe; return dsl.conds.every((c) => X.condMatch(r, c)); });
+    const rows = all.filter(f).filter((r) => dsl.conds.every((c) => X.condMatch(r, c)));
     const tbl = h('<div class="tablewrap"><table class="data"><thead><tr><th>时间</th><th>站点</th><th>请求</th><th>Jev 结论</th><th>访问</th><th>攻击</th><th>置信度</th><th>耗时 / 超时</th><th>裁剪</th><th>网关结论</th></tr></thead><tbody></tbody></table></div>');
     rows.forEach((r) => {
       const j = r.jevFull; const a = j.failure ? null : X.argmax(j.access); const t = j.failure ? null : X.argmax(j.attack);
@@ -322,16 +328,4 @@
     page.appendChild(tbl);
     page.appendChild(h(`<div class="dim small tfoot">共 ${rows.length} 条；原型只含 ${all.length} 条 Jev 样例记录，上方的分布图用示意数据。点击行打开请求详情的 Jev 标签。</div>`));
   });
-  X.condMatch = (r, c) => {
-    // reuse the request filter on a record via a tiny single-condition query
-    const q = new URLSearchParams(); void q;
-    const j = r.jev;
-    switch (c.k) {
-      case 'access': return !!j && !j.failure && c.v.includes(j.access); case 'attack': return !!j && !j.failure && c.v.includes(j.attack); case 'failure': return !!j && c.v.includes(j.failure);
-      case 'conf': return !!j && j.confidence != null && j.confidence < c.v; case 'ms': return r.total_ms > c.v; case 'path': return c.v.some((p) => (p.endsWith('*') ? r.path.startsWith(p.slice(0, -1)) : r.path === p));
-      case 'outcome': return c.v.includes(r.outcome); case 'decision': return c.v.includes(r.decision_path); case 'method': return c.v.includes(r.method); case 'site': return c.v.includes(r.site);
-      case 'session': return c.v.some((s) => r.session && r.session.startsWith(s)); case 'id': return c.v.some((s) => r.request_id.endsWith(s) || r.request_id === s);
-      default: return true;
-    }
-  };
 })();

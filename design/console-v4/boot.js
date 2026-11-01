@@ -16,7 +16,11 @@
   };
   const baseRender = X.render;
   X.render = function () { baseRender(); X.renderSiteSelect(); X.updateModes(); };
-  $('#site-select').onchange = (e) => { X.state.site = e.target.value; X.render(); };
+  $('#site-select').onchange = (e) => {
+    X.state.site = e.target.value;
+    try { history.replaceState(null, '', X.hashWith({ site: X.state.site === 'all' ? null : X.state.site })); } catch (err) { /* sandboxed preview: keep the scope in memory only */ }
+    X.render();
+  };
   $$('.nav-item[data-href]').forEach((b) => { b.onclick = () => go(b.dataset.href); });
   $('#nav-toggle').onclick = () => { $('#app').classList.toggle('nav-collapsed'); };
   $('#search-box').onclick = () => openPalette();

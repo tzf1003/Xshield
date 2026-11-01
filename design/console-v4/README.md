@@ -42,6 +42,8 @@
 | `#/sites/emr?tab=config&group=advanced`、`…&edit=yaml` | `/sites/$name` | 站点详情：概览、配置（表单分组 / YAML）、调优建议（`tab=insights`）、变更历史（`tab=history&diff=6..7`） |
 | `#/system?tab=edges|storage|params|import` | `/system` | 系统（网关、日志存储、运行参数、导入） |
 
+全局参数 `site`（站点范围，缺省为全部站点）写在地址里并在各页之间保持，顶栏的下拉框读写它；例如 `#/requests?site=juice&chip=would` 只看 juice 的本应拦截。
+
 在 claude.ai 上预览时，`#/…` 形式的地址只在页面内部生效，不会同步到浏览器地址栏。
 
 ## 建议的演示路线

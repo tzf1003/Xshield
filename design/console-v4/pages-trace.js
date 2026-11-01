@@ -58,6 +58,7 @@
       default: return true;
     }
   }
+  X.condMatch = condMatch;
   const CHIPS = [['', '已判定'], ['attention', '需要关注'], ['blocked', '拦截'], ['would', '本应拦截'], ['unjudged', '未经判定'], ['jev', 'Jev 调用'], ['no_session', '无会话'], ['bypass', '绕过']];
   const chipTest = {
     '': () => true, attention: (r) => ['blocked', 'would_block', 'unjudged'].includes(r.outcome), blocked: (r) => r.outcome === 'blocked', would: (r) => r.outcome === 'would_block',
@@ -67,13 +68,13 @@
   function baseRows(q) {
     const dsl = X.parseDsl(q.get('q') || ''); const all = q.get('scope') === 'all';
     const lookup = dsl.conds.some((c) => c.k === 'id' || c.k === 'session' || (c.k === 'path' && c.v.some((p) => !p.endsWith('*'))));
-    const wantsUnknown = dsl.conds.some((c) => c.k === 'decision' && c.v.includes('unknown_site'));
+    const wantsExcluded = dsl.conds.some((c) => c.k === 'decision' && c.v.some((v) => v === 'unknown_site' || v === 'bypass'));
     const since = Number(q.get('since')) || 0; const until = Number(q.get('until')) || Infinity;
     let rows = M.RECORDS.slice();
     if (X.state.site !== 'all') rows = rows.filter((r) => r.site === X.state.site);
     rows = rows.filter((r) => r.at_millis >= since && r.at_millis <= until);
     rows = rows.filter((r) => dsl.conds.every((c) => condMatch(r, c)));
-    return { rows, includeAll: all || lookup || q.get('chip') === 'bypass' || wantsUnknown, autoIncluded: !all && lookup, dsl };
+    return { rows, includeAll: all || lookup || q.get('chip') === 'bypass' || wantsExcluded, autoIncluded: !all && lookup, dsl };
   }
   const isJudged = (r) => r.decision_path !== 'bypass' && r.decision_path !== 'unknown_site';
   X.filterRows = (q) => {
@@ -90,7 +91,7 @@
     M.SYSTEM.edges.forEach((e) => (e.gaps || []).forEach((g) => {
       if (g.to_ms < since || g.from_ms > until) return;
       if (X.state.site !== 'all' && false) return;
-      if (g.dropped + g.write_errors > 0) out.push({ kind: 'lost', text: `${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} ${e.edge} 有 ${g.dropped} 条记录未写入（队列满），这段时间的请求可能查不到`, href: '#/system?tab=storage', act: '查看系统' });
+      if (X.gapLost(g) > 0) out.push({ kind: 'lost', text: `${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} ${e.edge} 有 ${X.gapLost(g)} 条记录未写入（${X.gapCause(g)}），这段时间的请求可能查不到`, href: '#/system?tab=storage', act: '查看系统' });
       else if (g.dropped_bypass > 0) out.push({ kind: 'soft', text: `${e.edge} 在 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} 丢弃了 ${n(g.dropped_bypass)} 条绕过记录，判定记录不受影响`, href: '#/system?tab=storage', act: '查看系统' });
     }));
     return out;
@@ -108,15 +109,17 @@
   // ================================================================ OVERVIEW
   function summaryFor(site) {
     const base = { emr: { judged: 4000 }, juice: { judged: 2204 } }; const baseOf = (nm) => base[nm] || { judged: 0 };
-    const names = site === 'all' ? ['emr', 'juice'] : [site]; const s = { judged: 0, blocked: 0, would_block: 0, unjudged: 0, jev_calls: 0, timeouts: 0 }; const hist = [];
+    const names = site === 'all' ? X.sites.map((st) => st.name) : [site]; const s = { judged: 0, blocked: 0, would_block: 0, unjudged: 0, jev_calls: 0, timeouts: 0 }; const hist = [];
     names.forEach((nm) => {
-      const st = X.site(nm); s.judged += baseOf(nm).judged; s.blocked += st.blocked_24h; s.would_block += st.would_block_24h; s.jev_calls += st.jev_calls_24h; s.timeouts += (M.EVIDENCE[nm] || { jev: { timeouts: 0 } }).jev.timeouts;
-      ((M.EVIDENCE[nm] || { histogram: [] }).histogram).forEach((c, i) => { hist[i] = (hist[i] || 0) + c; });
+      const st = X.site(nm); const ev = X.evidence(nm);
+      s.judged += baseOf(nm).judged; s.blocked += st.blocked_24h; s.would_block += st.would_block_24h; s.jev_calls += st.jev_calls_24h; s.timeouts += ev.jev.timeouts;
+      ev.histogram.forEach((c, i) => { hist[i] = (hist[i] || 0) + c; });
     });
     const total = hist.reduce((a, b) => a + b, 0); let acc = 0; let p95 = 0;
-    for (let i = 0; i < hist.length; i++) { acc += hist[i]; if (acc >= total * 0.95) { p95 = i * 100 + 50; break; } }
-    s.p95 = site !== 'all' ? (M.EVIDENCE[site] || { jev: { p95_ms: 0 } }).jev.p95_ms : Math.round((M.EVIDENCE.emr.jev.p95_ms * M.EVIDENCE.emr.jev.calls + M.EVIDENCE.juice.jev.p95_ms * M.EVIDENCE.juice.jev.calls) / (M.EVIDENCE.emr.jev.calls + M.EVIDENCE.juice.jev.calls));
-    s.jev_pct = (s.jev_calls / s.judged) * 100; s.hist = hist; s.p95bucket = p95; return s;
+    for (let i = 0; i < hist.length; i++) { acc += hist[i]; if (total && acc >= total * 0.95) { p95 = i * 100 + 50; break; } }
+    const calls = names.reduce((a, nm) => a + X.evidence(nm).jev.calls, 0);
+    s.p95 = calls ? Math.round(names.reduce((a, nm) => a + X.evidence(nm).jev.p95_ms * X.evidence(nm).jev.calls, 0) / calls) : 0;
+    s.jev_pct = s.judged ? (s.jev_calls / s.judged) * 100 : 0; s.hist = hist; s.p95bucket = p95; return s;
   }
   function attentionItems() {
     const items = []; const st = X.computeStatus();
@@ -130,7 +133,7 @@
       }
       const sg = M.INSIGHTS[s.name].suggestions;
       if (sg.length) items.push({ lvl: 'info', msg: `${s.name} 有 ${sg.length} 条调优建议：${X.list(sg.map((x) => X.SUGG[x.kind]))}`, acts: [['查看建议', `#/sites/${s.name}?tab=insights`]] });
-      const ev = M.EVIDENCE[s.name];
+      const ev = X.evidence(s.name);
       if (ev.call_limit.address_hits || ev.call_limit.session_hits) items.push({ lvl: 'info', msg: `${s.name} 地址调用上限最近 24 小时触发 ${ev.call_limit.address_hits} 次（最高 ${ev.call_limit.address_peak} 次/分钟，默认上限 30）；Jev 超时 ${ev.jev.timeouts} 次 / ${ev.jev.calls} 次调用`, acts: [['查看证据', `#/sites/${s.name}?tab=config&group=advanced`]] });
     });
     const order = { serious: 0, warn: 1, info: 2 }; items.sort((a, b) => order[a.lvl] - order[b.lvl]); return items;
@@ -163,7 +166,7 @@
     });
     page.appendChild(tiles);
 
-    const share = X.state.site === 'all' ? 1 : X.state.site === 'emr' ? 0.64 : 0.36;
+    const share = X.state.site === 'all' ? 1 : ({ emr: 0.64, juice: 0.36 })[X.state.site] || 0;
     const ts = M.TIMESERIES.map((d) => ({ hour: d.hour, fast: Math.round(d.fast * share), jev: Math.round(d.jev * share), no_session: Math.round(d.no_session * share) }));
     const chart = X.chartCard('每小时请求（不含绕过）', X.stackedChart(ts), ts.map((d) => [`${String(d.hour).padStart(2, '0')}:00`, d.fast, d.jev, d.no_session]), ['小时', '免调用放行', 'Jev 判定', '无会话']);
     chart.appendChild(h('<div class="legend" style="margin-top:8px"><span><span class="sw" style="background:var(--s1)"></span>免调用放行</span><span><span class="sw" style="background:var(--s2)"></span>Jev 判定</span><span><span class="sw" style="background:var(--s3)"></span>无会话</span></div>'));
@@ -752,7 +755,7 @@
     rows.forEach((r) => {
       if (last != null && r.at_millis - last > 300000) {
         const g = gaps.find((x) => x.to_ms > last && x.from_ms < r.at_millis);
-        tlEl.appendChild(h(`<div class="tl-gap">⋯ ${X.dur(r.at_millis - last)}无请求${g ? ` <span class="gapnote">▲ 其中 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} ${esc(g.edge)} 有 ${g.dropped} 条记录未写入，这段时间可能有请求查不到</span>` : ''}</div>`));
+        tlEl.appendChild(h(`<div class="tl-gap">⋯ ${X.dur(r.at_millis - last)}无请求${g ? ` <span class="gapnote">▲ 其中 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} ${esc(g.edge)} 有 ${X.gapLost(g)} 条记录未写入（${X.gapCause(g)}），这段时间可能有请求查不到</span>` : ''}</div>`));
       }
       last = r.at_millis;
       const tags = []; const rs = r.trace.response || {};

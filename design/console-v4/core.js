@@ -144,6 +144,14 @@
   };
 
   // ---------------------------------------------------------------- status lights (docs/07 7.9.13)
+  // A log gap counts both rows dropped from a full queue and rows lost to failed writes (docs/07 7.7.4).
+  X.gapLost = (g) => (g.dropped || 0) + (g.write_errors || 0);
+  X.gapCause = (g) => (g.dropped && g.write_errors ? '队列满、写入失败' : g.write_errors ? '写入失败' : '队列满');
+  // Evidence for a site; a site created in this session has none yet.
+  X.evidence = (name) => M.EVIDENCE[name] || {
+    window_hours: 24, jev: { p50_ms: 0, p95_ms: 0, p99_ms: 0, timeouts: 0, calls: 0, timeout_ms_used: M.SYSTEM.params.site_overridable.jev_timeout_ms },
+    call_limit: { session_peak: 0, address_peak: 0, session_hits: 0, address_hits: 0 }, cache: { cached_allows: 0 }, histogram: new Array(30).fill(0),
+  };
   X.computeStatus = () => {
     const now = X.now(); const edges = M.SYSTEM.edges; const on = edges.filter((e) => e.online); const problems = [];
     edges.filter((e) => !e.online).forEach((e) => problems.push({ kind: 'edge_offline', level: 'warn', text: `${e.edge} 已离线 ${Math.max(1, Math.round((now - e.seen_at) / 60000))} 分钟（最后心跳 ${X.fmtHMS(e.seen_at)}）`, href: '#/system?tab=edges', act: '查看系统' }));
@@ -152,7 +160,7 @@
       if (behind.length && now - s.saved_at > X.BEHIND_MS) problems.push({ kind: 'version_behind', level: 'serious', text: `${s.name} v${s.version} 保存后仍有 ${behind.length}/${ro.edges_online} 个网关没加载（${behind.map((e) => `${e.edge} 停在 v${e.version}`).join('、')}）`, href: '#/system?tab=edges', act: '查看系统' });
     });
     edges.forEach((e) => (e.gaps || []).forEach((g) => {
-      if (g.dropped + g.write_errors > 0 && now - g.to_ms < 15 * 60000) problems.push({ kind: 'log_gap', level: 'serious', text: `${e.edge} 在 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} 有 ${g.dropped} 条判定记录未写入，这段时间的请求可能查不到`, href: `#/requests?since=${g.from_ms}&until=${g.to_ms}&scope=all`, act: '查看缺口' });
+      if (X.gapLost(g) > 0 && now - g.to_ms < 15 * 60000) problems.push({ kind: 'log_gap', level: 'serious', text: `${e.edge} 在 ${X.fmtHM(g.from_ms)}–${X.fmtHM(g.to_ms)} 有 ${X.gapLost(g)} 条判定记录未写入（${X.gapCause(g)}），这段时间的请求可能查不到`, href: `#/requests?since=${g.from_ms}&until=${g.to_ms}&scope=all`, act: '查看缺口' });
     }));
     edges.forEach((e) => { if (e.online && e.queue / M.SYSTEM.params.fixed.queue_capacity > 0.8) problems.push({ kind: 'queue_pressure', level: 'warn', text: `${e.edge} 发送队列超过 80%`, href: '#/system?tab=edges', act: '查看系统' }); });
     const order = { serious: 0, warn: 1, info: 2 }; problems.sort((a, b) => order[a.level] - order[b.level]);
@@ -266,6 +274,10 @@
   X.state = { site: 'all' };
   X.render = () => {
     const page = $('#page'); const { parts, q } = X.parseHash(); const key = parts[0] || 'overview';
+    // docs/06 6.2.2: the site scope lives in the URL (`site`, default all sites) and persists across pages.
+    const urlSite = q.get('site');
+    if (urlSite && (urlSite === 'all' || X.sites.some((s) => s.name === urlSite))) X.state.site = urlSite;
+    else if (!urlSite && X.state.site !== 'all') { try { history.replaceState(null, '', X.hashWith({ site: X.state.site })); } catch (e) { /* sandboxed preview: keep the scope in memory only */ } }
     if (X.routeKey === 'requests' && !X.parseHashPrev) X.scroll.requests = page.scrollTop;
     X.closePopover();
     $$('.nav-item[data-route]').forEach((b) => b.classList.toggle('active', b.dataset.route === key));
@@ -390,15 +402,19 @@
       return { spec };
     } catch (e) { if (e && e.line) return { error: e }; throw e; }
   };
-  const pathOk = (p) => p.startsWith('/') && !/[?#\s]/.test(p) && !p.slice(0, -1).includes('*') && !p.split('/').some((seg) => seg === '.' || seg === '..');
+  // These mirror crates/xshield-core/src/context/config.rs (valid_host, valid_origin, valid_token, PathPattern::parse).
+  const hostOk = (x) => x.length > 0 && x.length <= 253 && /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(x) && !x.includes('..');
+  const originOk = (o) => { const m = /^https?:\/\/([^:/]*)(?::(\d*))?$/.exec(o || ''); return !!m && hostOk(m[1]) && (m[2] == null || (m[2].length >= 1 && m[2].length <= 5)); };
+  const tokenOk = (t) => /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/.test(t || '');
+  const pathOk = (p) => p.length <= 256 && p.startsWith('/') && !/[?#\\\s\x00-\x1f\x7f]/.test(p) && !p.slice(0, -1).includes('*') && !p.split('/').some((seg) => seg === '.' || seg === '..');
   X.validateSpec = (spec) => {
     const errors = []; const warnings = []; const add = (g, f, msg) => errors.push({ group: g, field: f, msg });
     if (!/^[a-z0-9_-]{1,64}$/.test(spec.name || '')) add('basic', 'name', '站点名只能用小写字母、数字、-、_，最长 64 个字符');
-    if (!spec.hosts.length || spec.hosts.length > 16 || spec.hosts.some((x) => !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d+)?$/i.test(x))) add('basic', 'hosts', 'Host 不能为空，最多 16 个，每个必须是有效的主机名');
-    if (!/^https?:\/\/[^/\s]+$/i.test(spec.origin || '')) add('basic', 'origin', '源站地址必须是 http://主机[:端口] 或 https://主机[:端口]，不带路径');
+    if (!spec.hosts.length || spec.hosts.length > 16 || spec.hosts.some((x) => !hostOk(x))) add('basic', 'hosts', 'Host 不能为空，最多 16 个，每个必须是有效的主机名（不带端口）');
+    if (!originOk(spec.origin)) add('basic', 'origin', '源站地址必须是 http://主机[:端口] 或 https://主机[:端口]，不带路径');
     if (!['observe', 'enforce'].includes(spec.mode)) add('mode', 'mode', '模式只能是 observe（观察）或 enforce（拦截）');
     if (!['allow', 'deny'].includes(spec.on_jev_unavailable)) add('mode', 'on_jev_unavailable', 'Jev 不可用时只能是 allow（放行）或 deny（拒绝）');
-    const sess = spec.session || {}; if ((!sess.cookie && !sess.header) || (sess.cookie && sess.header)) add('session', 'session', '会话凭证需要一个有效的 Cookie 名或请求头名');
+    const sess = spec.session || {}; if ((!sess.cookie && !sess.header) || (sess.cookie && sess.header) || !tokenOk(sess.cookie || sess.header)) add('session', 'session', '会话凭证需要一个有效的 Cookie 名或请求头名（字母、数字和 !#$%&\'*+-.^_`|~，最长 64）');
     if (!spec.entries.length || spec.entries.length > 64 || spec.entries.some((p) => !pathOk(p))) add('entries', 'entries', '入口至少一条、最多 64 条；每条以 / 开头，* 只能在末尾，不能含查询串、. 或 .. 段');
     if (spec.bypass.length > 64 || spec.bypass.some((p) => !pathOk(p))) add('bypass', 'bypass', '绕过最多 64 条，规则格式同入口');
     const a = spec.advanced || {}; const range = (k, lo, hi, label) => { if (a[k] != null && (!Number.isInteger(a[k]) || a[k] < lo || a[k] > hi)) add('advanced', k, `${label}需在 ${lo}–${hi} 之间`); };
