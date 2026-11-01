@@ -4174,6 +4174,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "xshield-edge"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "pingora",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "uuid",
+ "xshield-core",
+ "xshield-judge",
+]
+
+[[package]]
 name = "xshield-evidence"
 version = "0.1.1"
 dependencies = [
@@ -4211,6 +4228,25 @@ dependencies = [
  "xshield-evidence",
  "xshield-postgres",
  "xshield-worker",
+ "zeroize",
+]
+
+[[package]]
+name = "xshield-judge"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "xshield-core",
  "zeroize",
 ]
 
