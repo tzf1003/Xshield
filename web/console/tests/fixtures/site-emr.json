@@ -55,6 +55,9 @@
     ]
   },
   "requests_24h": 9812,
+  "unjudged_24h": 0,
+  "jev_timeouts_24h": 3,
+  "call_limits_24h": 0,
   "blocked_24h": 21,
   "would_block_24h": 0,
   "jev_calls_24h": 412,

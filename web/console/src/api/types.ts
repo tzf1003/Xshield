@@ -446,9 +446,10 @@ export interface JevStats {
   /** Calls per 0.1 confidence bucket (ten entries). */
   confidence_histogram: { counts: number[] };
   /**
-   * Calls per hour for the stacked bars of the Jev page (docs/06 6.4.6): calls that gave an
-   * answer by conclusion, and calls that failed (`unavailable`). Added for the console v4 page;
-   * the gateway side fills it from the same window.
+   * Calls per hour for the stacked bars of the Jev page (docs/06 6.4.6). `allow` and `deny` count
+   * the calls Jev answered ALLOW or DENY. `unavailable` is every other call: a timeout, an error,
+   * an exhausted call limit, or an UNKNOWN answer, so allow + deny + unavailable equals the calls.
+   * Added for the console v4 page; the gateway side fills it from the same window.
    */
   hourly: Array<{ at_millis: number; allow: number; deny: number; unavailable: number }>;
   complete: boolean;
@@ -510,6 +511,12 @@ export interface SiteSummary {
   blocked_24h: number;
   would_block_24h: number;
   jev_calls_24h: number;
+  /** Requests forwarded without a judgement in the last 24 hours (docs/07 7.9.13). */
+  unjudged_24h: number;
+  /** Jev calls that timed out in the last 24 hours. */
+  jev_timeouts_24h: number;
+  /** Jev calls refused by the per-session call limit in the last 24 hours. */
+  call_limits_24h: number;
   suggestions: number;
 }
 
