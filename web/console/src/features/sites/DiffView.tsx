@@ -59,10 +59,12 @@ export function DiffView({ ops, mode = "unified" }: { ops: LineOp[]; mode?: "uni
   if (ops.every((op) => op.op === "eq")) {
     return <div className="small muted">没有差异。</div>;
   }
+  // The box is not a scrolling region of its own (sites.css): the dialog around it scrolls, so no
+  // focusable scroll box is needed to read a long diff.
   if (mode === "split") {
     return (
-      <div className="diff">
-        <table className="diff-split" aria-label="并排差异">
+      <section className="diff sites-diff" aria-label="并排差异">
+        <table className="diff-split">
           <tbody>
             {sideBySide(ops).map((pair) => (
               <tr key={pair.id}>
@@ -72,12 +74,12 @@ export function DiffView({ ops, mode = "unified" }: { ops: LineOp[]; mode?: "uni
             ))}
           </tbody>
         </table>
-      </div>
+      </section>
     );
   }
   const lines = ops.map((op, position) => ({ id: position, op }));
   return (
-    <section className="diff" aria-label="差异">
+    <section className="diff sites-diff" aria-label="差异">
       {lines.map(({ id, op }) => (
         <div key={id} className={`diff-line ${op.op === "eq" ? "" : op.op}`}>
           <span className="sign" aria-hidden="true">

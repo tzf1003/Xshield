@@ -33,7 +33,7 @@ function ActionLink({ action }: { action: Action }) {
           className="btn ov-btn"
           to="/sites/$name"
           params={{ name: target.name }}
-          search={{ tab: target.tab }}
+          search={{ tab: target.tab, group: target.group }}
         >
           {label}
         </Link>

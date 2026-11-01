@@ -185,8 +185,11 @@ function SynonymsItem({
       <div className="small muted">内置</div>
       <div className="taglist">
         {builtins.map(([a, b]) => (
-          <span key={`${a}|${b}`} className="tag-chip builtin" title="内置词，不能删除">
-            <span aria-hidden="true">🔒</span>
+          <span
+            key={`${a}|${b}`}
+            className="tag-chip builtin builtin-chip"
+            title="内置词，不能删除"
+          >
             {a} ↔ {b}
           </span>
         ))}
@@ -312,6 +315,8 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
 
   return (
     <div className="stack">
+      {/* The evidence of each parameter below comes from the evidence endpoint, read only while this group is open. */}
+      <h2 className="adv-title">Jev 证据</h2>
       <div className="row between adv-summary">
         <span>
           {labels.length === 0
@@ -487,7 +492,9 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
           label="脱敏词"
           values={advanced?.secret_fields ?? []}
           locked={defaults?.secret_fields ?? []}
+          lockedLabel="内置"
           lockedTitle="内置词，不能删除"
+          ownLabel="本站点"
           max={32}
           placeholder="例如 idcard，按 Enter 添加"
           check={(word) => {

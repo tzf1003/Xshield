@@ -13,6 +13,7 @@ import { fmtInt } from "../../lib/format.ts";
 import { shortRequestId } from "../../lib/ids.ts";
 import { errorText, IMPACT_INFO, PARAM_INFO } from "../../lib/vocab.ts";
 import { validateSpec } from "../../lib/site-validate.ts";
+import { RETENTION_MS } from "../../lib/time-range.ts";
 import { ErrorBar, Loading } from "../../ui/Page.tsx";
 
 export type QuickTarget =
@@ -62,6 +63,7 @@ function QuickRuleBody({ target, onClose }: { target: QuickTarget; onClose: () =
     target.requestId ? `从请求 ${shortRequestId(target.requestId)} ${TITLES[target.kind]}` : "",
   );
   const [savedVersion, setSavedVersion] = useState<number | null>(null);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
 
   const choices = useMemo(() => {
     if (target.kind === "entry") {
@@ -157,7 +159,12 @@ function QuickRuleBody({ target, onClose }: { target: QuickTarget; onClose: () =
         spec: draft,
         body: { spec: draft, expected_version: site.data.version, note: note.trim() || undefined },
       },
-      { onSuccess: (saved) => setSavedVersion(saved.version) },
+      {
+        onSuccess: (saved) => {
+          setSavedVersion(saved.version);
+          setSavedAt(Date.now());
+        },
+      },
     );
   };
 
@@ -187,7 +194,7 @@ function QuickRuleBody({ target, onClose }: { target: QuickTarget; onClose: () =
                   label: (
                     <span>
                       {choice.label} <span className="mono small">{choice.value}</span>
-                      {choice.note ? <span className="small dim"> · {choice.note}</span> : null}
+                      {choice.note ? <span className="small muted"> · {choice.note}</span> : null}
                     </span>
                   ),
                 }))}
@@ -226,7 +233,7 @@ function QuickRuleBody({ target, onClose }: { target: QuickTarget; onClose: () =
                   : "最近 24 小时没有足够的证据给出建议。"}
               </div>
               {target.kind === "timeout" && evidence.data ? (
-                <div className="small dim">
+                <div className="small muted">
                   最近 24 小时 p50 {fmtInt(evidence.data.jev.p50_ms ?? 0)} · p95{" "}
                   {fmtInt(evidence.data.jev.p95_ms ?? 0)} · p99{" "}
                   {fmtInt(evidence.data.jev.p99_ms ?? 0)} ms，超时{" "}
@@ -320,15 +327,31 @@ function QuickRuleBody({ target, onClose }: { target: QuickTarget; onClose: () =
             </>
           ) : (
             <div className="stack">
-              <div className={effective ? "hint-ok" : "muted"} role="status">
+              <div className={effective ? undefined : "muted"} role="status">
                 {effective
                   ? `● v${savedVersion} 已生效`
                   : `已保存 v${savedVersion} · 等待网关加载…`}
               </div>
-              <div className="row" style={{ justifyContent: "flex-end" }}>
+              <div className="row saved-links" style={{ justifyContent: "flex-end" }}>
                 <Link to="/sites/$name" params={{ name: target.site }} search={{ tab: "history" }}>
                   查看变更历史
                 </Link>
+                {effective &&
+                savedAt !== null &&
+                (target.kind === "entry" || target.kind === "bypass") ? (
+                  <Link
+                    to="/requests"
+                    search={{
+                      site: target.site,
+                      q: `path:${change || target.path}`,
+                      range: "custom",
+                      since: savedAt,
+                      until: savedAt + RETENTION_MS,
+                    }}
+                  >
+                    查看这个路径之后的请求
+                  </Link>
+                ) : null}
                 <button type="button" className="btn" onClick={onClose}>
                   关闭
                 </button>

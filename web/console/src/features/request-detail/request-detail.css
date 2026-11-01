@@ -373,6 +373,14 @@
   display: contents;
 }
 
+/* The question heading of a prompt is a level-2 heading under the page title, so it reads as the
+   shared .struct-sec h3 did (axe heading-order). */
+.struct-sec .struct-title {
+  font-size: 13px;
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
 /* Not found */
 
 .rd-notfound {
@@ -404,7 +412,9 @@
   }
 }
 
-@media (max-width: 1100px) {
+/* Below 1200 px (docs/06 6.8.1) the related rail moves under the tabs and the Jev viewer is one column;
+   below 768 px the search field takes the full width. */
+@media (max-width: 1199px) {
   .rd-main {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -412,14 +422,46 @@
   .rd-rail {
     position: static;
   }
-}
 
-@media (max-width: 900px) {
   .rd-jev-cols {
     grid-template-columns: minmax(0, 1fr);
   }
+}
 
+@media (max-width: 767px) {
   .rd-search {
     width: 100%;
   }
+}
+
+/* A redacted value: the words and the length on a diagonal hatch (docs/06 6.4.4). The hover title of
+   the value names the rule that matched. */
+.rd-redacted {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  background-color: var(--sunken);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent 0 5px,
+    var(--border-strong) 5px 6px
+  );
+}
+
+/* The formatted raw text with line numbers (docs/06 6.4.5): the numbers stay out of a copy and out of
+   the screen reader's way. */
+.code-numbered .code-line {
+  display: block;
+}
+
+.code-numbered .code-no {
+  display: inline-block;
+  min-width: 3ch;
+  margin-right: 12px;
+  text-align: right;
+  color: var(--ink-3);
+  user-select: none;
 }

@@ -4,6 +4,8 @@
 
 :root {
   color-scheme: light;
+  /* Icons are text glyphs, never colour emoji (docs/06 6.6.1). */
+  font-variant-emoji: text;
   --page: #f9f9f7;
   --surface: #fcfcfb;
   --sunken: #f3f2ef;
@@ -13,6 +15,10 @@
   --ink-2: #52514e;
   --ink-3: #6f6d68;
   --num-ink: #b5461b;
+  /* Text-safe tones for words in the status colours: the bare tokens are for marks and fills. */
+  --ok-ink: #0b7a0b;
+  --blocked-ink: #b42323;
+  --would-ink: #8a5a00;
   --accent: #256abf;
   --accent-fill: #256abf;
   --accent-weak: rgba(37, 106, 191, 0.12);
@@ -47,6 +53,9 @@
     --ink-2: #c3c2b7;
     --ink-3: #9c9a93;
     --num-ink: #f08a5d;
+    --ok-ink: #5fd65f;
+    --blocked-ink: #ff7070;
+    --would-ink: #f5c04a;
     --accent: #5598e7;
     --accent-fill: #256abf;
     --accent-weak: rgba(85, 152, 231, 0.18);
@@ -71,6 +80,9 @@
   --ink-2: #c3c2b7;
   --ink-3: #9c9a93;
   --num-ink: #f08a5d;
+  --ok-ink: #5fd65f;
+  --blocked-ink: #ff7070;
+  --would-ink: #f5c04a;
   --accent: #5598e7;
   --accent-fill: #256abf;
   --accent-weak: rgba(85, 152, 231, 0.18);
@@ -721,7 +733,7 @@ a:hover {
 }
 
 .jev-cell.fail {
-  color: var(--blocked);
+  color: var(--blocked-ink);
 }
 
 .reqid {
@@ -1109,7 +1121,8 @@ a:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  /* Black text: each fill is light enough to pass 4.5:1 with it, where white fails (docs/06 6.8.2). */
+  color: #000;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -1213,15 +1226,15 @@ a:hover {
 }
 
 .hint-ok {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 
 .hint-bad {
-  color: var(--blocked);
+  color: var(--blocked-ink);
 }
 
 .hint-warn {
-  color: var(--would);
+  color: var(--would-ink);
 }
 
 .hint-none {
@@ -1248,12 +1261,14 @@ a:hover {
   color: var(--accent);
 }
 
+/* The chart fills of s2 and s3 are too pale for text on the sunken surface (docs/06 6.8.2): numbers take
+   the numeric ink, and literals the secondary ink. */
 .json-tree .num {
-  color: var(--s3);
+  color: var(--num-ink);
 }
 
 .json-tree .lit {
-  color: var(--s2);
+  color: var(--ink-2);
 }
 
 .json-tree button {
@@ -1439,7 +1454,7 @@ mark.hit {
 
 .field-error {
   font-size: 12px;
-  color: var(--blocked);
+  color: var(--blocked-ink);
   margin-top: 4px;
 }
 
@@ -1709,7 +1724,7 @@ mark.hit {
 
 .palette-group {
   font-size: 12px;
-  color: var(--ink-3);
+  color: var(--ink-2);
   padding: 8px 10px 4px;
 }
 
@@ -1738,7 +1753,7 @@ mark.hit {
 
 .palette-item .sub {
   margin-left: auto;
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -1750,7 +1765,7 @@ mark.hit {
   border-top: 1px solid var(--border);
   padding: 8px 12px;
   font-size: 12px;
-  color: var(--ink-3);
+  color: var(--ink-2);
   display: flex;
   gap: 14px;
   flex-wrap: wrap;
@@ -1878,19 +1893,16 @@ mark.hit {
   scroll-behavior: smooth;
 }
 
-@media (max-width: 1280px) {
+/* docs/06 6.8.1: from 1200 px the preview sits beside the list. Below that the split layouts stack here,
+   and the request page's own stylesheet turns the preview into a drawer. */
+@media (max-width: 1199px) {
   .split,
   .grid-main-side {
     grid-template-columns: minmax(0, 1fr);
   }
-
-  .peek {
-    position: static;
-    max-height: none;
-  }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1023px) {
   .grid-2,
   .cfg-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -1900,6 +1912,15 @@ mark.hit {
     flex-direction: row;
     flex-wrap: wrap;
     position: static;
+  }
+}
+
+/* docs/06 6.8.1: under 768 px the top bar wraps onto two rows. */
+@media (max-width: 767px) {
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 8px 14px;
   }
 }
 

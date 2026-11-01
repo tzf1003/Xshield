@@ -153,7 +153,7 @@ export function SiteWizardPage() {
                     {remoteProblem}
                   </span>
                 ) : remote?.valid === true ? (
-                  <span className="hint-ok">服务端校验通过</span>
+                  <span>✓ 服务端校验通过</span>
                 ) : null}
               </div>
               {create.isError ? (

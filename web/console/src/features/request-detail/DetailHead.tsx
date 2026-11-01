@@ -61,8 +61,8 @@ function QueryLine({ query, values }: { query: string; values: TraceValue[] }) {
               <>
                 <span className="dim">=</span>
                 {redacted ? (
-                  <span className="redacted">
-                    {`🔒 已脱敏${traced?.len !== undefined ? ` · ${traced.len} 字符` : ""}`}
+                  <span className="rd-redacted">
+                    {`已脱敏${traced?.len !== undefined ? ` · ${traced.len} 字符` : ""}`}
                   </span>
                 ) : (
                   <SafeText text={pair.value} />

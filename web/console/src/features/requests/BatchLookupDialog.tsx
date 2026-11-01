@@ -1,11 +1,12 @@
 // Batch lookup (docs/06 6.4.3): paste a test-suite table or any text with request ids, and see what
 // the gateway recorded for each id next to the verdict the table expected.
 
-import { Modal, Select } from "antd";
+import { Modal } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import type { LookupResponse, Outcome } from "../../api/types.ts";
 import { useLookup } from "../../api/queries.ts";
 import { tsvLine } from "../../lib/csv.ts";
+import { countRequestIds } from "../../lib/ids.ts";
 import { ERROR_TEXT, OUTCOME_INFO } from "../../lib/vocab.ts";
 import { readText, removeText } from "../../lib/storage.ts";
 import { OutcomeTag, DecisionTag } from "../../ui/Badges.tsx";
@@ -45,6 +46,12 @@ export function BatchLookupDialog({ open, onClose }: Props) {
   }, [open]);
 
   const paste = useMemo(() => parsePaste(text), [text]);
+  // docs/06 6.4.3: the count names the ids found, and the distinct ones when the two differ.
+  const idsFound = useMemo(() => countRequestIds(text), [text]);
+  const idCount =
+    idsFound === paste.ids.length
+      ? `识别到 ${idsFound} 个请求 ID`
+      : `识别到 ${idsFound} 个请求 ID（去重后 ${paste.ids.length}）`;
   const expectedIndex =
     expectedOverride === "none" ? null : (expectedOverride ?? paste.expectedColumn);
   const tableRows = useMemo(() => {
@@ -146,25 +153,30 @@ export function BatchLookupDialog({ open, onClose }: Props) {
         />
         <div className="row" style={{ justifyContent: "space-between" }}>
           <span className="small muted">
-            识别到 {paste.ids.length} 个请求 ID
+            {idCount}
             {paste.table ? ` · 表头 ${paste.table.headers.length} 列` : ""}
             {paste.table ? (
               <>
                 {" · 预期结论列："}
-                <Select
-                  size="small"
+                <select
+                  className="native-input"
                   aria-label="预期结论列"
-                  value={expectedIndex === null ? "none" : expectedIndex}
-                  onChange={(value: number | "none") => setExpectedOverride(value)}
-                  options={[
-                    { value: "none", label: "不对照" },
-                    ...paste.table.headers.map((header, index) => ({
-                      value: index,
-                      label: header || `第 ${index + 1} 列`,
-                    })),
-                  ]}
-                  style={{ width: 160 }}
-                />
+                  value={expectedIndex === null ? "none" : String(expectedIndex)}
+                  onChange={(event) =>
+                    setExpectedOverride(
+                      event.target.value === "none" ? "none" : Number(event.target.value),
+                    )
+                  }
+                  style={{ width: 160, height: 24, fontSize: 12 }}
+                >
+                  <option value="none">不对照</option>
+                  {paste.table.headers.map((header, index) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: the headers of one paste are a fixed list
+                    <option key={`col-${index}`} value={String(index)}>
+                      {header || `第 ${index + 1} 列`}
+                    </option>
+                  ))}
+                </select>
               </>
             ) : null}
             {tooMany ? <span className="hint-bad"> · {ERROR_TEXT.TOO_MANY_IDS}</span> : null}

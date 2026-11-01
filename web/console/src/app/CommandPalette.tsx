@@ -97,7 +97,16 @@ export function CommandPalette({ open, onClose, onHelp }: Props) {
 
   let flatIndex = -1;
   return (
-    <Modal open={open} onCancel={onClose} footer={null} closable={false} width={640} title={null}>
+    // The dialog is named for screen readers; its header is hidden, so the palette looks as before.
+    <Modal
+      open={open}
+      onCancel={onClose}
+      footer={null}
+      closable={false}
+      width={640}
+      title={<span className="sr-only">命令面板</span>}
+      styles={{ header: { display: "none" } }}
+    >
       <div className="palette">
         <div className="palette-input">
           <input
@@ -110,51 +119,56 @@ export function CommandPalette({ open, onClose, onHelp }: Props) {
             onKeyDown={onKeyDown}
             placeholder="粘贴请求 ID、会话标签、路径、站点名，或输入 outcome:blocked 这类条件"
             aria-label="命令面板"
-            aria-controls="palette-list"
+            aria-controls={groups.length > 0 ? "palette-list" : undefined}
             aria-activedescendant={items[active] ? `palette-${items[active].id}` : undefined}
             role="combobox"
-            aria-expanded="true"
+            aria-expanded={groups.length > 0}
             aria-autocomplete="list"
           />
         </div>
-        <div className="palette-list" id="palette-list" role="listbox">
-          {groups.length === 0 ? (
+        {groups.length === 0 ? (
+          <div className="palette-list">
             <div className="empty small">
               {text.trim().length === 0 ? "还没有打开过请求、会话或站点。" : "没有匹配的结果。"}
             </div>
-          ) : null}
-          {groups.map((group) => (
-            <fieldset
-              key={group.title}
-              aria-label={group.title}
-              style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}
-            >
-              <div className="palette-group">{group.title}</div>
-              {group.items.map((item) => {
-                flatIndex += 1;
-                const index = flatIndex;
-                return (
-                  <button
-                    type="button"
-                    key={item.id}
-                    id={`palette-${item.id}`}
-                    role="option"
-                    aria-selected={index === active}
-                    aria-disabled={item.disabled !== undefined}
-                    disabled={item.disabled !== undefined}
-                    className="palette-item"
-                    title={item.disabled}
-                    onMouseEnter={() => setActive(index)}
-                    onClick={(event) => run(item, event.metaKey || event.ctrlKey)}
-                  >
-                    <span>{item.label}</span>
-                    {item.sub ? <span className="sub">{item.sub}</span> : null}
-                  </button>
-                );
-              })}
-            </fieldset>
-          ))}
-        </div>
+          </div>
+        ) : (
+          <div className="palette-list" id="palette-list" role="listbox">
+            {groups.map((group) => (
+              <fieldset
+                key={group.title}
+                aria-label={group.title}
+                style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}
+              >
+                <div className="palette-group" aria-hidden="true">
+                  {group.title}
+                </div>
+                {group.items.map((item) => {
+                  flatIndex += 1;
+                  const index = flatIndex;
+                  return (
+                    <button
+                      type="button"
+                      key={item.id}
+                      id={`palette-${item.id}`}
+                      role="option"
+                      aria-selected={index === active}
+                      aria-disabled={item.disabled !== undefined}
+                      disabled={item.disabled !== undefined}
+                      className="palette-item"
+                      title={item.disabled}
+                      onMouseEnter={() => setActive(index)}
+                      onClick={(event) => run(item, event.metaKey || event.ctrlKey)}
+                    >
+                      <span>{item.label}</span>
+                      {item.sub ? <span className="sub">{item.sub}</span> : null}
+                    </button>
+                  );
+                })}
+              </fieldset>
+            ))}
+          </div>
+        )}
         <div className="palette-foot">
           <span>↑ ↓ 选择</span>
           <span>⏎ 打开</span>

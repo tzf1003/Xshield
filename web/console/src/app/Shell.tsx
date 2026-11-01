@@ -35,7 +35,12 @@ export function Shell() {
   const global = useGlobalSearch();
   const setSearch = useSetSearch();
   const sites = useSites();
-  const [collapsed, setCollapsed] = useState(() => readText(NAV_KEY) === "collapsed");
+  // Below 1024 px the navigation starts as the icon rail (docs/06 6.8.1); the user can still open it.
+  const [collapsed, setCollapsed] = useState(
+    () =>
+      readText(NAV_KEY) === "collapsed" ||
+      (typeof window !== "undefined" && window.matchMedia("(max-width: 1023px)").matches),
+  );
   const [dialog, setDialog] = useState<DialogName | null>(null);
   const restored = useRef(false);
 

@@ -4,12 +4,13 @@
 
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { Tabs } from "antd";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ApiError } from "../../api/client.ts";
 import { useRequestDetail, useStatus } from "../../api/queries.ts";
 import type { RequestDetail } from "../../api/types.ts";
 import { keepScope, useNowBucket, useSetSearch } from "../../app/scope.ts";
 import { type KeyHandler, isTypingTarget, useKeys } from "../../app/keys.ts";
+import { pushRecent } from "../../app/recent.ts";
 import {
   DETAIL_TABS,
   type DetailSearch,
@@ -19,7 +20,7 @@ import {
   type JevView,
 } from "../../app/search-schema.ts";
 import { isRequestId } from "../../lib/ids.ts";
-import { Empty, ErrorBar, Loading } from "../../ui/Page.tsx";
+import { ErrorBar, Loading } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
 import { type QuickTarget, QuickRuleDialog } from "../sites/QuickRuleDialog.tsx";
 import { DetailHead, neighborSearch } from "./DetailHead.tsx";
@@ -71,7 +72,16 @@ function DetailView({
   const tab: DetailTab = search.tab ?? "pipeline";
   const view: JevView = search.jev_view ?? "structured";
   const doc: JevDoc = search.jev_doc ?? "state";
-  const { neighbors, jev } = detail;
+  const { neighbors, jev, summary } = detail;
+
+  // The palette's empty state lists what was opened last (docs/06 6.3.3).
+  useEffect(() => {
+    pushRecent({
+      kind: "request",
+      id: summary.request_id,
+      title: `${summary.method} ${summary.path}`,
+    });
+  }, [summary.request_id, summary.method, summary.path]);
 
   const openNeighbour = (target: string) => {
     void navigate({
@@ -180,12 +190,13 @@ function NotFound({ requestId }: { requestId: string }) {
   const gaps = logGaps(status.data?.gateway.problems ?? []);
   return (
     <div className="rd-notfound">
-      <Empty title="找不到这个请求">
+      <div className="empty">
+        <h1 className="empty-title">找不到这个请求</h1>
         <div className="mono small">
           <SafeText text={requestId} />
         </div>
         <div className="small">{missingReason(requestId, now, gaps)}</div>
-      </Empty>
+      </div>
       <div className="row">
         <Link to="/requests" search={keepScope}>
           返回请求追溯

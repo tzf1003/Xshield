@@ -10,7 +10,6 @@ import {
   createRoute,
   createRouter,
   Outlet,
-  parseSearchWith,
   redirect,
   stringifySearchWith,
   useRouterState,
@@ -171,7 +170,9 @@ export const router = createRouter({
   routeTree,
   context: { queryClient },
   defaultPreload: "intent",
-  parseSearch: parseSearchWith((value) => value),
+  // Plain strings only: TanStack's own decoder turns "1" and "true" into numbers and booleans, which
+  // the validators in search-schema.ts would then drop. stringifySearch keeps string values plain.
+  parseSearch: (search) => Object.fromEntries(new URLSearchParams(search)),
   stringifySearch: stringifySearchWith(JSON.stringify),
 });
 

@@ -4,10 +4,11 @@
 // "这个会话在当前时间范围内没有记录" (docs/06 6.7.2).
 
 import { Link, useParams, useSearch } from "@tanstack/react-router";
-import { type ReactNode, useCallback, useMemo } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo } from "react";
 import { ApiError, qs } from "../../api/client.ts";
 import { useSite, useTimeline } from "../../api/queries.ts";
 import type { SessionCredential, TimelineRow } from "../../api/types.ts";
+import { pushRecent } from "../../app/recent.ts";
 import { keepScope, useScope, useSetSearch } from "../../app/scope.ts";
 import { fmtClock, fmtElapsed, fmtInt } from "../../lib/format.ts";
 import { isRequestId, isSessionLabel, shortRequestId } from "../../lib/ids.ts";
@@ -56,6 +57,11 @@ function Timeline({ label }: { label: string }) {
 
   const only = search.only ?? "judged";
   const at = search.at;
+
+  // The palette's empty state lists the sessions opened last (docs/06 6.3.3).
+  useEffect(() => {
+    pushRecent({ kind: "session", id: label, title: `会话 ${label.slice(0, 8)}` });
+  }, [label]);
 
   const timeline = useTimeline(label, qs({ site: scope.site, only }));
   const rows = useMemo(

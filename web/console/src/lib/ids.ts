@@ -35,6 +35,11 @@ export function requestIdMillis(id: string): number | null {
   return Number.parseInt(id.slice(4, 16), 16);
 }
 
+/** How many request ids a text holds before duplicates are removed (docs/06 6.4.3). */
+export function countRequestIds(text: string): number {
+  return [...text.matchAll(REQUEST_ID_IN_TEXT)].length;
+}
+
 /** Every distinct request id in a text, in order of first appearance. */
 export function findRequestIds(text: string): string[] {
   const seen = new Set<string>();

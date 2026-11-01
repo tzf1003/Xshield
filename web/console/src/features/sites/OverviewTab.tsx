@@ -1,10 +1,11 @@
-// The overview of a site (docs/06 6.4.9): the 24-hour figures, the paths that would have been blocked most, the
-// Jev evidence, and, while the site observes, the readiness checklist. The trend line of 6.4.2 is not shown here.
+// The overview of a site (docs/06 6.4.9): the 24-hour figures, the paths that would have been blocked most, and,
+// while the site observes, the readiness checklist. The trend line of 6.4.2 is not shown here. The Jev evidence
+// is not read here: the Advanced group of the configuration tab reads it when it opens (docs/07 7.10.4).
 
-import { useEvidence, useInsights } from "../../api/queries.ts";
+import { useInsights } from "../../api/queries.ts";
 import type { SiteDetail } from "../../api/types.ts";
-import { fmtInt, fmtMs } from "../../lib/format.ts";
-import { Card, ErrorBar, Kv, Loading, Tile } from "../../ui/Page.tsx";
+import { fmtInt } from "../../lib/format.ts";
+import { Card, ErrorBar, Loading, Tile } from "../../ui/Page.tsx";
 import { ReadinessList } from "./Readiness.tsx";
 
 type Props = {
@@ -16,8 +17,6 @@ type Props = {
 export function OverviewTab({ site, now, onInsights }: Props) {
   const observing = site.mode === "observe";
   const insights = useInsights(site.name);
-  const evidence = useEvidence(site.name);
-  const jev = evidence.data?.jev;
   const hot = [...(insights.data?.suggestions ?? [])]
     .filter((item) => item.kind === "hot_would_block")
     .sort((a, b) => b.count - a.count)
@@ -82,28 +81,6 @@ export function OverviewTab({ site, now, onInsights }: Props) {
               </ul>
             )}
           </Card>
-
-          <Card title="Jev 证据" aside={`最近 ${fmtInt(evidence.data?.window_hours ?? 24)} 小时`}>
-            {evidence.isPending ? (
-              <Loading height={80} />
-            ) : evidence.isError ? (
-              <ErrorBar error={evidence.error} onRetry={() => void evidence.refetch()} />
-            ) : jev && jev.calls > 0 ? (
-              <Kv
-                items={[
-                  ["调用", `${fmtInt(jev.calls)} 次`],
-                  [
-                    "耗时 p50 / p95 / p99",
-                    `${fmtMs(jev.p50_ms)} / ${fmtMs(jev.p95_ms)} / ${fmtMs(jev.p99_ms)}`,
-                  ],
-                  ["超时", `${fmtInt(jev.timeouts)} 次（超时设置 ${fmtMs(jev.timeout_ms_used)}）`],
-                  ["缓存放行", `${fmtInt(evidence.data?.cache.cached_allows)} 次`],
-                ]}
-              />
-            ) : (
-              <div className="small muted">最近 24 小时没有 Jev 调用。</div>
-            )}
-          </Card>
         </div>
 
         {observing ? (
@@ -112,7 +89,11 @@ export function OverviewTab({ site, now, onInsights }: Props) {
               {insights.isPending ? (
                 <Loading height={120} />
               ) : (
-                <ReadinessList readiness={insights.data?.readiness ?? null} now={now} />
+                <ReadinessList
+                  readiness={insights.data?.readiness ?? null}
+                  now={now}
+                  site={site.name}
+                />
               )}
             </Card>
           </div>

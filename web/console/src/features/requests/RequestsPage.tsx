@@ -9,12 +9,13 @@ import type { RequestRow } from "../../api/types.ts";
 import type { ChipId } from "../../app/search-schema.ts";
 import { keepScope, type Scope, useScope, useSetSearch } from "../../app/scope.ts";
 import { useKeys } from "../../app/keys.ts";
-import { fmtClock, fmtInt } from "../../lib/format.ts";
+import { fmtInt } from "../../lib/format.ts";
 import { isStaticAsset } from "../../lib/quick-rules.ts";
 import { readJson, writeJson } from "../../lib/storage.ts";
 import { RANGE_LABEL } from "../../lib/vocab.ts";
 import { ErrorBar, Loading, PageHead, Notice } from "../../ui/Page.tsx";
 import { QuickRuleDialog, type QuickTarget } from "../sites/QuickRuleDialog.tsx";
+import { hm } from "../system/clock.ts";
 import { BatchLookupDialog } from "./BatchLookupDialog.tsx";
 import { ExportDialog } from "./ExportDialog.tsx";
 import { FilterBar } from "./FilterBar.tsx";
@@ -263,7 +264,14 @@ export function RequestsPage() {
   const gaps = (system.data?.edges ?? [])
     .flatMap((edge) => edge.gaps.map((gap) => ({ ...gap, edge: edge.edge })))
     .filter((gap) => gap.to_ms >= scope.since && gap.from_ms <= scope.until);
-  const firstGap = gaps[0];
+  // The notice names a loss of judgement records first; a gap that only dropped bypass records is grey
+  // and says the judgements are unaffected (docs/06 6.4.3).
+  const judgedGap = gaps.find((gap) => gap.dropped + gap.write_errors > 0);
+  const gapNotice = judgedGap
+    ? { gap: judgedGap, lost: judgedGap.dropped + judgedGap.write_errors, tone: "warn" as const }
+    : gaps[0]
+      ? { gap: gaps[0], lost: 0, tone: "info" as const }
+      : null;
   const rangeLabel =
     scope.range === "custom" ? "自定义时间范围" : `最近 ${RANGE_LABEL[scope.range]}`;
   const showDate = scope.until - scope.since > 24 * 60 * 60 * 1000;
@@ -334,8 +342,14 @@ export function RequestsPage() {
         {!allOn && hiddenUnknown > 0 ? (
           <span className="toolbar-note">
             另有 {fmtInt(hiddenUnknown)} 条未知站点请求 ·{" "}
-            <button type="button" className="linkbtn" onClick={() => setSearch({ scope: "all" })}>
-              显示
+            <button
+              type="button"
+              className="linkbtn"
+              onClick={() =>
+                setSearch({ q: appendTerm(q, "decision:unknown_site"), peek: undefined })
+              }
+            >
+              查看
             </button>
           </span>
         ) : null}
@@ -352,12 +366,18 @@ export function RequestsPage() {
         liveDisabled={false}
       />
 
-      {firstGap ? (
-        <Notice tone="warn">
-          {fmtClock(firstGap.from_ms)}–{fmtClock(firstGap.to_ms)} {firstGap.edge} 有{" "}
-          {firstGap.dropped + firstGap.dropped_bypass + firstGap.write_errors}{" "}
-          条记录未写入（队列丢弃 {firstGap.dropped}，写入出错 {firstGap.write_errors}
-          ），这段时间的请求可能查不到 · <Link to="/system">查看系统</Link>
+      {gapNotice ? (
+        <Notice tone={gapNotice.tone}>
+          {hm(gapNotice.gap.from_ms)}–{hm(gapNotice.gap.to_ms)} {gapNotice.gap.edge}
+          {gapNotice.lost > 0 ? (
+            <> 有 {fmtInt(gapNotice.lost)} 条记录未写入（队列满），这段时间的请求可能查不到 · </>
+          ) : (
+            <> 丢弃了 {fmtInt(gapNotice.gap.dropped_bypass)} 条绕过记录，判定记录不受影响 · </>
+          )}
+          <Link to="/system">查看系统</Link>
+          <div className="small dim">
+            缺口历史来自网关心跳，网关重启后清空，重启之前的缺口看不到。
+          </div>
         </Notice>
       ) : null}
       {live && poll.paused ? (

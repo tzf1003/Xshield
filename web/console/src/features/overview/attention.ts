@@ -28,7 +28,7 @@ export type Level = "serious" | "warn" | "info";
 /** Where an action leads. A site target is only offered for a name that passes isSiteName. */
 export type Target =
   | { kind: "system"; tab: SystemTab }
-  | { kind: "site"; name: string; tab: SiteTab }
+  | { kind: "site"; name: string; tab: SiteTab; group?: "advanced" }
   | { kind: "requests"; search: RequestsSearch }
   | { kind: "jev" };
 
@@ -68,7 +68,12 @@ function atLeastOnePercent(count: number, calls: number): boolean {
 }
 
 const toSystem = (tab: SystemTab): Target => ({ kind: "system", tab });
-const toSite = (name: string, tab: SiteTab): Target => ({ kind: "site", name, tab });
+const toSite = (name: string, tab: SiteTab, group?: "advanced"): Target => ({
+  kind: "site",
+  name,
+  tab,
+  group,
+});
 
 /** The request list of one site over the last 24 hours: the window the site's own counts use. */
 const siteRequests = (name: string, chip: ChipId): Target => ({
@@ -141,6 +146,8 @@ function problemItems(problem: GatewayProblem, key: string): AttentionItem[] {
           actions: [{ label: "查看存储", target: toSystem("storage") }],
         },
       ];
+    // An offline instance is a warning too, like a late heartbeat; the status lights list it in full.
+    case "edge_offline":
     case "heartbeat_late":
       return [
         {
@@ -317,7 +324,7 @@ function evidenceItem(site: SiteSummary): AttentionItem | null {
     key: `evidence-${site.name}`,
     level: "info",
     text: `${site.name} ${parts.join("、")} / ${fmtInt(calls)} 次调用`,
-    actions: siteActions(site.name, [["查看证据", toSite(site.name, "overview")]]),
+    actions: siteActions(site.name, [["查看证据", toSite(site.name, "config", "advanced")]]),
   };
 }
 

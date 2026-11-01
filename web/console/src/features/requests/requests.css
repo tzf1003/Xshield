@@ -1,0 +1,148 @@
+/* The request list (docs/06 6.8.1). The table is sized by its own container, not the viewport, so it
+   reads the same beside the preview as it does alone. As the container narrows, the secondary columns
+   move under the path onto a second line (light monospace), and nothing is lost: the second line
+   carries the same values. Only one of the two places is shown at any width. */
+
+.rq-wrap {
+  container-type: inline-size;
+  container-name: request-list;
+}
+
+.rq-path-line {
+  display: block;
+  min-width: 0;
+}
+
+.rq-method,
+.rq-sub,
+.rq-sub-site,
+.rq-sub-dur,
+.rq-sub-id,
+.rq-sub-status,
+.rq-sub-jev {
+  display: none;
+}
+
+@container request-list (max-width: 1080px) {
+  .rq-c-site,
+  .rq-c-dur,
+  .rq-c-id {
+    display: none;
+  }
+
+  .rq-sub {
+    display: flex;
+    align-items: center;
+    gap: 2px 12px;
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--ink-2);
+    white-space: nowrap;
+  }
+
+  .rq-sub-site,
+  .rq-sub-dur,
+  .rq-sub-id {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+}
+
+@container request-list (max-width: 900px) {
+  .rq-c-method,
+  .rq-c-status {
+    display: none;
+  }
+
+  /* The method moves in front of the path on the same line. */
+  .rq-path-line {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .rq-path-line .path {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .rq-method {
+    display: inline;
+    flex: none;
+    color: var(--ink-2);
+  }
+
+  .rq-sub-status {
+    display: inline;
+  }
+}
+
+@container request-list (max-width: 680px) {
+  .rq-c-jev {
+    display: none;
+  }
+
+  .rq-sub-jev {
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
+/* The preview sits beside the list from 1200 px. Below that it is an overlay drawer on the right, over
+   the list (docs/06 6.8.1), so the list keeps its full width. The shared stylesheet stacks the split at
+   1199 px and no longer styles .peek, so this sheet owns .peek on both sides of 1200 px. */
+@media (min-width: 1200px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr) 400px;
+  }
+
+  .peek {
+    position: sticky;
+    top: 0;
+    max-height: calc(100vh - 220px);
+  }
+}
+
+@media (max-width: 1199px) {
+  .split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .peek {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    width: min(400px, 92vw);
+    max-height: none;
+    border-radius: 0;
+    box-shadow: var(--shadow);
+  }
+}
+
+/* The 低 mark after a Jev confidence under 70% (docs/06 6.4.3): a small outlined word, not a colour. */
+.jev-low {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ink-2);
+}
+
+/* The copy button of a row sits on the tint of a selected row, where the shared grey falls below 4.5:1
+   (the shared sheet owns .copy-btn). The table reads it in the darker ink instead. */
+.rq-wrap .copy-btn {
+  color: var(--ink-2);
+}
+
+.rq-wrap .copy-btn:hover {
+  color: var(--accent);
+}

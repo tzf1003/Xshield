@@ -11,6 +11,7 @@ import { useKeys } from "../../app/keys.ts";
 import { keepScope } from "../../app/scope.ts";
 import { fmtClock, fmtElapsed, fmtInt } from "../../lib/format.ts";
 import { isRequestId, shortSession } from "../../lib/ids.ts";
+import { CONTEXT_LABEL } from "../../lib/vocab.ts";
 import { DecisionTag, JevCell, OutcomeTag } from "../../ui/Badges.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
 import { withGaps } from "./sessions-model.ts";
@@ -108,7 +109,13 @@ function TimelineLine({
   if (row.issued_session !== null) {
     tags.push(
       row.issued_session === label
-        ? { key: "issued", text: "◆ 签发本会话" }
+        ? {
+            key: "issued",
+            // The login that issued this session is the first row; its context says how it is kept.
+            text: row.context
+              ? `◆ 签发本会话 · 上下文：${CONTEXT_LABEL[row.context]}`
+              : "◆ 签发本会话",
+          }
         : { key: "issued", text: `◆ 签发新会话 ${shortSession(row.issued_session)}` },
     );
   }

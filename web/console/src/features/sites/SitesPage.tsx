@@ -8,16 +8,8 @@ import { useNowBucket } from "../../app/scope.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { Empty, ErrorBar, Loading, PageHead } from "../../ui/Page.tsx";
 import { observedText } from "./Readiness.tsx";
-import { type RolloutTone, rolloutListText } from "./rollout.ts";
+import { rolloutListText } from "./rollout.ts";
 import "./sites.css";
-
-const TONE_CLASS: Record<RolloutTone, string> = {
-  ok: "hint-ok",
-  wait: "muted",
-  warn: "hint-warn",
-  bad: "hint-bad",
-  none: "muted",
-};
 
 function modeText(site: SiteSummary, now: number): string {
   if (site.mode === "enforce") return "拦截";
@@ -80,6 +72,7 @@ export function SitesPage() {
             </thead>
             <tbody>
               {list.map((site) => {
+                // The state is the glyph and the words (docs/06 6.5.3): the text itself stays in ink.
                 const status = rolloutListText(site.rollout, site.updated_at, now);
                 return (
                   <tr key={site.name}>
@@ -91,7 +84,7 @@ export function SitesPage() {
                     <td className="mono">{site.hosts.join("、")}</td>
                     <td className="mono">{site.origin}</td>
                     <td>{modeText(site, now)}</td>
-                    <td className={TONE_CLASS[status.tone]}>{status.text}</td>
+                    <td>{status.text}</td>
                     <td className="num tnum">{fmtInt(site.requests_24h)}</td>
                     <td className="num tnum">
                       {site.mode === "enforce"

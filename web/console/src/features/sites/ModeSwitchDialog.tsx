@@ -75,7 +75,7 @@ export function ModeSwitchDialog({ site, dirty, onClose, onSaved }: Props) {
             ) : insights.isError ? (
               <ErrorBar error={insights.error} onRetry={() => void insights.refetch()} />
             ) : (
-              <ReadinessList readiness={readiness} now={now} />
+              <ReadinessList readiness={readiness} now={now} site={site.name} />
             )}
           </div>
         ) : (

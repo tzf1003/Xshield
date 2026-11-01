@@ -129,6 +129,7 @@ export function ConfigTab({
 
   return (
     <div className="stack">
+      <div className="small muted desktop-hint">建议在桌面端修改配置</div>
       <div className="row between">
         <Segmented
           value={edit}

@@ -120,7 +120,7 @@ function EdgeDetail({ edge, sites }: { edge: EdgeStatus; sites: Array<[string, S
   return (
     <div className="sys-detail-grid">
       <section>
-        <h3 className="sys-h">站点加载</h3>
+        <h2 className="sys-h">站点加载</h2>
         {sites.length === 0 ? (
           <p className="muted small">这个实例还没有加载任何站点。</p>
         ) : (
@@ -157,7 +157,7 @@ function EdgeDetail({ edge, sites }: { edge: EdgeStatus; sites: Array<[string, S
         )}
       </section>
       <section>
-        <h3 className="sys-h">Jev 线路</h3>
+        <h2 className="sys-h">Jev 线路</h2>
         <dl className="kv">
           <dt>线路</dt>
           <dd>{ROUTE_LABEL[edge.jev.route]}</dd>
@@ -172,9 +172,9 @@ function EdgeDetail({ edge, sites }: { edge: EdgeStatus; sites: Array<[string, S
         </dl>
       </section>
       <section>
-        <h3 className="sys-h">这个实例的日志缺口</h3>
+        <h2 className="sys-h">这个实例的日志缺口</h2>
         {gaps.length === 0 ? (
-          <p className="muted small">最近 24 小时没有缺口。</p>
+          <p className="muted small">这个实例没有上报过缺口。</p>
         ) : (
           <div className="tbl-wrap">
             <table className="tbl sys-mini">

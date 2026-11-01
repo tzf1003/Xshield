@@ -32,6 +32,12 @@ export function problemText(problem: GatewayProblem): string {
       return `判定日志分区不足，未来只有 ${problem.days_ahead} 天`;
     case "heartbeat_late":
       return `${problem.edge} 心跳延迟`;
+    case "edge_offline": {
+      const stuck = Object.entries(problem.loaded)
+        .map(([site, version]) => `${site} v${version}`)
+        .join("、");
+      return `实例 ${problem.edge} 离线，最后心跳 ${fmtClock(problem.last_seen_ms)}${stuck ? `，停在 ${stuck}` : ""}`;
+    }
   }
 }
 

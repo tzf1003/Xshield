@@ -260,7 +260,7 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
               {remoteProblem}
             </span>
           ) : null}
-          {remote?.valid === true ? <span className="hint-ok">服务端校验通过</span> : null}
+          {remote?.valid === true ? <span>✓ 服务端校验通过</span> : null}
         </div>
 
         <label className="field" style={{ margin: 0 }}>

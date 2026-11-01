@@ -81,9 +81,9 @@ export function StoragePanel({ system, now }: { system: SystemInfo; now: number 
         )}
       </Card>
       <div className="sys-section">
-        <Card title="日志缺口" aside="最近 24 小时">
+        <Card title="日志缺口" aside="来自网关心跳，网关重启后清空">
           {gaps.length === 0 ? (
-            <Empty title="最近 24 小时没有日志缺口。" />
+            <Empty title="没有日志缺口。" />
           ) : (
             <div className="tbl-wrap">
               <table className="tbl">

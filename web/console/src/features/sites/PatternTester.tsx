@@ -16,16 +16,13 @@ export function PatternTester({ entries, bypass, savedEntries, savedBypass }: Pr
   const [path, setPath] = useState("");
   const trimmed = path.trim();
   let text: string | null = null;
-  let tone = "muted";
   if (trimmed.length > 0) {
     if (!trimmed.startsWith("/")) {
       text = "路径必须以 / 开头";
-      tone = "hint-bad";
     } else {
       const verdict = judgePath(trimmed, entries, bypass);
       if (verdict.kind === "invalid_spelling") {
         text = "网关不会把这种写法的路径匹配到任何入口或绕过（路径含 ; // %2e %2f 等写法）";
-        tone = "hint-warn";
       } else if (verdict.kind === "bypass") {
         const fresh = savedBypass.includes(verdict.rule) ? "" : "（草稿新增）";
         text = `命中绕过 ${verdict.rule}：不判定，直接转发${fresh}`;
@@ -49,7 +46,7 @@ export function PatternTester({ entries, bypass, savedEntries, savedBypass }: Pr
         placeholder="输入一个路径，看它命中哪条规则，例如 /rest/admin/application-configuration"
         onChange={(event) => setPath(event.target.value)}
       />
-      <div className={`small ${tone}`} role="status" aria-live="polite">
+      <div className="small" role="status" aria-live="polite">
         {text ?? "输入路径后显示判定"}
       </div>
     </div>

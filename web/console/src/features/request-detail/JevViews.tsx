@@ -126,42 +126,65 @@ function ResponseView({
   );
 }
 
-export function JevRaw({
-  doc,
-  parsed,
-  body,
-  bodyNote,
-  response,
-  query,
-  wrap,
-}: DocProps & { wrap: boolean }) {
+/** The response indented per level when it is JSON; null when it is not (it stays as it came). */
+function indentedResponse(response: string | null): string | null {
+  if (response === null) return null;
+  const parsed = parseJson(response);
+  return parsed.ok ? JSON.stringify(parsed.value, null, 2) : null;
+}
+
+/**
+ * The raw text of what was sent (docs/06 6.4.5). The original is one line as Jev received it; the
+ * format box indents it per level and numbers the lines; the wrap box turns wrapping off; the byte
+ * count is of the text on screen.
+ */
+export function JevRaw({ doc, parsed, body, bodyNote, response, query }: DocProps) {
   const [formatted, setFormatted] = useState(false);
-  const stateText =
-    parsed.status === "ok"
-      ? formatted
-        ? JSON.stringify(parsed.state, null, 2)
+  const [wrap, setWrap] = useState(true);
+
+  const original =
+    doc === "state"
+      ? parsed.status === "absent"
+        ? null
         : parsed.text
-      : parsed.status === "invalid"
-        ? parsed.text
-        : "";
-  const bodyText = body !== null ? JSON.stringify(body, null, 2) : null;
-  const shown = doc === "state" ? stateText : doc === "body" ? bodyText : response;
-  const classes = wrap ? "codeblock" : "codeblock nowrap";
+      : doc === "body"
+        ? body !== null
+          ? JSON.stringify(body)
+          : null
+        : response;
+  const indented =
+    doc === "state"
+      ? parsed.status === "ok"
+        ? JSON.stringify(parsed.state, null, 2)
+        : null
+      : doc === "body"
+        ? body !== null
+          ? JSON.stringify(body, null, 2)
+          : null
+        : indentedResponse(response);
+  const shown = formatted && indented !== null ? indented : original;
+  const lines: string[] = shown === null ? [] : shown.split("\n");
+
   return (
     <div className="stack">
       <div className="row rd-viewtools">
         <DocSwitch doc={doc} />
-        {doc === "state" && parsed.status === "ok" ? (
-          <Segmented
-            size="small"
-            value={formatted ? "formatted" : "original"}
-            options={[
-              { label: "原样", value: "original" },
-              { label: "格式化", value: "formatted" },
-            ]}
-            onChange={(value) => setFormatted(String(value) === "formatted")}
+        <label className="check small">
+          <input
+            type="checkbox"
+            checked={formatted}
+            onChange={(event) => setFormatted(event.target.checked)}
           />
-        ) : null}
+          格式化显示
+        </label>
+        <label className="check small">
+          <input
+            type="checkbox"
+            checked={wrap}
+            onChange={(event) => setWrap(event.target.checked)}
+          />
+          自动换行
+        </label>
         {shown !== null ? (
           <span className="small dim tnum">{fmtBytes(utf8Bytes(shown))}</span>
         ) : null}
@@ -170,12 +193,24 @@ export function JevRaw({
       {doc === "response" && response === null ? (
         <Empty title="没有原始响应">超时、连接失败或没有发出调用时，没有响应。</Empty>
       ) : null}
-      {shown !== null &&
-      !(doc === "response" && response === null) &&
-      !(doc === "body" && body === null) ? (
-        <pre className={classes}>
-          <SafeText text={shown} query={query} />
-        </pre>
+      {shown !== null && !(doc === "response" && response === null) ? (
+        formatted && indented !== null ? (
+          <pre className={wrap ? "codeblock code-numbered" : "codeblock code-numbered nowrap"}>
+            {lines.map((line, index) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: the lines are a fixed list of one text
+              <span className="code-line" key={index}>
+                <span className="code-no" aria-hidden="true">
+                  {index + 1}
+                </span>
+                <SafeText text={line} query={query} />
+              </span>
+            ))}
+          </pre>
+        ) : (
+          <pre className={wrap ? "codeblock" : "codeblock nowrap"}>
+            <SafeText text={shown} query={query} />
+          </pre>
+        )
       ) : null}
     </div>
   );
@@ -229,7 +264,7 @@ function QuestionBlock({
 }) {
   return (
     <section className="struct-sec">
-      <h3>{title}</h3>
+      <h2 className="struct-title">{title}</h2>
       <div className="small">
         <SafeText text={question.instructions} />
       </div>

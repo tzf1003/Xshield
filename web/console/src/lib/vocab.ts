@@ -21,8 +21,8 @@ import type {
 export type Tone = "blocked" | "would" | "unjudged" | "ok" | "neutral";
 
 export const DECISION_INFO: Record<DecisionPath, { name: string; icon: string; desc: string }> = {
-  bypass: { name: "绕过", icon: "⤳", desc: "命中绕过规则，不判定，直接转发" },
-  fast_allow: { name: "快速放行", icon: "⚡", desc: "需核验的值都已核验，没有调用 Jev" },
+  bypass: { name: "绕过", icon: "→", desc: "命中绕过规则，不判定，直接转发" },
+  fast_allow: { name: "快速放行", icon: "»", desc: "需核验的值都已核验，没有调用 Jev" },
   cached_allow: { name: "缓存放行", icon: "↺", desc: "复用缓存时长内 Jev 对同一请求的放行" },
   jev_allow: { name: "Jev 通过", icon: "✦", desc: "Jev 判定访问有依据、内容无攻击" },
   jev_deny: {
@@ -32,16 +32,16 @@ export const DECISION_INFO: Record<DecisionPath, { name: string; icon: string; d
   },
   jev_unavailable: {
     name: "Jev 不可用",
-    icon: "⚠",
+    icon: "∅",
     desc: "Jev 超时、出错、调用达到上限或答不上来，按站点设置处理",
   },
   no_session: { name: "无会话", icon: "⊘", desc: "没有会话凭证，路径也不是入口" },
   body_not_inspectable: {
     name: "请求体不可判定",
-    icon: "⧉",
+    icon: "⊟",
     desc: "请求体超过 48 KiB 或没有 Content-Length，返回 413",
   },
-  unknown_site: { name: "未知站点", icon: "⌀", desc: "Host 不属于任何站点，返回 404" },
+  unknown_site: { name: "未知站点", icon: "⊗", desc: "Host 不属于任何站点，返回 404" },
 };
 
 export const OUTCOME_INFO: Record<

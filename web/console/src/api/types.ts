@@ -836,7 +836,8 @@ export type GatewayProblem =
     }
   | { kind: "queue_pressure"; edge: string; queue: number; capacity: number }
   | { kind: "partition_missing"; days_ahead: number }
-  | { kind: "heartbeat_late"; edge: string };
+  | { kind: "heartbeat_late"; edge: string }
+  | { kind: "edge_offline"; edge: string; last_seen_ms: number; loaded: Record<string, number> };
 
 /** GET /api/status: the top bar lights and the overview's attention list (every 15 seconds). */
 export interface StatusResponse {

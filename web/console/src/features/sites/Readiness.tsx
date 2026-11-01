@@ -1,12 +1,14 @@
 // The readiness checklist before a site switches to enforce mode, and its summary on the overview and
 // insights tabs (docs/06 6.4.10 flow D, docs/07 7.9.11). It states facts only; it sets no threshold.
 
+import { Link } from "@tanstack/react-router";
 import type { DecisionPath, Readiness } from "../../api/types.ts";
 import { fmtInt, fmtLocalDateTime, fmtMs } from "../../lib/format.ts";
 import { DECISION_INFO, HEALTH_LABEL } from "../../lib/vocab.ts";
 
 export type ReadyMark = "✓" | "▲" | "–";
-type Row = { key: string; mark: ReadyMark; text: string };
+/** `listChip` names the request-list chip that the row's own link opens (docs/06 line 627). */
+type Row = { key: string; mark: ReadyMark; text: string; listChip?: "would_block" };
 
 /** "4 天 3 小时", or "5 小时" when less than a day has passed. */
 export function observedText(ms: number): string {
@@ -40,7 +42,12 @@ export function readinessRows(readiness: Readiness, now: number): Row[] {
   rows.push(
     total === 0
       ? { key: "would", mark: "✓", text: "本应拦截 0 条" }
-      : { key: "would", mark: "▲", text: `本应拦截 ${fmtInt(total)} 条：${breakdown}` },
+      : {
+          key: "would",
+          mark: "▲",
+          text: `本应拦截 ${fmtInt(total)} 条：${breakdown}`,
+          listChip: "would_block",
+        },
   );
   rows.push(
     readiness.open_suggestions > 0
@@ -83,23 +90,32 @@ export function readinessRows(readiness: Readiness, now: number): Row[] {
 }
 
 const MARK_WORD: Record<ReadyMark, string> = { "✓": "正常", "▲": "需要注意", "–": "不适用" };
-const MARK_CLASS: Record<ReadyMark, string> = {
-  "✓": "hint-ok",
-  "▲": "hint-warn",
-  "–": "hint-none",
-};
 
-export function ReadinessList({ readiness, now }: { readiness: Readiness | null; now: number }) {
+export function ReadinessList({
+  readiness,
+  now,
+  site,
+}: {
+  readiness: Readiness | null;
+  now: number;
+  site: string;
+}) {
   if (readiness === null) return <div className="small muted">暂无就绪检查数据</div>;
   return (
     <ul className="ready site-ready" aria-label="就绪检查">
       {readinessRows(readiness, now).map((row) => (
         <li key={row.key} className="ready-row">
-          <span className={MARK_CLASS[row.mark]}>
+          {/* The mark is a shape and a word, never only a colour (docs/06 6.8.2). */}
+          <span>
             <span aria-hidden="true">{row.mark}</span>
             <span className="sr-only">{MARK_WORD[row.mark]}</span>
           </span>
           <span>{row.text}</span>
+          {row.listChip ? (
+            <Link className="ready-link" to="/requests" search={{ site, chip: row.listChip }}>
+              逐条查看 <span aria-hidden="true">→</span>
+            </Link>
+          ) : null}
         </li>
       ))}
     </ul>

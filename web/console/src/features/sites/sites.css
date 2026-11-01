@@ -7,6 +7,19 @@
   gap: 6px;
 }
 
+/* The heading of the advanced group: one line, above the summary and the parameters (docs/07 7.10.4). */
+.adv-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* The count of the active group sits on the accent tint: ink-2 keeps it at 4.5:1 (docs/06 6.8.2). */
+.cfg-nav button[aria-current="true"] .count {
+  color: var(--ink-2);
+}
+
 /* Advanced parameters: one row per parameter, its choice on the right of the name. */
 .adv-head {
   display: flex;
@@ -110,10 +123,29 @@
   padding: 0;
 }
 
+/* The links that open requests from a readiness row or after a saved rule. The accent blue is 3.8:1 on the dialog
+   surface in the dark theme, so these take the text colour with an underline. */
+.ready-link,
+.saved-links a {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+/* The link at the right edge of a readiness row that opens its requests (docs/06 line 627). */
+.ready-link {
+  white-space: nowrap;
+}
+
 /* Diff: unified lines come from global.css; the side-by-side view adds two columns per row. */
 .diff-box > summary {
   cursor: pointer;
   margin-bottom: 6px;
+}
+
+/* A diff is read in full: the dialog or page around it scrolls, so the box does not (no focusable scroll region). */
+.sites-diff.diff {
+  max-height: none;
+  overflow: visible;
 }
 
 .diff-split {
@@ -283,12 +315,31 @@
   max-height: 60vh;
 }
 
-@media (max-width: 900px) {
+/* Built-in redaction words and synonyms: a dashed frame and no remove control (docs/06 6.4.9). */
+.tag-chip.builtin-chip {
+  border-style: dashed;
+}
+
+/* The desktop hint shows below 768 px only; nothing is disabled there (docs/06 6.8.1). */
+.desktop-hint {
+  display: none;
+}
+
+/* Below 768 px the pages read in one column and the header wraps (docs/06 6.8.1). */
+@media (max-width: 767px) {
   .wizard-layout {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .wizard-side {
     position: static;
+  }
+
+  .site-actions {
+    flex-wrap: wrap;
+  }
+
+  .desktop-hint {
+    display: block;
   }
 }

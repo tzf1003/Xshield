@@ -193,7 +193,7 @@ export function InsightsTab({ site, working, now, onAdd, onApply }: Props) {
     <div className="stack">
       {site.mode === "observe" ? (
         <Card title="就绪检查" aside={`最近 ${fmtInt(data.window_hours)} 小时`}>
-          <ReadinessList readiness={data.readiness} now={now} />
+          <ReadinessList readiness={data.readiness} now={now} site={site.name} />
         </Card>
       ) : null}
       {data.complete ? null : (

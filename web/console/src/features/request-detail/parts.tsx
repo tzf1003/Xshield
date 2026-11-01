@@ -80,8 +80,8 @@ export function ValueText({
 }) {
   if (value === REDACTED) {
     return (
-      <span className="redacted" title={secret ?? "已脱敏"}>
-        {`🔒 已脱敏${len !== null && len !== undefined ? ` · ${fmtInt(len)} 字符` : ""}`}
+      <span className="rd-redacted" title={secret ?? "已脱敏"}>
+        {`已脱敏${len !== null && len !== undefined ? ` · ${fmtInt(len)} 字符` : ""}`}
       </span>
     );
   }

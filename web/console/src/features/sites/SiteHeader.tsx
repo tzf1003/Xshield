@@ -10,15 +10,7 @@ import type { SiteDetail } from "../../api/types.ts";
 import { fmtLocalDateTime } from "../../lib/format.ts";
 import { specToJson, specToYaml } from "../../lib/yaml.ts";
 import { PageHead } from "../../ui/Page.tsx";
-import { type RolloutTone, rolloutListText } from "./rollout.ts";
-
-const TONE_CLASS: Record<RolloutTone, string> = {
-  ok: "hint-ok",
-  wait: "hint-none",
-  warn: "hint-warn",
-  bad: "hint-bad",
-  none: "hint-none",
-};
+import { rolloutListText } from "./rollout.ts";
 
 const MENU_ITEMS: MenuProps["items"] = [
   { key: "copy", label: "复制为新站点" },
@@ -78,11 +70,11 @@ export function SiteHeader({ site, now, onSwitchMode, onCopy, onDelete, deleting
             <span className="mono">{site.hosts.join("、")}</span>
             <span aria-hidden="true">→</span>
             <span className="mono">{site.origin}</span>
-            <span className={TONE_CLASS[status.tone]}>{status.text}</span>
+            <span>{status.text}</span>
           </span>
         }
         actions={
-          <div className="row">
+          <div className="row site-actions">
             <button type="button" className="btn" onClick={onSwitchMode}>
               {site.mode === "enforce" ? "切回观察模式…" : "切换到拦截模式…"}
             </button>

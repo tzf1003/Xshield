@@ -8,10 +8,14 @@ import { type RefObject, useRef } from "react";
 import { api } from "../../api/client.ts";
 import { keys } from "../../api/queries.ts";
 import type { RequestRow } from "../../api/types.ts";
-import { fmtClock, fmtLocalDateTime, fmtMs, fmtUtc } from "../../lib/format.ts";
-import { DecisionTag, JevCell, OutcomeTag } from "../../ui/Badges.tsx";
+import { fmtClock, fmtLocalDateTime, fmtMs, fmtUtc, pct } from "../../lib/format.ts";
+import { CONFIDENCE_LINE } from "../jev/jev-model.ts";
+import { FAILURE_INFO } from "../../lib/vocab.ts";
+import type { JevSummary } from "../../api/types.ts";
+import { DecisionTag, OutcomeTag } from "../../ui/Badges.tsx";
 import { CopyButton, RequestLink } from "../../ui/RequestRef.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
+import "./requests.css";
 
 export type ExtraColumn = "session" | "client" | "host" | "version";
 export const EXTRA_COLUMNS: ReadonlyArray<{ id: ExtraColumn; label: string }> = [
@@ -68,7 +72,7 @@ export function RequestTable({
   };
 
   return (
-    <div className="tbl-wrap" ref={scrollerRef}>
+    <div className="tbl-wrap rq-wrap" ref={scrollerRef}>
       <table className="tbl" aria-label="请求列表" aria-rowcount={rows.length}>
         <thead>
           <tr>
@@ -76,15 +80,15 @@ export function RequestTable({
               时间
             </th>
             {showSite ? (
-              <th scope="col" style={{ width: 90 }}>
+              <th scope="col" className="rq-c-site" style={{ width: 90 }}>
                 站点
               </th>
             ) : null}
-            <th scope="col" style={{ width: 64 }}>
+            <th scope="col" className="rq-c-method" style={{ width: 64 }}>
               方法
             </th>
             <th scope="col">路径</th>
-            <th scope="col" style={{ width: 56 }}>
+            <th scope="col" className="rq-c-status" style={{ width: 56 }}>
               状态
             </th>
             <th scope="col" style={{ width: 118 }}>
@@ -93,10 +97,10 @@ export function RequestTable({
             <th scope="col" style={{ width: 96 }}>
               结论
             </th>
-            <th scope="col" style={{ width: 110 }}>
+            <th scope="col" className="rq-c-jev" style={{ width: 110 }}>
               Jev
             </th>
-            <th scope="col" style={{ width: 80 }}>
+            <th scope="col" className="rq-c-dur" style={{ width: 80 }}>
               耗时
             </th>
             {extras.includes("session") ? (
@@ -119,7 +123,7 @@ export function RequestTable({
                 配置版本
               </th>
             ) : null}
-            <th scope="col" style={{ width: 120 }}>
+            <th scope="col" className="rq-c-id" style={{ width: 120 }}>
               请求 ID
             </th>
             <th scope="col" style={{ width: 36 }}>
@@ -147,25 +151,46 @@ export function RequestTable({
                 <td className="tnum" title={fmtUtc(row.at_millis)}>
                   {showDate ? fmtLocalDateTime(row.at_millis) : fmtClock(row.at_millis)}
                 </td>
-                {showSite ? <td>{row.site ?? <span className="dim">—</span>}</td> : null}
-                <td className="mono small">{row.method}</td>
+                {showSite ? (
+                  <td className="rq-c-site">{row.site ?? <span className="dim">—</span>}</td>
+                ) : null}
+                <td className="mono small rq-c-method">{row.method}</td>
                 <td style={{ maxWidth: 0 }}>
-                  <span className="path" title={row.query ? `${row.path}?${row.query}` : row.path}>
-                    <SafeText text={row.path} />
-                    {row.query ? <span className="query">{`?${row.query}`}</span> : null}
+                  <span className="rq-path-line">
+                    <span className="rq-method mono small">{row.method}</span>
+                    <span
+                      className="path"
+                      title={row.query ? `${row.path}?${row.query}` : row.path}
+                    >
+                      <SafeText text={row.path} />
+                      {row.query ? <span className="query">{`?${row.query}`}</span> : null}
+                    </span>
+                  </span>
+                  {/* The second line: the columns that the container is too narrow for (docs/06 6.8.1). */}
+                  <span className="rq-sub">
+                    {showSite ? <span className="rq-sub-site">{row.site ?? "—"}</span> : null}
+                    <span className="rq-sub-dur tnum">{fmtMs(row.total_ms)}</span>
+                    <span className="rq-sub-id">
+                      <RequestLink id={row.request_id} />
+                      <CopyButton text={row.request_id} />
+                    </span>
+                    <span className="rq-sub-status tnum">{row.status ?? "—"}</span>
+                    <span className="rq-sub-jev">
+                      <JevColumn jev={row.jev} />
+                    </span>
                   </span>
                 </td>
-                <td className="tnum num">{row.status ?? "—"}</td>
+                <td className="tnum num rq-c-status">{row.status ?? "—"}</td>
                 <td>
                   <DecisionTag path={row.decision_path} />
                 </td>
                 <td>
                   <OutcomeTag outcome={row.outcome} />
                 </td>
-                <td>
-                  <JevCell jev={row.jev} />
+                <td className="rq-c-jev">
+                  <JevColumn jev={row.jev} />
                 </td>
-                <td className="tnum num">{fmtMs(row.total_ms)}</td>
+                <td className="tnum num rq-c-dur">{fmtMs(row.total_ms)}</td>
                 {extras.includes("session") ? (
                   <td>
                     {row.session ? (
@@ -194,7 +219,7 @@ export function RequestTable({
                 {extras.includes("version") ? (
                   <td className="tnum">{row.site_version ?? <span className="dim">—</span>}</td>
                 ) : null}
-                <td>
+                <td className="rq-c-id">
                   <span className="row" style={{ gap: 2, flexWrap: "nowrap" }}>
                     <RequestLink id={row.request_id} />
                     <CopyButton text={row.request_id} />
@@ -209,6 +234,42 @@ export function RequestTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/**
+ * The Jev answer of a row (docs/06 6.4.3): the direction and its confidence, 低 when the confidence is
+ * under 70%, or the short name of the failure. The confidence is the smaller of the two top
+ * probabilities (docs/07 7.9.3).
+ */
+function JevColumn({ jev }: { jev: JevSummary | null }) {
+  if (jev === null) return <span className="dim">—</span>;
+  if (jev.failure !== null) {
+    const failure = FAILURE_INFO[jev.failure];
+    return (
+      <span className="jev-cell fail" title={failure.desc}>
+        {failure.short}
+      </span>
+    );
+  }
+  const direction =
+    jev.attack === "ATTACK"
+      ? "攻击"
+      : jev.access === "DENY"
+        ? "越权"
+        : jev.access === "ALLOW" && jev.attack === "BENIGN"
+          ? "放行"
+          : "不确定";
+  const low = jev.confidence !== null && jev.confidence < CONFIDENCE_LINE;
+  return (
+    <span className="jev-cell" title={`访问：${jev.access ?? "—"}，内容：${jev.attack ?? "—"}`}>
+      {direction} {pct(jev.confidence)}
+      {low ? (
+        <span className="jev-low" title="置信度低于 70%">
+          低
+        </span>
+      ) : null}
+    </span>
   );
 }
 

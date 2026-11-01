@@ -47,7 +47,6 @@ export function JevInspector({ detail, requestId, view, doc, hl }: Props) {
   const status = useJevStatus();
   const prompt = usePrompt(jev?.prompt ?? null);
   const [query, setQuery] = useState("");
-  const [wrap, setWrap] = useState(true);
   const [position, setPosition] = useState<{ index: number; total: number } | null>(null);
   const panel = useRef<HTMLDivElement | null>(null);
 
@@ -120,16 +119,6 @@ export function JevInspector({ detail, requestId, view, doc, hl }: Props) {
             {position.total === 0 ? "没有匹配" : `${position.index + 1} / ${position.total}`}
           </span>
         )}
-        {view === "raw" ? (
-          <label className="check small">
-            <input
-              type="checkbox"
-              checked={wrap}
-              onChange={(event) => setWrap(event.target.checked)}
-            />
-            自动换行
-          </label>
-        ) : null}
         {jev.state !== null ? <CopyAction text={jev.state} label="复制 state" /> : null}
         {bodyText !== null ? <CopyAction text={bodyText} label="复制完整请求体" /> : null}
       </div>
@@ -183,7 +172,6 @@ export function JevInspector({ detail, requestId, view, doc, hl }: Props) {
             bodyNote={bodyNote}
             response={jev.response}
             query={query}
-            wrap={wrap}
           />
         ) : null}
         {view === "prompt" ? (

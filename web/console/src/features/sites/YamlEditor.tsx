@@ -5,10 +5,11 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { json } from "@codemirror/lang-json";
 import { yaml } from "@codemirror/lang-yaml";
-import { defaultHighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { type Diagnostic, lintGutter, setDiagnostics } from "@codemirror/lint";
 import { EditorState } from "@codemirror/state";
 import { EditorView, highlightActiveLine, keymap, lineNumbers } from "@codemirror/view";
+import { tags } from "@lezer/highlight";
 import { Segmented } from "antd";
 import { useEffect, useRef, useState } from "react";
 import type { SiteSpec } from "../../api/types.ts";
@@ -18,6 +19,24 @@ import { type SpecText, parseSpecText } from "./spec-model.ts";
 export type YamlFormat = "yaml" | "json";
 
 type Failure = Extract<SpecText, { ok: false }>;
+
+/**
+ * Token colours from the console's own tokens (docs/06 6.5.2). CodeMirror's default style was picked
+ * for a light page and fails 4.5:1 on the dark one, so the tokens here are the ones that pass in both.
+ */
+const HIGHLIGHT = HighlightStyle.define([
+  { tag: tags.propertyName, color: "var(--accent)" },
+  { tag: [tags.comment, tags.meta], color: "var(--ink-2)" },
+  {
+    tag: [tags.punctuation, tags.string, tags.number, tags.bool, tags.null, tags.keyword],
+    color: "var(--ink)",
+  },
+]);
+
+/** The active line keeps the page's own surface tint, so the text on it keeps its contrast. */
+const ACTIVE_LINE = EditorView.theme({
+  ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: "var(--sunken)" },
+});
 
 function CodeHost({
   initialText,
@@ -50,7 +69,8 @@ function CodeHost({
           highlightActiveLine(),
           history(),
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
-          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          syntaxHighlighting(HIGHLIGHT, { fallback: true }),
+          ACTIVE_LINE,
           lintGutter(),
           language,
           EditorView.lineWrapping,
@@ -146,7 +166,7 @@ export function YamlEditor({
         failure={failure}
         onText={handleText}
       />
-      <div className={failure ? "field-error" : "small hint-ok"} role="status" aria-live="polite">
+      <div className={failure ? "field-error" : "small"} role="status" aria-live="polite">
         {failure ? failure.message : "解析正常，改动已进入草稿。"}
       </div>
     </div>
