@@ -31,8 +31,8 @@ RUN apt-get update \
 USER 10001:10001
 
 FROM runtime-base AS edge
-COPY --from=builder /src/target/release/xshield-edge /usr/local/bin/xshield-edge
-ENTRYPOINT ["/usr/local/bin/xshield-edge"]
+COPY --from=builder /src/target/release/xshield-gateway /usr/local/bin/xshield-gateway
+ENTRYPOINT ["/usr/local/bin/xshield-gateway"]
 
 FROM runtime-base AS control
 COPY --from=builder /src/target/release/xshield-control /usr/local/bin/xshield-control
