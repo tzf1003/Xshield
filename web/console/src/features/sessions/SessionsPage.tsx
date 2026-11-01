@@ -44,13 +44,12 @@ export function SessionsPage() {
   const rangeText = scope.range === "custom" ? "这段时间" : `最近 ${RANGE_LABEL[scope.range]}`;
   const rangeLabel =
     scope.range === "custom" ? "自定义时间范围" : `最近 ${RANGE_LABEL[scope.range]}`;
-  const showSite = scope.site === undefined;
   const widerRange = scope.range !== "7d";
   const filtered = flag !== undefined || q.length > 0;
 
   let body: ReactNode;
   if (sessions.isPending) {
-    body = <SessionTableSkeleton showSite={showSite} />;
+    body = <SessionTableSkeleton />;
   } else if (sessions.isError) {
     body = <ErrorBar error={sessions.error} onRetry={() => void sessions.refetch()} />;
   } else if (rows.length === 0) {
@@ -76,7 +75,7 @@ export function SessionsPage() {
       </Empty>
     ) : (
       <Empty title={`${rangeText}没有会话`}>
-        <div>会话由登录请求签发，只有带会话凭证的请求才会出现在这里。</div>
+        <div>会话由登录请求签发；没有登录的流量不产生会话。</div>
         <div className="row">
           <Link to="/system" search={keepScope}>
             查看网关状态
@@ -102,7 +101,7 @@ export function SessionsPage() {
   } else {
     body = (
       <div className={sessions.isFetching ? "stack dimmed" : "stack"}>
-        <SessionTable rows={shown} now={now} showSite={showSite} />
+        <SessionTable rows={shown} now={now} />
         <div className="tbl-foot">
           <span role="status">
             显示 {fmtInt(shown.length)} 个会话

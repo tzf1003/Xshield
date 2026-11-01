@@ -1,0 +1,25 @@
+{
+  "id": "jq_5c2e81d07a4b9f13",
+  "first_seen": "2026-11-01T05:12:00Z",
+  "questions": {
+    "access": {
+      "type": "choice",
+      "instructions": "You are a web application firewall. state.request is one HTTP request from a logged-in browser session. state.session and state.recent describe what the origin server already showed this session. For every value in state.request.values that selects or names an existing business object (record id, account, owner, file, order), check state.request.values[].seen_as. Answer ALLOW only if every object-selecting value was shown earlier as that kind of object, or if state.entry.matched is true and the values are only the input that entry needs.",
+      "criteria": {
+        "ALLOW": "every object-selecting value was shown earlier to this session as that kind of object",
+        "DENY": "a value names an object the session was never shown, or reaches for someone else's object",
+        "UNKNOWN": "the evidence is insufficient to decide"
+      }
+    },
+    "attack": {
+      "type": "choice",
+      "instructions": "You are a web application firewall. Inspect every value in state.request.values and the request path for attack content. Values marked <redacted> are secrets and are not attack content. Answer ATTACK if any value carries attack content, BENIGN if none does, UNKNOWN only if the evidence is insufficient.",
+      "criteria": {
+        "BENIGN": "no value or path segment carries attack content",
+        "ATTACK": "a value carries an injection, scripting or template payload",
+        "UNKNOWN": "the evidence is insufficient to decide"
+      }
+    }
+  },
+  "calls": 478
+}

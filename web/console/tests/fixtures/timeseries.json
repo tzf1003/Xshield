@@ -1,0 +1,302 @@
+{
+  "bucket_ms": 3600000,
+  "since_millis": 1793452800000,
+  "until_millis": 1793539200000,
+  "buckets": [
+    {
+      "at_millis": 1793455200000,
+      "counts": {
+        "bypass": 250,
+        "fast_allow": 115,
+        "cached_allow": 2,
+        "jev_allow": 8,
+        "jev_deny": 2,
+        "no_session": 2
+      }
+    },
+    {
+      "at_millis": 1793458800000,
+      "counts": {
+        "bypass": 259,
+        "fast_allow": 119,
+        "cached_allow": 2,
+        "jev_allow": 9,
+        "jev_deny": 2,
+        "no_session": 2
+      }
+    },
+    {
+      "at_millis": 1793462400000,
+      "counts": {
+        "bypass": 283,
+        "fast_allow": 130,
+        "cached_allow": 2,
+        "jev_allow": 9,
+        "jev_deny": 2,
+        "no_session": 2
+      }
+    },
+    {
+      "at_millis": 1793466000000,
+      "counts": {
+        "bypass": 323,
+        "fast_allow": 149,
+        "cached_allow": 2,
+        "jev_allow": 11,
+        "jev_deny": 2,
+        "no_session": 3
+      }
+    },
+    {
+      "at_millis": 1793469600000,
+      "counts": {
+        "bypass": 375,
+        "fast_allow": 172,
+        "cached_allow": 3,
+        "jev_allow": 12,
+        "jev_deny": 3,
+        "no_session": 3
+      }
+    },
+    {
+      "at_millis": 1793473200000,
+      "counts": {
+        "bypass": 435,
+        "fast_allow": 200,
+        "cached_allow": 3,
+        "jev_allow": 14,
+        "jev_deny": 3,
+        "no_session": 3,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793476800000,
+      "counts": {
+        "bypass": 500,
+        "fast_allow": 230,
+        "cached_allow": 4,
+        "jev_allow": 16,
+        "jev_deny": 3,
+        "jev_unavailable": 1,
+        "no_session": 4,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793480400000,
+      "counts": {
+        "bypass": 565,
+        "fast_allow": 260,
+        "cached_allow": 4,
+        "jev_allow": 19,
+        "jev_deny": 4,
+        "jev_unavailable": 1,
+        "no_session": 5,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793484000000,
+      "counts": {
+        "bypass": 625,
+        "fast_allow": 287,
+        "cached_allow": 5,
+        "jev_allow": 20,
+        "jev_deny": 4,
+        "jev_unavailable": 1,
+        "no_session": 5,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793487600000,
+      "counts": {
+        "bypass": 677,
+        "fast_allow": 311,
+        "cached_allow": 5,
+        "jev_allow": 22,
+        "jev_deny": 5,
+        "jev_unavailable": 1,
+        "no_session": 5,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793491200000,
+      "counts": {
+        "bypass": 717,
+        "fast_allow": 330,
+        "cached_allow": 5,
+        "jev_allow": 23,
+        "jev_deny": 5,
+        "jev_unavailable": 1,
+        "no_session": 6,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793494800000,
+      "counts": {
+        "bypass": 741,
+        "fast_allow": 341,
+        "cached_allow": 5,
+        "jev_allow": 24,
+        "jev_deny": 5,
+        "jev_unavailable": 1,
+        "no_session": 6,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793498400000,
+      "counts": {
+        "bypass": 750,
+        "fast_allow": 345,
+        "cached_allow": 5,
+        "jev_allow": 25,
+        "jev_deny": 5,
+        "jev_unavailable": 1,
+        "no_session": 6,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793502000000,
+      "counts": {
+        "bypass": 741,
+        "fast_allow": 341,
+        "cached_allow": 5,
+        "jev_allow": 24,
+        "jev_deny": 5,
+        "jev_unavailable": 1,
+        "no_session": 6,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793505600000,
+      "counts": {
+        "bypass": 717,
+        "fast_allow": 330,
+        "cached_allow": 5,
+        "jev_allow": 23,
+        "jev_deny": 5,
+        "jev_unavailable": 1,
+        "no_session": 6,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793509200000,
+      "counts": {
+        "bypass": 677,
+        "fast_allow": 311,
+        "cached_allow": 5,
+        "jev_allow": 22,
+        "jev_deny": 5,
+        "jev_unavailable": 1,
+        "no_session": 5,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793512800000,
+      "counts": {
+        "bypass": 625,
+        "fast_allow": 287,
+        "cached_allow": 4,
+        "jev_allow": 21,
+        "jev_deny": 4,
+        "jev_unavailable": 1,
+        "no_session": 5,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793516400000,
+      "counts": {
+        "bypass": 565,
+        "fast_allow": 260,
+        "cached_allow": 4,
+        "jev_allow": 19,
+        "jev_deny": 4,
+        "jev_unavailable": 1,
+        "no_session": 5,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793520000000,
+      "counts": {
+        "bypass": 500,
+        "fast_allow": 230,
+        "cached_allow": 4,
+        "jev_allow": 16,
+        "jev_deny": 3,
+        "jev_unavailable": 1,
+        "no_session": 4,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793523600000,
+      "counts": {
+        "bypass": 435,
+        "fast_allow": 200,
+        "cached_allow": 3,
+        "jev_allow": 14,
+        "jev_deny": 3,
+        "jev_unavailable": 1,
+        "no_session": 3,
+        "body_not_inspectable": 1
+      }
+    },
+    {
+      "at_millis": 1793527200000,
+      "counts": {
+        "bypass": 375,
+        "fast_allow": 172,
+        "cached_allow": 3,
+        "jev_allow": 12,
+        "jev_deny": 3,
+        "no_session": 3
+      }
+    },
+    {
+      "at_millis": 1793530800000,
+      "counts": {
+        "bypass": 323,
+        "fast_allow": 149,
+        "cached_allow": 2,
+        "jev_allow": 11,
+        "jev_deny": 2,
+        "no_session": 3
+      }
+    },
+    {
+      "at_millis": 1793534400000,
+      "counts": {
+        "bypass": 283,
+        "fast_allow": 130,
+        "cached_allow": 2,
+        "jev_allow": 9,
+        "jev_deny": 2,
+        "no_session": 2
+      }
+    },
+    {
+      "at_millis": 1793538000000,
+      "counts": {
+        "bypass": 259,
+        "fast_allow": 119,
+        "cached_allow": 2,
+        "jev_allow": 9,
+        "jev_deny": 2,
+        "no_session": 2
+      }
+    }
+  ],
+  "complete": true,
+  "scanned": 18204
+}

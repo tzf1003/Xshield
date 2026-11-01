@@ -1,0 +1,124 @@
+/* The system page (docs/06 6.4.11). Every class starts with sys- so it cannot collide with another feature
+   folder. Colours are the shared tokens, so both themes and both densities follow the global sheet. */
+
+.sys-section {
+  margin-top: 16px;
+}
+
+.sys-name {
+  font-weight: 600;
+}
+
+.sys-hint {
+  margin: 10px 0 0;
+}
+
+/* Row headers in the matrices and the fixed table are labels, not the sticky column headers of .tbl. */
+.tbl .sys-rowhead {
+  position: static;
+  background: none;
+  height: var(--row-h);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink);
+}
+
+.sys-default {
+  color: var(--ink-3);
+}
+
+.sys-override {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.tbl .sys-note {
+  height: auto;
+  padding: 8px 10px;
+  white-space: normal;
+  max-width: none;
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.sys-matrix .sys-default {
+  font-weight: 400;
+}
+
+/* ------------------------------------------------------------------ gateway details */
+
+/* Compact cells for the mini tables that sit inside a detail row. */
+.tbl.sys-mini td,
+.tbl.sys-mini th {
+  height: auto;
+  padding: 4px 8px;
+  white-space: normal;
+  max-width: none;
+}
+
+/* The detail row's own cell only (child combinator), so the mini tables above keep their padding. */
+.tbl tr.sys-detail > td {
+  height: auto;
+  padding: 12px 14px;
+  white-space: normal;
+  max-width: none;
+}
+
+.sys-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
+.sys-h {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sys-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* ------------------------------------------------------------------ import */
+
+.sys-import {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 760px;
+}
+
+.sys-import-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sys-file {
+  max-width: 100%;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.sys-file::file-selector-button {
+  min-height: var(--control-h);
+  margin-right: 10px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sys-file::file-selector-button:hover {
+  background: var(--sunken);
+}

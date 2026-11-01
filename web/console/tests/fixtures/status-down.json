@@ -1,0 +1,26 @@
+{
+  "gateway": {
+    "light": "down",
+    "edges": {
+      "online": 0,
+      "total": 3
+    },
+    "problems": [
+      {
+        "kind": "partition_missing",
+        "days_ahead": 1
+      }
+    ]
+  },
+  "jev": {
+    "health": "idle",
+    "window_minutes": 5,
+    "calls": 0,
+    "ok": 0,
+    "failures": {},
+    "p50_ms": null,
+    "p95_ms": null,
+    "last_ok_at": "2026-11-01T12:28:00Z",
+    "last_failure": null
+  }
+}

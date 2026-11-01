@@ -1,0 +1,128 @@
+{
+  "sites": [
+    {
+      "name": "emr",
+      "hosts": [
+        "emr.example.com"
+      ],
+      "origin": "http://10.0.0.5:8080",
+      "mode": "enforce",
+      "version": 13,
+      "updated_at": "2026-11-01T13:17:30Z",
+      "observing_since_millis": null,
+      "loaded_version": 12,
+      "edges": [
+        {
+          "edge": "edge-1",
+          "version": 13,
+          "error": null,
+          "loaded_at_millis": 1793539051500
+        },
+        {
+          "edge": "edge-2",
+          "version": 12,
+          "error": null,
+          "loaded_at_millis": 1793532000000
+        },
+        {
+          "edge": "edge-3",
+          "version": 12,
+          "error": null,
+          "loaded_at_millis": 1793532000000
+        }
+      ],
+      "rollout": {
+        "version": 13,
+        "edges_online": 2,
+        "edges_loaded": 1,
+        "edges": [
+          {
+            "edge": "edge-1",
+            "online": true,
+            "loaded_version": 13,
+            "error": null
+          },
+          {
+            "edge": "edge-2",
+            "online": true,
+            "loaded_version": 12,
+            "error": null
+          },
+          {
+            "edge": "edge-3",
+            "online": false,
+            "loaded_version": 12,
+            "error": null
+          }
+        ]
+      },
+      "requests_24h": 9812,
+      "blocked_24h": 21,
+      "would_block_24h": 0,
+      "jev_calls_24h": 412,
+      "suggestions": 0
+    },
+    {
+      "name": "juice",
+      "hosts": [
+        "juice.example.com"
+      ],
+      "origin": "http://10.0.0.9:3000",
+      "mode": "observe",
+      "version": 7,
+      "updated_at": "2026-11-01T12:40:00Z",
+      "observing_since_millis": 1793006400000,
+      "loaded_version": 7,
+      "edges": [
+        {
+          "edge": "edge-1",
+          "version": 7,
+          "error": null,
+          "loaded_at_millis": 1793536802000
+        },
+        {
+          "edge": "edge-2",
+          "version": 7,
+          "error": null,
+          "loaded_at_millis": 1793536803000
+        },
+        {
+          "edge": "edge-3",
+          "version": 7,
+          "error": null,
+          "loaded_at_millis": 1793536803000
+        }
+      ],
+      "rollout": {
+        "version": 7,
+        "edges_online": 2,
+        "edges_loaded": 2,
+        "edges": [
+          {
+            "edge": "edge-1",
+            "online": true,
+            "loaded_version": 7,
+            "error": null
+          },
+          {
+            "edge": "edge-2",
+            "online": true,
+            "loaded_version": 7,
+            "error": null
+          },
+          {
+            "edge": "edge-3",
+            "online": false,
+            "loaded_version": 7,
+            "error": null
+          }
+        ]
+      },
+      "requests_24h": 8392,
+      "blocked_24h": 2,
+      "would_block_24h": 14,
+      "jev_calls_24h": 66,
+      "suggestions": 2
+    }
+  ]
+}

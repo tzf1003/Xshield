@@ -1,0 +1,189 @@
+/* The Jev page (docs/06 6.4.6, 6.5.4). Shared classes (card, chips, tbl, dimmed, linkbtn) come from
+   global.css; these rules only lay out the health card, the three charts and the chip line. */
+
+.jev-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+  margin-bottom: 16px;
+}
+
+.jev-top > .card {
+  min-width: 0;
+}
+
+@media (max-width: 1280px) {
+  .jev-top {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .jev-top > :first-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 1100px) {
+  .jev-top {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.jev-complete-note {
+  margin: -8px 0 12px;
+}
+
+.jev-hourly-row {
+  margin-bottom: 16px;
+}
+
+.jev-hourly {
+  gap: 8px;
+}
+
+/* The shared stacked bars draw in a 600-unit box; capping the width keeps their labels at size. */
+.jev-hourly-chart {
+  max-width: 760px;
+}
+
+.jev-health-head {
+  margin-bottom: 8px;
+}
+
+.jev-health-config {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+/* Histograms: CSS bars so the labels keep their size in a narrow card. */
+.jev-hist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.jev-hist-plot {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  height: 132px;
+  padding-top: 18px;
+  border-bottom: 1px solid var(--axis);
+}
+
+.jev-hist-col {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.jev-hist-bar {
+  display: block;
+  width: 76%;
+  max-width: 22px;
+  background: var(--s1);
+  border-radius: 3px 3px 0 0;
+}
+
+.jev-hist-mark {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px solid var(--ink-3);
+  border-left-style: dashed;
+  pointer-events: none;
+}
+
+.jev-hist-mark.strong {
+  border-left: 1px solid var(--ink-2);
+  border-left-style: solid;
+}
+
+.jev-hist-mark-text {
+  position: absolute;
+  top: 0;
+  left: 4px;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ink-2);
+}
+
+.jev-hist-mark.flip .jev-hist-mark-text {
+  left: auto;
+  right: 4px;
+}
+
+.jev-hist-axis {
+  position: relative;
+  height: 16px;
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.jev-hist-tick {
+  position: absolute;
+  top: 2px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.jev-hist-tick.start {
+  transform: none;
+}
+
+.jev-hist-tick.end {
+  transform: translateX(-100%);
+}
+
+.jev-hist-foot {
+  margin-top: 8px;
+}
+
+.jev-hist-table {
+  font-size: 12px;
+}
+
+.jev-hist-table td,
+.jev-hist-table th {
+  height: 28px;
+}
+
+/* The chip line and the condition line above the list. */
+.jev-chips {
+  margin-bottom: 10px;
+}
+
+.jev-chips .chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.jev-condition {
+  margin-bottom: 10px;
+}
+
+.jev-condition-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(680px, 100%);
+}
+
+.jev-condition-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The chip group is a fieldset for its name; reset the browser's frame so it reads as the chip line. */
+.jev-chips {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}

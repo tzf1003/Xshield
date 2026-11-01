@@ -1,0 +1,204 @@
+{
+  "summary": {
+    "id": 91103,
+    "request_id": "req_01a1971a07e079639a823d4257b43172",
+    "at_millis": 1793536428000,
+    "site": "juice",
+    "site_version": 6,
+    "method": "POST",
+    "host": "juice.example.com",
+    "path": "/rest/user/login",
+    "query": null,
+    "status": 200,
+    "decision_path": "jev_allow",
+    "outcome": "allowed",
+    "session": "b19e0c7a53d2f408",
+    "context": "address",
+    "client": "192.168.1.20",
+    "total_ms": 640,
+    "jev": {
+      "access": "ALLOW",
+      "attack": "BENIGN",
+      "confidence": 0.97,
+      "ms": 410,
+      "failure": null
+    }
+  },
+  "edge": "edge-1",
+  "trace": {
+    "v": 1,
+    "entry": "/rest/user/login",
+    "bypass": null,
+    "refused": null,
+    "values_truncated": false,
+    "values": [
+      {
+        "at": "path[0]",
+        "key": null,
+        "value": "rest",
+        "kind": "route",
+        "inert": true,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "path[1]",
+        "key": null,
+        "value": "user",
+        "kind": "route",
+        "inert": true,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "path[2]",
+        "key": null,
+        "value": "login",
+        "kind": "route",
+        "inert": true,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "body.email",
+        "key": "email",
+        "value": "user@example.com",
+        "kind": "input",
+        "inert": false,
+        "seen": false,
+        "verified": false,
+        "sources": []
+      },
+      {
+        "at": "body.password",
+        "key": "password",
+        "value": "<redacted>",
+        "kind": "input",
+        "inert": false,
+        "seen": false,
+        "verified": false,
+        "sources": [],
+        "len": 8
+      }
+    ],
+    "session": {
+      "age_seconds": 48,
+      "known_values": 0,
+      "entries_passed": [
+        {
+          "path": "/rest/products/search",
+          "at_millis": 1793536380000,
+          "request_id": "req_01a197194c6078179758c5f40c3b98ce"
+        },
+        {
+          "path": "/api/Products",
+          "at_millis": 1793536410000,
+          "request_id": "req_01a19719c190705d8e8b52e1adc67763"
+        },
+        {
+          "path": "/rest/user/login",
+          "at_millis": 1793536428000,
+          "request_id": "req_01a1971a07e079639a823d4257b43172"
+        }
+      ],
+      "recent": [
+        {
+          "method": "GET",
+          "path": "/rest/products/search",
+          "status": 200,
+          "request_id": "req_01a197194c6078179758c5f40c3b98ce",
+          "at_millis": 1793536380000
+        },
+        {
+          "method": "GET",
+          "path": "/api/Products",
+          "status": 200,
+          "request_id": "req_01a19719c190705d8e8b52e1adc67763",
+          "at_millis": 1793536410000
+        }
+      ]
+    },
+    "cache_source": null,
+    "timing": {
+      "total_ms": 640,
+      "judge_ms": 412,
+      "origin_ms": 225
+    },
+    "response": {
+      "content_type": "application/json",
+      "bytes": 320,
+      "observed": "json",
+      "skip": null,
+      "values": 4,
+      "new_values": 4,
+      "fields": [
+        [
+          "token",
+          1
+        ]
+      ],
+      "issued_session": "7c1e9a40d2b35f61",
+      "entry_passed": true,
+      "after_would_block": false
+    },
+    "upstream_error": null
+  },
+  "jev": {
+    "state": "{\"entry\":{\"matched\":true},\"session\":{\"age_seconds\":48,\"entries_passed\":[\"/rest/products/search\",\"/api/Products\",\"/rest/user/login\"]},\"recent\":[{\"method\":\"GET\",\"path\":\"/rest/products/search\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products\",\"status\":200}],\"request\":{\"method\":\"POST\",\"path\":\"/rest/user/login\",\"values\":[{\"at\":\"body.email\",\"kind\":\"input\",\"value\":\"user@example.com\",\"seen_as\":[]},{\"at\":\"body.password\",\"kind\":\"input\",\"value\":\"<redacted>\",\"seen_as\":[]}]}}",
+    "prompt": "jq_5c2e81d07a4b9f13",
+    "model": "typesafe-ai/jev",
+    "route": "gateway",
+    "timeout_ms": 2000,
+    "trim": 0,
+    "request_bytes": 2210,
+    "http_status": 200,
+    "response": "{\"access\":{\"ALLOW\":0.9712,\"DENY\":0.021,\"UNKNOWN\":0.0078},\"attack\":{\"BENIGN\":0.981,\"ATTACK\":0.015,\"UNKNOWN\":0.004}}",
+    "usage": {
+      "input_tokens": 540,
+      "output_tokens": 12
+    },
+    "access": {
+      "ALLOW": 0.9712,
+      "DENY": 0.021,
+      "UNKNOWN": 0.0078
+    },
+    "attack": {
+      "BENIGN": 0.981,
+      "ATTACK": 0.015,
+      "UNKNOWN": 0.004
+    },
+    "conclusion": "allow",
+    "millis": 410,
+    "failure": null
+  },
+  "neighbors": {
+    "prev": "req_01a19719c190705d8e8b52e1adc67763",
+    "next": null
+  },
+  "sources": {
+    "req_01a197194c6078179758c5f40c3b98ce": {
+      "method": "GET",
+      "path": "/rest/products/search",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536380000
+    },
+    "req_01a19719c190705d8e8b52e1adc67763": {
+      "method": "GET",
+      "path": "/api/Products",
+      "status": 200,
+      "decision_path": "fast_allow",
+      "at_millis": 1793536410000
+    },
+    "req_01a1971a07e079639a823d4257b43172": {
+      "method": "POST",
+      "path": "/rest/user/login",
+      "status": 200,
+      "decision_path": "jev_allow",
+      "at_millis": 1793536428000
+    }
+  }
+}

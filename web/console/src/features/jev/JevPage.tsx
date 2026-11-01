@@ -16,7 +16,7 @@ import { JevHealthCard } from "./JevHealthCard.tsx";
 import { type HistMarker, type HistTick, JevHistogram } from "./JevHistogram.tsx";
 import { JevHourly } from "./JevHourly.tsx";
 import { JevRequestList } from "./JevRequestList.tsx";
-import { CONFIDENCE_LINE, planJevList } from "./jev-model.ts";
+import { CONFIDENCE_LINE, lowConfidenceCount, planJevList } from "./jev-model.ts";
 import "./jev.css";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -130,13 +130,16 @@ export function JevPage() {
         footnote={
           <>
             p50 {fmtMs(data.p50_ms)} · p95 {fmtMs(data.p95_ms)}
-            {beyond ? " · 站点超时超出图的范围" : ""}
+            {beyond && siteTimeout !== null
+              ? ` · 站点超时 ${fmtInt(siteTimeout)} ms，超出图的范围`
+              : ""}
           </>
         }
       />
     );
 
     const confCounts = data.confidence_histogram.counts;
+    const lowConfidence = lowConfidenceCount(data);
     confidence = (
       <JevHistogram
         title="置信度分布"
@@ -148,9 +151,9 @@ export function JevPage() {
           { at: confCounts.length, text: "1.0" },
         ]}
         markers={[{ at: Math.round(CONFIDENCE_LINE * 10), text: "70%", strong: true }]}
-        summary={`置信度直方图，共 ${fmtInt(data.calls)} 次调用，低于 70% 的 ${fmtInt(data.low_confidence)} 次`}
+        summary={`置信度直方图，共 ${fmtInt(data.calls)} 次调用，低于 70% 的 ${fmtInt(lowConfidence)} 次`}
         dimmed={dimmed}
-        footnote={<>低于 70%：{fmtInt(data.low_confidence)} 次</>}
+        footnote={<>低于 70%：{fmtInt(lowConfidence)} 次</>}
       />
     );
 

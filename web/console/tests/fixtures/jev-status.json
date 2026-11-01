@@ -1,0 +1,22 @@
+{
+  "health": "ok",
+  "window_minutes": 5,
+  "calls": 42,
+  "ok": 42,
+  "failures": {},
+  "p50_ms": 540,
+  "p95_ms": 910,
+  "last_ok_at": "2026-11-01T13:17:30Z",
+  "last_failure": {
+    "at": "2026-11-01T13:02:00Z",
+    "failure": "JEV_TIMEOUT",
+    "site": "emr"
+  },
+  "config": {
+    "route": "gateway",
+    "endpoint_host": "ai-gateway.vercel.sh",
+    "model": "typesafe-ai/jev",
+    "default_timeout_ms": 2000,
+    "prompt": "jq_5c2e81d07a4b9f13"
+  }
+}

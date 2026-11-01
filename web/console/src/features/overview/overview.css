@@ -1,0 +1,219 @@
+/* The overview (docs/06 6.4.2). Every class starts with ov- so it cannot collide with another feature
+   folder. Colours are the shared tokens, so both themes and both densities follow the global sheet. */
+
+.ov-section {
+  margin-top: 16px;
+}
+
+.ov-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.ov-empty-links {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------------ needs attention */
+
+.ov-attn {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ov-attn-row {
+  margin: 0;
+}
+
+.ov-level {
+  flex: none;
+  min-width: 60px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.ov-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.ov-btn {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.ov-btn:hover {
+  text-decoration: none;
+}
+
+/* ------------------------------------------------------------------ hourly chart */
+
+.ov-trend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ov-trend-plot {
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  height: 160px;
+  border-bottom: 1px solid var(--axis);
+}
+
+.ov-trend-col {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 2px;
+  max-width: 36px;
+  display: flex;
+  flex-direction: column-reverse;
+}
+
+.ov-seg {
+  display: block;
+  flex: none;
+  border-radius: 2px;
+}
+
+.ov-seg:hover {
+  filter: brightness(1.08);
+}
+
+.ov-seg:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ov-seg-s1 {
+  background: var(--s1);
+}
+
+.ov-seg-s2 {
+  background: var(--s2);
+}
+
+.ov-seg-s3 {
+  background: var(--s3);
+}
+
+.ov-seg-neutral {
+  background: var(--neutral-seg);
+}
+
+.ov-tip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  min-width: 160px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
+}
+
+.ov-tip span {
+  display: block;
+  color: var(--ink-2);
+}
+
+.ov-trend-col:hover .ov-tip,
+.ov-trend-col:focus-within .ov-tip {
+  display: block;
+}
+
+.ov-trend-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.tbl .ov-rowhead {
+  position: static;
+  background: none;
+  height: var(--row-h);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------------------ sites */
+
+.ov-sites {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ov-site {
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+
+.ov-site:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.ov-site-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ov-site-name {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.ov-rollout {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.ov-rollout .dot {
+  margin-right: 4px;
+  vertical-align: 1px;
+}
+
+.ov-site-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+/* ------------------------------------------------------------------ recent blocks */
+
+.ov-judge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}

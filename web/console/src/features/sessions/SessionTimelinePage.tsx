@@ -80,7 +80,7 @@ function Timeline({ label }: { label: string }) {
     !rows.some((row) => row.request_id === at);
   const credential = credentialOf(site.data?.spec.session);
 
-  let issuedBy: ReactNode = <span className="dim">签发请求已超过保留期</span>;
+  let issuedBy: ReactNode = <span className="dim">签发它的请求不在保留期内</span>;
   if (summary?.issued_by) {
     if (issuer !== undefined && isRequestId(issuer.request_id)) {
       issuedBy = (
@@ -164,7 +164,10 @@ function Timeline({ label }: { label: string }) {
               {fmtInt(rows.reduce((sum, row) => sum + (row.learned ?? 0), 0))}
             </span>
             <span className="small dim">
-              累计学到的值，随时间增长{timeline.hasNextPage ? "（按已加载的请求计算）" : ""}
+              累计学到的值，随时间增长
+              {timeline.hasNextPage || only !== "judged"
+                ? "（只计算已加载且符合“只看”的请求）"
+                : ""}
             </span>
           </div>
           <div className="toolbar-note">绕过请求不识别会话，不在这里显示。</div>

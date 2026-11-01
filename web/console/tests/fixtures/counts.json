@@ -1,0 +1,23 @@
+{
+  "total": 49,
+  "by_outcome": {
+    "blocked": 11,
+    "allowed": 32,
+    "unjudged": 1,
+    "would_block": 5
+  },
+  "by_decision_path": {
+    "unknown_site": 3,
+    "fast_allow": 24,
+    "jev_allow": 2,
+    "jev_unavailable": 2,
+    "bypass": 5,
+    "no_session": 6,
+    "cached_allow": 1,
+    "jev_deny": 4,
+    "body_not_inspectable": 2
+  },
+  "jev_calls": 8,
+  "complete": true,
+  "scanned": 49
+}

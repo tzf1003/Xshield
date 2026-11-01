@@ -1,0 +1,53 @@
+{
+  "window_hours": 24,
+  "rows": 548,
+  "groups": 120,
+  "complete": true,
+  "changes": [
+    {
+      "kind": "no_session_to_entry",
+      "count": 312,
+      "top": [
+        [
+          "GET",
+          "/rest/admin/application-configuration",
+          312
+        ]
+      ],
+      "sample": "req_01a1971fb50073a59298767186c1a22f"
+    },
+    {
+      "kind": "judged_to_bypass",
+      "count": 892,
+      "would_block": 12,
+      "top": [
+        [
+          "GET",
+          "/assets/i18n/en.json",
+          401
+        ]
+      ],
+      "sample": "req_01a19728dcc071aab225b9e0f5d7b63f"
+    },
+    {
+      "kind": "jev_timeout",
+      "count": 3,
+      "detail": {
+        "old_ms": 2000,
+        "new_ms": 1000
+      }
+    }
+  ],
+  "patterns": {
+    "entries": {
+      "/rest/user/login": 41,
+      "/rest/admin/application-configuration": 312
+    },
+    "bypass": {
+      "/assets/*": 892
+    }
+  },
+  "warnings": [
+    "SESSION_CHANGED"
+  ]
+}
