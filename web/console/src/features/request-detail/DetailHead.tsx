@@ -3,8 +3,8 @@
 // same session.
 
 import { Link } from "@tanstack/react-router";
-import type { DetailSearch } from "../../app/search-schema.ts";
 import { keepScope } from "../../app/scope.ts";
+import { validateDetail } from "../../app/search-schema.ts";
 import type { RequestDetail, TraceValue } from "../../api/types.ts";
 import { explainRecord } from "../../lib/explain.ts";
 import { fmtElapsed, fmtLocalDateTime, fmtMs, fmtUtc } from "../../lib/format.ts";
@@ -15,14 +15,19 @@ import { CopyButton } from "../../ui/RequestRef.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
 import { REDACTED } from "./detail-model.ts";
 
-/** The search of a neighbour link: the scope and the tab stay, the highlight of this request does not. */
-export function neighborSearch(previous: DetailSearch): DetailSearch {
-  return { ...keepScope(previous), tab: previous.tab, jev_view: previous.jev_view };
+/**
+ * The search of a neighbour link: the scope and the tab stay, the highlight of this request does not.
+ * Typed on the raw search, as keepScope is: a Link without `from` hands its callback the root route's
+ * search, so a callback typed on DetailSearch does not fit. The fields are validated here instead.
+ */
+export function neighborSearch(previous: Record<string, unknown>) {
+  const detail = validateDetail(previous);
+  return { ...keepScope(previous), tab: detail.tab, jev_view: detail.jev_view };
 }
 
 /** The search of a session link that opens the timeline on this request (docs/06 6.4.4). */
 export function timelineSearch(requestId: string) {
-  return (previous: DetailSearch) => ({ ...keepScope(previous), at: requestId });
+  return (previous: Record<string, unknown>) => ({ ...keepScope(previous), at: requestId });
 }
 
 type QueryPair = { at: number; key: string; value: string | null };
