@@ -108,12 +108,49 @@ pub struct Seen {
 }
 
 impl Seen {
-    /// Whether the value is safe to fast-allow: long, or seen under an id field.
+    /// Whether the value is safe to fast-allow for a request to `path`: long,
+    /// or seen under an id field of the same kind of object. Short values
+    /// collide across unrelated objects (basket 1, product 1), so they only
+    /// count when the origin field or the request that showed them names the
+    /// same kind of object as `path`.
     #[must_use]
-    pub fn is_specific(&self, value: &str) -> bool {
-        value.chars().count() >= LONG_VALUE_CHARS
-            || self.origins.iter().any(|origin| is_id_like(&origin.field))
+    pub fn is_specific(&self, value: &str, path: &str) -> bool {
+        if value.chars().count() >= LONG_VALUE_CHARS {
+            return true;
+        }
+        let wanted = kind_words(path);
+        self.origins.iter().any(|origin| {
+            is_id_like(&origin.field) && {
+                let shown = kind_words(&format!(
+                    "{} {}",
+                    origin
+                        .field
+                        .rsplit_once('.')
+                        .map_or("", |(parent, _)| parent),
+                    origin.request.split_once(' ').map_or("", |(_, path)| path)
+                ));
+                wanted
+                    .iter()
+                    .any(|word| shown.iter().any(|other| related(word, other)))
+            }
+        })
     }
+}
+
+const GENERIC_WORDS: [&str; 8] = ["api", "rest", "v1", "v2", "v3", "data", "value", "id"];
+
+/// Lower-cased alphabetic words of a path, minus plural endings and generic
+/// route prefixes: `/api/Addresss/7` gives `address`.
+fn kind_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|word| word.len() >= 3)
+        .map(|word| word.to_ascii_lowercase().trim_end_matches('s').to_owned())
+        .filter(|word| word.len() >= 3 && !GENERIC_WORDS.contains(&word.as_str()))
+        .collect()
+}
+
+fn related(left: &str, right: &str) -> bool {
+    left.contains(right) || right.contains(left)
 }
 
 /// One remembered request.
@@ -367,8 +404,13 @@ mod tests {
         );
         let seen = session.lookup(&key, "7").unwrap();
         assert_eq!(seen.origins[0].field, "id");
-        assert!(seen.is_specific("7"));
-        assert!(!session.lookup(&key, "8").unwrap().is_specific("8"));
+        assert!(seen.is_specific("7", "/api/patients/7"));
+        assert!(
+            !session
+                .lookup(&key, "8")
+                .unwrap()
+                .is_specific("8", "/api/patients/8")
+        );
         assert!(session.lookup(&key, "9").is_none());
     }
 
@@ -380,8 +422,32 @@ mod tests {
                 request: "GET /x".into(),
             }],
         };
-        assert!(seen.is_specific("P-0000042"));
-        assert!(!seen.is_specific("alice"));
+        assert!(seen.is_specific("P-0000042", "/x"));
+        assert!(!seen.is_specific("alice", "/x"));
+    }
+
+    #[test]
+    fn short_ids_only_count_for_the_same_kind_of_object() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(&key, "GET /api/Deliverys", &[response("id", "1")]);
+        session.remember(
+            &key,
+            "GET /rest/basket/22",
+            &[response("BasketItem.id", "9"), response("BasketId", "22")],
+        );
+        let delivery = session.lookup(&key, "1").unwrap();
+        assert!(delivery.is_specific("1", "/api/Deliverys/1"));
+        assert!(!delivery.is_specific("1", "/rest/basket/1"));
+        let item = session.lookup(&key, "9").unwrap();
+        assert!(item.is_specific("9", "/api/BasketItems/9"));
+        assert!(
+            session
+                .lookup(&key, "22")
+                .unwrap()
+                .is_specific("22", "/rest/basket/22/checkout")
+        );
     }
 
     #[test]

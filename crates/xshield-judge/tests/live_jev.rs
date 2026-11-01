@@ -405,6 +405,9 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
             case.name, blocked, case.expect_block, record.decision_path, record.outcome, detail
         );
         if blocked != case.expect_block {
+            if let Some(jev) = &record.jev {
+                println!("  state sent: {}", jev.state);
+            }
             wrong.push(case.name);
         }
         assert!(
@@ -417,4 +420,137 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
         wrong.is_empty(),
         "verdicts differ from the expectation: {wrong:?}"
     );
+}
+
+/// The Juice Shop checkout flow recorded on the Windows trial (docs/04 section
+/// 4.5): camel-case route names, small numeric ids and card fields that the
+/// first trial answered DENY for although every id had been shown. The
+/// checkout POST itself is left out: the model still answers DENY at about
+/// 0.55 because `paymentId` 7 was shown only as a card id (docs/04 section 4.5).
+#[tokio::test]
+#[ignore = "needs XSHIELD_JEV_API_KEY and network access"]
+async fn live_juice_shop_checkout_flow() {
+    let judge = Judge::new(
+        ContextKey::new(vec![5; 32]),
+        JevClient::from_environment().expect("Jev configuration"),
+    );
+    let site = SiteSpec::from_json(
+        r#"{"name":"juice","hosts":["juice.test"],"origin":"http://o:1","session":{"cookie":"token"},
+            "entries":["/","/rest/user/login","/rest/products/search"],
+            "bypass":["/assets/*"],"mode":"enforce"}"#,
+    )
+    .expect("site");
+    let observe = |path: &'static str, body: &'static [u8], now_ms: u64| {
+        judge.observe(
+            &site,
+            &Observation {
+                credential: Some("tokenA"),
+                issued_credential: None,
+                method: "GET",
+                path,
+                status: 200,
+                content_type: Some("application/json"),
+                body,
+                now_ms,
+            },
+        );
+    };
+    observe(
+        "/rest/basket/22",
+        br#"{"status":"success","data":{"id":22,"coupon":null,"UserId":24,"Products":[{"id":1,"name":"Apple Juice (1000ml)","price":1.99,"BasketItem":{"id":9,"quantity":1,"BasketId":22,"ProductId":1}}]}}"#,
+        1_000,
+    );
+    observe(
+        "/api/Quantitys/",
+        br#"{"status":"success","data":[{"ProductId":1,"id":1,"quantity":138},{"ProductId":2,"id":2,"quantity":8}]}"#,
+        1_001,
+    );
+    observe(
+        "/api/Addresss",
+        br#"{"status":"success","data":[{"id":7,"fullName":"Test User","zipCode":"10001","city":"NYC","UserId":24}]}"#,
+        1_002,
+    );
+    observe(
+        "/api/Deliverys",
+        br#"{"status":"success","data":[{"id":1,"name":"One Day Delivery","price":0.99,"eta":1},{"id":2,"name":"Fast Delivery","price":0.5,"eta":3}]}"#,
+        1_003,
+    );
+    observe(
+        "/api/Cards",
+        br#"{"status":"success","data":[{"id":7,"fullName":"Test User","cardNum":4111111111111111}]}"#,
+        1_004,
+    );
+    let cases = [
+        get(
+            "address by shown id",
+            "/api/Addresss/7",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get(
+            "delivery by shown id",
+            "/api/Deliverys/1",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get(
+            "card by shown id",
+            "/api/Cards/7",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get(
+            "basket item by shown id",
+            "/api/BasketItems/9",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        post(
+            "add card form",
+            "/api/Cards/",
+            r#"{"fullName":"Test User","cardNum":4111111111111111,"expMonth":2,"expYear":2099}"#,
+            Some("tokenA"),
+            false,
+        ),
+        post(
+            "neutral key names another account",
+            "/rest/wallet/transfer",
+            r#"{"to":"user-1042","amount":5}"#,
+            Some("tokenA"),
+            true,
+        ),
+        get(
+            "basket of someone else",
+            "/rest/basket/1",
+            None,
+            Some("tokenA"),
+            true,
+        ),
+        get(
+            "address never shown",
+            "/api/Addresss/3",
+            None,
+            Some("tokenA"),
+            true,
+        ),
+        get(
+            "card never shown",
+            "/api/Cards/12",
+            None,
+            Some("tokenA"),
+            true,
+        ),
+        post(
+            "checkout foreign basket",
+            "/rest/basket/1/checkout",
+            r#"{"couponData":"bnVsbA==","orderDetails":{"paymentId":"7","addressId":"7","deliveryMethodId":"1"}}"#,
+            Some("tokenA"),
+            true,
+        ),
+    ];
+    run(&judge, &site, &cases, 2_000).await;
 }

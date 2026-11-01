@@ -59,6 +59,7 @@ v4 目标状态必需的环境变量只有这些（TLS 多证书、PROXY 协议�
 | `AI_GATEWAY_API_KEY` | Jev 调用凭证 |
 | `XSHIELD_JEV_ENDPOINT` / `XSHIELD_JEV_MODEL` | 可选：Jev 调用地址和线上模型名，换私有部署模型时设置（新增，默认 Vercel AI Gateway）。地址必须是 https，回环地址可用 http |
 | `XSHIELD_JEV_ROUTE` / `XSHIELD_JEV_API_KEY` | 可选：直连 TypeSafe |
+| `XSHIELD_JEV_TIMEOUT_MS` | 可选：单次 Jev 调用超时，100 到 30000 毫秒，默认 2000；到模型服务链路慢时调大 |
 
 v3 代码目前读取 109 个 `XSHIELD_*` 变量，逐个的去留见 [05.3](05-v3-removal.md#53-环境变量去留)。
 

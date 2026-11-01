@@ -63,6 +63,25 @@ pub fn is_id_like(field: &str) -> bool {
         .any(|suffix| lower.ends_with(suffix))
 }
 
+/// Whether a request value sits where an object reference would: a path
+/// segment, or a field whose name reads like an id, an owner or a file.
+#[must_use]
+pub fn is_reference_position(at: &str, key: Option<&str>) -> bool {
+    if at.starts_with("path[") {
+        return true;
+    }
+    key.is_some_and(|key| {
+        let lower = key.to_ascii_lowercase();
+        is_id_like(key)
+            || is_identity_key(key)
+            || [
+                "file", "path", "doc", "record", "order", "share", "token", "basket", "item",
+            ]
+            .iter()
+            .any(|word| lower.contains(word))
+    })
+}
+
 fn is_identity_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     [
@@ -90,9 +109,23 @@ fn is_paging_key(key: &str) -> bool {
 
 fn is_word(value: &str) -> bool {
     let mut bytes = value.bytes();
-    value.len() <= 24
+    value.len() <= 40
         && bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
         && bytes.all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte == b'-')
+}
+
+/// A path segment made only of letters (`api`, `Addresss`, `BasketItems`).
+/// Before another segment it is a route name; as the last segment it may be
+/// an object name (`/users/Alice`), so only lowercase words are inert there.
+fn is_route_word(value: &str) -> bool {
+    value.len() <= 32
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || byte == b'_' || byte == b'-')
 }
 
 fn inert_value(key: Option<&str>, value: &str) -> bool {
@@ -172,13 +205,14 @@ pub fn extract_request(
     body: &[u8],
 ) -> ExtractedRequest {
     let mut out = ExtractedRequest::default();
-    for (index, segment) in path.split('/').filter(|part| !part.is_empty()).enumerate() {
-        push(
-            &mut out,
-            format!("path[{index}]"),
-            None,
-            percent_decode(segment, false),
-        );
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    for (index, segment) in segments.iter().enumerate() {
+        let value = percent_decode(segment, false);
+        let route = index + 1 < segments.len() && is_route_word(&value);
+        push(&mut out, format!("path[{index}]"), None, value);
+        if let Some(last) = out.values.last_mut().filter(|_| route) {
+            last.inert = true;
+        }
     }
     if let Some(query) = query {
         pairs(&mut out, "query", query);
@@ -317,7 +351,7 @@ pub fn extract_response(content_type: Option<&str>, body: &[u8]) -> Vec<Response
     match kind.as_str() {
         "application/json" => {
             if let Ok(json) = serde_json::from_slice::<Value>(body) {
-                walk_response(&mut out, &json, "value", 0);
+                walk_response(&mut out, &json, "", "value", 0);
             }
         }
         "text/html" | "application/xhtml+xml" => {
@@ -344,23 +378,55 @@ fn add(out: &mut Vec<ResponseValue>, field: &str, value: String) {
     }
 }
 
-fn walk_response(out: &mut Vec<ResponseValue>, json: &Value, field: &str, depth: usize) {
+/// Generic wrapper keys that say nothing about the kind of object inside.
+fn is_wrapper_key(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "data"
+            | "value"
+            | "items"
+            | "results"
+            | "result"
+            | "response"
+            | "rows"
+            | "list"
+            | "records"
+    )
+}
+
+/// `BasketItem.id` for an identifier nested in a named object, so the model
+/// and the specificity check can tell a basket id from a product id.
+fn qualified(parent: &str, field: &str) -> String {
+    if is_id_like(field) && !parent.is_empty() && !is_wrapper_key(parent) {
+        format!("{parent}.{field}")
+    } else {
+        field.to_owned()
+    }
+}
+
+fn walk_response(
+    out: &mut Vec<ResponseValue>,
+    json: &Value,
+    parent: &str,
+    field: &str,
+    depth: usize,
+) {
     if depth > JSON_DEPTH_MAX {
         return;
     }
     match json {
         Value::Object(map) => {
             for (name, inner) in map {
-                walk_response(out, inner, name, depth + 1);
+                walk_response(out, inner, field, name, depth + 1);
             }
         }
         Value::Array(items) => {
             for inner in items {
-                walk_response(out, inner, field, depth + 1);
+                walk_response(out, inner, parent, field, depth + 1);
             }
         }
-        Value::String(text) => add(out, field, text.clone()),
-        Value::Number(number) => add(out, field, number.to_string()),
+        Value::String(text) => add(out, &qualified(parent, field), text.clone()),
+        Value::Number(number) => add(out, &qualified(parent, field), number.to_string()),
         Value::Bool(_) | Value::Null => {}
     }
 }
@@ -434,6 +500,28 @@ mod tests {
                 ("path[2]", "8", false)
             ]
         );
+    }
+
+    #[test]
+    fn camel_case_route_names_are_inert_but_ids_are_not() {
+        let request = extract_request("/api/BasketItems/9", None, None, b"");
+        assert_eq!(
+            values(&request),
+            vec![
+                ("path[0]", "api", true),
+                ("path[1]", "BasketItems", true),
+                ("path[2]", "9", false)
+            ]
+        );
+        let request = extract_request("/rest/user/'%20OR%201=1", None, None, b"");
+        assert!(request.values.iter().any(|value| !value.inert));
+        // The last segment may be an object name, and hyphenated ids are ids.
+        let request = extract_request("/rest/admin/application-configuration", None, None, b"");
+        assert!(request.values.iter().all(|value| value.inert));
+        let request = extract_request("/api/users/Alice", None, None, b"");
+        assert!(!request.values[2].inert);
+        let request = extract_request("/api/patients/patient-S-shared", None, None, b"");
+        assert!(!request.values[2].inert);
     }
 
     #[test]
