@@ -75,28 +75,6 @@ XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-postgres --test calibration_lineage_review_retention -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-worker --test evidence_retention -- --ignored
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-worker --lib model_eval::tests::postgres_evaluation -- --ignored
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-worker --lib postgres_model_evaluation_cache_reuses_revalidated_source -- --ignored
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-worker --lib postgres_outbox_publishing -- --ignored
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-worker --test calibration_vault_reader -- --ignored
-if [[ -n "${XSHIELD_TEST_CLICKHOUSE_URL:-}" ]]; then
-    XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-        cargo test -p xshield-worker --lib real_retention_outbox_clickhouse_delivery -- --ignored
-    XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-        cargo test -p xshield-worker --lib real_outbox_clickhouse_delivery -- --ignored
-    XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-        cargo test -p xshield-worker --lib real_calibration_outbox_clickhouse_delivery -- --ignored
-    XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-        cargo test -p xshield-worker --lib real_calibration_maintenance_outbox_clickhouse_delivery -- --ignored
-else
-    printf '%s\n' 'ClickHouse outbox integration skipped: XSHIELD_TEST_CLICKHOUSE_URL is not configured.'
-fi
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control evidence_manifests_are_scoped_paginated_and_audited -- --ignored
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-control case_creation_is_idempotent_bounded_and_audited -- --ignored

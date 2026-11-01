@@ -809,7 +809,7 @@ fn sensor_observations_are_client_claims_that_authorize_nothing() {
 }
 
 #[test]
-fn only_the_gateway_families_are_claimed_and_never_from_the_outbox() {
+fn only_the_gateway_families_are_claimed() {
     for value in [
         enforced_pass(),
         encoded_pass(),
@@ -822,17 +822,6 @@ fn only_the_gateway_families_are_claimed_and_never_from_the_outbox() {
         let bytes = serde_json::to_vec(&value).unwrap();
         let wire: WireEvent = serde_json::from_slice(&bytes).unwrap();
         assert!(supports(&wire), "{}", value["event_type"]);
-        // The outbox is a different producer contract: naming a journal-only
-        // type there must stay unsupported.
-        let outbox = IndexRow::parse_outbox(
-            &bytes,
-            &EventId::parse(EVENT_ID).unwrap(),
-            7,
-            BOOT,
-            "0".repeat(64),
-            TimeDelta::days(30),
-        );
-        assert!(matches!(outbox, Err(PublishError::UnsupportedEventType)));
     }
     // Stages that keep the generic shape stay with the generic parser.
     let generic = event(

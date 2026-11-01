@@ -573,10 +573,6 @@
       "status": "partial",
       "covered_by": [
         {
-          "path": "crates/xshield-worker/src/model_eval/wire.rs",
-          "test": "noul_has_its_own_primitive_and_absent_confidence_semantics"
-        },
-        {
           "path": "crates/xshield-worker/src/search.rs",
           "test": "model_call_query_distinguishes_partial_pending_and_presend_failure"
         },
@@ -605,22 +601,7 @@
         "模型使用模板+检索+工具结果+预算裁剪"
       ],
       "expected": "保存最终送达的实际逻辑输入和来源引用，裁剪明示",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/model_eval/tests.rs",
-          "test": "postgres_evaluation_captures_actual_io_and_dependency_failures"
-        },
-        {
-          "path": "crates/xshield-worker/src/model_eval/tests.rs",
-          "test": "postgres_evaluation_score_preserves_gateway_evidence_and_failure_terminals"
-        },
-        {
-          "path": "crates/xshield-worker/src/model_eval/wire/history.rs",
-          "test": "offline_history_is_captured_and_sent_with_explicit_coverage"
-        }
-      ],
-      "gap": "输入只来自操作员批准的单个 JSON，没有模板、检索或工具结果拼装，超预算时整体拒绝而非裁剪，“裁剪明示”既无实现也无断言。"
+      "status": "planned"
     },
     {
       "id": "MODEL-05",
@@ -630,18 +611,7 @@
         "模型超时重试后缓存命中"
       ],
       "expected": "每次实际调用独立attempt，命中引用原证据及当前上下文摘要",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/model_eval/tests.rs",
-          "test": "postgres_model_evaluation_cache_reuses_revalidated_source"
-        },
-        {
-          "path": "crates/xshield-worker/src/model_eval/tests.rs",
-          "test": "interrupted_attempt_is_closed_once_and_never_replayed"
-        }
-      ],
-      "gap": "没有“超时后重试再命中缓存”的序列测试（实现不自动重试，每次调用至多一次 HTTP），“当前上下文摘要”未单独断言，只体现为新的 request_id/model_call_id。"
+      "status": "planned"
     },
     {
       "id": "MODEL-06",
@@ -661,18 +631,7 @@
         "供应商不返回内部推理或token明细"
       ],
       "expected": "标记不可用，不编造隐藏思维或真实用量",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/model_eval/wire.rs",
-          "test": "missing_confidence_and_usage_stay_explicitly_unknown"
-        },
-        {
-          "path": "crates/xshield-worker/src/model_eval/tests.rs",
-          "test": "postgres_evaluation_score_preserves_gateway_evidence_and_failure_terminals"
-        }
-      ],
-      "gap": "供应商成功响应缺少 usage 时，落库调用记录的 usage.source=unavailable 只在响应解析层断言，未经 evaluate 全流程验证。"
+      "status": "planned"
     },
     {
       "id": "AGENT-01",
@@ -851,13 +810,9 @@
         {
           "path": "crates/xshield-worker/src/lib.rs",
           "test": "rejects_same_event_id_with_different_content"
-        },
-        {
-          "path": "crates/xshield-worker/src/outbox/delivery_tests.rs",
-          "test": "postgres_outbox_publishing_is_scoped_acknowledged_and_retryable"
         }
       ],
-      "gap": "相同 event_id 重投后的逻辑去重与计数不重复依赖 ClickHouse active 视图的 LIMIT 1 BY event_id，只在需要 XSHIELD_TEST_CLICKHOUSE_URL 的 CI 用例中验证，本地只断言 checkpoint 复用、已确认 outbox 不再领取与异摘要冲突拒绝（模拟客户端）。"
+      "gap": "相同 event_id 重投后的逻辑去重与计数不重复依赖 ClickHouse active 视图的 LIMIT 1 BY event_id，只在需要 XSHIELD_TEST_CLICKHOUSE_URL 的 CI 用例中验证，本地只断言 checkpoint 复用与异摘要冲突拒绝（模拟客户端）；outbox 发布器已随 v3 删除（docs/05 §5.2），不再是重复消费来源之一。"
     },
     {
       "id": "AUDIT-09",
