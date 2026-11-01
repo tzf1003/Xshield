@@ -106,7 +106,7 @@ export function Shell() {
         onHelp={() => setDialog("help")}
         onOpenSites={() => void navigate({ href: hrefFor("/sites") })}
       />
-      <div className="main">
+      <main className="main">
         <Topbar
           onOpenPalette={() => setDialog("palette")}
           onCustomRange={() => setDialog("range")}
@@ -114,7 +114,7 @@ export function Shell() {
         <div className="page-scroll">
           <Outlet />
         </div>
-      </div>
+      </main>
       <CommandPalette
         open={dialog === "palette"}
         onClose={() => setDialog(null)}

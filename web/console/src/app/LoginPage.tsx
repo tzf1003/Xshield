@@ -26,7 +26,7 @@ export function LoginPage() {
   const error = login.error instanceof ApiError ? errorText(login.error.code) : null;
 
   return (
-    <div className="login-page">
+    <main className="login-page">
       <div className="stack" style={{ width: "min(380px, 100%)" }}>
         {window.isSecureContext ? null : (
           <div className="notice" role="note">
@@ -65,6 +65,6 @@ export function LoginPage() {
           </div>
         </form>
       </div>
-    </div>
+    </main>
   );
 }

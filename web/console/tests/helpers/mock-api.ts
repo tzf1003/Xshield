@@ -95,13 +95,19 @@ export function servedRequests(page: Page): ServedRequest[] {
   return servedByPage.get(page) ?? [];
 }
 
+/** Only the control plane's calls: a glob like `**\/api/**` also matches the app's own modules under
+ *  src/api/, and answering those with 404 leaves the page blank. */
+function isApiCall(url: URL): boolean {
+  return url.pathname.startsWith("/api/");
+}
+
 /** Routes every /api call of the page to the fixtures. */
 export async function mockApi(page: Page, options: MockOptions = {}): Promise<void> {
   const state = freshState(options);
   const served: ServedRequest[] = [];
   servedByPage.set(page, served);
-  await page.unroute("**/api/**");
-  await page.route("**/api/**", async (route, request) => {
+  await page.unroute(isApiCall);
+  await page.route(isApiCall, async (route, request) => {
     const url = new URL(request.url());
     const raw = request.postData();
     const call: Call = {
