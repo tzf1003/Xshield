@@ -6,17 +6,14 @@
 
 每个目标定义在 `src/lib.rs`。对任意输入都不能 panic；对解析器接受的输入，还要满足注释里写明的不变量。
 
+`xshield-gateway` was deleted (docs/05-v3-removal.md); the targets that exercised its
+parsers (`proxy_header`、`route_admission`、`query_pagination`、`routing_authority`、
+`request_crypto`、`auth_binding`、`strict_json`、`sensor_batch`) went with it. What is
+left only exercises `xshield-core` and `xshield-audit` parsers.
+
 | 目标 | 解析器 | 额外检查 |
 | --- | --- | --- |
-| `proxy_header` | PROXY v1/v2 头 | 完整头不超过给定字节与版本上限；单独解析头得到相同结果；头的每个严格前缀都是“未完成” |
 | `path_shape` | 未匹配路径的审计形状 | 结果总是合法形状且有上界 |
-| `route_admission` | 方法与路径的路由匹配 | 准入与准入类别对“是否匹配”一致；未匹配总是 `OPERATION_NOT_MATCHED` |
-| `query_pagination` | 分页查询串 | 转发的查询只含声明参数，再次准入得到同一文本 |
-| `routing_authority` | `Host` 与请求目标 authority | 路由名是客户端发来的名字之一；源站目标不带 scheme 和 authority |
-| `request_crypto` | 浏览器加密请求封包 | 没有客户端密钥时不可能通过认证 |
-| `auth_binding` | 源站登录响应 | 不 panic |
-| `strict_json` | 缓冲响应的严格 JSON | 接受的输入都是普通 JSON |
-| `sensor_batch` | 传感器观测批次 | 1 到 16 个事件，序号连续 |
 | `site_config` | 控制面收到的站点配置 | 解析、校验与拒绝分类都不 panic |
 | `page_fingerprint` | 前端构建页面指纹 | 注入偏移指向第一个小写 `</head>` |
 | `upstream_address` | 上游地址与私网放行列表 | 不 panic |
@@ -35,7 +32,7 @@ cd fuzz && cargo test
 ```sh
 cd fuzz
 cargo fuzz build -s none -O
-cargo fuzz run -s none -O route_admission -- -max_total_time=300
+cargo fuzz run -s none -O site_config -- -max_total_time=300
 ```
 
 这里用 `-s none` 在固定的稳定版工具链上构建，不加 sanitizer。代码都是安全 Rust，要找的是 panic 和不变量被破坏。
