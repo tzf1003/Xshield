@@ -1,6 +1,8 @@
 # Xshield 的 Prometheus 告警规则
 
-`alerts.yml` 是针对 edge 与 control 的 `/metrics`（[docs/19 19.5](../../docs/19-deployment-operations.md)）写的告警规则，字段名直接取自导出代码（`crates/xshield-gateway/src/ops_api.rs`、`crates/xshield-control/src/ops.rs`），不依赖任何固定的 `job`/`instance` 标注约定——Helm 的 ServiceMonitor 与手写 `scrape_configs` 打的标签不同，规则只按指标名本身区分 edge/control（已经是 `xshield_edge_*`/`xshield_control_*` 前缀,互不冲突）。
+> v4 说明：本目录将在代码改造时删除，见 [docs/05](../../docs/05-v3-removal.md)。下文的 `docs/NN` 编号指 v3 旧文档（提交 ad524d4）。
+
+`alerts.yml` 是针对 edge 与 control 的 `/metrics`（docs/19 19.5（v3 文档，见提交 ad524d4））写的告警规则，字段名直接取自导出代码（`crates/xshield-gateway/src/ops_api.rs`、`crates/xshield-control/src/ops.rs`），不依赖任何固定的 `job`/`instance` 标注约定——Helm 的 ServiceMonitor 与手写 `scrape_configs` 打的标签不同，规则只按指标名本身区分 edge/control（已经是 `xshield_edge_*`/`xshield_control_*` 前缀,互不冲突）。
 
 ## 接入
 

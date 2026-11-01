@@ -1,5 +1,7 @@
 # Xshield 管理后台
 
+> v4 说明：控制台将按 [docs/03 3.5](../../docs/03-admin-config-audit.md#35-控制台范围) 精简为站点配置、模式切换、判定日志和 Jev 状态。下文描述的是当前 v3 控制台，`docs/NN` 编号指 v3 旧文档（提交 ad524d4）。
+
 React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元数据，按模型调用 ID 读取脱敏生命周期与证据引用并预填历史检索，按 Agent 运行 ID 读取脱敏生命周期与固定事件引用并预填历史检索，按访问申请 ID 读取历史申请/决策元数据并预填历史检索，按校准报告 ID 读取受限冻结元数据，或在固定 UTC 时间窗内分页发现模型调用；也可按资格或身份绑定 ID 读取账本快照，或用结构化条件检索事件，并从事件详情显式提交有界服务端因果查询。UI 调用固定 GET 端点及只读 `POST /control/v1/search`、`POST /control/v1/causality`；权限、访问审计和 tenant/site 范围由 `xshield-control` 决定。模型详情、Agent 详情与模型调用列表均需要显式 `Observer`，校准报告详情需要 `AuditAdministrator`，事件检索与因果查询需要 `Investigator`；带 `calibration_report_id` 或 `evidence_hold_id` 的检索还要求同一主体同时具备 `AuditAdministrator`，三种角色分别校验。
 
 控制台使用 TanStack Router 的后台路由和 antd 左侧导航（窄屏为抽屉），不再用“查询类型”选择菜单；Ctrl/⌘+K 命令面板按页面名搜索，或按 ID 前缀打开既有详情路由、预填结构化检索（不自动提交）。站点、调查、案件、审批、审计和权限中心各自拥有独立 URL；页面刷新会恢复深链接，导航隐藏只改善操作体验，服务端仍对每个请求独立授权。
@@ -58,7 +60,7 @@ React + TypeScript 界面，按请求 ID 读取摘要、事件分页和证据元
 
 等价的仓库根目录参数是 `./dev.sh --console-only`。`./dev.sh --reset` 只清理本地开发 Docker 数据卷并重新应用迁移。
 
-页面为 `http://127.0.0.1:55173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 [管理 API](../../docs/29-api-endpoint-catalog.md) 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
+页面为 `http://127.0.0.1:55173`。开发代理默认连接 `http://127.0.0.1:9443`；该端口需运行已按 管理 API（v3 docs/29，见提交 ad524d4） 配置的控制服务。可由操作者设置 `XSHIELD_CONTROL_PROXY=https://control.internal.example` 后启动 Vite；只接受 HTTPS origin 或 loopback HTTP origin，拒绝 URL 用户信息、路径、查询和片段。该变量是开发服务器配置，不进入浏览器 bundle。
 
 代理只转发固定调查 GET、案件列表/集合/保留历史 GET、证据申请列表/详情/内容 GET、导出列表 `GET /control/v1/exports?view=mine|review`（只接受这两个视图和可选签名游标）、Agent API Key 管理（`GET/POST /control/v1/agent-api-keys`，以及 `POST /control/v1/agent-api-keys/{key_id}/revoke|rotate`，均不带查询串）、站点配置 `GET/PUT /control/v1/site-config`、精确 `POST /control/v1/search`、`POST /control/v1/causality` 及案件、保留创建/释放和证据申请/审批路径；写路径与证据详情/内容路径拒绝附加查询串。OIDC callback 保留经服务端校验的授权响应 query；其他身份路径拒绝 query。代理只转发 Xshield session/state Cookie，剥离所有其他 Cookie；`Set-Cookie` 仅允许来自登录开始、callback、reauth-start 与 logout。代理不注入管理身份且不跟随重定向。正常开发启动使用 OIDC 会话；只有 Playwright 配置会设置 `VITE_XSHIELD_E2E_MACHINE_LOGIN=1` 启用合成 Bearer 表单，生产构建不会提供该入口。应用中没有演示数据入口；合成响应仅在 `tests/` 用于回归。
 
@@ -130,7 +132,7 @@ npm run build
 Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 ```
 
-API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 [29.22](../../docs/29-api-endpoint-catalog.md#2922-已实现的本人案件列表契约)。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 [29.24](../../docs/29-api-endpoint-catalog.md#2924-已实现的证据访问申请列表契约)。模型调用列表依赖支持其固定窗口、签名游标和 `console.model.list` 审计的控制 API。校准报告详情须先升级至能识别 `console.calibration.report.read` 的管理 journal 发布器，再启用控制 API 与界面；调查导出 API 启用前应用迁移 0039、升级导出管理事件发布器并开放 Vite 的固定 `/exports` 代理路由；导出列表（审批中心的待办与“我的申请”）另需迁移 0050、`console.export.list` 审计和同一代理路由；无新增 secret。完整事件/正文导出继续独立交付。
+API 同样保持 `private, no-store`。生产代理仅向指定控制服务传递 Authorization，剥离业务 Cookie，禁止缓存、重定向和请求/响应正文日志；日志须脱敏认证头。不要把秘密放进 `VITE_*` 或静态配置。案件列表启用前先应用迁移 0021 并升级管理 journal 发布器，见 29.22（v3 docs/29，见提交 ad524d4）。证据申请列表启用前先应用迁移 0022、升级管理 journal 发布器，再部署控制 API 与界面；索引构建需要安排写入维护窗口，回滚应用可保留索引，见 29.24（v3 docs/29，见提交 ad524d4）。模型调用列表依赖支持其固定窗口、签名游标和 `console.model.list` 审计的控制 API。校准报告详情须先升级至能识别 `console.calibration.report.read` 的管理 journal 发布器，再启用控制 API 与界面；调查导出 API 启用前应用迁移 0039、升级导出管理事件发布器并开放 Vite 的固定 `/exports` 代理路由；导出列表（审批中心的待办与“我的申请”）另需迁移 0050、`console.export.list` 审计和同一代理路由；无新增 secret。完整事件/正文导出继续独立交付。
 
 ## 脚本、代码风格与目录
 

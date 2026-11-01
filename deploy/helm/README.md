@@ -1,6 +1,8 @@
 # Xshield Helm chart
 
-`xshield/` 把一个租户、一个站点部署到 Kubernetes。设计取舍见 [docs/19 19.9](../../docs/19-deployment-operations.md)。这里只写操作步骤。
+> v4 说明：v4 首版不提供 Helm 部署，本目录将在代码改造时删除，见 [docs/05](../../docs/05-v3-removal.md)。下文的 `docs/NN` 编号指 v3 旧文档（提交 ad524d4）。
+
+`xshield/` 把一个租户、一个站点部署到 Kubernetes。设计取舍见 docs/19 19.9（v3 文档，见提交 ad524d4）。这里只写操作步骤。
 
 ## 前提
 

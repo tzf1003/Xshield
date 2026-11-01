@@ -1,12 +1,14 @@
 # Xshield 的 systemd 单元（参考部署）
 
-把 edge、control 与各项日志/outbox 维护任务跑成 systemd 服务，供不用容器编排的单机或虚拟机部署使用。设计取舍与环境变量见 [docs/19](../../docs/19-deployment-operations.md)；本目录只给出可直接安装的单元文件与示例环境文件，语义与 [deploy/compose](../compose/) 的参考部署一致，只是把容器编排换成了 systemd 自己的调度、重启与 journal。
+> v4 说明：v4 首版不提供 systemd 部署，本目录将在代码改造时删除，见 [docs/05](../../docs/05-v3-removal.md)。下文的 `docs/NN` 编号指 v3 旧文档（提交 ad524d4）。
+
+把 edge、control 与各项日志/outbox 维护任务跑成 systemd 服务，供不用容器编排的单机或虚拟机部署使用。设计取舍与环境变量见 docs/19（v3 文档，见提交 ad524d4）；本目录只给出可直接安装的单元文件与示例环境文件，语义与 [deploy/compose](../compose/) 的参考部署一致，只是把容器编排换成了 systemd 自己的调度、重启与 journal。
 
 ## 和 Compose 参考部署的差异
 
 - Compose 用一个永不重启的 `net` 服务持有共享网络命名空间,好让 edge 的签名 apply 通道(`127.0.0.1:9553`)与 control 的管理 API(`127.0.0.1:9443`)互通。裸机或虚拟机上两者本就共享同一个 loopback,不需要这个技巧。
 - 常驻维护进程(`xshield-audit-seal`、审计发布、outbox 发布)在这里不是常驻循环(`XSHIELD_RUN_INTERVAL_SECONDS`),而是 systemd 的 oneshot + timer 模板单元,对应 docs/19 自己给出的另一种选择("一次性模式...适合 cron 或 Kubernetes CronJob")。因此这里**不设置** `XSHIELD_RUN_HEARTBEAT_FILE`(docs/19:只能与常驻间隔一起设置);是否按时成功运行改用 systemd 自身的记录:`systemctl list-timers`、`systemctl status xshield-seal@edge.service`、`journalctl -u xshield-seal@edge`,或给模板单元加 `OnFailure=` 去触发告警(配合 20 `deploy/prometheus/` 的告警规则按 node_exporter 的 systemd collector 接入)。
-- 证据保留清理(`xshield-evidence-retain`)不随任何 target 自动启用,也没有配套 `.timer`:这是一条删除路径,先按 [docs/26](../../docs/26-runbooks.md) 的运行手册手工跑熟悉节奏,再自行决定是否加定时器。
+- 证据保留清理(`xshield-evidence-retain`)不随任何 target 自动启用,也没有配套 `.timer`:这是一条删除路径,先按 docs/26（v3 文档，见提交 ad524d4） 的运行手册手工跑熟悉节奏,再自行决定是否加定时器。
 
 ## 安装
 
@@ -77,6 +79,6 @@ curl -s http://127.0.0.1:9555/readyz   # control
 
 ## 限制
 
-- 单机部署,没有高可用;PostgreSQL 与 ClickHouse 的备份按 [docs/19 19.6](../../docs/19-deployment-operations.md) 自行安排,和 Compose 参考部署相同。
+- 单机部署,没有高可用;PostgreSQL 与 ClickHouse 的备份按 docs/19 19.6（v3 文档，见提交 ad524d4） 自行安排,和 Compose 参考部署相同。
 - 本目录不提供反向代理/TLS 终止单元:管理 API 与控制台仍需要你自己的同源代理,要求见 [web/console/README.md](../../web/console/README.md)。
 - `*.env.example` 只是起点,不是完整契约;字段语义与取值范围以 docs/19、docs/13、docs/26 为准,这里的注释只是导航。

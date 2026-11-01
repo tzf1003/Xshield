@@ -1,6 +1,8 @@
 # Xshield 单机参考部署（Docker Compose）
 
-一台主机运行一个租户、一个站点的全部组件。设计取舍与约束见 [docs/19 19.8](../../docs/19-deployment-operations.md)，这里只写操作步骤。
+> v4 说明：本目录描述的是 v3 的部署。v4 只保留单机 Compose 一种参考部署，按 [docs/04](../../docs/04-deployment-testing.md) 与 [docs/05](../../docs/05-v3-removal.md) 改造；下文的 `docs/NN` 编号指 v3 旧文档（提交 ad524d4）。
+
+一台主机运行一个租户、一个站点的全部组件。设计取舍与约束见 docs/19 19.8（v3 文档，见提交 ad524d4），这里只写操作步骤。
 
 ## 前提
 
