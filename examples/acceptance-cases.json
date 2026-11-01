@@ -139,7 +139,7 @@
           "test": "refresh_advances_only_generation_and_rejects_late_response"
         }
       ],
-      "gap": "只顺序断言旧快照的第二次刷新得到 Conflict 且旧凭证随后被拒，没有两个标签经 edge 并发刷新、旧响应最后到达的测试；存储层的比较并交换断言随 v3 身份绑定一起删除（docs/05 §5.2）。"
+      "gap": "只顺序断言旧快照的第二次刷新得到 Conflict 且旧凭证随后被拒，没有两个标签经 edge 并发刷新、旧响应最后到达的测试；存储层的比较并交换断言随 v3 身份绑定一起删除，原 SQL 夹具也已随 migrations/0001_v4_baseline.sql 替换全部 v3 迁移（docs/05 §5.2、docs/03 §3.2）删除。"
     },
     {
       "id": "FLOW-01",
@@ -648,15 +648,11 @@
       "status": "partial",
       "covered_by": [
         {
-          "path": "crates/xshield-control/src/lib.rs",
-          "test": "search_rejects_unauthorized_or_invalid_plans_before_index_access"
-        },
-        {
           "path": "crates/xshield-core/src/query.rs",
           "test": "plan_is_bounded_and_keeps_scope_out_of_client_input"
         }
       ],
-      "gap": "调查 Agent 及其工具层不存在，只在控制面 HTTP 层断言查询 DTO 拒绝客户端指定 tenant 与角色不足时 403，未断言调查 Agent 发起的生产写操作被拒。"
+      "gap": "调查 Agent 及其工具层不存在，只在控制面 HTTP 层断言查询 DTO 拒绝客户端指定 tenant 与角色不足时 403，未断言调查 Agent 发起的生产写操作被拒；控制台已随 v3 精简为单管理员（docs/05 §5.2），原 HTTP 层断言随之删除。"
     },
     {
       "id": "AGENT-04",
@@ -667,14 +663,7 @@
         "回滚到已验证包"
       ],
       "expected": "记录批准者、版本、受影响流量，旧新请求各固定版本",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-control/src/tests/site_approval.rs",
-          "test": "rollback_restores_the_previously_active_configuration_as_a_new_revision"
-        }
-      ],
-      "gap": "适配包、灰度发布与适配 Agent 都不存在，仅站点配置回滚断言了独立审批、新修订号与 edge 恢复的配置，未记录受影响流量，也未断言新旧请求各自固定版本。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-01",
@@ -703,13 +692,9 @@
         {
           "path": "crates/xshield-worker/src/lib.rs",
           "test": "request_summary_is_scoped_and_validated"
-        },
-        {
-          "path": "web/console/tests/request-detail.spec.ts",
-          "test": "every observed stage shows its outcome, reason, proof and timing; skipped ones say why"
         }
       ],
-      "gap": "真实 edge 硬拒绝后不写模型阶段 SKIPPED 事件（模型不在请求路径），SKIPPED+原因只在仅供示例使用的 M0 核心编排器、索引校验与合成控制台夹具中断言。"
+      "gap": "真实 edge 硬拒绝后不写模型阶段 SKIPPED 事件（模型不在请求路径），SKIPPED+原因只在仅供示例使用的 M0 核心编排器与索引校验中断言；原合成控制台夹具已随控制台精简为单管理员（docs/05 §5.2）删除。"
     },
     {
       "id": "AUDIT-03",
@@ -734,17 +719,9 @@
         {
           "path": "crates/xshield-worker/src/lib.rs",
           "test": "reports_only_the_contiguous_publication_watermark"
-        },
-        {
-          "path": "crates/xshield-control/src/lib.rs",
-          "test": "request_events_are_scoped_bounded_and_audited"
-        },
-        {
-          "path": "web/console/tests/request-detail.spec.ts",
-          "test": "a missing request and an index still publishing are different answers"
         }
       ],
-      "gap": "未在 journal 健康时暂停真实 ClickHouse 消费者；控制面对未发布请求的本地 journal 回退没有任何测试；水位显示只用合成控制台响应和发布健康单测断言。"
+      "gap": "未在 journal 健康时暂停真实 ClickHouse 消费者；控制面对未发布请求的本地 journal 回退没有任何测试；水位显示只用发布健康单测断言，原控制面与合成控制台断言已随控制台精简为单管理员（docs/05 §5.2）删除。"
     },
     {
       "id": "AUDIT-05",
@@ -815,10 +792,6 @@
         {
           "path": "crates/xshield-audit/src/lib.rs",
           "test": "rejects_tampering_and_quota_exhaustion"
-        },
-        {
-          "path": "crates/xshield-control/src/lib.rs",
-          "test": "evidence_access_request_is_idempotent_bounded_and_audited"
         }
       ]
     },
@@ -831,22 +804,7 @@
         "提交T2合法request_id"
       ],
       "expected": "授权拒绝，ID不是凭证",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-control/src/tests/hold_console_wire.rs",
-          "test": "console_hold_client_mutates_postgres_http_contract"
-        },
-        {
-          "path": "crates/xshield-control/src/tests/case_close.rs",
-          "test": "case_close_enforces_authentication_scope_role_rate_and_store_failure"
-        },
-        {
-          "path": "crates/xshield-control/src/tests/ledger_inspection.rs",
-          "test": "ledger_lookup_rejects_invalid_targets_and_query_before_storage"
-        }
-      ],
-      "gap": "本地没有测试让 T1 管理员提交 T2 的合法 request_id 读取请求详情（只有 CI 专用真实 ClickHouse 用例覆盖，且端点返回未找到而非显式授权拒绝）。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-11",
@@ -859,19 +817,11 @@
       "status": "partial",
       "covered_by": [
         {
-          "path": "crates/xshield-control/src/lib.rs",
-          "test": "evidence_access_request_is_idempotent_bounded_and_audited"
-        },
-        {
-          "path": "crates/xshield-control/src/lib.rs",
-          "test": "evidence_access_decision_is_independent_short_lived_and_audited"
-        },
-        {
           "path": "crates/xshield-worker/src/control_audit/tests.rs",
           "test": "export_workflow_events_carry_validated_export_case_and_package_targets"
         }
       ],
-      "gap": "导出创建/审批/下载在 HTTP 层没有审计断言（只有发布器契约与被 CSRF 拒绝的导出 POST），审计中的目的只以摘要记录，没有测试把三类动作的操作者、目的、审批、范围与结果作为同一审计链核对。"
+      "gap": "导出创建/审批/下载在 HTTP 层没有审计断言（只有发布器契约与被 CSRF 拒绝的导出 POST），审计中的目的只以摘要记录，没有测试把三类动作的操作者、目的、审批、范围与结果作为同一审计链核对；证据访问申请/决定的原控制面断言已随控制台精简为单管理员（docs/05 §5.2）删除。"
     },
     {
       "id": "AUDIT-12",
@@ -902,22 +852,7 @@
         "报文含HTML/脚本/超长恶意行"
       ],
       "expected": "纯文本安全渲染，有界预览，不运行源站页面",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "web/console/tests/request-detail.spec.ts",
-          "test": "untrusted metadata is text, and the layout stays inside the viewport"
-        },
-        {
-          "path": "web/console/tests/search.spec.ts",
-          "test": "untrusted metadata is text, raw fields are dropped and the layout fits"
-        },
-        {
-          "path": "web/console/tests/downloads.spec.ts",
-          "test": "hands the exact bytes to the browser as a .bin attachment and releases the object URL"
-        }
-      ],
-      "gap": "没有用超长恶意行断言有界预览，注入字符串均较短且来自合成 API 响应。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-15",
