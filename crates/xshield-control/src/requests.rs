@@ -675,9 +675,61 @@ fn decision_from_json(value: &Value) -> Option<NewDecision> {
     })
 }
 
+/// What an import body held, line by line: the rows to write, the rows whose time
+/// lies outside the kept window, and the lines that failed.
+#[derive(Default)]
+struct ImportLines {
+    rows: Vec<NewDecision>,
+    out_of_range: i64,
+    failed: i64,
+    error_lines: Vec<usize>,
+}
+
+/// Reads the lines of an import body against the day partitions that exist and the
+/// kept `window` (both ends included, section 7.9.9). A row outside the window has no
+/// partition to go to: it is counted as out of range, which is not an error. A line
+/// that is not a row, or whose day has no partition, is an error, and its line number
+/// is kept for the first few.
+fn read_import_lines(
+    body: &[u8],
+    days: &HashSet<chrono::NaiveDate>,
+    window: (i64, i64),
+) -> ImportLines {
+    let mut lines = ImportLines::default();
+    for (index, line) in body.split(|byte| *byte == b'\n').enumerate() {
+        let text = line.trim_ascii();
+        if text.is_empty() {
+            continue;
+        }
+        let row = serde_json::from_slice::<Value>(text)
+            .ok()
+            .as_ref()
+            .and_then(decision_from_json);
+        match row {
+            Some(row) if row.at_millis < window.0 || row.at_millis > window.1 => {
+                lines.out_of_range += 1;
+            }
+            Some(row)
+                if DateTime::from_timestamp_millis(row.at_millis)
+                    .is_some_and(|time| days.contains(&time.date_naive())) =>
+            {
+                lines.rows.push(row);
+            }
+            _ => {
+                lines.failed += 1;
+                if lines.error_lines.len() < IMPORT_ERROR_LINES {
+                    lines.error_lines.push(index + 1);
+                }
+            }
+        }
+    }
+    lines
+}
+
 /// `POST /api/import`: imports gateway file-mode output, one JSON row per line.
-/// Rows that already exist, or that fall outside the existing day partitions,
-/// are skipped or counted as failed; the reply says which lines failed.
+/// A row that already exists is skipped. A row outside the kept window is counted as
+/// `out_of_range`, and a line that cannot be used is an error; the reply says which
+/// lines failed.
 ///
 /// # Errors
 /// `INTERNAL` for a database failure while writing.
@@ -687,35 +739,12 @@ pub async fn import(State(state): State<Arc<ControlState>>, body: Bytes) -> ApiR
         .iter()
         .filter_map(|partition| partition.day)
         .collect();
-    let mut parsed = Vec::new();
-    let mut failed = 0_i64;
-    let mut error_lines = Vec::new();
-    for (index, line) in body.split(|byte| *byte == b'\n').enumerate() {
-        let text = line.trim_ascii();
-        if text.is_empty() {
-            continue;
-        }
-        let row = serde_json::from_slice::<Value>(text)
-            .ok()
-            .as_ref()
-            .and_then(decision_from_json)
-            .filter(|row| {
-                DateTime::from_timestamp_millis(row.at_millis)
-                    .is_some_and(|time| days.contains(&time.date_naive()))
-            });
-        if let Some(row) = row {
-            parsed.push(row);
-        } else {
-            failed += 1;
-            if error_lines.len() < IMPORT_ERROR_LINES {
-                error_lines.push(index + 1);
-            }
-        }
-    }
+    let window = partitions::kept_window_millis(crate::params::now_millis());
+    let lines = read_import_lines(&body, &days, window);
     let mut skipped = 0_i64;
     let mut seen = HashSet::new();
-    let mut fresh = Vec::with_capacity(parsed.len());
-    for row in parsed {
+    let mut fresh = Vec::with_capacity(lines.rows.len());
+    for row in lines.rows {
         if seen.insert((row.request_id.clone(), row.at_millis)) {
             fresh.push(row);
         } else {
@@ -740,8 +769,9 @@ pub async fn import(State(state): State<Arc<ControlState>>, body: Bytes) -> ApiR
     Ok(Json(json!({
         "imported": imported,
         "skipped": skipped,
-        "errors": failed,
-        "error_lines": error_lines,
+        "out_of_range": lines.out_of_range,
+        "errors": lines.failed,
+        "error_lines": lines.error_lines,
     })))
 }
 
@@ -797,6 +827,42 @@ mod tests {
             "decision_path": "teleport", "outcome": "allowed",
         });
         assert!(decision_from_json(&unknown).is_none());
+    }
+
+    #[test]
+    fn an_import_counts_a_row_outside_the_kept_window_apart_from_an_error() {
+        const DAY: i64 = 86_400_000;
+        // 2026-11-01 12:00 UTC, with the window and the partitions that hold it.
+        let now: i64 = 1_793_491_200_000 + 12 * 3_600_000;
+        let window = partitions::kept_window_millis(now);
+        let days: HashSet<chrono::NaiveDate> =
+            partitions::partition_days(chrono::NaiveDate::from_ymd_opt(2026, 11, 1).expect("date"))
+                .into_iter()
+                .collect();
+        let row = |at_millis: i64, request_id: &str| {
+            json!({
+                "at_millis": at_millis, "request_id": request_id, "site": "juice",
+                "method": "GET", "path": "/", "decision_path": "fast_allow", "outcome": "allowed",
+            })
+            .to_string()
+        };
+        let body = format!(
+            "{}\n{}\n{{not json\n",
+            row(now - 5 * DAY, "req_five"),
+            row(now - 9 * DAY, "req_nine"),
+        );
+        let lines = read_import_lines(body.as_bytes(), &days, window);
+        assert_eq!(lines.rows.len(), 1);
+        assert_eq!(lines.out_of_range, 1);
+        assert_eq!(lines.failed, 1);
+        assert_eq!(lines.error_lines, vec![3]);
+
+        // Inside the window but with no partition for its day: an error, not out of range.
+        let lines = read_import_lines(body.as_bytes(), &HashSet::new(), window);
+        assert!(lines.rows.is_empty());
+        assert_eq!(lines.out_of_range, 1);
+        assert_eq!(lines.failed, 2);
+        assert_eq!(lines.error_lines, vec![1, 3]);
     }
 
     #[test]

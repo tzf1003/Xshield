@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Days, NaiveDate};
+use chrono::{DateTime, NaiveDate};
 use sqlx::PgPool;
 use xshield_postgres::partitions;
 
@@ -11,8 +11,6 @@ use crate::params::DAY_MILLIS;
 
 /// The time between maintenance passes, after the first one at startup.
 const PASS_INTERVAL: Duration = Duration::from_hours(1);
-/// Partitions exist from yesterday to this many days after today.
-const DAYS_AHEAD: u64 = 7;
 /// An edge whose last heartbeat is older than this has its status row deleted.
 const EDGE_STALE_MILLIS: i64 = DAY_MILLIS;
 
@@ -29,10 +27,10 @@ pub async fn run(pool: PgPool) {
 }
 
 /// Runs one maintenance pass at `now_millis`, in three independent steps: it creates
-/// the decision log partitions from yesterday to seven days ahead, drops the
-/// partitions that ended before the retention period, and deletes the edge status
-/// rows that have not been refreshed for a day. A step that fails is logged, and the
-/// next step still runs.
+/// the decision log partitions from the start of the retention period to seven days
+/// ahead, drops the partitions that ended before the retention period, and deletes
+/// the edge status rows that have not been refreshed for a day. A step that fails is
+/// logged, and the next step still runs.
 pub async fn maintain_once(pool: &PgPool, now_millis: i64) {
     match utc_day(now_millis) {
         Some(today) => ensure_partitions(pool, today).await,
@@ -49,21 +47,10 @@ fn utc_day(now_millis: i64) -> Option<NaiveDate> {
     Some(DateTime::from_timestamp_millis(now_millis)?.date_naive())
 }
 
-/// The days that get a partition: yesterday, today, and each of the `DAYS_AHEAD`
-/// days after today. A day outside the calendar is left out.
-fn partition_days(today: NaiveDate) -> Vec<NaiveDate> {
-    let Some(first) = today.checked_sub_days(Days::new(1)) else {
-        return Vec::new();
-    };
-    (0..=DAYS_AHEAD + 1)
-        .filter_map(|step| first.checked_add_days(Days::new(step)))
-        .collect()
-}
-
-/// Creates the partition of each day in [`partition_days`]. A day that fails is
-/// logged, and the other days are still created.
+/// Creates the partition of each day in [`partitions::partition_days`]. A day that
+/// fails is logged, and the other days are still created.
 async fn ensure_partitions(pool: &PgPool, today: NaiveDate) {
-    for day in partition_days(today) {
+    for day in partitions::partition_days(today) {
         if let Err(error) = partitions::ensure_partition(pool, day).await {
             eprintln!("xshield-control: creating the partition for {day} failed: {error}");
         }
@@ -116,15 +103,6 @@ async fn purge_stale_edges(pool: &PgPool, now_millis: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn partitions_run_from_yesterday_to_seven_days_ahead() {
-        let today = NaiveDate::from_ymd_opt(2026, 11, 1).expect("date");
-        let days = partition_days(today);
-        assert_eq!(days.len(), 9);
-        assert_eq!(days.first(), NaiveDate::from_ymd_opt(2026, 10, 31).as_ref());
-        assert_eq!(days.last(), NaiveDate::from_ymd_opt(2026, 11, 8).as_ref());
-    }
 
     #[test]
     fn the_day_of_a_time_is_its_utc_date() {

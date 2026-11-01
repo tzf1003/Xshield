@@ -20,6 +20,13 @@ use crate::decision_stats::SCAN_LIMIT;
 pub const JEV_CALLED_SQL: &str = "jev IS NOT NULL AND jev_ms IS NOT NULL AND (jev_failure IS NULL \
      OR jev_failure NOT IN ('JEV_CALL_LIMIT', 'JEV_STATE_TOO_LARGE'))";
 
+/// Predicate for rows that asked Jev for a decision: the calls of [`JEV_CALLED_SQL`]
+/// plus the calls the per-minute limit refused. A refused call is demand that the
+/// limit turned away, so the per-minute demand measurements count it.
+pub const JEV_DEMAND_SQL: &str = "((jev IS NOT NULL AND jev_failure = 'JEV_CALL_LIMIT') \
+     OR (jev IS NOT NULL AND jev_ms IS NOT NULL AND (jev_failure IS NULL \
+     OR jev_failure NOT IN ('JEV_CALL_LIMIT', 'JEV_STATE_TOO_LARGE'))))";
+
 /// How far either side of the time a request id encodes [`get_detail`] searches.
 /// The row is written when the response ends, so it can come well after the
 /// request arrived.
@@ -949,8 +956,11 @@ mod tests {
     }
 
     /// Creates the partition of `day`, fills it with rows in which the session
-    /// label, the outcome and the Jev call are each rare, and analyzes it.
-    /// Returns the bounds of the day in Unix milliseconds.
+    /// label, the outcome and the Jev call are each rare, and analyzes it. Returns
+    /// the first and the last millisecond of the day, both inclusive. A plan probe
+    /// over that window reaches the probe day's partition alone: the next day's
+    /// first millisecond would also reach its partition, which other tests fill
+    /// while this one plans.
     async fn fill_probe_day(pool: &PgPool, day: NaiveDate) -> (i64, i64) {
         ensure_partition(pool, day).await.expect("partition");
         let (start, end) = day_bounds_millis(day).expect("bounds");
@@ -978,16 +988,24 @@ mod tests {
             .execute(pool)
             .await
             .expect("analyze");
-        (start, end)
+        (start, end - 1)
     }
 
-    /// A connection of its own, on which `statement` is prepared. Generic plans
-    /// are forced and sequential scans discouraged, so that the plan uses an
-    /// index whenever one applies. The setting is not shared with the pool.
+    /// Held by the two tests that write to the 2099-08-04 partition, so that they
+    /// create it one at a time.
+    static SHARED_DAY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A connection of its own, on which `statement` is prepared. Sequential scans
+    /// are discouraged, so that the plan uses an index whenever one applies. Custom
+    /// plans are forced: each plan is made for the call's literal arguments, so
+    /// partition pruning leaves only the probe day's partition. A generic plan would
+    /// cover every partition the database holds, and partitions that other tests
+    /// create at the same time would change the plan. The setting is not shared with
+    /// the pool.
     async fn prepared_on_own_connection(statement: &str) -> PgConnection {
         let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
         let mut connection = PgConnection::connect(&url).await.expect("connect");
-        sqlx::raw_sql("SET plan_cache_mode = force_generic_plan; SET enable_seqscan = off")
+        sqlx::raw_sql("SET plan_cache_mode = force_custom_plan; SET enable_seqscan = off")
             .execute(&mut connection)
             .await
             .expect("settings");
@@ -1036,7 +1054,7 @@ mod tests {
     async fn the_session_timeline_scans_the_session_index() {
         let pool = connect_test_pool().await;
         let day = NaiveDate::from_ymd_opt(2099, 8, 1).expect("date");
-        let (start, end) = fill_probe_day(&pool, day).await;
+        let (start, last) = fill_probe_day(&pool, day).await;
         let mut connection = prepared_on_own_connection(
             "PREPARE probe (text, bigint, bigint, bigint) AS
              SELECT id FROM decision_log
@@ -1046,7 +1064,7 @@ mod tests {
         .await;
         let plan = explain_execute(
             &mut connection,
-            &format!("probe('session-probe', {start}, {end}, 100)"),
+            &format!("probe('session-probe', {start}, {last}, 100)"),
         )
         .await;
         assert_plan_scans(&mut connection, "decision_log_session_idx", &plan).await;
@@ -1057,7 +1075,7 @@ mod tests {
     async fn the_attention_listing_scans_the_attention_index() {
         let pool = connect_test_pool().await;
         let day = NaiveDate::from_ymd_opt(2099, 8, 2).expect("date");
-        let (start, end) = fill_probe_day(&pool, day).await;
+        let (start, last) = fill_probe_day(&pool, day).await;
         let mut connection = prepared_on_own_connection(
             "PREPARE probe (text[], bigint, bigint, bigint) AS
              SELECT id FROM decision_log
@@ -1068,7 +1086,7 @@ mod tests {
         .await;
         let plan = explain_execute(
             &mut connection,
-            &format!("probe(ARRAY['blocked', 'would_block', 'unjudged'], {start}, {end}, 100)"),
+            &format!("probe(ARRAY['blocked', 'would_block', 'unjudged'], {start}, {last}, 100)"),
         )
         .await;
         assert_plan_scans(&mut connection, "decision_log_attention_idx", &plan).await;
@@ -1079,7 +1097,7 @@ mod tests {
     async fn the_jev_listing_scans_the_jev_index() {
         let pool = connect_test_pool().await;
         let day = NaiveDate::from_ymd_opt(2099, 8, 3).expect("date");
-        let (start, end) = fill_probe_day(&pool, day).await;
+        let (start, last) = fill_probe_day(&pool, day).await;
         let mut connection = prepared_on_own_connection(&format!(
             "PREPARE probe (bigint, bigint, bigint) AS
              SELECT id FROM decision_log
@@ -1087,7 +1105,7 @@ mod tests {
              ORDER BY at_millis DESC, id DESC LIMIT $3"
         ))
         .await;
-        let plan = explain_execute(&mut connection, &format!("probe({start}, {end}, 100)")).await;
+        let plan = explain_execute(&mut connection, &format!("probe({start}, {last}, 100)")).await;
         assert_plan_scans(&mut connection, "decision_log_jev_idx", &plan).await;
     }
 
@@ -1096,6 +1114,7 @@ mod tests {
     async fn a_login_is_found_by_the_session_it_issued_and_is_not_on_its_rows() {
         use crate::decision_stats::{self, Scope, TimelineOnly};
 
+        let _shared_day = SHARED_DAY.lock().await;
         let pool = connect_test_pool().await;
         let day = NaiveDate::from_ymd_opt(2099, 8, 4).expect("date");
         ensure_partition(&pool, day).await.expect("partition");
@@ -1145,5 +1164,59 @@ mod tests {
             .await
             .expect("query");
         assert!(never.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn minute_peaks_counts_the_calls_the_limit_refused() {
+        use crate::decision_stats::{self, Scope};
+
+        let _shared_day = SHARED_DAY.lock().await;
+        let pool = connect_test_pool().await;
+        let day = NaiveDate::from_ymd_opt(2099, 8, 4).expect("date");
+        ensure_partition(&pool, day).await.expect("partition");
+        let (start, _end) = day_bounds_millis(day).expect("bounds");
+        // (request id, offset in ms, Jev failure, Jev round trip in ms). Three calls
+        // reached Jev, two were refused by the per-minute limit, and one was refused
+        // for its state size, which never asks Jev at all.
+        let rows = [
+            ("req_call_1", 1_000_i64, None, Some(40_i64)),
+            ("req_call_2", 2_000, None, Some(45)),
+            ("req_call_3", 3_000, None, Some(50)),
+            ("req_refused_1", 4_000, Some("JEV_CALL_LIMIT"), None),
+            ("req_refused_2", 5_000, Some("JEV_CALL_LIMIT"), None),
+            ("req_too_large", 6_000, Some("JEV_STATE_TOO_LARGE"), None),
+        ];
+        for (request_id, offset, failure, jev_ms) in rows {
+            sqlx::query(
+                r#"INSERT INTO decision_log
+                       (at_millis, request_id, site, edge, host, client, session, context,
+                        method, path, decision_path, outcome, trace, jev, jev_ms, jev_failure)
+                   VALUES
+                       ($1, $2, 'emr', 'edge-1', 'emr.test', '192.0.2.9', 'sess-busy',
+                        'session', 'GET', '/a', 'fast_allow', 'allowed', '{}'::jsonb,
+                        '{"prompt":"jq_0000000000000001"}'::jsonb, $3, $4)"#,
+            )
+            .bind(start + offset)
+            .bind(request_id)
+            .bind(jev_ms)
+            .bind(failure)
+            .execute(&pool)
+            .await
+            .expect("row");
+        }
+        let scope = Scope {
+            site: Some("emr".to_owned()),
+            since_millis: start,
+            until_millis: start + 86_400_000,
+        };
+        let peaks = decision_stats::minute_peaks(&pool, &scope, false, 3)
+            .await
+            .expect("peaks");
+        // Five calls demanded in one minute against a limit of three: the two refused
+        // calls are demand, and the state-size refusal is not.
+        assert_eq!(peaks.peak, 5);
+        assert_eq!(peaks.excess, 2);
+        assert_eq!(peaks.keys_over, 1);
     }
 }

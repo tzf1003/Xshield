@@ -53,7 +53,9 @@ const DEFAULT_WINDOW_HOURS: i64 = 24;
 const MAX_WINDOW_HOURS: i64 = 168;
 const EVIDENCE_WINDOW_HOURS: i64 = 24;
 const HOUR_MILLIS: i64 = 3_600_000;
-const HISTORY_VERSIONS: i64 = 10_000;
+/// Versions read per page while looking for when observing began. `history` returns
+/// at most 200 versions a page.
+const OBSERVE_PAGE: i64 = 200;
 const HOT_TEMPLATES: usize = 5;
 const SUGGESTIONS_PER_RULE: usize = 50;
 const PREFIX_MIN_PATHS: usize = 3;
@@ -826,25 +828,51 @@ fn histogram_counts(buckets: &[(i32, i64)]) -> Vec<i64> {
     counts
 }
 
-/// When observing began: the newest version that switched the site into observe
-/// mode, or its creation. `None` when the history holds no configuration.
-#[must_use]
-fn observing_since(history: &[HistoryEntry]) -> Option<DateTime<Utc>> {
-    let mut previous: Option<Mode> = None;
-    let mut since = None;
-    for entry in history {
-        let Some(spec) = &entry.spec else {
-            previous = None;
-            since = None;
-            continue;
-        };
-        let mode = spec.mode();
-        if mode == Mode::Observe && previous != Some(Mode::Observe) {
-            since = Some(entry.changed_at);
+/// Walks a site's versions newest first and remembers where the newest run of
+/// observe-mode versions began.
+#[derive(Debug, Default)]
+struct ObserveRun {
+    /// Whether the walk has reached an observe-mode version yet.
+    inside: bool,
+    /// When the oldest observe-mode version seen so far was recorded.
+    since: Option<DateTime<Utc>>,
+}
+
+impl ObserveRun {
+    /// Takes the next version, which is older than the ones before it. Returns `false`
+    /// once the walk has left the run.
+    fn take(&mut self, entry: &HistoryEntry) -> bool {
+        if entry
+            .spec
+            .as_ref()
+            .is_some_and(|spec| spec.mode() == Mode::Observe)
+        {
+            self.inside = true;
+            self.since = Some(entry.changed_at);
+            true
+        } else {
+            !self.inside
         }
-        previous = Some(mode);
     }
-    since
+}
+
+/// When observing began: the start of the newest run of observe-mode versions, or
+/// `None` when the site never observed. Versions are read newest first, a page at a
+/// time, and the walk stops at the first version outside the run, so the answer does
+/// not depend on how much history the site has.
+async fn observing_since(pool: &PgPool, name: &str) -> ApiResult<Option<DateTime<Utc>>> {
+    let mut run = ObserveRun::default();
+    let mut before = None;
+    loop {
+        let page = site_spec_store::history(pool, name, before, OBSERVE_PAGE).await?;
+        let Some(oldest) = page.last() else {
+            return Ok(run.since);
+        };
+        if !page.iter().all(|entry| run.take(entry)) {
+            return Ok(run.since);
+        }
+        before = Some(oldest.version);
+    }
 }
 
 /// The readiness check before observe mode is switched to enforce: when observing
@@ -859,9 +887,9 @@ async fn readiness_of(
     now: i64,
 ) -> ApiResult<Value> {
     let name = record.spec.name();
-    let history =
-        site_spec_store::history_of_site_chronological(pool, name, HISTORY_VERSIONS).await?;
-    let since = observing_since(&history).unwrap_or(record.created_at);
+    let since = observing_since(pool, name)
+        .await?
+        .unwrap_or(record.created_at);
     let mut would_block: BTreeMap<&str, i64> = BTreeMap::new();
     for group in analysis
         .groups
@@ -1061,5 +1089,82 @@ mod tests {
         assert_eq!(scan.words["idcard"].calls, 1);
         assert_eq!(scan.words["idcard"].sample.as_deref(), Some("req_0123"));
         assert!(!scan.words.contains_key("ssn"));
+    }
+
+    /// `observing_since`'s walk over versions given newest first and read `page` at
+    /// a time.
+    fn since_read_in_pages(newest_first: &[HistoryEntry], page: usize) -> Option<DateTime<Utc>> {
+        let mut run = ObserveRun::default();
+        for chunk in newest_first.chunks(page) {
+            if !chunk.iter().all(|entry| run.take(entry)) {
+                break;
+            }
+        }
+        run.since
+    }
+
+    #[test]
+    fn observing_began_with_the_newest_run_of_observe_versions() {
+        use xshield_postgres::site_spec_store::Change;
+
+        // A version that holds a configuration in `mode`, or a delete for `None`.
+        fn version(number: i64, mode: Option<&str>) -> HistoryEntry {
+            HistoryEntry {
+                version: number,
+                change: Change::Update,
+                rollback_of: None,
+                note: None,
+                changed_at: DateTime::from_timestamp_millis(number * 1_000).expect("time"),
+                spec: mode.map(|mode| {
+                    SiteSpec::from_json(&format!(
+                        r#"{{"name": "emr", "hosts": ["emr.example.com"],
+                            "origin": "http://10.0.0.5:8080",
+                            "session": {{"cookie": "SESSIONID"}},
+                            "entries": ["/login"], "mode": "{mode}"}}"#
+                    ))
+                    .expect("test spec")
+                }),
+            }
+        }
+        let at = |number: i64| DateTime::from_timestamp_millis(number * 1_000);
+        // Newest first, as the database returns them.
+        let cases = [
+            (
+                vec![
+                    version(3, Some("observe")),
+                    version(2, Some("observe")),
+                    version(1, Some("enforce")),
+                ],
+                at(2),
+            ),
+            (
+                vec![
+                    version(3, Some("enforce")),
+                    version(2, Some("observe")),
+                    version(1, Some("observe")),
+                ],
+                at(1),
+            ),
+            (
+                vec![version(2, Some("enforce")), version(1, Some("enforce"))],
+                None,
+            ),
+            (vec![version(1, Some("observe"))], at(1)),
+            (
+                vec![
+                    version(3, Some("observe")),
+                    version(2, None),
+                    version(1, Some("observe")),
+                ],
+                at(3),
+            ),
+            (Vec::new(), None),
+        ];
+        for (history, expected) in &cases {
+            // The answer must not depend on how the history is paged.
+            for page in 1..=4 {
+                assert_eq!(since_read_in_pages(history, page), *expected, "page {page}");
+            }
+        }
     }
 }
