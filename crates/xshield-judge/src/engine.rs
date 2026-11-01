@@ -249,7 +249,7 @@ impl<J: JevPort> Judge<J> {
         let mut values = Vec::new();
         for value in extracted.values.iter().filter(|v| !v.inert) {
             let seen = session.lookup(&self.key, &value.value);
-            all_known &= seen.is_some_and(|seen| seen.is_specific(&value.value));
+            all_known &= seen.is_some_and(|seen| seen.is_specific(&value.value, request.path));
             values.push(StateValue {
                 at: value.at.clone(),
                 value: value.value.clone(),

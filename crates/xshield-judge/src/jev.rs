@@ -50,6 +50,8 @@ pub enum JevConfigError {
     Key,
     /// The endpoint is not https (or loopback http) with a host.
     Endpoint,
+    /// `XSHIELD_JEV_TIMEOUT_MS` is not a number between 100 and 30000.
+    Timeout,
 }
 
 impl std::fmt::Display for JevConfigError {
@@ -58,6 +60,7 @@ impl std::fmt::Display for JevConfigError {
             Self::Route => "JEV_CONFIG_ROUTE_INVALID",
             Self::Key => "JEV_CONFIG_KEY_INVALID",
             Self::Endpoint => "JEV_CONFIG_ENDPOINT_INVALID",
+            Self::Timeout => "JEV_CONFIG_TIMEOUT_INVALID",
         })
     }
 }
@@ -129,7 +132,8 @@ impl JevClient {
 
     /// Reads `XSHIELD_JEV_ROUTE` (`gateway` default, or `direct`), the matching
     /// key variable, and the optional `XSHIELD_JEV_ENDPOINT` / `XSHIELD_JEV_MODEL`
-    /// overrides used for a private deployment.
+    /// overrides used for a private deployment, and `XSHIELD_JEV_TIMEOUT_MS`
+    /// (100 to 30000, default 2000) for slow links.
     ///
     /// # Errors
     /// [`JevConfigError`] for an unknown route, missing key or bad endpoint.
@@ -147,7 +151,16 @@ impl JevClient {
         let endpoint =
             std::env::var("XSHIELD_JEV_ENDPOINT").unwrap_or_else(|_| default_endpoint.to_owned());
         let model = std::env::var("XSHIELD_JEV_MODEL").unwrap_or_else(|_| default_model.to_owned());
-        Self::new(&endpoint, &key, &model, TIMEOUT)
+        let timeout = match std::env::var("XSHIELD_JEV_TIMEOUT_MS") {
+            Ok(text) => text
+                .parse::<u64>()
+                .ok()
+                .filter(|millis| (100..=30_000).contains(millis))
+                .map(Duration::from_millis)
+                .ok_or(JevConfigError::Timeout)?,
+            Err(_) => TIMEOUT,
+        };
+        Self::new(&endpoint, &key, &model, timeout)
     }
 
     async fn exchange(&self, body: Vec<u8>) -> Result<Vec<u8>, JevFailure> {
