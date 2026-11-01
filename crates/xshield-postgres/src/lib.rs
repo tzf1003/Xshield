@@ -51,6 +51,8 @@ mod service_identity_read;
 mod share_grant_issue;
 mod share_grant_read;
 mod site_config;
+pub mod site_spec_store;
+pub mod decision_log_store;
 
 pub use action_read::ResponseActionDescriptorQuery;
 pub use binding_inspection::BindingInspection;

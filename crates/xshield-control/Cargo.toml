@@ -8,29 +8,17 @@ rust-version.workspace = true
 
 [dependencies]
 axum.workspace = true
-chrono.workspace = true
-clickhouse.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 openssl.workspace = true
-openidconnect.workspace = true
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+sqlx.workspace = true
 tokio.workspace = true
-tokio-stream.workspace = true
-uuid.workspace = true
-url.workspace = true
-xshield-audit = { path = "../xshield-audit" }
 xshield-core = { path = "../xshield-core" }
-xshield-evidence = { path = "../xshield-evidence" }
 xshield-postgres = { path = "../xshield-postgres" }
-xshield-worker = { path = "../xshield-worker" }
-zeroize.workspace = true
 
 [dev-dependencies]
-clickhouse = { workspace = true, features = ["test-util"] }
 tower.workspace = true
-sqlx.workspace = true
 
 [lints]
 workspace = true
