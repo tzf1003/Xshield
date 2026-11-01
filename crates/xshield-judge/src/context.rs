@@ -13,7 +13,7 @@ use crate::values::{ResponseValue, is_id_like};
 /// Most values remembered per session.
 pub const SEEN_MAX: usize = 5_000;
 /// Most origins of one value kept.
-pub const SOURCES_MAX: usize = 3;
+pub const SOURCES_MAX: usize = 6;
 /// Most recent requests kept per session.
 pub const RECENT_MAX: usize = 50;
 /// A session with no traffic for this long is dropped.
@@ -103,17 +103,98 @@ pub struct Origin {
 /// What this session knows about one request value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Seen {
-    /// Up to [`SOURCES_MAX`] origins, newest last.
+    /// Up to [`SOURCES_MAX`] origins, newest last; id fields outlast others.
     pub origins: Vec<Origin>,
 }
 
 impl Seen {
-    /// Whether the value is safe to fast-allow: long, or seen under an id field.
+    /// Whether the value is safe to fast-allow for a request to `path` under
+    /// the field `key`: long, or seen under an id field of the same kind of
+    /// object. Short values collide across unrelated objects (basket 1,
+    /// product 1), so they only count when the origin field or the request
+    /// that showed them names the same kind of object as the path or key.
     #[must_use]
-    pub fn is_specific(&self, value: &str) -> bool {
+    pub fn is_specific(&self, value: &str, path: &str, key: Option<&str>) -> bool {
         value.chars().count() >= LONG_VALUE_CHARS
-            || self.origins.iter().any(|origin| is_id_like(&origin.field))
+            || self
+                .origins
+                .iter()
+                .any(|origin| is_id_like(&origin.field) && affinity(origin, path, key))
     }
+
+    /// The origins ordered for the model, most useful last: ones of the same
+    /// kind of object as the request, then id fields, then the rest. The
+    /// model sees only the last few, so a recent unrelated match (a stock
+    /// count) must not push out the product list that really showed the id.
+    #[must_use]
+    pub fn ranked(&self, path: &str, key: Option<&str>) -> Vec<&Origin> {
+        let mut origins: Vec<&Origin> = self.origins.iter().collect();
+        origins.sort_by_key(|origin| {
+            u8::from(is_id_like(&origin.field)) + 2 * u8::from(affinity(origin, path, key))
+        });
+        origins
+    }
+}
+
+fn affinity(origin: &Origin, path: &str, key: Option<&str>) -> bool {
+    // A field name says what kind of object the value selects; only without
+    // one (a path segment, a bare `id` field) does the path decide.
+    let by_key = key.map(kind_words).unwrap_or_default();
+    let wanted = if by_key.is_empty() {
+        kind_words(path)
+    } else {
+        by_key
+    };
+    // The field's own name says what it identifies (`ProductId` is a
+    // product, whatever object carried it); a bare `id` takes the kind of its
+    // parent (`Products.id`), and a bare top-level `id` the kind of the
+    // request that returned it.
+    let (parent, last) = origin.field.rsplit_once('.').unwrap_or(("", &origin.field));
+    let mut shown = kind_words(last);
+    if shown.is_empty() {
+        shown = kind_words(parent);
+    }
+    if shown.is_empty() {
+        shown = kind_words(origin.request.split_once(' ').map_or("", |(_, path)| path));
+    }
+    wanted
+        .iter()
+        .any(|word| shown.iter().any(|other| related(word, other)))
+}
+
+const GENERIC_WORDS: [&str; 8] = ["api", "rest", "v1", "v2", "v3", "data", "value", "id"];
+
+/// Lower-cased words of a path or field name, camel case split, plural
+/// endings and generic route prefixes removed: `/api/Addresss/7` gives
+/// `address`, `ProductId` gives `product`.
+fn kind_words(text: &str) -> Vec<String> {
+    let mut spaced = String::with_capacity(text.len() + 8);
+    let mut previous_lower = false;
+    for c in text.chars() {
+        if c.is_ascii_uppercase() && previous_lower {
+            spaced.push(' ');
+        }
+        previous_lower = c.is_ascii_lowercase();
+        spaced.push(c);
+    }
+    spaced
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .map(|word| word.to_ascii_lowercase().trim_end_matches('s').to_owned())
+        .filter(|word| word.len() >= 3 && !GENERIC_WORDS.contains(&word.as_str()))
+        .collect()
+}
+
+/// Words for one kind of object that differ between a field and the endpoint
+/// that lists it (`paymentId` selects a card of `/api/Cards`).
+const SYNONYMS: [(&str, &str); 1] = [("payment", "card")];
+
+fn related(left: &str, right: &str) -> bool {
+    left.contains(right)
+        || right.contains(left)
+        || SYNONYMS.iter().any(|(first, second)| {
+            (left.contains(first) && right.contains(second))
+                || (left.contains(second) && right.contains(first))
+        })
 }
 
 /// One remembered request.
@@ -175,7 +256,15 @@ impl SessionContext {
             if let Some(seen) = self.seen.get_mut(&digest) {
                 if !seen.origins.contains(&origin) {
                     if seen.origins.len() == SOURCES_MAX {
-                        seen.origins.remove(0);
+                        // Small numbers repeat everywhere; keep the id-field
+                        // origins that really identify an object and drop
+                        // the noise (a stock count, an ETA) first.
+                        let drop = seen
+                            .origins
+                            .iter()
+                            .position(|o| !is_id_like(&o.field))
+                            .unwrap_or(0);
+                        seen.origins.remove(drop);
                     }
                     seen.origins.push(origin);
                 }
@@ -367,9 +456,42 @@ mod tests {
         );
         let seen = session.lookup(&key, "7").unwrap();
         assert_eq!(seen.origins[0].field, "id");
-        assert!(seen.is_specific("7"));
-        assert!(!session.lookup(&key, "8").unwrap().is_specific("8"));
+        assert!(seen.is_specific("7", "/api/patients/7", None));
+        assert!(
+            !session
+                .lookup(&key, "8")
+                .unwrap()
+                .is_specific("8", "/api/patients/8", None)
+        );
         assert!(session.lookup(&key, "9").is_none());
+    }
+
+    #[test]
+    fn the_field_name_decides_the_kind_and_the_best_origin_comes_last() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(&key, "GET /rest/products/search", &[response("id", "1")]);
+        session.remember(&key, "GET /api/Deliverys", &[response("id", "1")]);
+        session.remember(&key, "GET /api/Quantitys/", &[response("quantity", "1")]);
+        let seen = session.lookup(&key, "1").unwrap();
+        assert!(seen.is_specific("1", "/rest/basket/22/checkout", Some("deliveryMethodId")));
+        assert!(!seen.is_specific("1", "/rest/basket/22/checkout", Some("couponId")));
+        assert!(seen.is_specific("1", "/api/BasketItems/", Some("ProductId")));
+        let ranked = seen.ranked("/api/BasketItems/", Some("ProductId"));
+        assert_eq!(ranked.last().unwrap().request, "GET /rest/products/search");
+        assert_eq!(ranked[0].field, "quantity");
+    }
+
+    #[test]
+    fn a_payment_id_is_a_card_the_list_showed() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(&key, "GET /api/Cards", &[response("id", "7")]);
+        let seen = session.lookup(&key, "7").unwrap();
+        assert!(seen.is_specific("7", "/rest/basket/22/checkout", Some("paymentId")));
+        assert!(!seen.is_specific("7", "/rest/basket/22/checkout", Some("addressId")));
     }
 
     #[test]
@@ -380,21 +502,66 @@ mod tests {
                 request: "GET /x".into(),
             }],
         };
-        assert!(seen.is_specific("P-0000042"));
-        assert!(!seen.is_specific("alice"));
+        assert!(seen.is_specific("P-0000042", "/x", None));
+        assert!(!seen.is_specific("alice", "/x", None));
+    }
+
+    #[test]
+    fn short_ids_only_count_for_the_same_kind_of_object() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(&key, "GET /api/Deliverys", &[response("id", "1")]);
+        session.remember(
+            &key,
+            "GET /rest/basket/22",
+            &[response("BasketItem.id", "9"), response("BasketId", "22")],
+        );
+        let delivery = session.lookup(&key, "1").unwrap();
+        assert!(delivery.is_specific("1", "/api/Deliverys/1", None));
+        assert!(!delivery.is_specific("1", "/rest/basket/1", None));
+        session.remember(&key, "GET /rest/basket/22", &[response("Products.id", "1")]);
+        let both = session.lookup(&key, "1").unwrap();
+        assert!(!both.is_specific("1", "/rest/basket/1", None));
+        assert!(both.is_specific("1", "/api/Products/1", None));
+        let item = session.lookup(&key, "9").unwrap();
+        assert!(item.is_specific("9", "/api/BasketItems/9", None));
+        assert!(session.lookup(&key, "22").unwrap().is_specific(
+            "22",
+            "/rest/basket/22/checkout",
+            None
+        ));
     }
 
     #[test]
     fn origins_are_deduplicated_and_capped() {
         let key = key();
         let mut session = SessionContext::new(0);
-        for index in 0..5 {
+        for index in 0..=SOURCES_MAX + 2 {
             session.remember(&key, &format!("GET /r{index}"), &[response("id", "7")]);
         }
-        session.remember(&key, "GET /r4", &[response("id", "7")]);
+        let last = format!("GET /r{}", SOURCES_MAX + 2);
+        session.remember(&key, &last, &[response("id", "7")]);
         let seen = session.lookup(&key, "7").unwrap();
         assert_eq!(seen.origins.len(), SOURCES_MAX);
-        assert_eq!(seen.origins.last().unwrap().request, "GET /r4");
+        assert_eq!(seen.origins.last().unwrap().request, last);
+    }
+
+    #[test]
+    fn noise_origins_are_dropped_before_id_origins() {
+        let key = key();
+        let mut session = SessionContext::new(0);
+        session.remember(&key, "GET /api/Products", &[response("id", "1")]);
+        for index in 0..SOURCES_MAX + 3 {
+            session.remember(
+                &key,
+                &format!("GET /s{index}"),
+                &[response("quantity", "1")],
+            );
+        }
+        let seen = session.lookup(&key, "1").unwrap();
+        assert_eq!(seen.origins.len(), SOURCES_MAX);
+        assert_eq!(seen.origins[0].request, "GET /api/Products");
     }
 
     #[test]

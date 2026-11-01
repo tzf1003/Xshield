@@ -64,6 +64,8 @@ pub struct Judgement {
 pub struct Observation<'a> {
     /// The request's credential, if it had one.
     pub credential: Option<&'a str>,
+    /// Client address; the context of requests that have no credential.
+    pub client: &'a str,
     /// A credential the origin issued in this response (new `Set-Cookie`).
     pub issued_credential: Option<&'a str>,
     /// HTTP method.
@@ -219,29 +221,14 @@ impl<J: JevPort> Judge<J> {
         extracted: &ExtractedRequest,
         cache_key: &Digest16,
     ) -> Plan {
-        let Some(session_id) = session_id else {
-            if !entry {
-                return Plan::Done(Verdict::Unsafe(DecisionPath::NoSession));
-            }
-            // An entry without a session (login): only attack content matters.
-            let values: Vec<StateValue> = extracted
-                .values
-                .iter()
-                .filter(|v| !v.inert)
-                .map(|v| StateValue {
-                    at: v.at.clone(),
-                    value: v.value.clone(),
-                    key: v.key.clone(),
-                    seen_as: vec![],
-                })
-                .collect();
-            if values.is_empty() {
-                return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
-            }
-            return Plan::Ask {
-                limit_key: self.key.mac("address", request.client.as_bytes()),
-                values,
-            };
+        // Without a credential only an entry may pass (a login, a sign-up
+        // step). Its context is the client address: what the origin showed
+        // that address earlier (a new user's id, the security questions) is
+        // the only evidence that the next sign-up request names its own data.
+        let session_id = match session_id {
+            Some(id) => id,
+            None if entry => self.key.mac("address", request.client.as_bytes()),
+            None => return Plan::Done(Verdict::Unsafe(DecisionPath::NoSession)),
         };
         let mut inner = self.lock();
         let session = inner.store.session(session_id, request.now_ms);
@@ -249,15 +236,19 @@ impl<J: JevPort> Judge<J> {
         let mut values = Vec::new();
         for value in extracted.values.iter().filter(|v| !v.inert) {
             let seen = session.lookup(&self.key, &value.value);
-            all_known &= seen.is_some_and(|seen| seen.is_specific(&value.value));
+            let verified = seen.is_some_and(|seen| {
+                seen.is_specific(&value.value, request.path, value.key.as_deref())
+            });
+            all_known &= verified;
             values.push(StateValue {
+                verified,
                 at: value.at.clone(),
                 value: value.value.clone(),
                 key: value.key.clone(),
                 seen_as: seen
                     .map(|seen| {
-                        seen.origins
-                            .iter()
+                        seen.ranked(request.path, value.key.as_deref())
+                            .into_iter()
                             .map(|o| format!("{} @ {}", o.field, o.request))
                             .collect()
                     })
@@ -369,12 +360,10 @@ impl<J: JevPort> Judge<J> {
         };
         let verdict = match conclude(&answers) {
             Conclusion::Allow => {
-                if let Some(id) = session_id {
-                    self.lock()
-                        .store
-                        .session(id, request.now_ms)
-                        .cache_allow(*cache_key, request.now_ms);
-                }
+                self.lock()
+                    .store
+                    .session(session_id.unwrap_or(limit_key), request.now_ms)
+                    .cache_allow(*cache_key, request.now_ms);
                 Verdict::Safe(DecisionPath::JevAllow)
             }
             Conclusion::Deny => Verdict::Unsafe(DecisionPath::JevDeny),
@@ -425,6 +414,17 @@ impl<J: JevPort> Judge<J> {
         } else {
             None
         };
+        if success && entry && !observation.client.is_empty() && seeded.is_none_or(str::is_empty) {
+            // A sign-up page shows a new user's id to a client that has no
+            // session yet; the next sign-up request is judged against that.
+            inner
+                .store
+                .session(
+                    self.key.mac("address", observation.client.as_bytes()),
+                    observation.now_ms,
+                )
+                .remember(&self.key, &request, &values);
+        }
         for credential in [seeded, observation.issued_credential]
             .into_iter()
             .flatten()
@@ -602,6 +602,7 @@ mod tests {
     fn list_response(credential: &str, now_ms: u64) -> Observation<'_> {
         Observation {
             credential: Some(credential),
+            client: "10.0.0.1",
             issued_credential: None,
             method: "GET",
             path: "/api/patients",
@@ -692,6 +693,7 @@ mod tests {
         let site = site(r#","mode":"enforce""#);
         let redeem = Observation {
             credential: Some("bob"),
+            client: "10.0.0.1",
             issued_credential: None,
             method: "GET",
             path: "/share/CODE",
@@ -908,6 +910,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_clean_entry_request_without_a_session_is_judged_once() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let poll = RequestFacts {
+            method: "GET",
+            path: "/login",
+            query: Some("name=Score%20Board"),
+            ..get("/login", None, None, 0)
+        };
+        for index in 0..(ADDRESS_CALLS_PER_MINUTE * 2) {
+            let at = RequestFacts {
+                now_ms: 1_000 + u64::from(index),
+                ..poll
+            };
+            let verdict = judge.judge(&site, &at).await;
+            assert!(verdict.forward, "poll {index}");
+        }
+        assert_eq!(fake.calls(), 1);
+        // The injection that follows still reaches Jev with budget left.
+        fake.answer("ALLOW", "ATTACK");
+        let attack = RequestFacts {
+            query: Some("name=%27%20OR%201%3D1--"),
+            now_ms: 9_000,
+            ..poll
+        };
+        let verdict = judge.judge(&site, &attack).await;
+        assert!(!verdict.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_entry_request_is_judged_against_what_its_address_was_shown() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // A sign-up page: no credential yet, the origin shows the new id.
+        let sign_up = |client| RequestFacts {
+            client,
+            ..get("/api/patients", Some("id=7"), None, 5_000)
+        };
+        let blind = judge.judge(&site, &sign_up("10.0.0.9")).await;
+        assert!(!blind.forward, "an id nobody showed this address");
+        assert_eq!(fake.calls(), 1);
+        judge.observe(
+            &site,
+            &Observation {
+                credential: None,
+                client: "10.0.0.9",
+                ..list_response("unused", 1_000)
+            },
+        );
+        let shown = judge.judge(&site, &sign_up("10.0.0.9")).await;
+        assert!(shown.forward);
+        assert_eq!(shown.record.unwrap().decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1);
+        // Another address was shown nothing.
+        let other = judge.judge(&site, &sign_up("10.0.0.2")).await;
+        assert!(!other.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
     async fn c5_calls_beyond_the_session_limit_follow_the_unavailable_policy() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
@@ -990,6 +1056,7 @@ mod tests {
             &site,
             &Observation {
                 credential: None,
+                client: "10.0.0.1",
                 issued_credential: Some("fresh"),
                 method: "POST",
                 path: "/login",
@@ -1004,6 +1071,7 @@ mod tests {
             &site,
             &Observation {
                 credential: Some("other"),
+                client: "10.0.0.1",
                 issued_credential: None,
                 method: "GET",
                 path: "/missing",
@@ -1025,6 +1093,7 @@ mod tests {
             &site,
             &Observation {
                 credential: None,
+                client: "10.0.0.1",
                 issued_credential: Some("fresh"),
                 method: "POST",
                 path: "/login",

@@ -85,6 +85,7 @@ async fn live_business_traffic_and_evasions() {
         &site,
         &Observation {
             credential: Some("doctorA"),
+            client: "10.0.0.1",
             issued_credential: None,
             method: "GET",
             path: "/api/patients",
@@ -239,6 +240,7 @@ async fn live_acceptance_scenarios() {
             &site,
             &Observation {
                 credential: Some(session),
+                client: "10.0.0.1",
                 issued_credential: None,
                 method: "GET",
                 path: "/api/patients",
@@ -254,6 +256,7 @@ async fn live_acceptance_scenarios() {
         &site,
         &Observation {
             credential: Some("recipient"),
+            client: "10.0.0.1",
             issued_credential: None,
             method: "POST",
             path: "/api/share/redeem",
@@ -405,6 +408,9 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
             case.name, blocked, case.expect_block, record.decision_path, record.outcome, detail
         );
         if blocked != case.expect_block {
+            if let Some(jev) = &record.jev {
+                println!("  state sent: {}", jev.state);
+            }
             wrong.push(case.name);
         }
         assert!(
@@ -417,4 +423,257 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
         wrong.is_empty(),
         "verdicts differ from the expectation: {wrong:?}"
     );
+}
+
+/// The Juice Shop checkout flow recorded on the Windows trial (docs/04 section
+/// 4.5): camel-case route names, small numeric ids and card fields that the
+/// first trial answered DENY for although every id had been shown. The
+/// checkout POST is covered too: `paymentId` 7 was shown only as a card id.
+#[tokio::test]
+#[ignore = "needs XSHIELD_JEV_API_KEY and network access"]
+async fn live_juice_shop_checkout_flow() {
+    let judge = Judge::new(
+        ContextKey::new(vec![5; 32]),
+        JevClient::from_environment().expect("Jev configuration"),
+    );
+    let site = SiteSpec::from_json(
+        r#"{"name":"juice","hosts":["juice.test"],"origin":"http://o:1","session":{"cookie":"token"},
+            "entries":["/","/rest/user/login","/rest/products/search"],
+            "bypass":["/assets/*"],"mode":"enforce"}"#,
+    )
+    .expect("site");
+    let observe = |path: &'static str, body: &'static [u8], now_ms: u64| {
+        judge.observe(
+            &site,
+            &Observation {
+                credential: Some("tokenA"),
+                client: "10.0.0.1",
+                issued_credential: None,
+                method: "GET",
+                path,
+                status: 200,
+                content_type: Some("application/json"),
+                body,
+                now_ms,
+            },
+        );
+    };
+    observe(
+        "/rest/basket/22",
+        br#"{"status":"success","data":{"id":22,"coupon":null,"UserId":24,"Products":[{"id":1,"name":"Apple Juice (1000ml)","price":1.99,"BasketItem":{"id":9,"quantity":1,"BasketId":22,"ProductId":1}}]}}"#,
+        1_000,
+    );
+    observe(
+        "/rest/products/search",
+        br#"{"status":"success","data":[{"id":1,"name":"Apple Juice (1000ml)","price":1.99},{"id":2,"name":"Orange Juice (1000ml)","price":2.99}]}"#,
+        999,
+    );
+    observe(
+        "/api/Quantitys/",
+        br#"{"status":"success","data":[{"ProductId":1,"id":1,"quantity":138},{"ProductId":2,"id":2,"quantity":8}]}"#,
+        1_001,
+    );
+    observe(
+        "/api/Addresss",
+        br#"{"status":"success","data":[{"id":7,"fullName":"Test User","zipCode":"10001","city":"NYC","UserId":24}]}"#,
+        1_002,
+    );
+    observe(
+        "/api/Deliverys",
+        br#"{"status":"success","data":[{"id":1,"name":"One Day Delivery","price":0.99,"eta":1},{"id":2,"name":"Fast Delivery","price":0.5,"eta":3}]}"#,
+        1_003,
+    );
+    observe(
+        "/api/Cards",
+        br#"{"status":"success","data":[{"id":7,"fullName":"Test User","cardNum":4111111111111111}]}"#,
+        1_004,
+    );
+    let cases = [
+        get(
+            "address by shown id",
+            "/api/Addresss/7",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get(
+            "delivery by shown id",
+            "/api/Deliverys/1",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get(
+            "card by shown id",
+            "/api/Cards/7",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get(
+            "basket item by shown id",
+            "/api/BasketItems/9",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        post(
+            "add card form",
+            "/api/Cards/",
+            r#"{"fullName":"Test User","cardNum":4111111111111111,"expMonth":2,"expYear":2099}"#,
+            Some("tokenA"),
+            false,
+        ),
+        get("address list", "/api/Addresss", None, Some("tokenA"), false),
+        get(
+            "delivery list",
+            "/api/Deliverys",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get("card list", "/api/Cards", None, Some("tokenA"), false),
+        get(
+            "quantity list",
+            "/api/Quantitys/",
+            None,
+            Some("tokenA"),
+            false,
+        ),
+        get(
+            "product by shown id",
+            "/api/Products/1",
+            Some("d=Sun%20Nov%2001%202026"),
+            Some("tokenA"),
+            false,
+        ),
+        post(
+            "add to own basket",
+            "/api/BasketItems/",
+            r#"{"ProductId":1,"BasketId":"22","quantity":1}"#,
+            Some("tokenA"),
+            false,
+        ),
+        post(
+            "add to someone else's basket",
+            "/api/BasketItems/",
+            r#"{"ProductId":1,"BasketId":"1","quantity":1}"#,
+            Some("tokenA"),
+            true,
+        ),
+        get(
+            "user by name never shown",
+            "/api/users/Alice",
+            None,
+            Some("tokenA"),
+            true,
+        ),
+        post(
+            "neutral key names another account",
+            "/rest/wallet/transfer",
+            r#"{"to":"user-1042","amount":5}"#,
+            Some("tokenA"),
+            true,
+        ),
+        get(
+            "basket of someone else",
+            "/rest/basket/1",
+            None,
+            Some("tokenA"),
+            true,
+        ),
+        get(
+            "address never shown",
+            "/api/Addresss/3",
+            None,
+            Some("tokenA"),
+            true,
+        ),
+        get(
+            "card never shown",
+            "/api/Cards/12",
+            None,
+            Some("tokenA"),
+            true,
+        ),
+        post(
+            "checkout own basket",
+            "/rest/basket/22/checkout",
+            r#"{"couponData":"bnVsbA==","orderDetails":{"paymentId":"7","addressId":"7","deliveryMethodId":"1"}}"#,
+            Some("tokenA"),
+            false,
+        ),
+        post(
+            "checkout foreign basket",
+            "/rest/basket/1/checkout",
+            r#"{"couponData":"bnVsbA==","orderDetails":{"paymentId":"7","addressId":"7","deliveryMethodId":"1"}}"#,
+            Some("tokenA"),
+            true,
+        ),
+    ];
+    run(&judge, &site, &cases, 2_000).await;
+}
+
+/// The Juice Shop sign-up flow: a client without a session is shown the
+/// security questions and the id of the user it just created, then answers
+/// with both. The first third Windows round judged that DENY.
+#[tokio::test]
+#[ignore = "needs XSHIELD_JEV_API_KEY and network access"]
+async fn live_juice_shop_sign_up_flow() {
+    let judge = Judge::new(
+        ContextKey::new(vec![6; 32]),
+        JevClient::from_environment().expect("Jev configuration"),
+    );
+    let site = SiteSpec::from_json(
+        r#"{"name":"juice","hosts":["juice.test"],"origin":"http://o:1","session":{"cookie":"token"},
+            "entries":["/","/rest/user/login","/api/Users/","/api/SecurityQuestions/","/api/SecurityAnswers/"],
+            "bypass":["/assets/*"],"mode":"enforce"}"#,
+    )
+    .expect("site");
+    for (method, path, body, now_ms) in [
+        (
+            "GET",
+            "/api/SecurityQuestions/",
+            br#"{"status":"success","data":[{"id":1,"question":"Your eldest siblings middle name?"},{"id":2,"question":"Mother's maiden name?"}]}"#.as_slice(),
+            1_000,
+        ),
+        (
+            "POST",
+            "/api/Users/",
+            br#"{"status":"success","data":{"id":52,"email":"new.user@example.com","role":"customer","isActive":true}}"#.as_slice(),
+            1_001,
+        ),
+    ] {
+        judge.observe(
+            &site,
+            &Observation {
+                credential: None,
+                client: "10.0.0.1",
+                issued_credential: None,
+                method,
+                path,
+                status: 200,
+                content_type: Some("application/json"),
+                body,
+                now_ms,
+            },
+        );
+    }
+    let cases = [
+        post(
+            "answer for the user just created",
+            "/api/SecurityAnswers/",
+            r#"{"UserId":52,"answer":"iYPJ_o3lz87lCk1v8arjsUK1","SecurityQuestionId":1}"#,
+            None,
+            false,
+        ),
+        post(
+            "answer for someone else's user",
+            "/api/SecurityAnswers/",
+            r#"{"UserId":1,"answer":"iYPJ_o3lz87lCk1v8arjsUK1","SecurityQuestionId":1}"#,
+            None,
+            true,
+        ),
+    ];
+    run(&judge, &site, &cases, 2_000).await;
 }

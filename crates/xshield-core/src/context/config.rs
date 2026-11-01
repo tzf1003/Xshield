@@ -111,8 +111,8 @@ impl PathPattern {
 
     /// Whether `path` (without query) is covered by this pattern.
     ///
-    /// A path with dot segments, doubled slashes, a backslash, a control byte or
-    /// an encoded slash/dot/backslash never matches: a bypass or entry must not
+    /// A path with dot segments, doubled slashes, a backslash, a path parameter
+    /// (`;`), a control byte or an encoded slash/dot/backslash never matches: a bypass or entry must not
     /// be reachable through a spelling the origin may resolve differently.
     #[must_use]
     pub fn matches(&self, path: &str) -> bool {
@@ -136,7 +136,7 @@ fn has_dot_segment(path: &str) -> bool {
 pub fn is_plain_path(path: &str) -> bool {
     if !path.starts_with('/')
         || path.contains("//")
-        || path.contains(['\\', '?', '#'])
+        || path.contains(['\\', '?', '#', ';'])
         || path.bytes().any(|byte| byte.is_ascii_control())
         || has_dot_segment(path)
     {
@@ -413,6 +413,9 @@ mod tests {
         assert!(site.is_bypass("/static/app.js"));
         assert!(site.is_bypass("/favicon.ico"));
         assert!(!site.is_bypass("/static/../api/patients"));
+        // Servlet containers resolve `..;/` and `;x/..` as dot segments.
+        assert!(!site.is_bypass("/static/..;/api/patients"));
+        assert!(!site.is_bypass("/static/;x/../api/patients"));
     }
 
     #[test]
