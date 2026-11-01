@@ -135,10 +135,10 @@
       "values": 4,
       "new_values": 4,
       "fields": [
-        [
-          "token",
-          1
-        ]
+        {
+          "field": "token",
+          "count": 1
+        }
       ],
       "issued_session": "7c1e9a40d2b35f61",
       "entry_passed": true,

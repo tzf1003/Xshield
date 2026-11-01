@@ -177,18 +177,18 @@
       "values": 14,
       "new_values": 9,
       "fields": [
-        [
-          "id",
-          3
-        ],
-        [
-          "name",
-          3
-        ],
-        [
-          "price",
-          3
-        ]
+        {
+          "field": "id",
+          "count": 3
+        },
+        {
+          "field": "name",
+          "count": 3
+        },
+        {
+          "field": "price",
+          "count": 3
+        }
       ],
       "issued_session": null,
       "entry_passed": false,

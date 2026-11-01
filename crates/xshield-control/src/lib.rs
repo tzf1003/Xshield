@@ -29,6 +29,8 @@ mod status;
 mod system;
 
 #[cfg(test)]
+mod contract;
+#[cfg(test)]
 mod tests;
 
 use std::{
