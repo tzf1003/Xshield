@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 4071,
-  "passed_count": 4071,
+  "checks_total": 3860,
+  "passed_count": 3860,
   "acceptance_cases": {
     "total": 78,
     "planned": 7,
@@ -10,11 +10,6 @@
     "automated": 11
   },
   "checks": [
-    {
-      "name": "json:MANIFEST.sha256.json",
-      "passed": true,
-      "detail": ""
-    },
     {
       "name": "json:deploy/helm/xshield/values.schema.json",
       "passed": true,
@@ -126,16 +121,6 @@
       "detail": ""
     },
     {
-      "name": "json:reference/input-provenance.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "json:reference/sources.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
       "name": "json:schemas/artifact-manifest.schema.json",
       "passed": true,
       "detail": ""
@@ -227,6 +212,11 @@
     },
     {
       "name": "yaml:deploy/helm/xshield/Chart.yaml",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "yaml:deploy/helm/xshield/values-ha.yaml",
       "passed": true,
       "detail": ""
     },
@@ -18631,21 +18621,6 @@
       "detail": ""
     },
     {
-      "name": "requirements:20_ids",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "requirements:traceability",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "invariants:20_ids",
-      "passed": true,
-      "detail": ""
-    },
-    {
       "name": "acceptance:count",
       "passed": true,
       "detail": ""
@@ -19056,744 +19031,69 @@
       "detail": ""
     },
     {
-      "name": "sources:00-product-requirements.md",
+      "name": "fences:00-overview.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "fences:00-product-requirements.md",
+      "name": "no_tool_tokens:00-overview.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "no_tool_tokens:00-product-requirements.md",
+      "name": "fences:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "sources:01-threat-model-and-invariants.md",
+      "name": "no_tool_tokens:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "fences:01-threat-model-and-invariants.md",
+      "name": "fences:02-jev.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "no_tool_tokens:01-threat-model-and-invariants.md",
+      "name": "no_tool_tokens:02-jev.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "sources:02-system-architecture.md",
+      "name": "fences:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "fences:02-system-architecture.md",
+      "name": "no_tool_tokens:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "no_tool_tokens:02-system-architecture.md",
+      "name": "fences:04-deployment-testing.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "sources:03-request-response-pipeline.md",
+      "name": "no_tool_tokens:04-deployment-testing.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "fences:03-request-response-pipeline.md",
+      "name": "fences:05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "no_tool_tokens:03-request-response-pipeline.md",
+      "name": "no_tool_tokens:05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "sources:04-auth-session-binding.md",
+      "name": "link:README.md:docs/05-v3-removal.md",
       "passed": true,
       "detail": ""
-    },
-    {
-      "name": "fences:04-auth-session-binding.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:04-auth-session-binding.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:05-ui-action-provenance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:05-ui-action-provenance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:05-ui-action-provenance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:06-capability-ledger.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:06-capability-ledger.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:06-capability-ledger.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:07-browser-sensor.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:07-browser-sensor.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:07-browser-sensor.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:08-crypto-takeover.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:08-crypto-takeover.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:08-crypto-takeover.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:09-policy-engine.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:09-policy-engine.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:09-policy-engine.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:13-audit-storage-reliability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:13-audit-storage-reliability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:13-audit-storage-reliability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:14-investigation-query-replay.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:14-investigation-query-replay.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:14-investigation-query-replay.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:16-rust-code-architecture.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:16-rust-code-architecture.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:16-rust-code-architecture.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:17-development-standards.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:17-development-standards.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:17-development-standards.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:18-api-and-data-models.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:18-api-and-data-models.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:18-api-and-data-models.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:19-deployment-operations.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:19-deployment-operations.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:19-deployment-operations.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:21-performance-capacity.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:21-performance-capacity.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:21-performance-capacity.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:22-delivery-roadmap.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:22-delivery-roadmap.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:22-delivery-roadmap.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:23-risks-and-open-decisions.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:23-risks-and-open-decisions.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:23-risks-and-open-decisions.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:24-adrs.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:24-adrs.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:24-adrs.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:25-source-register.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:25-source-register.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:25-source-register.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:26-runbooks.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:26-runbooks.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:26-runbooks.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:27-rule-authoring-cookbook.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:27-rule-authoring-cookbook.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:27-rule-authoring-cookbook.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:28-conversation-decisions-and-traceability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:28-conversation-decisions-and-traceability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:28-conversation-decisions-and-traceability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:30-console-redesign.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:30-console-redesign.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:30-console-redesign.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:31-implemented-mechanisms.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:31-implemented-mechanisms.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:31-implemented-mechanisms.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "sources:32-observe-to-enforce-rollout.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "fences:32-observe-to-enforce-rollout.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "no_tool_tokens:32-observe-to-enforce-rollout.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/22-delivery-roadmap.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/30-console-redesign.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/31-implemented-mechanisms.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/19-deployment-operations.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/19-deployment-operations.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:web/console/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:Xshield_Design_Book_v3.0.docx",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:START_HERE.html",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/00-product-requirements.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/28-conversation-decisions-and-traceability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:AGENTS.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/00-product-requirements.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/01-threat-model-and-invariants.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/02-system-architecture.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/03-request-response-pipeline.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/04-auth-session-binding.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/05-ui-action-provenance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/06-capability-ledger.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/07-browser-sensor.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/08-crypto-takeover.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/09-policy-engine.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/13-audit-storage-reliability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/14-investigation-query-replay.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/16-rust-code-architecture.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/17-development-standards.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/18-api-and-data-models.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/19-deployment-operations.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/21-performance-capacity.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/22-delivery-roadmap.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/23-risks-and-open-decisions.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/24-adrs.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/25-source-register.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/26-runbooks.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/27-rule-authoring-cookbook.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/28-conversation-decisions-and-traceability.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/30-console-redesign.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/31-implemented-mechanisms.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/32-observe-to-enforce-rollout.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:docs/20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:README.md:validation/report.md",
-      "passed": true,
-      "detail": "generated by this validator"
     },
     {
       "name": "link:README.md:CHANGELOG.md",
@@ -19801,7 +19101,42 @@
       "detail": ""
     },
     {
-      "name": "link:deploy/compose/README.md:../../docs/19-deployment-operations.md",
+      "name": "link:README.md:docs/00-overview.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/02-jev.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/05-v3-removal.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:deploy/compose/README.md:../../docs/04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:deploy/compose/README.md:../../docs/05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
@@ -19811,7 +19146,7 @@
       "detail": ""
     },
     {
-      "name": "link:deploy/helm/README.md:../../docs/19-deployment-operations.md",
+      "name": "link:deploy/helm/README.md:../../docs/05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
@@ -19821,547 +19156,157 @@
       "detail": ""
     },
     {
-      "name": "link:docs/04-auth-session-binding.md:11-audit-event-contract.md",
+      "name": "link:deploy/prometheus/README.md:../../docs/05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/06-capability-ledger.md:11-audit-event-contract.md",
+      "name": "link:deploy/systemd/README.md:../../docs/05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/10-jev-and-agents.md:../tests/security-lab/README.md",
+      "name": "link:deploy/systemd/README.md:../compose/",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/10-jev-and-agents.md:11-audit-event-contract.md",
+      "name": "link:deploy/systemd/README.md:../../web/console/README.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/10-jev-and-agents.md:11-audit-event-contract.md",
+      "name": "link:docs/00-overview.md:05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/10-jev-and-agents.md:11-audit-event-contract.md",
+      "name": "link:docs/00-overview.md:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/10-jev-and-agents.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/00-overview.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/10-jev-and-agents.md:11-audit-event-contract.md",
+      "name": "link:docs/00-overview.md:02-jev.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:10-jev-and-agents.md",
+      "name": "link:docs/00-overview.md:02-jev.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/01-request-flow.md:02-jev.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:32-observe-to-enforce-rollout.md",
+      "name": "link:docs/01-request-flow.md:02-jev.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:13-audit-storage-reliability.md",
+      "name": "link:docs/01-request-flow.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/02-jev.md:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/02-jev.md:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/03-admin-config-audit.md:05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/11-audit-event-contract.md:15-console-and-api.md",
+      "name": "link:docs/03-admin-config-audit.md:05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/12-evidence-capture-and-vault.md:11-audit-event-contract.md",
+      "name": "link:docs/03-admin-config-audit.md:05-v3-removal.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/12-evidence-capture-and-vault.md:20-testing-and-acceptance.md",
+      "name": "link:docs/04-deployment-testing.md:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/12-evidence-capture-and-vault.md:11-audit-event-contract.md",
+      "name": "link:docs/04-deployment-testing.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/12-evidence-capture-and-vault.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/05-v3-removal.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/13-audit-storage-reliability.md:11-audit-event-contract.md",
+      "name": "link:docs/05-v3-removal.md:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/13-audit-storage-reliability.md:21-performance-capacity.md",
+      "name": "link:docs/05-v3-removal.md:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/13-audit-storage-reliability.md:21-performance-capacity.md",
+      "name": "link:docs/05-v3-removal.md:01-request-flow.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/05-v3-removal.md:00-overview.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/05-v3-removal.md:02-jev.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/05-v3-removal.md:02-jev.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/05-v3-removal.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/05-v3-removal.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/05-v3-removal.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
+      "name": "link:docs/05-v3-removal.md:04-deployment-testing.md",
       "passed": true,
       "detail": ""
     },
     {
-      "name": "link:docs/15-console-and-api.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/15-console-and-api.md:../web/console/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/15-console-and-api.md:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/18-api-and-data-models.md:12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/20-testing-and-acceptance.md:../tests/security-lab/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/22-delivery-roadmap.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/22-delivery-roadmap.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/22-delivery-roadmap.md:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/22-delivery-roadmap.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/22-delivery-roadmap.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/22-delivery-roadmap.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/22-delivery-roadmap.md:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/22-delivery-roadmap.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/26-runbooks.md:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/26-runbooks.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/26-runbooks.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/29-api-endpoint-catalog.md:12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/29-api-endpoint-catalog.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/30-console-redesign.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/30-console-redesign.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:22-delivery-roadmap.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:30-console-redesign.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:../web/console/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:19-deployment-operations.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:16-rust-code-architecture.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:../web/console/README.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:15-console-and-api.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:10-jev-and-agents.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:26-runbooks.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:20-testing-and-acceptance.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:11-audit-event-contract.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:12-evidence-capture-and-vault.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/31-implemented-mechanisms.md:06-capability-ledger.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:web/console/README.md:../../docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:web/console/README.md:../../docs/29-api-endpoint-catalog.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:web/console/README.md:../../docs/29-api-endpoint-catalog.md",
+      "name": "link:web/console/README.md:../../docs/03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     }

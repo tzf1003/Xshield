@@ -56,7 +56,7 @@ def main() -> int:
         print("environment variables read by code but not documented:")
         for name in missing:
             print(f"  {name}  ({code[name].relative_to(ROOT)})")
-        print("Document each in docs/19 (deployment) or the chapter that owns the feature.")
+        print("Document each in docs/03 3.3 (v4 variables) or the docs/05 5.3 table (v3 variables pending removal).")
         return 1
     print(f"ok: {len(code)} environment variables read by code are all documented")
     return 0

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 设计重置为 v4，文档推倒重写：删除 v3 的 00–32 号文档、Word 总册、`START_HERE.html`、文档库清单与来源登记，新增 `docs/00`–`05`。v4 只保留"会话上下文 + Jev 判定"一条主线：请求中的业务对象必须在本会话此前的源站响应中出现过或来自登记的入口（含分享兑换接口），否则交给 Jev 判定越权与攻击；单管理员、站点配置收敛为少量字段、判定日志取代 v3 证据链。代码尚未改造，删减清单见 `docs/05`。
+  - `scripts/validate_library.py` 去掉依赖 v3 文档的 RQ/INV 追踪与来源登记检查；`scripts/package_release.sh` 改为打包全部 `docs/*.md`；README、AGENTS、部署与控制台 README 的失效链接改为指向 v4 文档或注明 v3 旧文档所在提交 `ad524d4`。
+
 - 本地证据迁移到 S3（docs/12 12.11、docs/19 19.4）：S3 证据存储（P2 #10）落地后，切换 `XSHIELD_EVIDENCE_BACKEND=s3` 不迁移已有对象，旧对象只能等各自到期由仍指向本地目录的 `xshield-evidence-retain` 清理；此前没有工具能在切换前主动把它们搬过去。
   - 新增 `xshield-worker` 的 `xshield-evidence-migrate [BATCH_LIMIT]` 命令：按 artifact ID 游标分页扫描本地根目录，把完整、已认证、尚未过期的通用证据对象原样复制进配置的 S3 桶（密文与两个侧车逐字节不变，按配置的 Object Lock 模式锁定到同一个 `expires_at`）；不连数据库，不删除或改写任何本地文件。
   - `xshield-evidence` 新增 `LocalEvidenceVault::list_generic_artifact_ids_after`（不需要预先知道 tenant/site 即可分页枚举完整对象，跳过校准报告与 lineage-review 专用对象族）与 `S3EvidenceVault::migrate_from_local`；目的地写入全部 `If-None-Match: *`，已迁移的 artifact 重新运行是确认性空操作（`EvidenceMigrationOutcome::AlreadyMigrated`），写完立即原样读回核对，源/目的地密钥不一致直接拒绝。已过期的本地对象一律跳过，留给本地清理处理。
