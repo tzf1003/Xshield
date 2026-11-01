@@ -20,10 +20,12 @@ Xshield 部署在源站前面，记住每个登录会话正常走过的路（从
 | 03 | [管理员、配置与判定日志](docs/03-admin-config-audit.md) |
 | 04 | [部署与验收](docs/04-deployment-testing.md) |
 | 05 | [从 v3 到 v4 的删减清单](docs/05-v3-removal.md) |
+| 06 | [控制台界面设计](docs/06-console-ui.md)（可点击原型：[design/console-v4](design/console-v4/README.md)） |
+| 07 | [控制台与请求追溯：技术方案](docs/07-console-architecture.md) |
 
 ## 仓库地图
 
-`crates/`（Rust：`xshield-edge` 数据面、`xshield-judge` 模型判定、`xshield-control` 控制面、`xshield-core` 领域逻辑，其余 crate 按 05 删除）、`web/console`（控制台）、`migrations/`（PostgreSQL 迁移）、`scripts/`（验证与回归脚本）、`tests/`（靶场与集成回归）、`docs/`（v4 设计文档）。
+`crates/`（Rust：`xshield-edge` 数据面、`xshield-judge` 模型判定、`xshield-control` 控制面、`xshield-core` 领域逻辑，其余 crate 按 05 删除）、`web/console`（控制台）、`migrations/`（PostgreSQL 迁移）、`scripts/`（验证与回归脚本）、`tests/`（靶场与集成回归）、`docs/`（v4 设计文档）、`design/`（控制台可点击原型，不参与构建）。
 
 ## 运行与验证（当前 v3 代码）
 
