@@ -45,9 +45,9 @@ jobs:
           match() { if printf '%s\n' "$files" | grep -Eq "$1"; then echo true; else echo false; fi; }
           {
             echo "web=$(match '^(web/console/|tests/site-config/|\.github/)')"
-            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|migrations/|tests/site-config/|deploy/|dev/keycloak/|scripts/test_compose_deployment\.sh|\.github/)')"
+            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|sql/|sensor/|migrations/|tests/site-config/|deploy/|dev/keycloak/|scripts/test_compose_deployment\.sh|\.github/)')"
             echo "oidc=$(match '^(crates/xshield-(control|audit|core)/|Cargo\.(toml|lock)|rust-toolchain\.toml|scripts/(test_oidc|lib/)|dev/keycloak/|web/console/|migrations/|\.github/)')"
-            echo "fuzz=$(match '^(crates/xshield-(core|gateway|audit)/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|tests/site-config/|\.github/)')"
+            echo "fuzz=$(match '^(crates/xshield-(core|gateway|audit)/|sensor/src/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|tests/site-config/|\.github/)')"
             echo "evidence=$(match '^(crates/xshield-(core|evidence)/|Cargo\.(toml|lock)|rust-toolchain\.toml|\.github/)')"
           } >> "$GITHUB_OUTPUT"
 
@@ -121,6 +121,7 @@ jobs:
       - run: cargo test --workspace --doc
       - name: Rust to console HTTP wire contract
         run: cargo test -p xshield-control --lib console_client_ -- --ignored
+      - run: node --test sensor/test/*.test.mjs
       - name: PostgreSQL and transactional Outbox integration
         run: scripts/test_postgres.sh
       - name: ClickHouse publication and search integration
