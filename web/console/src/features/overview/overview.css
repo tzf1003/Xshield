@@ -31,12 +31,19 @@
   margin: 0;
 }
 
+/* The status colour is on the mark only; the word stays in ink (docs/06 6.5.3). */
 .ov-level {
   flex: none;
   min-width: 60px;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
+  color: var(--ink);
+}
+
+/* The mark carries the green; the words stay in ink (docs/06 6.5.3). */
+.ov-ok-mark {
+  color: var(--ok);
 }
 
 .ov-actions {

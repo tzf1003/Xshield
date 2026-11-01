@@ -557,8 +557,9 @@ a:hover {
   color: var(--accent);
 }
 
+/* The words stay in ink; the green is on the mark only (docs/06 6.5.3). */
 .all-good {
-  color: var(--ok);
+  color: var(--ink);
 }
 
 /* ------------------------------------------------------------------ controls */
