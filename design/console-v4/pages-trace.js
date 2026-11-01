@@ -309,7 +309,7 @@
     if (base.autoIncluded) page.appendChild(h('<div class="notice soft">已包含绕过请求：按请求 ID、会话或精确路径查找时不隐藏绕过记录。</div>'));
     const cw = X.customWindow(q);
     if (cw) {
-      const nb = h(`<div class="notice soft">时间窗 ${X.fmtHMS(cw.since)}–${X.fmtHMS(cw.until)} · <a href="${esc(X.hashWith({ range: null, since: null, until: null }))}">清除</a></div>`); page.appendChild(nb);
+      const nb = h(`<div class="notice soft">时间窗 ${X.fmtHMS(cw.since)}–${X.fmtHMS(cw.until)} · <a href="${esc(X.hashWith({ range: '24h', since: null, until: null }))}">清除</a></div>`); page.appendChild(nb);
     }
     const banners = gapBanners(q);
     banners.forEach((b) => page.appendChild(h(`<div class="banner ${b.kind}" role="status"><span class="bi">${b.kind === 'lost' ? '▲' : 'i'}</span><span>${esc(b.text)} · <a href="${esc(b.href)}">${esc(b.act)}</a></span></div>`)));

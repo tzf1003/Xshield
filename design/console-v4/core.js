@@ -260,11 +260,17 @@
   };
   // docs/06 6.2.2: the site scope lives in the address and nowhere else (no `site` means all sites). A link or button that
   // does not name a site carries the current scope to its target, so Back and Forward return to the scope of that page.
+  // The global scope is the site and the time range (`range`, and for `range=custom` its `since`/`until`). Whatever the target
+  // names itself is kept; only what it leaves out is filled in from the current address.
   X.scoped = (hash) => {
-    if (typeof hash !== 'string' || hash[0] !== '#' || X.state.site === 'all') return hash;
-    const i = hash.indexOf('?');
-    if (i >= 0 && new URLSearchParams(hash.slice(i + 1)).has('site')) return hash;
-    return `${hash}${i < 0 ? '?' : '&'}site=${encodeURIComponent(X.state.site)}`;
+    if (typeof hash !== 'string' || hash[0] !== '#') return hash;
+    const i = hash.indexOf('?'); const own = new URLSearchParams(i < 0 ? '' : hash.slice(i + 1)); const cur = X.parseHash().q; const add = [];
+    if (X.state.site !== 'all' && !own.has('site')) add.push(['site', X.state.site]);
+    if (!own.has('range') && cur.get('range')) {
+      add.push(['range', cur.get('range')]);
+      if (cur.get('range') === 'custom') ['since', 'until'].forEach((k) => { if (!own.has(k) && cur.get(k)) add.push([k, cur.get(k)]); });
+    }
+    return add.length ? `${hash}${i < 0 ? '?' : '&'}${add.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&')}` : hash;
   };
   // A custom time window is `range=custom` with `since`/`until` in Unix ms (docs/06 6.2.2); without `range=custom` they are not read.
   X.customWindow = (q) => (q.get('range') === 'custom' && q.get('since') ? { since: Number(q.get('since')) || 0, until: Number(q.get('until')) || Infinity } : null);

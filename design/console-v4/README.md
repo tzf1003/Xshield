@@ -42,7 +42,7 @@
 | `#/sites/emr?tab=config&group=advanced`、`…&edit=yaml` | `/sites/$name` | 站点详情：概览、配置（表单分组 / YAML）、调优建议（`tab=insights`）、变更历史（`tab=history&diff=6..7`） |
 | `#/system?tab=edges|storage|params|import` | `/system` | 系统（网关、日志存储、运行参数、导入） |
 
-全局参数 `site`（站点范围）只存在于地址里，地址里没有 `site` 就是全部站点；链接和按钮跳转时把当前范围带到目标地址，所以浏览器后退会回到原来页面的范围；顶栏的下拉框读写它（替换当前历史项）。例如 `#/requests?site=juice&chip=would` 只看 juice 的本应拦截。自定义时间窗写成 `range=custom&since=…&until=…`（Unix 毫秒，日志缺口的“查看缺口”用它），原型只在请求追溯页读取，时间范围选择器本身没有做。
+全局参数 `site`（站点范围）只存在于地址里，地址里没有 `site` 就是全部站点；链接和按钮跳转时把当前范围带到目标地址，所以浏览器后退会回到原来页面的范围；顶栏的下拉框读写它（替换当前历史项）。例如 `#/requests?site=juice&chip=would` 只看 juice 的本应拦截。自定义时间窗写成 `range=custom&since=…&until=…`（Unix 毫秒，日志缺口的“查看缺口”用它），和站点一样随链接、按钮带到别的页，点提示条上的“清除”写回 `range=24h`；原型只在请求追溯页读取它，时间范围选择器本身没有做。
 
 在 claude.ai 上预览时，`#/…` 形式的地址只在页面内部生效，不会同步到浏览器地址栏。
 
