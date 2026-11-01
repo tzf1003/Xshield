@@ -8,4 +8,5 @@ pub mod context;
 pub mod engine;
 pub mod jev;
 pub mod state;
+mod trace;
 pub mod values;
