@@ -96,8 +96,9 @@
     return out;
   }
   function notFoundReason(id) {
+    if (!/^req_[0-9a-f]{32}$/.test(id)) return '不是有效的请求 ID（req_ 加 32 位小写十六进制）';
     const t = M.idTime(id); const now = X.now();
-    if (now - t > 7 * 86400000) return `生成于 ${X.fmtFull(t).slice(5, 16)}，已超过 7 天保留期`;
+    if (now - t > 7 * 86400000) return `生成于 ${X.fmtFull(t).slice(0, 16)}，已超过 7 天保留期`;
     if (t > now + 60000 || t < now - 40 * 86400000) return 'ID 时间异常，可能不是本系统生成的';
     for (const e of M.SYSTEM.edges) for (const g of e.gaps || []) { if (t >= g.from_ms && t <= g.to_ms && g.dropped > 0) return `生成于 ${X.fmtHMS(t)}，当时 ${e.edge} 丢失了 ${g.dropped} 条记录`; }
     return '可能来自其他环境的网关';
@@ -311,7 +312,8 @@
     if (banners.length) page.appendChild(h('<div class="dim small" style="margin:-6px 0 10px">缺口数据来自网关心跳；网关重启会清空缺口历史，所以重启之前的缺口看不到。</div>'));
 
     // ---- table + peek
-    const { rows } = X.filterRows(q);
+    const dslBad = X.parseDsl(dslText).errors.length > 0; const { rows } = dslBad ? { rows: [] } : X.filterRows(q);
+    if (dslBad) checkDsl();
     const split = h('<div class="split reqsplit"></div>'); const left = h('<div class="leftcol"></div>'); const peekCol = h('<div class="peekcol"></div>');
     const newBar = h('<button type="button" class="newbar hidden"></button>');
     left.appendChild(newBar);
@@ -324,7 +326,8 @@
       if (curChip) hints.push(['清除快捷筛选', () => X.setQuery({ chip: null })]);
       if (dslText) hints.push(['清除条件', () => X.setQuery({ q: null })]);
       if (q.get('scope') !== 'all') hints.push(['包含绕过请求', () => X.setQuery({ scope: 'all' })]);
-      if (e) { e.innerHTML = '<div class="big">没有匹配的请求</div><div class="dim">可以放宽这些条件：</div><div class="hintbtns"></div>'; hints.forEach(([l, f]) => e.querySelector('.hintbtns').appendChild(btn(l, f, 'sm'))); }
+      if (e && dslBad) e.innerHTML = '<div class="big">条件有误，没有查询</div><div class="dim">修正上面标红的条件，按回车再查</div>';
+      else if (e) { e.innerHTML = '<div class="big">没有匹配的请求</div><div class="dim">可以放宽这些条件：</div><div class="hintbtns"></div>'; hints.forEach(([l, f]) => e.querySelector('.hintbtns').appendChild(btn(l, f, 'sm'))); }
     }
 
     function peekOpen() { split.classList.toggle('nopeek', !cur.sel); }

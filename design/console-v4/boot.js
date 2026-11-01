@@ -66,7 +66,7 @@
     ov.appendChild(box); document.body.appendChild(ov); const input = $('input', box); const results = $('.results', box); let items = []; let active = 0;
     const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); X.dialogs = X.dialogs.filter((x) => x !== api); if (prev && prev.focus) prev.focus(); };
     const api = { close }; X.dialogs.push(api);
-    const run = (it, newTab) => { close(); if (newTab && it.href) window.open(location.pathname + it.href, '_blank'); else it.run(); };
+    const run = (it, newTab) => { close(); let w = null; if (newTab && it.href) { try { w = window.open(location.pathname + it.href, '_blank'); } catch (e) { w = null; } } if (!w) it.run(); };
     const add = (group, title, sub, href, fn) => items.push({ group, title, sub, href, run: fn || (() => go(href)) });
     function build() {
       const v = input.value.trim(); items = []; const ids = [...new Set(v.match(/req_[0-9a-f]{32}/g) || [])];

@@ -193,10 +193,15 @@
 
   // ---------------------------------------------------------------- toast, copy, popover, dialog
   X.toast = (msg) => { const t = h(`<div class="toast">${esc(msg)}</div>`); $('#toasts').appendChild(t); setTimeout(() => t.remove(), 3200); };
+  // Clipboard writes can be refused inside a sandboxed frame; say so instead of claiming success.
   X.copy = (text, msg) => {
-    const done = () => X.toast(msg || '已复制');
-    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, done);
-    else { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch (e) { /* ignore */ } ta.remove(); done(); }
+    const ok = () => X.toast(msg || '已复制');
+    const fail = () => X.toast('浏览器不允许自动复制，请手动选中后复制');
+    const legacy = () => {
+      const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select();
+      let good = false; try { good = document.execCommand('copy'); } catch (e) { good = false; } ta.remove(); good ? ok() : fail();
+    };
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(ok, legacy); else legacy();
   };
   X.btn = (label, fn, cls) => { const b = h(`<button type="button" class="btn ${cls || ''}">${esc(label)}</button>`); if (fn) b.onclick = fn; return b; };
   X.closePopover = () => { if (X._pop) { X._pop.close(); X._pop = null; } };
