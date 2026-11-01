@@ -412,11 +412,7 @@ impl<J: JevPort> Judge<J> {
         } else {
             None
         };
-        if success
-            && entry
-            && !observation.client.is_empty()
-            && !seeded.is_some_and(|c| !c.is_empty())
-        {
+        if success && entry && !observation.client.is_empty() && seeded.is_none_or(str::is_empty) {
             // A sign-up page shows a new user's id to a client that has no
             // session yet; the next sign-up request is judged against that.
             inner
