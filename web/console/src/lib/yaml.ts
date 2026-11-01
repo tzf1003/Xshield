@@ -3,6 +3,7 @@
 
 import { parseDocument, stringify } from "yaml";
 import type { Advanced, SiteSpec } from "../api/types.ts";
+import { shapeIssues } from "./site-validate.ts";
 
 const TOP_KEYS = [
   "name",
@@ -124,7 +125,29 @@ function checkObject(value: unknown, text: string | null): ParseResult {
     const advancedProblem = unknownIn(advanced as Record<string, unknown>, ADVANCED_KEYS, text);
     if (advancedProblem) return advancedProblem;
   }
-  return { ok: true, value: object as unknown as SiteSpec };
+  // Types last: each value is checked for its type before any rule judges it (docs/07 7.10.8).
+  const [problem] = shapeIssues(value);
+  if (problem) {
+    const line = lineOfKey(text, problem.field);
+    const where = line === null ? "" : `（第 ${line} 行）`;
+    return { ok: false, line, message: `${problem.message}${where}` };
+  }
+  return { ok: true, value: dropEmptyParams(object) as unknown as SiteSpec };
+}
+
+/** A parameter written with no value means its default, so it is dropped rather than kept as null. */
+function dropEmptyParams(object: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(object)) {
+    if (key !== "advanced") out[key] = value;
+    else if (value !== null && value !== undefined) {
+      const advanced = Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== null),
+      );
+      if (Object.keys(advanced).length > 0) out.advanced = advanced;
+    }
+  }
+  return out;
 }
 
 export function advancedOf(spec: SiteSpec): Advanced {
