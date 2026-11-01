@@ -1,54 +1,142 @@
-//! `PostgreSQL` storage for site configuration and its change history
-//! (docs/03-admin-config-audit.md section 3.2).
+//! `PostgreSQL` storage for site configuration and its versioned history
+//! (docs/07-console-architecture.md sections 7.8.1 and 7.9.2).
 //!
-//! Each site's current [`SiteSpec`] lives in `site_configs`, keyed by name.
-//! Every create, update, rollback or delete also appends one row to
-//! `site_config_history` recording the configuration before and after the
-//! change, so the console can show history and roll back to an earlier
-//! version. This module works directly against a [`PgPool`] with runtime
-//! (not compile-time-checked) `sqlx` queries, and defines its own error type
-//! rather than reusing the v3 `PostgresIdentityStore`/`StoreError`.
+//! `site_configs` holds each site's current configuration. `site_config_history`
+//! holds every version of every site, with the full text of the configuration
+//! after the change, so any version can be opened, compared and restored. A
+//! version number counts up from 1 per site and keeps counting after a delete,
+//! so `(site, version)` never names two different configurations.
+//!
+//! Every write takes the site's row lock, checks the caller's `expected_version`
+//! and then writes the new version and its history row in one transaction.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use xshield_core::context::SiteSpec;
+
+/// Longest note accepted with a write, in characters.
+pub const NOTE_MAX_CHARS: usize = 500;
 
 /// A site's current stored configuration.
 #[derive(Debug, Clone)]
 pub struct SiteRecord {
     /// The validated site configuration.
     pub spec: SiteSpec,
-    /// Starts at 1 and increments by 1 on every `update`; the gateway polls
-    /// this on its own connection as a cheap change-detection signal.
+    /// The current version. Starts at 1 and counts up across updates, rollbacks
+    /// and a delete followed by a re-create.
     pub version: i64,
-    /// When the row was first created.
+    /// When the site was first created.
     pub created_at: DateTime<Utc>,
-    /// When the row was last changed.
+    /// When the site was last changed.
     pub updated_at: DateTime<Utc>,
 }
 
-/// One row of a site's configuration history.
-#[derive(Debug, Clone)]
-pub struct HistoryEntry {
-    /// History row id, used to select a rollback target.
-    pub id: i64,
-    /// The configuration before this change, or `None` for the first change.
-    pub before: Option<SiteSpec>,
-    /// The configuration after this change, or `None` when the site was deleted.
-    pub after: Option<SiteSpec>,
-    /// When this change was recorded.
-    pub changed_at: DateTime<Utc>,
+/// What a history row records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// The site was created.
+    Create,
+    /// The configuration was changed by the administrator.
+    Update,
+    /// The configuration was restored from an earlier version.
+    Rollback,
+    /// The site was deleted; the row has no configuration.
+    Delete,
+    /// The configuration was imported.
+    Import,
 }
 
-/// Outcome of rolling a site back to an earlier history entry.
+impl Change {
+    /// The stored spelling of this change kind.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Rollback => "rollback",
+            Self::Delete => "delete",
+            Self::Import => "import",
+        }
+    }
+
+    /// Parses the stored spelling of a change kind.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "create" => Self::Create,
+            "update" => Self::Update,
+            "rollback" => Self::Rollback,
+            "delete" => Self::Delete,
+            "import" => Self::Import,
+            _ => return None,
+        })
+    }
+}
+
+/// One version of a site.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    /// The version number, unique per site.
+    pub version: i64,
+    /// What this version records.
+    pub change: Change,
+    /// For a rollback, the version whose configuration was restored.
+    pub rollback_of: Option<i64>,
+    /// The administrator's remark, if any.
+    pub note: Option<String>,
+    /// When this version was recorded.
+    pub changed_at: DateTime<Utc>,
+    /// The whole configuration of this version; `None` for a delete.
+    pub spec: Option<SiteSpec>,
+}
+
+/// Outcome of a write that names an `expected_version`.
+#[derive(Debug)]
+pub enum WriteOutcome {
+    /// The site does not exist.
+    NotFound,
+    /// The site has moved on from the expected version.
+    VersionConflict {
+        /// The version the site is at now.
+        current: i64,
+    },
+    /// The write was applied; this is the resulting current record.
+    Applied(Box<SiteRecord>),
+}
+
+/// Outcome of deleting a site.
+#[derive(Debug)]
+pub enum DeleteOutcome {
+    /// The site does not exist.
+    NotFound,
+    /// The site has moved on from the expected version.
+    VersionConflict {
+        /// The version the site is at now.
+        current: i64,
+    },
+    /// The site was deleted; the delete is recorded as this version.
+    Deleted {
+        /// The history version recording the delete.
+        version: i64,
+    },
+}
+
+/// Outcome of restoring an earlier version.
 #[derive(Debug)]
 pub enum RollbackOutcome {
-    /// The site or the history row does not exist.
+    /// The site does not exist (or is currently deleted).
     NotFound,
-    /// The target history row's `after` is `None`: there is nothing to restore.
+    /// The site has moved on from the expected version.
+    VersionConflict {
+        /// The version the site is at now.
+        current: i64,
+    },
+    /// The requested version does not exist for this site.
+    VersionNotFound,
+    /// The requested version is a delete, so it has no configuration to restore.
     TargetDeleted,
-    /// The rollback was applied; this is the resulting current record.
-    Applied(SiteRecord),
+    /// The rollback was applied as a new version.
+    Applied(Box<SiteRecord>),
 }
 
 /// Failure of a site configuration storage operation.
@@ -60,6 +148,8 @@ pub enum SiteSpecStoreError {
     Serialize(serde_json::Error),
     /// A stored configuration failed to re-validate as a [`SiteSpec`].
     InvalidStoredSpec,
+    /// A stored history row carries a change kind this build does not know.
+    CorruptHistory,
     /// `create` was called with a name that already has a row.
     AlreadyExists,
 }
@@ -72,6 +162,7 @@ impl std::fmt::Display for SiteSpecStoreError {
             Self::InvalidStoredSpec => {
                 formatter.write_str("stored site configuration failed to re-validate")
             }
+            Self::CorruptHistory => formatter.write_str("stored site history row is malformed"),
             Self::AlreadyExists => formatter.write_str("site name already exists"),
         }
     }
@@ -82,7 +173,7 @@ impl std::error::Error for SiteSpecStoreError {
         match self {
             Self::Database(error) => Some(error),
             Self::Serialize(error) => Some(error),
-            Self::InvalidStoredSpec | Self::AlreadyExists => None,
+            Self::InvalidStoredSpec | Self::CorruptHistory | Self::AlreadyExists => None,
         }
     }
 }
@@ -112,13 +203,7 @@ fn json_to_spec(value: &serde_json::Value) -> Result<SiteSpec, SiteSpecStoreErro
     SiteSpec::from_json(&text).map_err(|_| SiteSpecStoreError::InvalidStoredSpec)
 }
 
-fn json_to_spec_opt(
-    value: Option<&serde_json::Value>,
-) -> Result<Option<SiteSpec>, SiteSpecStoreError> {
-    value.map(json_to_spec).transpose()
-}
-
-fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<SiteRecord, SiteSpecStoreError> {
+fn row_to_record(row: &PgRow) -> Result<SiteRecord, SiteSpecStoreError> {
     let spec: serde_json::Value = row.try_get("spec")?;
     Ok(SiteRecord {
         spec: json_to_spec(&spec)?,
@@ -128,84 +213,125 @@ fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<SiteRecord, SiteSpecStor
     })
 }
 
-fn row_to_history(row: &sqlx::postgres::PgRow) -> Result<HistoryEntry, SiteSpecStoreError> {
-    let before: Option<serde_json::Value> = row.try_get("before")?;
-    let after: Option<serde_json::Value> = row.try_get("after")?;
+fn row_to_history(row: &PgRow) -> Result<HistoryEntry, SiteSpecStoreError> {
+    let change: String = row.try_get("change")?;
+    let spec: Option<serde_json::Value> = row.try_get("spec")?;
     Ok(HistoryEntry {
-        id: row.try_get("id")?,
-        before: json_to_spec_opt(before.as_ref())?,
-        after: json_to_spec_opt(after.as_ref())?,
+        version: row.try_get("version")?,
+        change: Change::parse(&change).ok_or(SiteSpecStoreError::CorruptHistory)?,
+        rollback_of: row.try_get("rollback_of")?,
+        note: row.try_get("note")?,
         changed_at: row.try_get("changed_at")?,
+        spec: spec.as_ref().map(json_to_spec).transpose()?,
     })
 }
 
-/// Lists every site, ordered by name.
+const RECORD_COLUMNS: &str = "spec, version, created_at, updated_at";
+
+/// Lists every current site, ordered by name.
 ///
 /// # Errors
 /// Returns [`SiteSpecStoreError`] on a database failure or a stored
 /// configuration that no longer validates.
 pub async fn list(pool: &PgPool) -> Result<Vec<SiteRecord>, SiteSpecStoreError> {
-    let rows =
-        sqlx::query("SELECT spec, version, created_at, updated_at FROM site_configs ORDER BY name")
-            .fetch_all(pool)
-            .await?;
+    let sql = format!("SELECT {RECORD_COLUMNS} FROM site_configs ORDER BY name");
+    let rows = sqlx::query(AssertSqlSafe(sql)).fetch_all(pool).await?;
     rows.iter().map(row_to_record).collect()
 }
 
-/// Fetches one site by name.
+/// Fetches one current site by name.
 ///
 /// # Errors
 /// Returns [`SiteSpecStoreError`] on a database failure or a stored
 /// configuration that no longer validates.
 pub async fn get(pool: &PgPool, name: &str) -> Result<Option<SiteRecord>, SiteSpecStoreError> {
-    let row = sqlx::query(
-        "SELECT spec, version, created_at, updated_at FROM site_configs WHERE name = $1",
-    )
-    .bind(name)
-    .fetch_optional(pool)
-    .await?;
+    let sql = format!("SELECT {RECORD_COLUMNS} FROM site_configs WHERE name = $1");
+    let row = sqlx::query(AssertSqlSafe(sql))
+        .bind(name)
+        .fetch_optional(pool)
+        .await?;
     row.as_ref().map(row_to_record).transpose()
 }
 
 async fn insert_history(
     transaction: &mut Transaction<'_, Postgres>,
-    name: &str,
-    before: Option<&serde_json::Value>,
-    after: Option<&serde_json::Value>,
+    site: &str,
+    version: i64,
+    change: Change,
+    rollback_of: Option<i64>,
+    spec: Option<&serde_json::Value>,
+    note: Option<&str>,
 ) -> Result<(), SiteSpecStoreError> {
-    sqlx::query("INSERT INTO site_config_history (site_name, before, after) VALUES ($1, $2, $3)")
-        .bind(name)
-        .bind(before)
-        .bind(after)
-        .execute(&mut **transaction)
-        .await?;
+    sqlx::query(
+        "INSERT INTO site_config_history (site, version, spec, change, rollback_of, note)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(site)
+    .bind(version)
+    .bind(spec)
+    .bind(change.as_str())
+    .bind(rollback_of)
+    .bind(note)
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
-/// Creates a new site, recording a history row with `before: NULL`.
+/// The version a site's next history row takes: one more than the highest
+/// version ever recorded for it, deleted sites included.
+async fn next_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    site: &str,
+) -> Result<i64, SiteSpecStoreError> {
+    let current: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM site_config_history WHERE site = $1")
+            .bind(site)
+            .fetch_one(&mut **transaction)
+            .await?;
+    Ok(current.unwrap_or(0) + 1)
+}
+
+/// Creates a site as version 1, or the next version after an earlier delete.
 ///
 /// # Errors
 /// Returns [`SiteSpecStoreError::AlreadyExists`] if the name is taken, or
 /// another [`SiteSpecStoreError`] on a database or serialization failure.
-pub async fn create(pool: &PgPool, spec: &SiteSpec) -> Result<SiteRecord, SiteSpecStoreError> {
+pub async fn create(
+    pool: &PgPool,
+    spec: &SiteSpec,
+    note: Option<&str>,
+) -> Result<SiteRecord, SiteSpecStoreError> {
     let json = spec_to_json(spec)?;
     let mut transaction = pool.begin().await?;
-    let row = sqlx::query(
-        "INSERT INTO site_configs (name, spec) VALUES ($1, $2)
-         RETURNING spec, version, created_at, updated_at",
+    let version = next_version(&mut transaction, spec.name()).await?;
+    let sql = format!(
+        "INSERT INTO site_configs (name, spec, version) VALUES ($1, $2, $3)
+         RETURNING {RECORD_COLUMNS}"
+    );
+    let row = sqlx::query(AssertSqlSafe(sql))
+        .bind(spec.name())
+        .bind(&json)
+        .bind(version)
+        .fetch_one(&mut *transaction)
+        .await?;
+    insert_history(
+        &mut transaction,
+        spec.name(),
+        version,
+        Change::Create,
+        None,
+        Some(&json),
+        note,
     )
-    .bind(spec.name())
-    .bind(&json)
-    .fetch_one(&mut *transaction)
     .await?;
-    insert_history(&mut transaction, spec.name(), None, Some(&json)).await?;
     transaction.commit().await?;
     row_to_record(&row)
 }
 
-/// Updates an existing site's configuration, keyed by `name` (not
-/// `spec.name()`; the caller decides whether a rename is allowed before
-/// calling this).
+/// Replaces a site's configuration when the site is still at `expected_version`.
+///
+/// `name` is the site's current name; the caller checks that `spec` carries the
+/// same name before calling.
 ///
 /// # Errors
 /// Returns [`SiteSpecStoreError`] on a database or serialization failure.
@@ -213,163 +339,259 @@ pub async fn update(
     pool: &PgPool,
     name: &str,
     spec: &SiteSpec,
-) -> Result<Option<SiteRecord>, SiteSpecStoreError> {
-    let mut transaction = pool.begin().await?;
-    let existing = sqlx::query("SELECT spec FROM site_configs WHERE name = $1 FOR UPDATE")
-        .bind(name)
-        .fetch_optional(&mut *transaction)
-        .await?;
-    let Some(existing) = existing else {
-        transaction.rollback().await?;
-        return Ok(None);
-    };
-    let before: serde_json::Value = existing.try_get("spec")?;
+    expected_version: i64,
+    note: Option<&str>,
+) -> Result<WriteOutcome, SiteSpecStoreError> {
     let after = spec_to_json(spec)?;
-    let row = sqlx::query(
-        "UPDATE site_configs SET spec = $2, version = version + 1, updated_at = now()
-         WHERE name = $1
-         RETURNING spec, version, created_at, updated_at",
+    let mut transaction = pool.begin().await?;
+    let current = lock_current_version(&mut transaction, name).await?;
+    let Some(current) = current else {
+        transaction.rollback().await?;
+        return Ok(WriteOutcome::NotFound);
+    };
+    if current != expected_version {
+        transaction.rollback().await?;
+        return Ok(WriteOutcome::VersionConflict { current });
+    }
+    let version = current + 1;
+    let sql = format!(
+        "UPDATE site_configs SET spec = $2, version = $3, updated_at = now()
+         WHERE name = $1 RETURNING {RECORD_COLUMNS}"
+    );
+    let row = sqlx::query(AssertSqlSafe(sql))
+        .bind(name)
+        .bind(&after)
+        .bind(version)
+        .fetch_one(&mut *transaction)
+        .await?;
+    insert_history(
+        &mut transaction,
+        name,
+        version,
+        Change::Update,
+        None,
+        Some(&after),
+        note,
     )
-    .bind(name)
-    .bind(&after)
-    .fetch_one(&mut *transaction)
     .await?;
-    insert_history(&mut transaction, name, Some(&before), Some(&after)).await?;
     transaction.commit().await?;
-    Ok(Some(row_to_record(&row)?))
+    Ok(WriteOutcome::Applied(Box::new(row_to_record(&row)?)))
 }
 
-/// Deletes a site, recording a history row with `after: NULL`.
+/// Deletes a site when it is still at `expected_version`. The delete is
+/// recorded as a history version with no configuration.
 ///
 /// # Errors
 /// Returns [`SiteSpecStoreError`] on a database failure.
-pub async fn delete(pool: &PgPool, name: &str) -> Result<bool, SiteSpecStoreError> {
+pub async fn delete(
+    pool: &PgPool,
+    name: &str,
+    expected_version: i64,
+    note: Option<&str>,
+) -> Result<DeleteOutcome, SiteSpecStoreError> {
     let mut transaction = pool.begin().await?;
-    let existing = sqlx::query("SELECT spec FROM site_configs WHERE name = $1 FOR UPDATE")
-        .bind(name)
-        .fetch_optional(&mut *transaction)
-        .await?;
-    let Some(existing) = existing else {
+    let current = lock_current_version(&mut transaction, name).await?;
+    let Some(current) = current else {
         transaction.rollback().await?;
-        return Ok(false);
+        return Ok(DeleteOutcome::NotFound);
     };
-    let before: serde_json::Value = existing.try_get("spec")?;
+    if current != expected_version {
+        transaction.rollback().await?;
+        return Ok(DeleteOutcome::VersionConflict { current });
+    }
     sqlx::query("DELETE FROM site_configs WHERE name = $1")
         .bind(name)
         .execute(&mut *transaction)
         .await?;
-    insert_history(&mut transaction, name, Some(&before), None).await?;
-    transaction.commit().await?;
-    Ok(true)
-}
-
-/// Lists a site's history, newest first.
-///
-/// # Errors
-/// Returns [`SiteSpecStoreError`] on a database or serialization failure.
-pub async fn history(
-    pool: &PgPool,
-    name: &str,
-    limit: i64,
-) -> Result<Vec<HistoryEntry>, SiteSpecStoreError> {
-    let limit = limit.clamp(1, 200);
-    let rows = sqlx::query(
-        "SELECT id, before, after, changed_at FROM site_config_history
-         WHERE site_name = $1 ORDER BY id DESC LIMIT $2",
+    let version = current + 1;
+    insert_history(
+        &mut transaction,
+        name,
+        version,
+        Change::Delete,
+        None,
+        None,
+        note,
     )
-    .bind(name)
-    .bind(limit)
-    .fetch_all(pool)
     .await?;
-    rows.iter().map(row_to_history).collect()
+    transaction.commit().await?;
+    Ok(DeleteOutcome::Deleted { version })
 }
 
-/// Rolls a site back to the configuration recorded in history row
-/// `history_id`, applying it as the new current configuration and recording
-/// yet another history row for the rollback itself.
+/// Restores the configuration of `to_version` as a new version, when the site
+/// is still at `expected_version`.
 ///
 /// # Errors
 /// Returns [`SiteSpecStoreError`] on a database or serialization failure.
 pub async fn rollback(
     pool: &PgPool,
     name: &str,
-    history_id: i64,
+    to_version: i64,
+    expected_version: i64,
+    note: Option<&str>,
 ) -> Result<RollbackOutcome, SiteSpecStoreError> {
     let mut transaction = pool.begin().await?;
-    let target =
-        sqlx::query("SELECT after FROM site_config_history WHERE id = $1 AND site_name = $2")
-            .bind(history_id)
+    let current = lock_current_version(&mut transaction, name).await?;
+    let Some(current) = current else {
+        transaction.rollback().await?;
+        return Ok(RollbackOutcome::NotFound);
+    };
+    if current != expected_version {
+        transaction.rollback().await?;
+        return Ok(RollbackOutcome::VersionConflict { current });
+    }
+    let target: Option<Option<serde_json::Value>> =
+        sqlx::query_scalar("SELECT spec FROM site_config_history WHERE site = $1 AND version = $2")
             .bind(name)
+            .bind(to_version)
             .fetch_optional(&mut *transaction)
             .await?;
     let Some(target) = target else {
         transaction.rollback().await?;
-        return Ok(RollbackOutcome::NotFound);
+        return Ok(RollbackOutcome::VersionNotFound);
     };
-    let after: Option<serde_json::Value> = target.try_get("after")?;
-    let Some(after) = after else {
+    let Some(after) = target else {
         transaction.rollback().await?;
         return Ok(RollbackOutcome::TargetDeleted);
     };
-    // Re-validate before writing it back as the current configuration: a row
-    // written by an older build must still parse as today's `SiteSpec`.
+    // A row written by an older build must still parse as today's `SiteSpec`
+    // before it becomes the current configuration.
     json_to_spec(&after)?;
-    let current = sqlx::query("SELECT spec FROM site_configs WHERE name = $1 FOR UPDATE")
+    let version = current + 1;
+    let sql = format!(
+        "UPDATE site_configs SET spec = $2, version = $3, updated_at = now()
+         WHERE name = $1 RETURNING {RECORD_COLUMNS}"
+    );
+    let row = sqlx::query(AssertSqlSafe(sql))
         .bind(name)
-        .fetch_optional(&mut *transaction)
+        .bind(&after)
+        .bind(version)
+        .fetch_one(&mut *transaction)
         .await?;
-    let before: Option<serde_json::Value> = match &current {
-        Some(row) => Some(row.try_get("spec")?),
-        None => None,
-    };
-    let row = if current.is_some() {
-        sqlx::query(
-            "UPDATE site_configs SET spec = $2, version = version + 1, updated_at = now()
-             WHERE name = $1
-             RETURNING spec, version, created_at, updated_at",
-        )
-        .bind(name)
-        .bind(&after)
-        .fetch_one(&mut *transaction)
-        .await?
-    } else {
-        sqlx::query(
-            "INSERT INTO site_configs (name, spec) VALUES ($1, $2)
-             RETURNING spec, version, created_at, updated_at",
-        )
-        .bind(name)
-        .bind(&after)
-        .fetch_one(&mut *transaction)
-        .await?
-    };
-    insert_history(&mut transaction, name, before.as_ref(), Some(&after)).await?;
+    insert_history(
+        &mut transaction,
+        name,
+        version,
+        Change::Rollback,
+        Some(to_version),
+        Some(&after),
+        note,
+    )
+    .await?;
     transaction.commit().await?;
-    Ok(RollbackOutcome::Applied(row_to_record(&row)?))
+    Ok(RollbackOutcome::Applied(Box::new(row_to_record(&row)?)))
+}
+
+/// Locks the site's row and returns its current version, or `None` when the
+/// site does not exist. Writes hold this lock, so version checks never race.
+async fn lock_current_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    name: &str,
+) -> Result<Option<i64>, SiteSpecStoreError> {
+    let version: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM site_configs WHERE name = $1 FOR UPDATE")
+            .bind(name)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    Ok(version)
+}
+
+/// Lists a site's versions, newest first. `before` pages backwards: only
+/// versions strictly below it are returned.
+///
+/// # Errors
+/// Returns [`SiteSpecStoreError`] on a database or serialization failure.
+pub async fn history(
+    pool: &PgPool,
+    name: &str,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<Vec<HistoryEntry>, SiteSpecStoreError> {
+    let limit = limit.clamp(1, 200);
+    let rows = sqlx::query(
+        "SELECT version, change, rollback_of, note, changed_at, spec
+         FROM site_config_history
+         WHERE site = $1 AND version < $2
+         ORDER BY version DESC LIMIT $3",
+    )
+    .bind(name)
+    .bind(before.unwrap_or(i64::MAX))
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_history).collect()
+}
+
+/// Fetches one version of a site.
+///
+/// # Errors
+/// Returns [`SiteSpecStoreError`] on a database or serialization failure.
+pub async fn version(
+    pool: &PgPool,
+    name: &str,
+    version: i64,
+) -> Result<Option<HistoryEntry>, SiteSpecStoreError> {
+    let row = sqlx::query(
+        "SELECT version, change, rollback_of, note, changed_at, spec
+         FROM site_config_history WHERE site = $1 AND version = $2",
+    )
+    .bind(name)
+    .bind(version)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_history).transpose()
+}
+
+/// Every version of every site with a configuration, oldest first. Used to find
+/// when a site started or stopped observing.
+///
+/// # Errors
+/// Returns [`SiteSpecStoreError`] on a database or serialization failure.
+pub async fn history_of_site_chronological(
+    pool: &PgPool,
+    name: &str,
+    limit: i64,
+) -> Result<Vec<HistoryEntry>, SiteSpecStoreError> {
+    let rows = sqlx::query(
+        "SELECT version, change, rollback_of, note, changed_at, spec
+         FROM site_config_history WHERE site = $1
+         ORDER BY version ASC LIMIT $2",
+    )
+    .bind(name)
+    .bind(limit.clamp(1, 10_000))
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_history).collect()
 }
 
 #[cfg(test)]
 mod tests {
-    // These storage-layer tests need a reachable PostgreSQL instance, which
-    // this sandbox does not have. They document the expected behaviour and
-    // are exercised in an environment with `XSHIELD_TEST_DATABASE_URL` set.
+    // These storage-layer tests need a reachable PostgreSQL instance. They run
+    // when `XSHIELD_TEST_DATABASE_URL` is set (scripts/test_postgres.sh does
+    // that after applying `migrations/`).
 
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // Each test gets its own site name: the tests share one database and can
     // run concurrently, and `create` rejects a name that already exists.
-    fn minimal_spec(name: &str) -> SiteSpec {
+    fn minimal_spec(name: &str, entries: &[&str]) -> SiteSpec {
         let host = name.replace('_', "-");
+        let entries = entries
+            .iter()
+            .map(|entry| format!("\"{entry}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         SiteSpec::from_json(&format!(
             r#"{{
                 "name": "{name}",
                 "hosts": ["{host}.example.com"],
                 "origin": "http://10.0.0.5:8080",
                 "session": {{"cookie": "SESSIONID"}},
-                "entries": ["/login"]
+                "entries": [{entries}]
             }}"#
         ))
-        .unwrap()
+        .expect("test spec")
     }
 
     fn unique_name(prefix: &str) -> String {
@@ -377,52 +599,110 @@ mod tests {
         format!("{prefix}_{}", COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 
-    #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
-    async fn create_then_get_round_trips() {
-        let pool = connect_test_pool().await;
-        let spec = minimal_spec(&unique_name("create_then_get"));
-        let created = create(&pool, &spec).await.unwrap();
-        assert_eq!(created.spec, spec);
-        let fetched = get(&pool, spec.name()).await.unwrap().unwrap();
-        assert_eq!(fetched.spec, spec);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
-    async fn create_twice_is_already_exists() {
-        let pool = connect_test_pool().await;
-        let spec = minimal_spec(&unique_name("create_twice"));
-        create(&pool, &spec).await.unwrap();
-        let error = create(&pool, &spec).await.unwrap_err();
-        assert!(matches!(error, SiteSpecStoreError::AlreadyExists));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
-    async fn update_missing_site_is_none() {
-        let pool = connect_test_pool().await;
-        let spec = minimal_spec(&unique_name("update_missing"));
-        assert!(update(&pool, "missing", &spec).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
-    async fn rollback_to_deleted_target_is_rejected() {
-        let pool = connect_test_pool().await;
-        let spec = minimal_spec(&unique_name("rollback_deleted"));
-        create(&pool, &spec).await.unwrap();
-        delete(&pool, spec.name()).await.unwrap();
-        let entries = history(&pool, spec.name(), 50).await.unwrap();
-        let deleted_entry = entries.iter().find(|entry| entry.after.is_none()).unwrap();
-        let outcome = rollback(&pool, spec.name(), deleted_entry.id)
-            .await
-            .unwrap();
-        assert!(matches!(outcome, RollbackOutcome::TargetDeleted));
-    }
-
     async fn connect_test_pool() -> PgPool {
         let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
         PgPool::connect(&url).await.expect("connect")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn versions_count_up_and_survive_a_delete_and_recreate() {
+        let pool = connect_test_pool().await;
+        let name = unique_name("versions");
+        let first = minimal_spec(&name, &["/login"]);
+        let created = create(&pool, &first, Some("first")).await.unwrap();
+        assert_eq!(created.version, 1);
+
+        let second = minimal_spec(&name, &["/login", "/api/home"]);
+        let WriteOutcome::Applied(updated) = update(&pool, &name, &second, 1, None).await.unwrap()
+        else {
+            panic!("update should apply at the expected version");
+        };
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.spec, second);
+
+        let DeleteOutcome::Deleted { version } = delete(&pool, &name, 2, None).await.unwrap()
+        else {
+            panic!("delete should apply at the expected version");
+        };
+        assert_eq!(version, 3);
+        assert!(get(&pool, &name).await.unwrap().is_none());
+
+        let recreated = create(&pool, &first, None).await.unwrap();
+        assert_eq!(recreated.version, 4);
+
+        let entries = history(&pool, &name, None, 50).await.unwrap();
+        let versions: Vec<i64> = entries.iter().map(|entry| entry.version).collect();
+        assert_eq!(versions, vec![4, 3, 2, 1]);
+        assert_eq!(entries[1].change, Change::Delete);
+        assert!(entries[1].spec.is_none());
+        assert_eq!(entries[3].note.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_stale_expected_version_is_a_conflict_and_changes_nothing() {
+        let pool = connect_test_pool().await;
+        let name = unique_name("conflict");
+        let spec = minimal_spec(&name, &["/login"]);
+        create(&pool, &spec, None).await.unwrap();
+        update(&pool, &name, &spec, 1, None).await.unwrap();
+
+        let outcome = update(&pool, &name, &spec, 1, None).await.unwrap();
+        assert!(matches!(
+            outcome,
+            WriteOutcome::VersionConflict { current: 2 }
+        ));
+        let record = get(&pool, &name).await.unwrap().unwrap();
+        assert_eq!(record.version, 2);
+        assert_eq!(history(&pool, &name, None, 50).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn rollback_restores_an_earlier_text_as_a_new_version() {
+        let pool = connect_test_pool().await;
+        let name = unique_name("rollback");
+        let original = minimal_spec(&name, &["/login"]);
+        create(&pool, &original, None).await.unwrap();
+        let changed = minimal_spec(&name, &["/login", "/api/home"]);
+        update(&pool, &name, &changed, 1, None).await.unwrap();
+
+        let RollbackOutcome::Applied(restored) =
+            rollback(&pool, &name, 1, 2, Some("back")).await.unwrap()
+        else {
+            panic!("rollback should apply");
+        };
+        assert_eq!(restored.version, 3);
+        assert_eq!(restored.spec, original);
+        let newest = history(&pool, &name, None, 1).await.unwrap().remove(0);
+        assert_eq!(newest.change, Change::Rollback);
+        assert_eq!(newest.rollback_of, Some(1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn rolling_back_to_a_deleted_version_is_refused() {
+        let pool = connect_test_pool().await;
+        let name = unique_name("deleted_target");
+        let spec = minimal_spec(&name, &["/login"]);
+        create(&pool, &spec, None).await.unwrap();
+        let DeleteOutcome::Deleted { version } = delete(&pool, &name, 1, None).await.unwrap()
+        else {
+            panic!("delete should apply");
+        };
+        create(&pool, &spec, None).await.unwrap();
+        let outcome = rollback(&pool, &name, version, 3, None).await.unwrap();
+        assert!(matches!(outcome, RollbackOutcome::TargetDeleted));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_second_create_under_the_same_name_is_already_exists() {
+        let pool = connect_test_pool().await;
+        let spec = minimal_spec(&unique_name("create_twice"), &["/login"]);
+        create(&pool, &spec, None).await.unwrap();
+        let error = create(&pool, &spec, None).await.unwrap_err();
+        assert!(matches!(error, SiteSpecStoreError::AlreadyExists));
     }
 }
