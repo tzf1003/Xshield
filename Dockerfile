@@ -38,13 +38,13 @@ FROM runtime-base AS control
 COPY --from=builder /src/target/release/xshield-control /usr/local/bin/xshield-control
 ENTRYPOINT ["/usr/local/bin/xshield-control"]
 
-# The worker package ships several binaries (publisher, outbox, audit seal, evidence
-# retention, model evaluation); the default is the publisher and any other is chosen
-# with `docker run --entrypoint`.
+# The worker package ships the audit-journal-to-index publisher and the audit
+# seal binary; the default is the publisher and the other is chosen with
+# `docker run --entrypoint`. The v3-only outbox, evidence-retention and offline
+# model-evaluation binaries were deleted with their gateway producer (docs/05
+# §5.2); xshield-control still calls the publisher's library functions, so the
+# publisher binary and this image stay until xshield-control is rewritten.
 FROM runtime-base AS worker
 COPY --from=builder /src/target/release/xshield-worker /usr/local/bin/xshield-worker
-COPY --from=builder /src/target/release/xshield-outbox-worker /usr/local/bin/xshield-outbox-worker
 COPY --from=builder /src/target/release/xshield-audit-seal /usr/local/bin/xshield-audit-seal
-COPY --from=builder /src/target/release/xshield-evidence-retain /usr/local/bin/xshield-evidence-retain
-COPY --from=builder /src/target/release/xshield-model-eval /usr/local/bin/xshield-model-eval
 ENTRYPOINT ["/usr/local/bin/xshield-worker"]

@@ -120,7 +120,7 @@ jobs:
       - name: Rust to console HTTP wire contract
         run: cargo test -p xshield-control --lib console_client_ -- --ignored
       - run: node --test sensor/test/*.test.mjs
-      - name: PostgreSQL and transactional Outbox integration
+      - name: PostgreSQL integration
         run: scripts/test_postgres.sh
       - name: ClickHouse publication and search integration
         run: |

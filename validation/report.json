@@ -5,8 +5,8 @@
   "passed_count": 3844,
   "acceptance_cases": {
     "total": 78,
-    "planned": 54,
-    "partial": 22,
+    "planned": 57,
+    "partial": 19,
     "automated": 2
   },
   "checks": [

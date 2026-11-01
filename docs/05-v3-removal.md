@@ -31,7 +31,7 @@
 | `crates/xshield-core` | 保留领域 ID 和站点配置类型（按 [03.2](03-admin-config-audit.md#32-站点配置) 精简）；新增会话上下文、请求值提取、判定步骤；删除 `calibration`、资格与审批相关类型 |
 | `crates/xshield-gateway` | 已删除；代理、TLS、监听器、上下文存储、Jev 调用与判定日志写入由全新的 `crates/xshield-edge`（配合 `crates/xshield-judge`）取代，而非在原地改造 |
 | `crates/xshield-control` | 保留站点增改、模式切换；新增判定日志查询、配置历史与回滚、口令登录；删除审批状态机、案件、证据访问、保全、导出、校准报告、任务管理、API Key、OIDC |
-| `crates/xshield-worker` | 把 `model_eval` 中的 Jev 传输与响应校验移入网关（或单独小 crate）；其余（离线 CLI、outbox、检索、证据迁移与清理、校准）删除，整个 crate 随之删除 |
+| `crates/xshield-worker` | 已删除离线 CLI（`xshield-model-eval`）、`model_eval` 的 Jev 传输与响应解析（`transport.rs`、`wire.rs`）、outbox 发布器（模块与 `xshield-outbox-worker`）、校准（`calibration_audit`、`calibration_evaluator`、`calibration_vault_reader`）与证据迁移/清理二进制（`xshield-evidence-migrate`、`xshield-evidence-retain`）；没有移入网关，因为 `crates/xshield-judge` 已自带独立的 Jev 客户端。审计 journal 转 ClickHouse 索引的发布器（`PublisherConfig`、`publish_sealed_segments`、`inspect_publication_health`）与检索（`search.rs`、`local_request.rs`）仍被 `crates/xshield-control` 直接调用，整个 crate 暂不能删除；等 `xshield-control` 改造完成去掉这些调用后才能继续删到只剩本表其余各项同等程度 |
 | `crates/xshield-audit`、`crates/xshield-evidence` | 删除 |
 | `crates/xshield-postgres` | 只留站点配置、配置历史、判定日志三张表 |
 | `migrations/`、`sql/` | 产品尚未上线，用一份新的基线迁移取代现有迁移；删除 ClickHouse schema |
@@ -73,9 +73,7 @@ v3 代码读取下列 109 个变量。CI 的 `scripts/check_env_docs.py` 要求�
 | 控制面审计 journal | `XSHIELD_CONTROL_AUDIT_HIGH_WATERMARK_BYTES`、`XSHIELD_CONTROL_AUDIT_KEY_HEX`、`XSHIELD_CONTROL_AUDIT_KEY_ID`、`XSHIELD_CONTROL_AUDIT_MAX_BYTES`、`XSHIELD_CONTROL_AUDIT_SEGMENT_MAX_BYTES` |
 | 封存 journal 与常驻任务 | `XSHIELD_AUDIT_MAX_BYTES`、`XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES`、`XSHIELD_AUDIT_METADATA_RETENTION_DAYS`、`XSHIELD_JOURNAL_KEY_HEX`、`XSHIELD_JOURNAL_KEY_ID`、`XSHIELD_SEAL_KEY_HEX`、`XSHIELD_SEAL_KEY_ID`、`XSHIELD_SEAL_PUBLIC_KEY_HEX`、`XSHIELD_RUN_HEARTBEAT_FILE`、`XSHIELD_RUN_INTERVAL_SECONDS` |
 | ClickHouse 索引 | `XSHIELD_CLICKHOUSE_DATABASE`、`XSHIELD_CLICKHOUSE_PASSWORD`、`XSHIELD_CLICKHOUSE_TABLE`、`XSHIELD_CLICKHOUSE_URL`、`XSHIELD_CLICKHOUSE_USER`、`XSHIELD_INDEX_TARGET_ID` |
-| outbox 发布器 | `XSHIELD_OUTBOX_DATABASE_ACQUIRE_TIMEOUT_MS`、`XSHIELD_OUTBOX_DATABASE_MAX_CONNECTIONS`、`XSHIELD_OUTBOX_FAMILY`、`XSHIELD_OUTBOX_LEASE_SECONDS`、`XSHIELD_OUTBOX_MAX_BYTES`、`XSHIELD_OUTBOX_MAX_EVENTS`、`XSHIELD_OUTBOX_RETRY_SECONDS` |
-| 加密证据库（本地） | `XSHIELD_EVIDENCE_BACKEND`、`XSHIELD_EVIDENCE_KEY_HEX`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES`、`XSHIELD_EVIDENCE_MAX_RETENTION_DAYS`、`XSHIELD_EVIDENCE_MAX_TOTAL_BYTES`、`XSHIELD_EVIDENCE_ORPHAN_GRACE_SECONDS`、`XSHIELD_EVIDENCE_RETENTION_BATCH_LIMIT`、`XSHIELD_EVIDENCE_RETENTION_INTERVAL_SECONDS`、`XSHIELD_EVIDENCE_ROOT` |
+| 加密证据库（本地） | `XSHIELD_EVIDENCE_BACKEND`、`XSHIELD_EVIDENCE_KEY_HEX`、`XSHIELD_EVIDENCE_KEY_ID`、`XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES`、`XSHIELD_EVIDENCE_MAX_RETENTION_DAYS`、`XSHIELD_EVIDENCE_ROOT` |
 | 加密证据库（S3） | `XSHIELD_EVIDENCE_S3_ACCESS_KEY_ID`、`XSHIELD_EVIDENCE_S3_ADDRESSING`、`XSHIELD_EVIDENCE_S3_ALLOW_PLAIN_HTTP`、`XSHIELD_EVIDENCE_S3_BUCKET`、`XSHIELD_EVIDENCE_S3_ENDPOINT`、`XSHIELD_EVIDENCE_S3_OBJECT_LOCK`、`XSHIELD_EVIDENCE_S3_PREFIX`、`XSHIELD_EVIDENCE_S3_REGION`、`XSHIELD_EVIDENCE_S3_REQUEST_TIMEOUT_SECONDS`、`XSHIELD_EVIDENCE_S3_SECRET_ACCESS_KEY`、`XSHIELD_EVIDENCE_S3_SESSION_TOKEN`、`XSHIELD_EVIDENCE_S3_SSE_KMS`、`XSHIELD_EVIDENCE_S3_SSE_KMS_KEY_ID` |
-| 离线模型评估 | `XSHIELD_MODEL_CACHE_DOMAIN`、`XSHIELD_MODEL_CACHE_KEY_HEX`、`XSHIELD_MODEL_EVALUATION_RUNNER_ID`、`XSHIELD_MODEL_JOURNAL_DIRECTORY` |
 | 应用层加密接管 | `XSHIELD_REQUEST_DECRYPTION_KEYS`、`XSHIELD_REQUEST_DECRYPTION_KEY_HEX`、`XSHIELD_RESPONSE_ENCRYPTION_KEYS`、`XSHIELD_RESPONSE_ENCRYPTION_KEY_HEX` |
 | 网关签发分享凭证 | `XSHIELD_SHARE_TOKEN_KEY_HEX` |

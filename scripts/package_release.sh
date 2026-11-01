@@ -59,9 +59,6 @@ binaries=(
     xshield-edge
     xshield-control
     xshield-worker
-    xshield-outbox-worker
-    xshield-evidence-retain
-    xshield-model-eval
     xshield-audit-seal
     xshield-build
 )

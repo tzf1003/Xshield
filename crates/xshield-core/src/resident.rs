@@ -1,5 +1,5 @@
 //! Resident mode for the batch binaries (`xshield-worker`,
-//! `xshield-outbox-worker`, `xshield-audit-seal`).
+//! `xshield-audit-seal`).
 //!
 //! Each of them does one bounded, resumable pass and exits, which suits cron.
 //! Orchestrators without a cron (a Compose service, a Kubernetes Deployment)
