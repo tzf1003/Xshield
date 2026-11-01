@@ -247,11 +247,23 @@ function harness({
   };
 }
 
-// A few event-loop turns: enough for chained microtasks and, unlike 1.2.0,
-// for the real (if tiny) WebCrypto operations ENVELOPE_HOOK now awaits.
+// A few event-loop turns: enough for chained microtasks, and nothing more.
+// ENVELOPE_HOOK's WebCrypto work runs on the libuv threadpool, so a fixed
+// number of turns cannot promise it has finished on a busy machine; wait on
+// the observable condition with waitFor instead.
 const settle = async () => {
   for (let turn = 0; turn < 20; turn += 1) {
     await new Promise((resolve) => setImmediate(resolve));
+  }
+};
+
+// Polls until `condition` holds, yielding to the event loop between checks.
+// The 2 second cap turns a real regression into a prompt, readable failure.
+const waitFor = async (condition, what) => {
+  const deadline = Date.now() + 2_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 1));
   }
 };
 
@@ -835,7 +847,7 @@ test("XHR: encrypts a configured operation's string body before the native send"
   xhr.open("POST", "/checkout");
   const plaintext = JSON.stringify({ sku: "A-1" });
   xhr.send(plaintext);
-  await settle();
+  await waitFor(() => sensor.xhrs.length > 0, "the encrypted XHR to reach the native send");
   const [sent] = sensor.xhrs;
   assert.notEqual(sent.body, plaintext);
   assert.deepEqual(
