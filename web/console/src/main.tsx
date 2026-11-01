@@ -1,44 +1,44 @@
-import { App as AntdApp } from "antd";
+import "@fontsource/ibm-plex-sans/400.css";
+import "@fontsource/ibm-plex-sans/600.css";
+import "@fontsource/jetbrains-mono/400.css";
+import "./style.css";
+
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { AppRouter } from "./router/AppRouter";
-import { runFrozenWrite } from "./security/guarded.ts";
-import { createSessionRuntime } from "./security/runtime.ts";
-import { machineLoginEnabled, SessionProvider } from "./security/SessionProvider";
-import { applyStoredThemeAttributes, ThemeProvider } from "./theme/ThemeProvider";
-import { completeVerificationReturn, isVerificationReturn } from "./work/step-up-window.ts";
-import "./theme/fonts";
-import "./theme/tokens.generated.css";
-import "./style.css";
-import "./shell/shell.css";
+import { ConfigProvider } from "antd";
+import zhCN from "antd/locale/zh_CN";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { RouterProvider } from "@tanstack/react-router";
+import { onUnauthorized } from "./api.ts";
+import { createAppRouter } from "./router.tsx";
 
-// One runtime for the page: the session, its query cache and its pending writes live and die together.
-const runtime = createSessionRuntime();
-// Test-only seam of the explicitly enabled local Playwright build (the same gate as the Bearer
-// form). `import.meta.env.DEV` is false in production builds, so none of this ships.
-if (machineLoginEnabled) {
-  Object.defineProperty(window, "__xshieldE2E", {
-    value: Object.freeze({ runtime, runFrozenWrite }),
-  });
-}
-// The window an in-place MFA step-up opened is sent back to this page by the identity provider.
-// It renders nothing: it tells the opener to re-read its session and closes (work/step-up-window).
-const returning = isVerificationReturn(window);
-if (returning) completeVerificationReturn(window);
-const root = returning ? null : document.getElementById("root");
-const cspNonce =
-  document.querySelector('meta[name="xshield-csp-nonce"]')?.getAttribute("content") || undefined;
-// An explicit light/dark choice must be on <html> before the first React paint.
-applyStoredThemeAttributes();
-if (root)
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
+});
+
+const router = createAppRouter({ queryClient });
+
+// A 401 from any API call (session expired mid-use) sends the operator back to /login, no
+// matter which page or query triggered it.
+onUnauthorized(() => {
+  if (router.state.location.pathname !== "/login") {
+    router.navigate({ to: "/login" });
+  }
+});
+
+const root = document.getElementById("root");
+if (root) {
   createRoot(root).render(
     <StrictMode>
-      <ThemeProvider cspNonce={cspNonce}>
-        <SessionProvider runtime={runtime}>
-          <AntdApp>
-            <AppRouter runtime={runtime} />
-          </AntdApp>
-        </SessionProvider>
-      </ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <ConfigProvider
+          locale={zhCN}
+          button={{ autoInsertSpace: false }}
+          theme={{ token: { colorPrimary: "#0958d9" } }}
+        >
+          <RouterProvider router={router} />
+        </ConfigProvider>
+      </QueryClientProvider>
     </StrictMode>,
   );
+}
