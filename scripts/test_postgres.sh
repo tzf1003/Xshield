@@ -20,14 +20,10 @@ for migration in "$repo_root"/migrations/*.sql; do
     psql -X -v ON_ERROR_STOP=1 -d "$test_database" -f "$migration"
 done
 
+# v4 keeps only site_spec_store and decision_log_store (docs/05-v3-removal.md
+# section 5.2); both of their database-gated tests live as `#[cfg(test)]`
+# modules inside src/, so `--tests` here covers library unit tests, not a
+# `tests/` integration suite (that directory is now empty).
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-postgres --tests -- --ignored
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-postgres --test calibration_report -- --ignored
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-postgres --test calibration_report_retention -- --ignored
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-postgres --test calibration_lineage_review -- --ignored
-XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
-    cargo test -p xshield-postgres --test calibration_lineage_review_retention -- --ignored
+    cargo test -p xshield-postgres --lib -- --ignored

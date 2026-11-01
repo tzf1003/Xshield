@@ -102,13 +102,9 @@
         {
           "path": "crates/xshield-core/src/identity.rs",
           "test": "new_session_is_anonymous_and_empty"
-        },
-        {
-          "path": "crates/xshield-postgres/tests/page_provenance.rs",
-          "test": "document_session_identifies_only_active_credentialed_bindings"
         }
       ],
-      "gap": "服务器租期到期只在领域层断言 SessionExpired、存储层只断言凭证过期后被拒，没有经 edge 或存储在绑定 absolute_expires_at 过后重发 WAF Cookie 的测试。"
+      "gap": "服务器租期到期只在领域层断言 SessionExpired，没有经 edge 或存储在绑定 absolute_expires_at 过后重发 WAF Cookie 的测试；存储层的 PostgreSQL 过期断言随 v3 身份绑定一起删除（docs/05 §5.2）。"
     },
     {
       "id": "AUTH-09",
@@ -139,15 +135,11 @@
       "status": "partial",
       "covered_by": [
         {
-          "path": "crates/xshield-postgres/tests/identity_refresh.rs",
-          "test": "refresh_is_atomic_and_compare_and_swap"
-        },
-        {
           "path": "crates/xshield-core/src/identity.rs",
           "test": "refresh_advances_only_generation_and_rejects_late_response"
         }
       ],
-      "gap": "只顺序断言旧快照的第二次刷新得到 Conflict 且旧凭证随后被拒，没有两个标签经 edge 并发刷新、旧响应最后到达的测试；原 SQL 夹具已随 migrations/0001_v4_baseline.sql 替换全部 v3 迁移（docs/03 §3.2）删除。"
+      "gap": "只顺序断言旧快照的第二次刷新得到 Conflict 且旧凭证随后被拒，没有两个标签经 edge 并发刷新、旧响应最后到达的测试；存储层的比较并交换断言随 v3 身份绑定一起删除，原 SQL 夹具也已随 migrations/0001_v4_baseline.sql 替换全部 v3 迁移（docs/05 §5.2、docs/03 §3.2）删除。"
     },
     {
       "id": "FLOW-01",
@@ -281,13 +273,9 @@
         {
           "path": "crates/xshield-core/src/grant.rs",
           "test": "rejects_resource_operation_view_expiry_and_revocation"
-        },
-        {
-          "path": "crates/xshield-postgres/tests/grant_issue.rs",
-          "test": "grant_issue_is_atomic_idempotent_and_capacity_bounded"
         }
       ],
-      "gap": "只在领域层与 PostgreSQL 读取端口断言 orders.update 得到 OPERATION_NOT_GRANTED，没有经真实 edge 用只读资格调用 update/refund 的端到端回归（edge 目前只编译 GET 资源操作）。"
+      "gap": "只在领域层断言 orders.update 得到 OPERATION_NOT_GRANTED，没有经真实 edge 用只读资格调用 update/refund 的端到端回归（edge 目前只编译 GET 资源操作）；PostgreSQL 读取端口的断言随 v3 资格账本一起删除（docs/05 §5.2）。"
     },
     {
       "id": "GRANT-02",
@@ -844,14 +832,7 @@
         "元数据TTL到期"
       ],
       "expected": "按hold与分层规则处理，显示保留原因，不承诺TTL即时删除",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/case_evidence_holds.rs",
-          "test": "case_evidence_holds_are_atomic_scoped_bounded_and_serialize_with_purge"
-        }
-      ],
-      "gap": "元数据 TTL 到期只在 CI 专用真实 ClickHouse 用例中验证；原控制台保留状态展示已随控制台精简为单管理员（docs/05 §5.2）删除。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-13",
@@ -970,13 +951,9 @@
         {
           "path": "crates/xshield-worker/src/control_audit/tests.rs",
           "test": "duplicate_and_unknown_payload_fields_are_rejected_before_indexing"
-        },
-        {
-          "path": "crates/xshield-postgres/tests/site_config.rs",
-          "test": "legacy_revision_rows_still_read_back_as_typed_configurations"
         }
       ],
-      "gap": "消费端对新增字段一律按封闭解析拒绝，没有读写兼容矩阵或 minor 前向兼容测试，迁移只有全量顺序应用、0007 遗留行检查和个别遗留行回读，缺少逐版本升级测试。"
+      "gap": "消费端对新增字段一律按封闭解析拒绝，没有读写兼容矩阵或 minor 前向兼容测试；迁移改为单份 v4 基线（docs/05 §5.2），不再有逐版本或遗留行回读测试。"
     },
     {
       "id": "DEV-06",
