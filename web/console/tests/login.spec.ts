@@ -33,10 +33,19 @@ test("shows the server's error message on a failed login", async ({ page }) => {
 });
 
 test("navigates to /sites after a successful login", async ({ page }) => {
+  // A login establishes the session, so the session check that /sites makes after the
+  // login reports it authenticated, as the server does.
+  let loggedIn = false;
   await page.route("**/api/session", (route) =>
-    route.fulfill({ status: 401, json: { authenticated: false } }),
+    route.fulfill({
+      status: loggedIn ? 200 : 401,
+      json: { authenticated: loggedIn },
+    }),
   );
-  await page.route("**/api/login", (route) => route.fulfill({ status: 200, json: {} }));
+  await page.route("**/api/login", (route) => {
+    loggedIn = true;
+    return route.fulfill({ status: 200, json: {} });
+  });
   await page.route("**/api/sites", (route) => route.fulfill({ status: 200, json: [] }));
   await page.route("**/api/jev/status", (route) =>
     route.fulfill({ status: 200, json: { status: "unknown" } }),
