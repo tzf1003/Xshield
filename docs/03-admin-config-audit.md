@@ -55,6 +55,7 @@ v4 目标状态必需的环境变量只有这些（另有 TLS 多证书、运维
 | `XSHIELD_ADMIN_PASSWORD_HASH` | 管理员口令哈希（新增） |
 | `XSHIELD_CONTEXT_KEY_HEX` | 会话键和已见值哈希用的密钥（新增） |
 | `AI_GATEWAY_API_KEY` | Jev 调用凭证 |
+| `XSHIELD_JEV_ENDPOINT` | 可选：Jev 调用地址，换私有部署模型时设置（新增，默认 Vercel AI Gateway） |
 | `XSHIELD_JEV_ROUTE` / `XSHIELD_JEV_API_KEY` | 可选：直连 TypeSafe |
 
 v3 代码目前读取 109 个 `XSHIELD_*` 变量，逐个的去留见 [05.3](05-v3-removal.md#53-环境变量去留)。
