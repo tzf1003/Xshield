@@ -145,9 +145,10 @@ fn row_to_history(row: &sqlx::postgres::PgRow) -> Result<HistoryEntry, SiteSpecS
 /// Returns [`SiteSpecStoreError`] on a database failure or a stored
 /// configuration that no longer validates.
 pub async fn list(pool: &PgPool) -> Result<Vec<SiteRecord>, SiteSpecStoreError> {
-    let rows = sqlx::query("SELECT spec, version, created_at, updated_at FROM site_configs ORDER BY name")
-        .fetch_all(pool)
-        .await?;
+    let rows =
+        sqlx::query("SELECT spec, version, created_at, updated_at FROM site_configs ORDER BY name")
+            .fetch_all(pool)
+            .await?;
     rows.iter().map(row_to_record).collect()
 }
 
@@ -157,10 +158,12 @@ pub async fn list(pool: &PgPool) -> Result<Vec<SiteRecord>, SiteSpecStoreError> 
 /// Returns [`SiteSpecStoreError`] on a database failure or a stored
 /// configuration that no longer validates.
 pub async fn get(pool: &PgPool, name: &str) -> Result<Option<SiteRecord>, SiteSpecStoreError> {
-    let row = sqlx::query("SELECT spec, version, created_at, updated_at FROM site_configs WHERE name = $1")
-        .bind(name)
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT spec, version, created_at, updated_at FROM site_configs WHERE name = $1",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
     row.as_ref().map(row_to_record).transpose()
 }
 
@@ -170,14 +173,12 @@ async fn insert_history(
     before: Option<&serde_json::Value>,
     after: Option<&serde_json::Value>,
 ) -> Result<(), SiteSpecStoreError> {
-    sqlx::query(
-        "INSERT INTO site_config_history (site_name, before, after) VALUES ($1, $2, $3)",
-    )
-    .bind(name)
-    .bind(before)
-    .bind(after)
-    .execute(&mut **transaction)
-    .await?;
+    sqlx::query("INSERT INTO site_config_history (site_name, before, after) VALUES ($1, $2, $3)")
+        .bind(name)
+        .bind(before)
+        .bind(after)
+        .execute(&mut **transaction)
+        .await?;
     Ok(())
 }
 
@@ -295,13 +296,12 @@ pub async fn rollback(
     history_id: i64,
 ) -> Result<RollbackOutcome, SiteSpecStoreError> {
     let mut transaction = pool.begin().await?;
-    let target = sqlx::query(
-        "SELECT after FROM site_config_history WHERE id = $1 AND site_name = $2",
-    )
-    .bind(history_id)
-    .bind(name)
-    .fetch_optional(&mut *transaction)
-    .await?;
+    let target =
+        sqlx::query("SELECT after FROM site_config_history WHERE id = $1 AND site_name = $2")
+            .bind(history_id)
+            .bind(name)
+            .fetch_optional(&mut *transaction)
+            .await?;
     let Some(target) = target else {
         transaction.rollback().await?;
         return Ok(RollbackOutcome::NotFound);
@@ -401,7 +401,9 @@ mod tests {
         delete(&pool, spec.name()).await.unwrap();
         let entries = history(&pool, spec.name(), 50).await.unwrap();
         let deleted_entry = entries.iter().find(|entry| entry.after.is_none()).unwrap();
-        let outcome = rollback(&pool, spec.name(), deleted_entry.id).await.unwrap();
+        let outcome = rollback(&pool, spec.name(), deleted_entry.id)
+            .await
+            .unwrap();
         assert!(matches!(outcome, RollbackOutcome::TargetDeleted));
     }
 

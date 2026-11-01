@@ -107,9 +107,7 @@ pub enum StartupError {
 impl std::fmt::Display for StartupError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::InvalidAdminPasswordHash => {
-                "XSHIELD_ADMIN_PASSWORD_HASH is missing or malformed"
-            }
+            Self::InvalidAdminPasswordHash => "XSHIELD_ADMIN_PASSWORD_HASH is missing or malformed",
             Self::KeyDerivationUnavailable => "could not derive the session signing key",
         })
     }
@@ -287,10 +285,13 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn set_session_cookie(response: &mut Response, token: &str, max_age_secs: u64) {
-    let value =
-        format!("{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age_secs}; Secure; HttpOnly; SameSite=Lax");
+    let value = format!(
+        "{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age_secs}; Secure; HttpOnly; SameSite=Lax"
+    );
     if let Ok(header_value) = HeaderValue::from_str(&value) {
-        response.headers_mut().append(header::SET_COOKIE, header_value);
+        response
+            .headers_mut()
+            .append(header::SET_COOKIE, header_value);
     }
 }
 
@@ -426,10 +427,7 @@ async fn logout_handler() -> Response {
     response
 }
 
-async fn session_handler(
-    State(state): State<Arc<ControlState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn session_handler(State(state): State<Arc<ControlState>>, headers: HeaderMap) -> Response {
     if session_authenticated(&state, &headers) {
         Json(serde_json::json!({ "authenticated": true })).into_response()
     } else {
@@ -456,8 +454,12 @@ fn site_record_wire(record: &SiteRecord) -> SiteRecordWire<'_> {
     SiteRecordWire {
         spec: &record.spec,
         version: record.version,
-        created_at: record.created_at.to_rfc3339_opts(SecondsFormat::Millis, true),
-        updated_at: record.updated_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        created_at: record
+            .created_at
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
+        updated_at: record
+            .updated_at
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
     }
 }
 
@@ -474,7 +476,9 @@ fn history_entry_wire(entry: &HistoryEntry) -> HistoryEntryWire<'_> {
         id: entry.id,
         before: entry.before.as_ref(),
         after: entry.after.as_ref(),
-        changed_at: entry.changed_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        changed_at: entry
+            .changed_at
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
     }
 }
 
@@ -487,14 +491,17 @@ fn site_store_error_response(error: &SiteSpecStoreError) -> Response {
 fn parse_site_body(body: &Bytes) -> Result<SiteSpec, Response> {
     let text = std::str::from_utf8(body)
         .map_err(|_| json_error(StatusCode::BAD_REQUEST, "SITE_CONFIG_MALFORMED"))?;
-    SiteSpec::from_json(text).map_err(|error| json_error(StatusCode::BAD_REQUEST, &error.to_string()))
+    SiteSpec::from_json(text)
+        .map_err(|error| json_error(StatusCode::BAD_REQUEST, &error.to_string()))
 }
 
 // --- Site endpoints ---
 
 async fn sites_list(State(state): State<Arc<ControlState>>) -> Response {
     match site_spec_store::list(&state.pool).await {
-        Ok(records) => Json(records.iter().map(site_record_wire).collect::<Vec<_>>()).into_response(),
+        Ok(records) => {
+            Json(records.iter().map(site_record_wire).collect::<Vec<_>>()).into_response()
+        }
         Err(error) => site_store_error_response(&error),
     }
 }
@@ -538,7 +545,10 @@ async fn sites_update(
     }
 }
 
-async fn sites_delete(State(state): State<Arc<ControlState>>, Path(name): Path<String>) -> Response {
+async fn sites_delete(
+    State(state): State<Arc<ControlState>>,
+    Path(name): Path<String>,
+) -> Response {
     match site_spec_store::delete(&state.pool, &name).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => json_error(StatusCode::NOT_FOUND, "SITE_NOT_FOUND"),
@@ -675,7 +685,9 @@ pub async fn run_decision_log_retention_loop(pool: PgPool) {
             .timestamp_millis()
             .saturating_sub(DECISION_LOG_RETENTION_SECS.saturating_mul(1000));
         match decision_log_store::purge_older_than(&pool, cutoff_millis).await {
-            Ok(count) => eprintln!("xshield-control: purged {count} decision log rows older than 7 days"),
+            Ok(count) => {
+                eprintln!("xshield-control: purged {count} decision log rows older than 7 days")
+            }
             Err(error) => eprintln!("xshield-control: decision log purge failed: {error}"),
         }
     }

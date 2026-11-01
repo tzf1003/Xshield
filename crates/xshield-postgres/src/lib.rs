@@ -22,6 +22,7 @@ mod control_job;
 mod control_job_admin_list;
 mod control_job_case_list;
 mod control_job_list;
+pub mod decision_log_store;
 mod evidence_access_decision;
 mod evidence_access_inspection;
 mod evidence_access_list;
@@ -52,7 +53,6 @@ mod share_grant_issue;
 mod share_grant_read;
 mod site_config;
 pub mod site_spec_store;
-pub mod decision_log_store;
 
 pub use action_read::ResponseActionDescriptorQuery;
 pub use binding_inspection::BindingInspection;

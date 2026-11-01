@@ -140,11 +140,13 @@ fn row_to_decision(row: &sqlx::postgres::PgRow) -> Result<DecisionLogRow, Decisi
     let decision_path: String = row.try_get("decision_path")?;
     let outcome: String = row.try_get("outcome")?;
     let jev: Option<serde_json::Value> = row.try_get("jev")?;
-    let decision_path =
-        parse_decision_path(&decision_path).ok_or(DecisionLogStoreError::CorruptRow("decision_path"))?;
+    let decision_path = parse_decision_path(&decision_path)
+        .ok_or(DecisionLogStoreError::CorruptRow("decision_path"))?;
     let outcome = parse_outcome(&outcome).ok_or(DecisionLogStoreError::CorruptRow("outcome"))?;
     let jev = jev
-        .map(|value| serde_json::from_value::<JevRecord>(value).map_err(DecisionLogStoreError::Serialize))
+        .map(|value| {
+            serde_json::from_value::<JevRecord>(value).map_err(DecisionLogStoreError::Serialize)
+        })
         .transpose()?;
     Ok(DecisionLogRow {
         id,
@@ -356,7 +358,11 @@ mod tests {
             Outcome::WouldBlock,
             Outcome::Unjudged,
         ] {
-            assert_eq!(parse_outcome(outcome_str(outcome)), Some(outcome), "{outcome:?}");
+            assert_eq!(
+                parse_outcome(outcome_str(outcome)),
+                Some(outcome),
+                "{outcome:?}"
+            );
         }
     }
 
