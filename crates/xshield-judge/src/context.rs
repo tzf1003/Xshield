@@ -22,7 +22,10 @@ pub const IDLE_MAX_MS: u64 = 24 * 60 * 60 * 1000;
 pub const SESSIONS_MAX: usize = 20_000;
 /// Values at least this long are specific enough to fast-allow when seen.
 pub const LONG_VALUE_CHARS: usize = 8;
-/// How long a positive judgement is reused (docs/01 section 1.4 step 5).
+/// Default time a positive judgement is reused, in minutes (docs/01 section
+/// 1.4 step 5). A site may change it with `advanced.allow_cache_minutes`.
+pub const CACHE_MINUTES: u32 = 10;
+/// [`CACHE_MINUTES`] in milliseconds.
 pub const CACHE_MS: u64 = 10 * 60 * 1000;
 const ENTRIES_MAX: usize = 16;
 const CACHE_MAX: usize = 512;
@@ -113,13 +116,20 @@ impl Seen {
     /// object. Short values collide across unrelated objects (basket 1,
     /// product 1), so they only count when the origin field or the request
     /// that showed them names the same kind of object as the path or key.
+    /// `synonyms` are the site's extra pairs (see [`site_synonym`]).
     #[must_use]
-    pub fn is_specific(&self, value: &str, path: &str, key: Option<&str>) -> bool {
+    pub fn is_specific(
+        &self,
+        value: &str,
+        path: &str,
+        key: Option<&str>,
+        synonyms: &[(String, String)],
+    ) -> bool {
         value.chars().count() >= LONG_VALUE_CHARS
             || self
                 .origins
                 .iter()
-                .any(|origin| is_id_like(&origin.field) && affinity(origin, path, key))
+                .any(|origin| is_id_like(&origin.field) && affinity(origin, path, key, synonyms))
     }
 
     /// The origins ordered for the model, most useful last: ones of the same
@@ -127,16 +137,35 @@ impl Seen {
     /// model sees only the last few, so a recent unrelated match (a stock
     /// count) must not push out the product list that really showed the id.
     #[must_use]
-    pub fn ranked(&self, path: &str, key: Option<&str>) -> Vec<&Origin> {
+    pub fn ranked(
+        &self,
+        path: &str,
+        key: Option<&str>,
+        synonyms: &[(String, String)],
+    ) -> Vec<&Origin> {
         let mut origins: Vec<&Origin> = self.origins.iter().collect();
         origins.sort_by_key(|origin| {
-            u8::from(is_id_like(&origin.field)) + 2 * u8::from(affinity(origin, path, key))
+            u8::from(is_id_like(&origin.field))
+                + 2 * u8::from(affinity(origin, path, key, synonyms))
         });
         origins
     }
 }
 
-fn affinity(origin: &Origin, path: &str, key: Option<&str>) -> bool {
+/// A site's synonym pair as the context compares it: the same reduction
+/// `kind_words` applies to field and path names (lower case, trailing `s`
+/// removed), so `address` matches the `addre` that `/api/Addresss` yields.
+/// A pair with a word shorter than three letters after that is dropped: an
+/// empty word would match every field.
+#[must_use]
+pub fn site_synonym(first: &str, second: &str) -> Option<(String, String)> {
+    let first = first.to_ascii_lowercase();
+    let second = second.to_ascii_lowercase();
+    let (first, second) = (first.trim_end_matches('s'), second.trim_end_matches('s'));
+    (first.len() >= 3 && second.len() >= 3).then(|| (first.to_owned(), second.to_owned()))
+}
+
+fn affinity(origin: &Origin, path: &str, key: Option<&str>, synonyms: &[(String, String)]) -> bool {
     // A field name says what kind of object the value selects; only without
     // one (a path segment, a bare `id` field) does the path decide.
     let by_key = key.map(kind_words).unwrap_or_default();
@@ -159,7 +188,7 @@ fn affinity(origin: &Origin, path: &str, key: Option<&str>) -> bool {
     }
     wanted
         .iter()
-        .any(|word| shown.iter().any(|other| related(word, other)))
+        .any(|word| shown.iter().any(|other| related(word, other, synonyms)))
 }
 
 const GENERIC_WORDS: [&str; 8] = ["api", "rest", "v1", "v2", "v3", "data", "value", "id"];
@@ -188,10 +217,20 @@ fn kind_words(text: &str) -> Vec<String> {
 /// that lists it (`paymentId` selects a card of `/api/Cards`).
 const SYNONYMS: [(&str, &str); 1] = [("payment", "card")];
 
-fn related(left: &str, right: &str) -> bool {
+/// Whether two words name the same kind of object: one contains the other,
+/// or they are a built-in or site synonym pair.
+fn related(left: &str, right: &str, synonyms: &[(String, String)]) -> bool {
+    let pairs = SYNONYMS
+        .iter()
+        .map(|(first, second)| (*first, *second))
+        .chain(
+            synonyms
+                .iter()
+                .map(|(first, second)| (first.as_str(), second.as_str())),
+        );
     left.contains(right)
         || right.contains(left)
-        || SYNONYMS.iter().any(|(first, second)| {
+        || pairs.into_iter().any(|(first, second)| {
             (left.contains(first) && right.contains(second))
                 || (left.contains(second) && right.contains(first))
         })
@@ -321,15 +360,17 @@ impl SessionContext {
             .is_some_and(|until| *until > now_ms)
     }
 
-    /// Remembers a positive judgement.
-    pub fn cache_allow(&mut self, cache_key: Digest16, now_ms: u64) {
+    /// Remembers a positive judgement for `ttl_ms`. Entries keep the time they
+    /// were written with, so a later change of the site's cache time does not
+    /// shorten or extend them.
+    pub fn cache_allow(&mut self, cache_key: Digest16, now_ms: u64, ttl_ms: u64) {
         if self.cache.len() >= CACHE_MAX {
             self.cache.retain(|_, until| *until > now_ms);
             if self.cache.len() >= CACHE_MAX {
                 self.cache.clear();
             }
         }
-        self.cache.insert(cache_key, now_ms + CACHE_MS);
+        self.cache.insert(cache_key, now_ms + ttl_ms);
     }
 
     /// Number of remembered values.
@@ -456,12 +497,12 @@ mod tests {
         );
         let seen = session.lookup(&key, "7").unwrap();
         assert_eq!(seen.origins[0].field, "id");
-        assert!(seen.is_specific("7", "/api/patients/7", None));
+        assert!(seen.is_specific("7", "/api/patients/7", None, &[]));
         assert!(
             !session
                 .lookup(&key, "8")
                 .unwrap()
-                .is_specific("8", "/api/patients/8", None)
+                .is_specific("8", "/api/patients/8", None, &[])
         );
         assert!(session.lookup(&key, "9").is_none());
     }
@@ -475,10 +516,15 @@ mod tests {
         session.remember(&key, "GET /api/Deliverys", &[response("id", "1")]);
         session.remember(&key, "GET /api/Quantitys/", &[response("quantity", "1")]);
         let seen = session.lookup(&key, "1").unwrap();
-        assert!(seen.is_specific("1", "/rest/basket/22/checkout", Some("deliveryMethodId")));
-        assert!(!seen.is_specific("1", "/rest/basket/22/checkout", Some("couponId")));
-        assert!(seen.is_specific("1", "/api/BasketItems/", Some("ProductId")));
-        let ranked = seen.ranked("/api/BasketItems/", Some("ProductId"));
+        assert!(seen.is_specific(
+            "1",
+            "/rest/basket/22/checkout",
+            Some("deliveryMethodId"),
+            &[]
+        ));
+        assert!(!seen.is_specific("1", "/rest/basket/22/checkout", Some("couponId"), &[]));
+        assert!(seen.is_specific("1", "/api/BasketItems/", Some("ProductId"), &[]));
+        let ranked = seen.ranked("/api/BasketItems/", Some("ProductId"), &[]);
         assert_eq!(ranked.last().unwrap().request, "GET /rest/products/search");
         assert_eq!(ranked[0].field, "quantity");
     }
@@ -490,8 +536,8 @@ mod tests {
         let session = store.session(key.mac("session", b"cookie"), 0);
         session.remember(&key, "GET /api/Cards", &[response("id", "7")]);
         let seen = session.lookup(&key, "7").unwrap();
-        assert!(seen.is_specific("7", "/rest/basket/22/checkout", Some("paymentId")));
-        assert!(!seen.is_specific("7", "/rest/basket/22/checkout", Some("addressId")));
+        assert!(seen.is_specific("7", "/rest/basket/22/checkout", Some("paymentId"), &[]));
+        assert!(!seen.is_specific("7", "/rest/basket/22/checkout", Some("addressId"), &[]));
     }
 
     #[test]
@@ -502,8 +548,8 @@ mod tests {
                 request: "GET /x".into(),
             }],
         };
-        assert!(seen.is_specific("P-0000042", "/x", None));
-        assert!(!seen.is_specific("alice", "/x", None));
+        assert!(seen.is_specific("P-0000042", "/x", None, &[]));
+        assert!(!seen.is_specific("alice", "/x", None, &[]));
     }
 
     #[test]
@@ -518,18 +564,19 @@ mod tests {
             &[response("BasketItem.id", "9"), response("BasketId", "22")],
         );
         let delivery = session.lookup(&key, "1").unwrap();
-        assert!(delivery.is_specific("1", "/api/Deliverys/1", None));
-        assert!(!delivery.is_specific("1", "/rest/basket/1", None));
+        assert!(delivery.is_specific("1", "/api/Deliverys/1", None, &[]));
+        assert!(!delivery.is_specific("1", "/rest/basket/1", None, &[]));
         session.remember(&key, "GET /rest/basket/22", &[response("Products.id", "1")]);
         let both = session.lookup(&key, "1").unwrap();
-        assert!(!both.is_specific("1", "/rest/basket/1", None));
-        assert!(both.is_specific("1", "/api/Products/1", None));
+        assert!(!both.is_specific("1", "/rest/basket/1", None, &[]));
+        assert!(both.is_specific("1", "/api/Products/1", None, &[]));
         let item = session.lookup(&key, "9").unwrap();
-        assert!(item.is_specific("9", "/api/BasketItems/9", None));
+        assert!(item.is_specific("9", "/api/BasketItems/9", None, &[]));
         assert!(session.lookup(&key, "22").unwrap().is_specific(
             "22",
             "/rest/basket/22/checkout",
-            None
+            None,
+            &[]
         ));
     }
 
@@ -613,7 +660,7 @@ mod tests {
         let mut session = SessionContext::new(0);
         let cache_key = key.mac("cache", b"GET /x");
         assert!(!session.cached_allow(&cache_key, 0));
-        session.cache_allow(cache_key, 1_000);
+        session.cache_allow(cache_key, 1_000, CACHE_MS);
         assert!(session.cached_allow(&cache_key, 1_000 + CACHE_MS - 1));
         assert!(!session.cached_allow(&cache_key, 1_000 + CACHE_MS));
     }

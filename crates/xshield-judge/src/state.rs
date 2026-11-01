@@ -90,11 +90,17 @@ pub struct StateInput<'a> {
     pub truncated: bool,
     /// A secret that must never leave the gateway (the session credential).
     pub credential: Option<&'a str>,
+    /// Redaction words the site adds to the built-in ones (`advanced.secret_fields`).
+    pub secret_words: &'a [String],
 }
 
-fn is_secret_name(name: &str) -> bool {
+/// Whether a field name or a location names a secret: a built-in word or one
+/// of the site's words appears in it.
+#[must_use]
+pub fn is_secret_name(name: &str, site_words: &[String]) -> bool {
     let lower = name.to_ascii_lowercase();
     SECRET_WORDS.iter().any(|word| lower.contains(word))
+        || site_words.iter().any(|word| lower.contains(word.as_str()))
 }
 
 fn render_value(
@@ -103,7 +109,11 @@ fn render_value(
     cap: usize,
     seen_per_value: usize,
 ) -> Value {
-    let secret_name = value.key.as_deref().is_some_and(is_secret_name) || is_secret_name(&value.at);
+    let secret_name = value
+        .key
+        .as_deref()
+        .is_some_and(|key| is_secret_name(key, input.secret_words))
+        || is_secret_name(&value.at, input.secret_words);
     let secret_value = input
         .credential
         .is_some_and(|credential| !credential.is_empty() && value.value.contains(credential));
@@ -340,7 +350,23 @@ mod tests {
             values,
             truncated: false,
             credential,
+            secret_words: &[],
         }
+    }
+
+    #[test]
+    fn site_secret_words_redact_like_the_built_in_ones() {
+        let words = ["ssn".to_owned()];
+        let values = vec![
+            value("body.ssn", "123456789", Some("ssn"), &[]),
+            value("body.idcard", "fine", Some("idcard"), &[]),
+        ];
+        let mut site_input = input(values, None, vec![]);
+        site_input.secret_words = &words;
+        let state = build_state(&site_input).unwrap();
+        assert!(!state.contains("123456789"));
+        assert!(state.contains("fine"), "only the site's words are added");
+        assert!(state.contains(REDACTED));
     }
 
     #[test]

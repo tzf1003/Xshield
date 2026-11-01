@@ -44,7 +44,15 @@ impl JevPort for ScriptedJev {
         "scripted"
     }
 
-    async fn ask(&self, body: Vec<u8>) -> Result<Vec<u8>, JevFailure> {
+    fn route(&self) -> &'static str {
+        "scripted"
+    }
+
+    fn default_timeout(&self) -> Duration {
+        Duration::from_secs(2)
+    }
+
+    async fn ask(&self, body: Vec<u8>, _timeout: Duration) -> Result<Vec<u8>, JevFailure> {
         let document: Value = serde_json::from_slice(&body).expect("request is JSON");
         let request = &document["state"]["request"];
         let text = request.to_string().to_ascii_lowercase();

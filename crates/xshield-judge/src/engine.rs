@@ -2,14 +2,16 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use xshield_core::context::SessionCredential;
 use xshield_core::context::{
     DecisionPath, DecisionRecord, JevRecord, Mode, OnJevUnavailable, Outcome, SiteSpec,
 };
 
-use crate::context::{ContextKey, ContextStore, Digest16, Recent, label};
+use crate::context::{
+    CACHE_MINUTES, ContextKey, ContextStore, Digest16, Recent, label, site_synonym,
+};
 use crate::jev::{JevFailure, JevPort};
 use crate::state::{
     Conclusion, StateInput, StateValue, build_state, conclude, parse_response, request_body,
@@ -132,6 +134,47 @@ enum Verdict {
     Unjudged(DecisionPath),
 }
 
+/// The session context a Jev state is built from, copied out of the lock.
+#[derive(Default)]
+struct Snapshot {
+    age: u64,
+    entries: Vec<String>,
+    recent: Vec<Recent>,
+}
+
+/// The judging parameters in effect for one request: the code defaults, each
+/// replaced by the site's `advanced` section where the site sets it
+/// (docs/07 section 7.6.3).
+struct Tuning<'a> {
+    jev_timeout: Duration,
+    session_calls: u32,
+    address_calls: u32,
+    /// Allow reuse window in milliseconds; 0 turns the cache off.
+    cache_ms: u64,
+    /// The site's synonym pairs, reduced as the context compares them.
+    synonyms: Vec<(String, String)>,
+    secret_words: &'a [String],
+}
+
+impl<'a> Tuning<'a> {
+    fn new(site: &'a SiteSpec, jev_default: Duration) -> Self {
+        let advanced = site.advanced();
+        let default_ms = u32::try_from(jev_default.as_millis()).unwrap_or(u32::MAX);
+        Self {
+            jev_timeout: Duration::from_millis(u64::from(advanced.jev_timeout_ms_or(default_ms))),
+            session_calls: advanced.session_calls_per_minute_or(SESSION_CALLS_PER_MINUTE),
+            address_calls: advanced.address_calls_per_minute_or(ADDRESS_CALLS_PER_MINUTE),
+            cache_ms: u64::from(advanced.allow_cache_minutes_or(CACHE_MINUTES)) * 60_000,
+            synonyms: advanced
+                .synonyms()
+                .iter()
+                .filter_map(|(first, second)| site_synonym(first, second))
+                .collect(),
+            secret_words: advanced.secret_fields(),
+        }
+    }
+}
+
 impl<J: JevPort> Judge<J> {
     /// A judge with empty context.
     #[must_use]
@@ -173,9 +216,10 @@ impl<J: JevPort> Judge<J> {
             request.body,
         );
         let cache_key = self.cache_key(request, &extracted.values);
+        let tuning = Tuning::new(site, self.jev.default_timeout());
 
         let mut jev_record = None;
-        let verdict = match self.plan(request, entry, session_id, &extracted, &cache_key) {
+        let verdict = match self.plan(request, entry, session_id, &extracted, &cache_key, &tuning) {
             Plan::Done(verdict) => verdict,
             Plan::Ask { limit_key, values } => {
                 let (verdict, record) = self
@@ -187,6 +231,7 @@ impl<J: JevPort> Judge<J> {
                         values,
                         extracted.truncated,
                         &cache_key,
+                        &tuning,
                     )
                     .await;
                 jev_record = Some(record);
@@ -220,6 +265,7 @@ impl<J: JevPort> Judge<J> {
         session_id: Option<Digest16>,
         extracted: &ExtractedRequest,
         cache_key: &Digest16,
+        tuning: &Tuning<'_>,
     ) -> Plan {
         // Without a credential only an entry may pass (a login, a sign-up
         // step). Its context is the client address: what the origin showed
@@ -237,7 +283,12 @@ impl<J: JevPort> Judge<J> {
         for value in extracted.values.iter().filter(|v| !v.inert) {
             let seen = session.lookup(&self.key, &value.value);
             let verified = seen.is_some_and(|seen| {
-                seen.is_specific(&value.value, request.path, value.key.as_deref())
+                seen.is_specific(
+                    &value.value,
+                    request.path,
+                    value.key.as_deref(),
+                    &tuning.synonyms,
+                )
             });
             all_known &= verified;
             values.push(StateValue {
@@ -247,7 +298,7 @@ impl<J: JevPort> Judge<J> {
                 key: value.key.clone(),
                 seen_as: seen
                     .map(|seen| {
-                        seen.ranked(request.path, value.key.as_deref())
+                        seen.ranked(request.path, value.key.as_deref(), &tuning.synonyms)
                             .into_iter()
                             .map(|o| format!("{} @ {}", o.field, o.request))
                             .collect()
@@ -257,7 +308,7 @@ impl<J: JevPort> Judge<J> {
         }
         if all_known && !extracted.truncated {
             Plan::Done(Verdict::Safe(DecisionPath::FastAllow))
-        } else if session.cached_allow(cache_key, request.now_ms) {
+        } else if tuning.cache_ms > 0 && session.cached_allow(cache_key, request.now_ms) {
             Plan::Done(Verdict::Safe(DecisionPath::CachedAllow))
         } else {
             Plan::Ask {
@@ -265,6 +316,40 @@ impl<J: JevPort> Judge<J> {
                 values,
             }
         }
+    }
+
+    /// Spends one Jev call from the limiter and copies the session context the
+    /// state is built from. The error is the code of the reason no call may be
+    /// made.
+    fn admit(
+        &self,
+        request: &RequestFacts<'_>,
+        session_id: Option<Digest16>,
+        limit_key: Digest16,
+        tuning: &Tuning<'_>,
+    ) -> Result<Snapshot, &'static str> {
+        let mut inner = self.lock();
+        let limit = if session_id.is_some() {
+            tuning.session_calls
+        } else {
+            tuning.address_calls
+        };
+        if !inner.limiter.allow(limit_key, limit, request.now_ms) {
+            return Err("JEV_CALL_LIMIT");
+        }
+        let Some(id) = session_id else {
+            return Ok(Snapshot::default());
+        };
+        let session = inner.store.session(id, request.now_ms);
+        Ok(Snapshot {
+            age: session.age_seconds(request.now_ms),
+            entries: session.entries_passed().to_vec(),
+            recent: session
+                .recent(RECENT_IN_STATE)
+                .into_iter()
+                .cloned()
+                .collect(),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -277,6 +362,7 @@ impl<J: JevPort> Judge<J> {
         values: Vec<StateValue>,
         truncated: bool,
         cache_key: &Digest16,
+        tuning: &Tuning<'_>,
     ) -> (Verdict, JevRecord) {
         let failed = |code: &str, state: String| {
             (
@@ -290,50 +376,31 @@ impl<J: JevPort> Judge<J> {
                 },
             )
         };
-        let (age, entries, recent) = {
-            let mut inner = self.lock();
-            let limit = if session_id.is_some() {
-                SESSION_CALLS_PER_MINUTE
-            } else {
-                ADDRESS_CALLS_PER_MINUTE
-            };
-            if !inner.limiter.allow(limit_key, limit, request.now_ms) {
-                return failed("JEV_CALL_LIMIT", String::new());
-            }
-            match session_id {
-                Some(id) => {
-                    let session = inner.store.session(id, request.now_ms);
-                    let recent = session
-                        .recent(RECENT_IN_STATE)
-                        .into_iter()
-                        .cloned()
-                        .collect::<Vec<Recent>>();
-                    (
-                        session.age_seconds(request.now_ms),
-                        session.entries_passed().to_vec(),
-                        recent,
-                    )
-                }
-                None => (0, Vec::new(), Vec::new()),
-            }
+        let snapshot = match self.admit(request, session_id, limit_key, tuning) {
+            Ok(snapshot) => snapshot,
+            Err(code) => return failed(code, String::new()),
         };
         let input = StateInput {
             entry_matched: entry,
-            session_age_seconds: age,
-            entries_passed: &entries,
-            recent: recent.iter().collect(),
+            session_age_seconds: snapshot.age,
+            entries_passed: &snapshot.entries,
+            recent: snapshot.recent.iter().collect(),
             method: request.method,
             path: request.path,
             values,
             truncated,
             credential: request.credential,
+            secret_words: tuning.secret_words,
         };
         let state = match build_state(&input) {
             Ok(state) => state,
             Err(error) => return failed(&error.to_string(), String::new()),
         };
         let started = Instant::now();
-        let reply = self.jev.ask(request_body(self.jev.model(), &state)).await;
+        let reply = self
+            .jev
+            .ask(request_body(self.jev.model(), &state), tuning.jev_timeout)
+            .await;
         let millis = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
         let body = match reply {
             Ok(body) => body,
@@ -360,10 +427,12 @@ impl<J: JevPort> Judge<J> {
         };
         let verdict = match conclude(&answers) {
             Conclusion::Allow => {
-                self.lock()
-                    .store
-                    .session(session_id.unwrap_or(limit_key), request.now_ms)
-                    .cache_allow(*cache_key, request.now_ms);
+                if tuning.cache_ms > 0 {
+                    self.lock()
+                        .store
+                        .session(session_id.unwrap_or(limit_key), request.now_ms)
+                        .cache_allow(*cache_key, request.now_ms, tuning.cache_ms);
+                }
                 Verdict::Safe(DecisionPath::JevAllow)
             }
             Conclusion::Deny => Verdict::Unsafe(DecisionPath::JevDeny),
@@ -514,6 +583,7 @@ mod tests {
     struct FakeJev {
         calls: Arc<AtomicUsize>,
         sent: Arc<Mutex<Vec<String>>>,
+        timeouts: Arc<Mutex<Vec<Duration>>>,
         reply: Arc<Mutex<Result<(&'static str, &'static str), JevFailure>>>,
     }
 
@@ -522,8 +592,12 @@ mod tests {
             Self {
                 calls: Arc::default(),
                 sent: Arc::default(),
+                timeouts: Arc::default(),
                 reply: Arc::new(Mutex::new(Ok(("ALLOW", "BENIGN")))),
             }
+        }
+        fn timeouts(&self) -> Vec<Duration> {
+            self.timeouts.lock().unwrap().clone()
         }
         fn answer(&self, access: &'static str, attack: &'static str) {
             *self.reply.lock().unwrap() = Ok((access, attack));
@@ -552,8 +626,15 @@ mod tests {
         fn model(&self) -> &'static str {
             "fake"
         }
-        async fn ask(&self, body: Vec<u8>) -> Result<Vec<u8>, JevFailure> {
+        fn route(&self) -> &'static str {
+            "fake"
+        }
+        fn default_timeout(&self) -> Duration {
+            crate::jev::TIMEOUT
+        }
+        async fn ask(&self, body: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, JevFailure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.timeouts.lock().unwrap().push(timeout);
             self.sent
                 .lock()
                 .unwrap()
@@ -1137,6 +1218,178 @@ mod tests {
             ..get("/api/upload", None, Some("alice"), 0)
         };
         judge.judge(&site, &upload).await;
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_site_without_advanced_keeps_the_code_defaults() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        judge
+            .judge(
+                &site(""),
+                &get("/api/search", Some("q=default1x"), Some("alice"), 0),
+            )
+            .await;
+        assert_eq!(fake.timeouts(), [crate::jev::TIMEOUT]);
+    }
+
+    #[tokio::test]
+    async fn a_site_jev_timeout_replaces_the_default() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let plain = site(r#","mode":"enforce""#);
+        let tuned = site(r#","mode":"enforce","advanced":{"jev_timeout_ms":3000}"#);
+        judge
+            .judge(&plain, &get("/api/patients/D1", None, Some("alice"), 0))
+            .await;
+        judge
+            .judge(&tuned, &get("/api/patients/D2", None, Some("bob"), 0))
+            .await;
+        assert_eq!(
+            fake.timeouts(),
+            [crate::jev::TIMEOUT, Duration::from_millis(3000)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_site_session_limit_replaces_the_default() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce","advanced":{"session_calls_per_minute":2}"#);
+        for index in 0..2 {
+            let query = format!("q=v{index}x");
+            let verdict = judge
+                .judge(
+                    &site,
+                    &get("/api/search", Some(&query), Some("alice"), 1_000),
+                )
+                .await;
+            assert!(verdict.forward);
+        }
+        let over = judge
+            .judge(
+                &site,
+                &get("/api/search", Some("q=over1x"), Some("alice"), 2_000),
+            )
+            .await;
+        assert!(!over.forward);
+        assert_eq!(
+            over.record.unwrap().jev.unwrap().failure.as_deref(),
+            Some("JEV_CALL_LIMIT")
+        );
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_site_address_limit_replaces_the_default() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce","advanced":{"address_calls_per_minute":1}"#);
+        // Sessionless entry requests are limited by client address.
+        let first = judge
+            .judge(&site, &get("/login", Some("name=first1"), None, 0))
+            .await;
+        assert!(first.forward);
+        let second = judge
+            .judge(&site, &get("/login", Some("name=second1"), None, 1_000))
+            .await;
+        assert!(!second.forward);
+        assert_eq!(
+            second.record.unwrap().jev.unwrap().failure.as_deref(),
+            Some("JEV_CALL_LIMIT")
+        );
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_zero_cache_minutes_judges_every_repeat() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","advanced":{"allow_cache_minutes":0}"#);
+        for now in [0, 60_000] {
+            let verdict = judge
+                .judge(
+                    &site,
+                    &get("/api/search", Some("q=same1x"), Some("alice"), now),
+                )
+                .await;
+            assert_eq!(
+                verdict.record.unwrap().decision_path,
+                DecisionPath::JevAllow
+            );
+        }
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn site_secret_fields_are_redacted_before_jev_sees_them() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let plain = site("");
+        let guarded = site(r#","advanced":{"secret_fields":["ssn"]}"#);
+        let login = |body: &'static [u8]| RequestFacts {
+            method: "POST",
+            path: "/login",
+            content_type: Some("application/json"),
+            body,
+            ..get("/login", None, None, 0)
+        };
+        judge.judge(&plain, &login(br#"{"ssn":"123456789"}"#)).await;
+        judge
+            .judge(&guarded, &login(br#"{"ssn":"987654321"}"#))
+            .await;
+        let sent = fake.sent.lock().unwrap();
+        assert!(
+            sent[0].contains("123456789"),
+            "the built-in words do not cover ssn"
+        );
+        assert!(!sent[1].contains("987654321"));
+        assert!(sent[1].contains("<redacted>"));
+    }
+
+    #[tokio::test]
+    async fn a_site_synonym_lets_a_short_value_count_as_shown() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let plain = site(r#","mode":"enforce""#);
+        let synonym = site(r#","mode":"enforce","advanced":{"synonyms":[["wallet","account"]]}"#);
+        // The account list showed id 7 to this session.
+        judge.observe(
+            &plain,
+            &Observation {
+                credential: Some("alice"),
+                client: "10.0.0.1",
+                issued_credential: None,
+                method: "GET",
+                path: "/api/Accounts",
+                status: 200,
+                content_type: Some("application/json"),
+                body: br#"{"id":7,"name":"Acme"}"#,
+                now_ms: 0,
+            },
+        );
+        let request = get(
+            "/api/accounts/7/transfers",
+            Some("walletId=7"),
+            Some("alice"),
+            1_000,
+        );
+        let without = judge.judge(&plain, &request).await;
+        assert!(!without.forward, "walletId does not name an account");
+        assert_eq!(fake.calls(), 1);
+        let with = judge
+            .judge(
+                &synonym,
+                &RequestFacts {
+                    now_ms: 2_000,
+                    ..request.clone()
+                },
+            )
+            .await;
+        assert!(with.forward);
+        assert_eq!(with.record.unwrap().decision_path, DecisionPath::FastAllow);
         assert_eq!(fake.calls(), 1);
     }
 

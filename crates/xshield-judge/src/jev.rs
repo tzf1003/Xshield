@@ -72,8 +72,12 @@ impl std::error::Error for JevConfigError {}
 pub trait JevPort: Send + Sync {
     /// The wire model name to put in the request.
     fn model(&self) -> &str;
-    /// Performs the exchange within the configured deadline.
-    async fn ask(&self, body: Vec<u8>) -> Result<Vec<u8>, JevFailure>;
+    /// The route the calls take: `gateway`, `direct`, or `custom` for a private endpoint.
+    fn route(&self) -> &'static str;
+    /// The timeout a site gets when its `advanced` section sets none.
+    fn default_timeout(&self) -> Duration;
+    /// Performs the exchange within `timeout`.
+    async fn ask(&self, body: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, JevFailure>;
 }
 
 type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
@@ -84,6 +88,7 @@ pub struct JevClient {
     endpoint: Uri,
     bearer: Zeroizing<String>,
     model: String,
+    route: &'static str,
     timeout: Duration,
 }
 
@@ -126,6 +131,7 @@ impl JevClient {
             endpoint: uri,
             bearer: Zeroizing::new(format!("Bearer {api_key}")),
             model: model.to_owned(),
+            route: "custom",
             timeout,
         })
     }
@@ -138,18 +144,35 @@ impl JevClient {
     /// # Errors
     /// [`JevConfigError`] for an unknown route, missing key or bad endpoint.
     pub fn from_environment() -> Result<Self, JevConfigError> {
-        let (default_endpoint, default_model, key_name) = match std::env::var("XSHIELD_JEV_ROUTE")
-            .ok()
-            .as_deref()
-            .unwrap_or("gateway")
-        {
-            "gateway" => (GATEWAY_ENDPOINT, GATEWAY_MODEL, "AI_GATEWAY_API_KEY"),
-            "direct" => (DIRECT_ENDPOINT, DIRECT_MODEL, "XSHIELD_JEV_API_KEY"),
-            _ => return Err(JevConfigError::Route),
-        };
+        let (route, default_endpoint, default_model, key_name) =
+            match std::env::var("XSHIELD_JEV_ROUTE")
+                .ok()
+                .as_deref()
+                .unwrap_or("gateway")
+            {
+                "gateway" => (
+                    "gateway",
+                    GATEWAY_ENDPOINT,
+                    GATEWAY_MODEL,
+                    "AI_GATEWAY_API_KEY",
+                ),
+                "direct" => (
+                    "direct",
+                    DIRECT_ENDPOINT,
+                    DIRECT_MODEL,
+                    "XSHIELD_JEV_API_KEY",
+                ),
+                _ => return Err(JevConfigError::Route),
+            };
         let key = Zeroizing::new(std::env::var(key_name).map_err(|_| JevConfigError::Key)?);
-        let endpoint =
-            std::env::var("XSHIELD_JEV_ENDPOINT").unwrap_or_else(|_| default_endpoint.to_owned());
+        // An endpoint of our own (a private deployment) is reported as `custom`.
+        let overridden = std::env::var("XSHIELD_JEV_ENDPOINT").ok();
+        let route = if overridden.is_some() {
+            "custom"
+        } else {
+            route
+        };
+        let endpoint = overridden.unwrap_or_else(|| default_endpoint.to_owned());
         let model = std::env::var("XSHIELD_JEV_MODEL").unwrap_or_else(|_| default_model.to_owned());
         let timeout = match std::env::var("XSHIELD_JEV_TIMEOUT_MS") {
             Ok(text) => text
@@ -160,7 +183,9 @@ impl JevClient {
                 .ok_or(JevConfigError::Timeout)?,
             Err(_) => TIMEOUT,
         };
-        Self::new(&endpoint, &key, &model, timeout)
+        let mut client = Self::new(&endpoint, &key, &model, timeout)?;
+        client.route = route;
+        Ok(client)
     }
 
     async fn exchange(&self, body: Vec<u8>) -> Result<Vec<u8>, JevFailure> {
@@ -208,8 +233,16 @@ impl JevPort for JevClient {
         &self.model
     }
 
-    async fn ask(&self, body: Vec<u8>) -> Result<Vec<u8>, JevFailure> {
-        tokio::time::timeout(self.timeout, self.exchange(body))
+    fn route(&self) -> &'static str {
+        self.route
+    }
+
+    fn default_timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    async fn ask(&self, body: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, JevFailure> {
+        tokio::time::timeout(timeout, self.exchange(body))
             .await
             .unwrap_or(Err(JevFailure::Timeout))
     }
@@ -268,7 +301,7 @@ mod tests {
         )
         .await;
         let reply = client(&url, Duration::from_secs(2))
-            .ask(b"{\"q\":1}".to_vec())
+            .ask(b"{\"q\":1}".to_vec(), Duration::from_secs(2))
             .await
             .unwrap();
         assert_eq!(reply, b"{}");
@@ -301,7 +334,7 @@ mod tests {
             let (url, _task) = serve(reply, Duration::ZERO).await;
             assert_eq!(
                 client(&url, Duration::from_secs(2))
-                    .ask(vec![])
+                    .ask(vec![], Duration::from_secs(2))
                     .await
                     .unwrap_err(),
                 expected
@@ -317,8 +350,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            client(&url, Duration::from_millis(100))
-                .ask(vec![])
+            client(&url, Duration::from_secs(2))
+                .ask(vec![], Duration::from_millis(100))
                 .await
                 .unwrap_err(),
             JevFailure::Timeout
@@ -332,7 +365,7 @@ mod tests {
         drop(listener);
         assert_eq!(
             client(&url, Duration::from_secs(2))
-                .ask(vec![])
+                .ask(vec![], Duration::from_secs(2))
                 .await
                 .unwrap_err(),
             JevFailure::Transport
