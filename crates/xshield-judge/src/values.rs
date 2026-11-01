@@ -109,7 +109,7 @@ fn is_paging_key(key: &str) -> bool {
 
 fn is_word(value: &str) -> bool {
     let mut bytes = value.bytes();
-    value.len() <= 24
+    value.len() <= 40
         && bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
         && bytes.all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte == b'-')
 }
@@ -516,6 +516,8 @@ mod tests {
         let request = extract_request("/rest/user/'%20OR%201=1", None, None, b"");
         assert!(request.values.iter().any(|value| !value.inert));
         // The last segment may be an object name, and hyphenated ids are ids.
+        let request = extract_request("/rest/admin/application-configuration", None, None, b"");
+        assert!(request.values.iter().all(|value| value.inert));
         let request = extract_request("/api/users/Alice", None, None, b"");
         assert!(!request.values[2].inert);
         let request = extract_request("/api/patients/patient-S-shared", None, None, b"");
