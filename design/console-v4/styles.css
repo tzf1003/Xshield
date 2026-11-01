@@ -708,3 +708,5 @@ kbd { font-family: var(--mono); font-size: 11px; background: var(--sunken); bord
 /* narrow screens */
 @media (max-width: 1023px) { #app { --nav-w: 56px; } .label, .brand span:last-child, .nav-foot .modes { display: none; } .rangechip { display: none; } }
 @media (max-width: 767px) { .page { padding: 12px 10px 60px; } .topbar { flex-wrap: wrap; } .notice.mobile { display: block; } .qrow { grid-template-columns: 1fr; } }
+
+.ctn { display: contents; }

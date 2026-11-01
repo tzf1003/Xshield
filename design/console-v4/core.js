@@ -19,7 +19,17 @@
   const uesc = (cp) => String.fromCharCode(92) + 'u' + cp.toString(16).padStart(4, '0');
   const HIDDEN = new RegExp('[' + HIDDEN_RANGES.map(([a, b]) => (a === b ? uesc(a) : uesc(a) + '-' + uesc(b))).join('') + ']', 'g');
   function safeText(s) { return esc(s).replace(HIDDEN, (c) => `<span class="escw">${esc(uesc(c.codePointAt(0)))}</span>`); }
-  function h(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; }
+  // Builds one element from an HTML string. A string with several top-level nodes is wrapped in a
+  // display:contents box so no sibling is silently dropped (X.multiRoot lists such call sites for tests).
+  function h(html) {
+    const t = document.createElement('template'); t.innerHTML = html.trim();
+    if (t.content.childNodes.length > 1) {
+      const w = document.createElement('div'); w.className = 'ctn'; w.appendChild(t.content);
+      (X.multiRoot = X.multiRoot || []).push(((new Error()).stack || '').split('\n').slice(2, 4).join(' <- '));
+      return w;
+    }
+    return t.content.firstElementChild;
+  }
   function mid(s, max) { s = String(s); return s.length <= max ? s : s.slice(0, Math.ceil((max - 1) * 0.6)) + '…' + s.slice(-Math.floor((max - 1) * 0.4)); }
   Object.assign(X, { esc, safeText, h, mid, uesc });
 
@@ -111,7 +121,7 @@
   };
   X.rolloutHtml = (s) => {
     const ro = X.rolloutOf(s); const off = ro.edges.filter((e) => !e.online);
-    const offTxt = off.length ? ` · ${off.map((e) => `${esc(e.edge)} 离线（停在 v${e.version}）`).join('、')}` : '';
+    const offTxt = off.length ? ` · ${off.map((e) => `${esc(e.edge)} 离线（${e.version ? `停在 v${e.version}` : '没有加载过'}）`).join('、')}` : '';
     if (!ro.edges_online) return `<span class="ro warn">◌ v${s.version} 已保存 · 没有在线的网关，上线后加载</span>`;
     if (ro.edges_loaded === ro.edges_online) return `<span class="ro ok"><span class="dot ok" aria-hidden="true"></span>v${s.version} · ${ro.edges_loaded}/${ro.edges_online} 个网关已生效${offTxt}</span>`;
     const behind = ro.edges.filter((e) => e.online && e.version < s.version);

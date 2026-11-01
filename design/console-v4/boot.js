@@ -96,7 +96,7 @@
         const r = h(`<div class="pres ${i === active ? 'active' : ''}" role="option" aria-selected="${i === active}"><span>${esc(it.title)}</span><span class="sub">${esc(it.sub || '')}</span></div>`);
         r.onclick = () => run(it); r.onmousemove = () => { if (active !== i) { active = i; $$('.pres', results).forEach((x, j) => { x.classList.toggle('active', j === i); x.setAttribute('aria-selected', String(j === i)); }); } }; results.appendChild(r);
       });
-      if (!items.length) results.appendChild(h('<div class="pgroup">没有匹配项</div><div class="dim small" style="padding:6px 14px 10px">路径以 / 开头（例如 /rest/basket/*，* 结尾为前缀）；请求 ID 以 req_ 开头；会话是 16 位十六进制；站点输入名字；条件例如 outcome:blocked。</div>'));
+      if (!items.length) { results.appendChild(h('<div class="pgroup">没有匹配项</div>')); results.appendChild(h('<div class="dim small" style="padding:6px 14px 10px">路径以 / 开头（例如 /rest/basket/*，* 结尾为前缀）；请求 ID 以 req_ 开头；会话是 16 位十六进制；站点输入名字；条件例如 outcome:blocked。</div>')); }
       const a = $('.pres.active', results); if (a) a.scrollIntoView({ block: 'nearest' });
     }
     function onKey(e) {
