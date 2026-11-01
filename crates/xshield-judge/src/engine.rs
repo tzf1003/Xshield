@@ -240,7 +240,7 @@ impl<J: JevPort> Judge<J> {
     /// row that describes the decision.
     pub async fn judge(&self, site: &SiteSpec, request: &RequestFacts<'_>) -> Judgement {
         let started = Instant::now();
-        let mut record = base_row(site, request);
+        let mut record = base_row(Some(site), request);
         if let Some(pattern) = site.matching_bypass(request.path) {
             record.decision_path = DecisionPath::Bypass;
             record.outcome = Outcome::Allowed;
@@ -305,6 +305,9 @@ impl<J: JevPort> Judge<J> {
                 }
                 .to_owned(),
             );
+        }
+        if !forward {
+            record.trace.response = Some(not_forwarded());
         }
         record.trace.timing.judge_ms = elapsed_millis(started);
         Judgement {
@@ -665,11 +668,12 @@ impl<J: JevPort> Judge<J> {
 
 /// The row before judging: the request as the gateway read it. `judge` settles
 /// the decision fields before the row is returned.
-fn base_row(site: &SiteSpec, request: &RequestFacts<'_>) -> DecisionRecord {
+fn base_row(site: Option<&SiteSpec>, request: &RequestFacts<'_>) -> DecisionRecord {
+    let secret_words = site.map_or(&[][..], |site| site.advanced().secret_fields());
     DecisionRecord {
         at_millis: request.now_ms,
         request_id: request.request_id.to_owned(),
-        site: Some(site.name().to_owned()),
+        site: site.map(|site| site.name().to_owned()),
         site_version: None,
         edge: String::new(),
         host: String::new(),
@@ -678,15 +682,49 @@ fn base_row(site: &SiteSpec, request: &RequestFacts<'_>) -> DecisionRecord {
         context: None,
         method: request.method.to_owned(),
         path: request.path.to_owned(),
-        query: request.query.map(|query| {
-            redacted_query(query, request.credential, site.advanced().secret_fields())
-        }),
+        query: request
+            .query
+            .map(|query| redacted_query(query, request.credential, secret_words)),
         status: None,
         decision_path: DecisionPath::NoSession,
         outcome: Outcome::Blocked,
         trace: Trace::new(),
         jev: None,
     }
+}
+
+/// The response summary of a request the gateway did not forward.
+fn not_forwarded() -> ObservationSummary {
+    let mut summary = ObservationSummary::new(None, 0, Observed::Skipped);
+    summary.skip = Some(Skip::NotForwarded);
+    summary
+}
+
+/// The row for a request the gateway refuses before judging, with no Jev call
+/// and nothing learned: no site owns its host (`unknown_site`, 404), or its
+/// body cannot be inspected (`body_not_inspectable`, 413). Both are refusals
+/// that happen whatever the site's mode (docs/07 section 7.4.1).
+#[must_use]
+pub fn refused_row(
+    site: Option<&SiteSpec>,
+    request: &RequestFacts<'_>,
+    decision_path: DecisionPath,
+    status: u16,
+) -> DecisionRecord {
+    let mut record = base_row(site, request);
+    record.decision_path = decision_path;
+    record.outcome = Outcome::Blocked;
+    record.status = Some(status);
+    record.trace.refused = Some(
+        if decision_path == DecisionPath::UnknownSite {
+            "unknown_site"
+        } else {
+            "body_not_inspectable"
+        }
+        .to_owned(),
+    );
+    record.trace.response = Some(not_forwarded());
+    record
 }
 
 fn unjudged(mut row: JevRecord, code: &str) -> (Verdict, JevRecord) {
