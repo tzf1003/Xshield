@@ -658,7 +658,7 @@ CREATE TABLE jev_prompts (
 ### 7.9.6 会话
 
 - `GET /api/sessions?site=&since_millis=&until_millis=&flag=blocked|jev&limit=`：在时间窗内按 `session` 聚合，返回标签、上下文类型、站点、首末时间、请求数、Jev 调用数、拦截与本应拦截数、签发它的请求 ID（来自 `trace.response.issued_session`），按最后活动倒序，最多 200 个。时间窗缺省 24 小时。
-- `GET /api/sessions/{label}?site=&only=judged|jev|blocks&cursor=`：会话摘要和按时间正序的请求行；每行附带 `learned`（`trace.response.new_values`）、`entry_passed`、`issued_session`，供时间线标注。
+- `GET /api/sessions/{label}?site=&only=judged|jev|blocks&cursor=`：会话摘要和按时间正序的请求行；每行附带 `learned`（`trace.response.new_values`）、`entry_passed`、`issued_session`，供时间线标注。签发这个会话的登录请求发生在会话建立之前，按客户端地址记账（`context = address`），带的不是这个会话标签；时间线把它按 `trace.response.issued_session = {label}` 另外查出，排在第一行。
 
 ### 7.9.7 Jev
 
@@ -778,6 +778,7 @@ CREATE TABLE jev_prompts (
     "problems": [
       { "kind": "site_load_failed", "edge": "edge-2", "site": "shop", "error": "SITE_CONFIG_ORIGIN_INVALID" },
       { "kind": "version_behind", "edge": "edge-2", "site": "emr", "expected": 13, "loaded": 12, "saved_at_millis": 1793538900000 },
+      { "kind": "edge_offline", "edge": "edge-3", "last_seen_ms": 1793528224000, "loaded": { "emr": 11, "juice": 7 } },
       { "kind": "log_gap", "edge": "edge-1", "from_ms": 1793538120000, "to_ms": 1793538300000,
         "dropped": 37, "dropped_bypass": 0, "write_errors": 0 },
       { "kind": "queue_pressure", "edge": "edge-1", "queue": 8400, "capacity": 10000 },
@@ -796,7 +797,7 @@ CREATE TABLE jev_prompts (
 | `warn`（琥珀） | `problems` 非空 |
 | `ok`（绿） | 其余 |
 
-`problems` 的产生规则：`site_load_failed`：任一在线实例的 `sites[x].error` 非空（含 Host 冲突落选，错误码 `SITE_HOST_TAKEN`）；`version_behind`：在线实例加载的版本低于 `site_configs.version`，**且最新版本已保存超过 30 秒**（刚保存后的前 30 秒是正常的生效过程，不告警）；`log_gap`：最近 15 分钟内有缺口；`queue_pressure`：发送队列超过容量的 80%；`partition_missing`：今天没有分区或未来分区不足 2 天（[7.8.2](#782-分区与保留)）；`heartbeat_late`：在线实例的心跳间隔超过 15 秒。
+`problems` 的产生规则：`site_load_failed`：任一在线实例的 `sites[x].error` 非空（含 Host 冲突落选，错误码 `SITE_HOST_TAKEN`）；`version_behind`：在线实例加载的版本低于 `site_configs.version`，**且最新版本已保存超过 30 秒**（刚保存后的前 30 秒是正常的生效过程，不告警）；`edge_offline`：24 小时内发过心跳、现在 `seen_at` 超过 30 秒前的实例，带最后心跳时间和它停在的各站点版本（离线实例不参与 `version_behind` 判断，免得同一件事报两次）；`log_gap`：最近 15 分钟内有缺口；`queue_pressure`：发送队列超过容量的 80%；`partition_missing`：今天没有分区或未来分区不足 2 天（[7.8.2](#782-分区与保留)）；`heartbeat_late`：在线实例的心跳间隔超过 15 秒。
 
 “在线”指 `seen_at` 在 30 秒内。`edges.total` 包含 24 小时内发过心跳的全部实例，离线的计入 `total` 而不计入 `online`，所以“2/3 在线”能被看到。`jev` 与 `GET /api/jev/status` 的同名字段相同（[7.9.7](#797-jev)），省略 `config`。
 
