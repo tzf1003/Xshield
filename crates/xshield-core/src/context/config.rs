@@ -1,9 +1,14 @@
 //! Minimal v4 site configuration (docs/03 section 3.2).
 //!
-//! Everything else (context capacity, Jev timeout, call limits, cache time) is a
-//! code default, not a site option.
+//! Context capacity and the other limits that shape gateway memory or the Jev
+//! input contract are code defaults, not site options. The judging parameters a
+//! site may override (Jev timeout, call limits, allow cache time, extra
+//! redaction words, synonyms) live in the optional `advanced` section
+//! (docs/07 section 7.6).
 
 use serde::{Deserialize, Serialize};
+
+use super::advanced::{Advanced, AdvancedDto};
 
 const NAME_MAX: usize = 64;
 const HOSTS_MAX: usize = 16;
@@ -29,6 +34,9 @@ pub enum ConfigError {
     Entries,
     /// `bypass` holds an invalid pattern.
     Bypass,
+    /// `advanced` holds an out of range number, an invalid or too short word, a
+    /// synonym group that is not two different words, or too many entries.
+    Advanced,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -41,6 +49,7 @@ impl std::fmt::Display for ConfigError {
             Self::Session => "SITE_CONFIG_SESSION_INVALID",
             Self::Entries => "SITE_CONFIG_ENTRIES_INVALID",
             Self::Bypass => "SITE_CONFIG_BYPASS_INVALID",
+            Self::Advanced => "SITE_CONFIG_ADVANCED_INVALID",
         })
     }
 }
@@ -160,6 +169,8 @@ pub struct SiteSpec {
     bypass: Vec<PathPattern>,
     mode: Mode,
     on_jev_unavailable: OnJevUnavailable,
+    #[serde(skip_serializing_if = "Advanced::is_empty")]
+    advanced: Advanced,
 }
 
 #[derive(Deserialize)]
@@ -176,6 +187,10 @@ struct SiteSpecDto {
     mode: Mode,
     #[serde(default)]
     on_jev_unavailable: OnJevUnavailable,
+    // Read as a raw value: serde would otherwise take a JSON array as the
+    // positional form of a struct, and reject `null` outright.
+    #[serde(default)]
+    advanced: Option<serde_json::Value>,
 }
 
 impl TryFrom<SiteSpecDto> for SiteSpec {
@@ -208,6 +223,15 @@ impl TryFrom<SiteSpecDto> for SiteSpec {
         }
         let entries = parse_patterns(&dto.entries).ok_or(ConfigError::Entries)?;
         let bypass = parse_patterns(&dto.bypass).ok_or(ConfigError::Bypass)?;
+        let advanced = match dto.advanced {
+            None | Some(serde_json::Value::Null) => Advanced::default(),
+            Some(section @ serde_json::Value::Object(_)) => {
+                let section: AdvancedDto =
+                    serde_json::from_value(section).map_err(|_| ConfigError::Malformed)?;
+                Advanced::try_from(section)?
+            }
+            Some(_) => return Err(ConfigError::Malformed),
+        };
         let hosts = dto
             .hosts
             .iter()
@@ -222,6 +246,7 @@ impl TryFrom<SiteSpecDto> for SiteSpec {
             bypass,
             mode: dto.mode,
             on_jev_unavailable: dto.on_jev_unavailable,
+            advanced,
         })
     }
 }
@@ -234,6 +259,17 @@ impl SiteSpec {
     /// otherwise the first invalid section.
     pub fn from_json(text: &str) -> Result<Self, ConfigError> {
         let dto: SiteSpecDto = serde_json::from_str(text).map_err(|_| ConfigError::Malformed)?;
+        dto.try_into()
+    }
+
+    /// Parses and validates one site from an already parsed JSON document, for
+    /// callers that hold a `serde_json::Value` (a `jsonb` column).
+    ///
+    /// # Errors
+    /// The same as [`SiteSpec::from_json`].
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, ConfigError> {
+        let dto: SiteSpecDto =
+            SiteSpecDto::deserialize(value).map_err(|_| ConfigError::Malformed)?;
         dto.try_into()
     }
 
@@ -273,13 +309,37 @@ impl SiteSpec {
         self.on_jev_unavailable
     }
 
+    /// The site level judging parameters; empty when the site sets none.
+    #[must_use]
+    pub fn advanced(&self) -> &Advanced {
+        &self.advanced
+    }
+
+    /// The entry pattern that covers `path`, as configured.
+    #[must_use]
+    pub fn matching_entry(&self, path: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|pattern| pattern.matches(path))
+            .map(PathPattern::as_str)
+    }
+
+    /// The bypass pattern that covers `path`, as configured.
+    #[must_use]
+    pub fn matching_bypass(&self, path: &str) -> Option<&str> {
+        self.bypass
+            .iter()
+            .find(|pattern| pattern.matches(path))
+            .map(PathPattern::as_str)
+    }
+
     /// Whether `path` is registered as an entry.
     #[must_use]
     pub fn is_entry(&self, path: &str) -> bool {
         self.entries.iter().any(|pattern| pattern.matches(path))
     }
 
-    /// Whether `path` skips judging and logging entirely.
+    /// Whether `path` skips judging (the gateway still writes a brief log row).
     #[must_use]
     pub fn is_bypass(&self, path: &str) -> bool {
         self.bypass.iter().any(|pattern| pattern.matches(path))
