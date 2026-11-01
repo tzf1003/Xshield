@@ -114,29 +114,27 @@ export function planCounts(q: string, scope: Scope): string {
 /** The number a chip shows, from the counts of the same filters; null while they are loading. */
 export function chipCount(id: ChipId, counts: RequestCounts | undefined): number | null {
   if (!counts) return null;
-  const outcome = counts.by_outcome;
-  const path = counts.by_decision_path;
   switch (id) {
     case "judged":
-      return counts.total - (path.bypass ?? 0) - (path.unknown_site ?? 0);
+      return counts.judged;
     case "attention":
-      return (outcome.blocked ?? 0) + (outcome.would_block ?? 0) + (outcome.unjudged ?? 0);
+      return counts.attention;
     case "blocked":
-      return outcome.blocked ?? 0;
+      return counts.blocked;
     case "would_block":
-      return outcome.would_block ?? 0;
+      return counts.would_block;
     case "unjudged":
-      return outcome.unjudged ?? 0;
+      return counts.unjudged;
     case "jev":
-      return counts.jev_calls;
+      return counts.jev;
     case "no_session":
-      return path.no_session ?? 0;
+      return counts.no_session;
     case "bypass":
-      return path.bypass ?? 0;
+      return counts.bypass;
   }
 }
 
 /** Unknown-site rows among the counted rows; the default list hides them (docs/06 6.4.3). */
 export function unknownSiteCount(counts: RequestCounts | undefined): number {
-  return counts?.by_decision_path.unknown_site ?? 0;
+  return counts?.unknown_site ?? 0;
 }

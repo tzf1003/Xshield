@@ -107,23 +107,25 @@ export interface RequestRow {
 export interface RequestListResponse {
   rows: RequestRow[];
   next_cursor: string | null;
-  /** Largest row id in the result; live mode polls with `after_id`. */
-  max_id: number;
 }
 
 /**
- * `GET /api/requests/counts`: the same filters as the list, counted by outcome and decision path
- * so the quick filter chips can show their numbers. `complete: false` means the scan stopped at
- * the 2-million-row limit (7.9.1) and `scanned` rows were counted.
+ * `GET /api/requests/counts` (docs/07 7.9.3): the same filters as the list, counted in one pass for
+ * the quick filter chips. Every count is over judged rows except `bypass` and `unknown_site`.
+ * `scanned` is served only when `complete` is false: the scan stopped at the 2-million-row limit.
  */
 export interface RequestCounts {
-  total: number;
-  by_outcome: Partial<Record<Outcome, number>>;
-  by_decision_path: Partial<Record<DecisionPath, number>>;
-  /** Rows that carry a Jev exchange. */
-  jev_calls: number;
+  judged: number;
+  attention: number;
+  blocked: number;
+  would_block: number;
+  unjudged: number;
+  jev: number;
+  no_session: number;
+  bypass: number;
+  unknown_site: number;
   complete: boolean;
-  scanned: number;
+  scanned?: number;
 }
 
 // ------------------------------------------------------------------ the trace (7.4.3)
@@ -449,9 +451,6 @@ export interface JevStats {
    * the gateway side fills it from the same window.
    */
   hourly: Array<{ at_millis: number; allow: number; deny: number; unavailable: number }>;
-  low_confidence: number;
-  slower_than_p95: number;
-  trimmed: number;
   complete: boolean;
 }
 

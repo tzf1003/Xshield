@@ -328,7 +328,7 @@ export function RequestsPage() {
           );
         })}
         {counts.data && !counts.data.complete ? (
-          <span className="toolbar-note">按前 {fmtInt(counts.data.scanned)} 条记录计算</span>
+          <span className="toolbar-note">按前 {fmtInt(counts.data.scanned ?? 0)} 条记录计算</span>
         ) : null}
         {!allOn && hiddenUnknown > 0 ? (
           <span className="toolbar-note">
