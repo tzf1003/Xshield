@@ -2,38 +2,33 @@
 
 import type { LineOp } from "../../lib/diff.ts";
 
-type Cell = { id: number; text: string; op: LineOp["op"] };
+type Cell = { text: string; op: LineOp["op"] };
 type Pair = { id: number; left: Cell | null; right: Cell | null };
 
 /** Pairs deletions with additions in each changed block, so the two columns line up block by block. */
 function sideBySide(ops: LineOp[]): Pair[] {
   const pairs: Pair[] = [];
-  let id = 0;
   let deleted: Cell[] = [];
   let added: Cell[] = [];
   const flush = () => {
     const rows = Math.max(deleted.length, added.length);
     for (let row = 0; row < rows; row += 1) {
-      id += 1;
-      pairs.push({ id, left: deleted[row] ?? null, right: added[row] ?? null });
+      pairs.push({ id: pairs.length, left: deleted[row] ?? null, right: added[row] ?? null });
     }
     deleted = [];
     added = [];
   };
   for (const op of ops) {
     if (op.op === "del") {
-      id += 1;
-      deleted.push({ id, text: op.text, op: "del" });
+      deleted.push({ text: op.text, op: "del" });
     } else if (op.op === "add") {
-      id += 1;
-      added.push({ id, text: op.text, op: "add" });
+      added.push({ text: op.text, op: "add" });
     } else {
       flush();
-      id += 1;
       pairs.push({
-        id,
-        left: { id, text: op.text, op: "eq" },
-        right: { id, text: op.text, op: "eq" },
+        id: pairs.length,
+        left: { text: op.text, op: "eq" },
+        right: { text: op.text, op: "eq" },
       });
     }
   }
@@ -42,6 +37,23 @@ function sideBySide(ops: LineOp[]): Pair[] {
 }
 
 const SIGN: Record<LineOp["op"], string> = { eq: " ", add: "+", del: "-" };
+const WORD: Record<LineOp["op"], string> = { eq: "", add: "新增 ", del: "删除 " };
+
+function DiffCell({ cell }: { cell: Cell | null }) {
+  return (
+    <td className={`diff-cell ${cell?.op ?? "empty"}`}>
+      {cell ? (
+        <>
+          <span className="sign" aria-hidden="true">
+            {SIGN[cell.op]}
+          </span>
+          <span className="sr-only">{WORD[cell.op]}</span>
+          <span>{cell.text}</span>
+        </>
+      ) : null}
+    </td>
+  );
+}
 
 export function DiffView({ ops, mode = "unified" }: { ops: LineOp[]; mode?: "unified" | "split" }) {
   if (ops.every((op) => op.op === "eq")) {
@@ -49,54 +61,34 @@ export function DiffView({ ops, mode = "unified" }: { ops: LineOp[]; mode?: "uni
   }
   if (mode === "split") {
     return (
-      <div className="diff diff-split" role="table" aria-label="并排差异">
-        {sideBySide(ops).map((pair) => (
-          <div key={pair.id} className="diff-split-row" role="row">
-            <div className={`diff-cell ${pair.left?.op ?? "empty"}`} role="cell">
-              {pair.left ? (
-                <>
-                  <span className="sign" aria-hidden="true">
-                    {SIGN[pair.left.op]}
-                  </span>
-                  <span>{pair.left.text}</span>
-                </>
-              ) : null}
-            </div>
-            <div className={`diff-cell ${pair.right?.op ?? "empty"}`} role="cell">
-              {pair.right ? (
-                <>
-                  <span className="sign" aria-hidden="true">
-                    {SIGN[pair.right.op]}
-                  </span>
-                  <span>{pair.right.text}</span>
-                </>
-              ) : null}
-            </div>
-          </div>
-        ))}
+      <div className="diff">
+        <table className="diff-split" aria-label="并排差异">
+          <tbody>
+            {sideBySide(ops).map((pair) => (
+              <tr key={pair.id}>
+                <DiffCell cell={pair.left} />
+                <DiffCell cell={pair.right} />
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     );
   }
-  let id = 0;
-  const lines = ops.map((op) => {
-    id += 1;
-    return { id, op };
-  });
+  const lines = ops.map((op, position) => ({ id: position, op }));
   return (
-    <div className="diff" aria-label="差异">
-      {lines.map(({ id: lineId, op }) => (
-        <div key={lineId} className={`diff-line ${op.op === "eq" ? "" : op.op}`}>
+    <section className="diff" aria-label="差异">
+      {lines.map(({ id, op }) => (
+        <div key={id} className={`diff-line ${op.op === "eq" ? "" : op.op}`}>
           <span className="sign" aria-hidden="true">
             {SIGN[op.op]}
           </span>
           <span>
-            <span className="sr-only">
-              {op.op === "add" ? "新增 " : op.op === "del" ? "删除 " : ""}
-            </span>
+            <span className="sr-only">{WORD[op.op]}</span>
             {op.text}
           </span>
         </div>
       ))}
-    </div>
+    </section>
   );
 }

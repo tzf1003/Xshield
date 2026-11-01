@@ -201,7 +201,7 @@ export function ConfigTab({
       )}
 
       {dirty ? (
-        <div className="draftbar" role="region" aria-label="未保存的改动">
+        <section className="draftbar" aria-label="未保存的改动">
           <span className="tnum">未保存的改动 {fmtInt(Math.max(1, changeCount))} 处</span>
           {hasErrors ? (
             <span className="field-error">
@@ -218,7 +218,7 @@ export function ConfigTab({
           <button type="button" className="btn-primary" onClick={reviewFirst}>
             预估影响并保存 ⌘S
           </button>
-        </div>
+        </section>
       ) : null}
     </div>
   );

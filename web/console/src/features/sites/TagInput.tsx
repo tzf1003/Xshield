@@ -58,7 +58,11 @@ export function TagInput({
   const shown = problem ?? error;
   return (
     <div className="stack-tight">
-      <div className="taglist" aria-label={label}>
+      <fieldset
+        className="taglist"
+        aria-label={label}
+        style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}
+      >
         {locked.map((word) => (
           <span key={`locked-${word}`} className="tag-chip builtin" title={lockedTitle}>
             <span aria-hidden="true">🔒</span>
@@ -78,7 +82,7 @@ export function TagInput({
             </button>
           </span>
         ))}
-      </div>
+      </fieldset>
       <input
         id={id}
         className="native-input mono"

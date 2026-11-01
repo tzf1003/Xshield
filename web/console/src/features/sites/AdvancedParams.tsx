@@ -378,12 +378,16 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
                   </tr>
                 </thead>
                 <tbody>
-                  {ev.histogram.map((count, index) => (
-                    <tr key={`bucket-${index * ev.histogram_bucket_ms}`}>
-                      <td className="mono">{`${fmtInt(index * ev.histogram_bucket_ms)} ms`}</td>
-                      <td className="num tnum">{fmtInt(count)}</td>
-                    </tr>
-                  ))}
+                  {ev.histogram.map((count, index) => {
+                    // The start of each bucket is unique, so it serves as the row key.
+                    const from = index * ev.histogram_bucket_ms;
+                    return (
+                      <tr key={from}>
+                        <td className="mono">{`${fmtInt(from)} ms`}</td>
+                        <td className="num tnum">{fmtInt(count)}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </details>
