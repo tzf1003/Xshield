@@ -12,18 +12,7 @@
         "发送 WAF_A/Session_B"
       ],
       "expected": "拒绝 AUTH_BINDING_MISMATCH，不换绑不继承资格",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-core/src/identity.rs",
-          "test": "rejects_substitution_extra_credentials_scope_and_expiry"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "invalid_status"
-        }
-      ],
-      "gap": "没有测试先建立两个真实绑定再把 WAF_A 与 B 的有效凭证组合发送（边缘层只在 scripts/test_gateway_identity.sh 中使用未绑定的替换令牌，而该脚本第 1345 行查找并不存在的 segment-*.xaj 日志，当前无法跑通），也没有断言拒绝后绑定未被改写。"
+      "status": "planned"
     },
     {
       "id": "AUTH-02",
@@ -34,21 +23,7 @@
         "取得同身份同范围新 token"
       ],
       "expected": "验证继承链并原子更新，保留仍有效资格",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/identity_refresh.rs",
-          "test": "refresh_is_atomic_and_compare_and_swap"
-        },
-        {
-          "path": "crates/xshield-core/src/provenance.rs",
-          "test": "exact_action_survives_same_context_credential_refresh"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "refreshed_grant_status"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "AUTH-03",
@@ -58,18 +33,7 @@
         "WAF_A 搭配 B 的 refresh token 发起刷新"
       ],
       "expected": "请求阶段拒绝，不因源站成功响应继承 A 账本",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/identity_refresh.rs",
-          "test": "refresh_is_atomic_and_compare_and_swap"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "old_bearer_status"
-        }
-      ],
-      "gap": "只断言存储层用不匹配的旧凭证刷新返回 Conflict 且代际不变，没有经 edge 以 WAF_A 加 B 的有效刷新凭证发起刷新、并让源站成功应答后核对 A 账本的测试。"
+      "status": "planned"
     },
     {
       "id": "AUTH-04",
@@ -79,26 +43,7 @@
         "原站复用 Session 值但完成 A→B 登录"
       ],
       "expected": "更新 auth_epoch，旧资格失效",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-core/src/identity.rs",
-          "test": "context_switch_advances_epoch_and_invalidates_old_snapshot"
-        },
-        {
-          "path": "crates/xshield-postgres/tests/identity_context_switch.rs",
-          "test": "context_switch_is_atomic_and_invalidates_the_old_identity"
-        },
-        {
-          "path": "tests/postgres/m1_identity_grants.sql",
-          "test": "old epoch grant remained eligible"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "old_epoch_grant_status"
-        }
-      ],
-      "gap": "所有测试的换账号都伴随新凭证，没有业务 Session 值保持不变的 A→B 登录（此时 switch_context 返回 CredentialUnchanged，未测试），且边缘层断言只在 scripts/test_gateway_identity.sh 中，而该脚本第 1345 行查找并不存在的 segment-*.xaj 日志，当前无法跑通。"
+      "status": "planned"
     },
     {
       "id": "AUTH-05",
@@ -110,21 +55,7 @@
         "A 响应返回"
       ],
       "expected": "旧认证快照不得写入 B 账本",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/response_grant_issue.rs",
-          "test": "response_grant_batch_is_atomic_replayable_and_usable"
-        },
-        {
-          "path": "crates/xshield-postgres/tests/provenance_persistence.rs",
-          "test": "provenance_is_atomic_idempotent_and_epoch_bound"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "late_grant_count"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "AUTH-06",
@@ -152,21 +83,7 @@
         "删除 WAF Cookie 后直访私有 API"
       ],
       "expected": "新匿名空账本，不能触发首次免检",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "crates/xshield-core/src/identity.rs",
-          "test": "new_session_is_anonymous_and_empty"
-        },
-        {
-          "path": "crates/xshield-postgres/tests/identity_establish.rs",
-          "test": "anonymous_establishment_is_empty_audited_rate_and_capacity_bounded"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "anonymous_state"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "AUTH-08",
@@ -245,17 +162,7 @@
         "调用重置 B 密码"
       ],
       "expected": "无改密动作来源，拒绝且源站未收到",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "alice: another user's order (no reference exists)"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "origin reached ${path}"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "FLOW-02",
@@ -265,17 +172,7 @@
         "管理员新会话直接调用管理操作"
       ],
       "expected": "按选定严格流程拒绝",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "scripts/test_idor_lab.py",
-          "test": "missing = outcome"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "alice: unhooked ${via} (stays denied)"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "FLOW-03",
@@ -286,18 +183,7 @@
         "有效期内粘贴 O1 URL"
       ],
       "expected": "允许流程关；不要求重复点击",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "XHR, hooked"
-        },
-        {
-          "path": "crates/xshield-postgres/tests/response_grant_issue.rs",
-          "test": "response_grant_batch_is_atomic_replayable_and_usable"
-        }
-      ],
-      "gap": "只断言同一页面内不点击、由探针附带已收割引用的 XHR 在有效期内可复用资格；没有在新导航或新标签页粘贴 O1 URL 的测试，而不带引用的直访即使持有有效资格也被拒（越权靶场 missing 用例）。"
+      "status": "planned"
     },
     {
       "id": "FLOW-04",
@@ -308,17 +194,7 @@
         "直接访问 O2"
       ],
       "expected": "拒绝；不声称已确认源站越权漏洞",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "alice: another user's order (no reference exists)"
-        },
-        {
-          "path": "scripts/test_idor_lab.py",
-          "test": "other = outcome"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "FLOW-05",
@@ -329,18 +205,7 @@
         "直接访问"
       ],
       "expected": "拒绝；经认可列表或分享入口后才可访问",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "bob: reference harvested in alice's browser context"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "click -> GET /orders/ord-alice-1 (harvested ref)"
-        }
-      ],
-      "gap": "只分别断言另一浏览器上下文出示的引用被拒、经认可列表后访问通过；没有来自其他账号的共享资源，也没有同一用户换浏览器未列出即直访再经列表或分享入口取得资格的测试。"
+      "status": "planned"
     },
     {
       "id": "FLOW-06",
@@ -351,18 +216,7 @@
         "尝试凭返回按钮发资格"
       ],
       "expected": "前置页面本身未获准，不发行资格",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/page_actions.rs",
-          "test": "rejects_incoherent_page_and_issued_action_declarations"
-        },
-        {
-          "path": "crates/xshield-gateway/src/page_actions.rs",
-          "test": "page_issues_exactly_its_declared_actions_and_derives_all_descriptors"
-        }
-      ],
-      "gap": "只在配置编译层断言只有声明 page_actions 的已认证根页面能签发动作；没有直接请求未获准管理页面并断言其响应不发行任何动作或资格的边缘层测试。"
+      "status": "planned"
     },
     {
       "id": "FLOW-07",
@@ -373,22 +227,7 @@
         "普通用户 UI 未实例化该动作"
       ],
       "expected": "不能仅凭代码存在授权",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "sensor/test/sensor-1.1.0.test.mjs",
-          "test": "never replaces a reference the page set itself and never invents one"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "the sensor never invents a reference"
-        },
-        {
-          "path": "crates/xshield-gateway/src/page_actions.rs",
-          "test": "page_issues_exactly_its_declared_actions_and_derives_all_descriptors"
-        }
-      ],
-      "gap": "只断言探针从不创造引用、页面只签发配置声明的动作；没有公共 bundle 含未实例化管理组件并尝试调用的测试。"
+      "status": "planned"
     },
     {
       "id": "FLOW-08",
@@ -398,18 +237,7 @@
         "客户端添加管理按钮并上报点击堆栈"
       ],
       "expected": "只作不可信观察，不发行管理资格",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/gateway_audit/tests.rs",
-          "test": "sensor_observations_are_client_claims_that_authorize_nothing"
-        },
-        {
-          "path": "crates/xshield-gateway/src/sensor.rs",
-          "test": "a_hint_is_bounded_printable_text_and_never_an_action_reference"
-        }
-      ],
-      "gap": "只在解析层断言观测固定为 client_claimed/authorization_effect=none 且 action_hint 不能是动作引用；没有经 edge 上报伪造管理按钮点击后断言管理调用仍被拒、无资格写入的测试。"
+      "status": "planned"
     },
     {
       "id": "FLOW-09",
@@ -420,22 +248,7 @@
         "target_user 改为别人"
       ],
       "expected": "精确目标约束拒绝",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "alice: reference of another object"
-        },
-        {
-          "path": "scripts/test_idor_lab.py",
-          "test": "other = outcome"
-        },
-        {
-          "path": "crates/xshield-core/src/provenance.rs",
-          "test": "rejects_target_field_method_and_route_expansion"
-        }
-      ],
-      "gap": "边缘层只断言资源型目标（路径参数）被换成其他对象时拒绝；edge 不构造主体型目标（ActionTarget::Principal），self_password 动作把 target_user 改成他人既无边缘实现也无测试，领域层只断言为他人主体发行被拒。"
+      "status": "planned"
     },
     {
       "id": "FLOW-10",
@@ -446,18 +259,7 @@
         "模型读入"
       ],
       "expected": "用户内容不能变成批准的动作来源",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/response_grant.rs",
-          "test": "user_comment_text_never_becomes_an_approved_action_source"
-        },
-        {
-          "path": "crates/xshield-gateway/src/sensor_html.rs",
-          "test": "page_carrying_user_comment_html_is_not_the_approved_page"
-        }
-      ],
-      "gap": "只在网关解析器/注入层断言评论中的“重置密码”文字或按钮 HTML 不改变响应授予的目标操作、伪造保留引用字段被拒、带评论的页面因摘要不符不注入；未经真实 edge 或浏览器断言，且产品的动作来源链路没有模型参与，“模型读入”这一步既无实现也无测试。"
+      "status": "planned"
     },
     {
       "id": "FLOW-11",
@@ -467,18 +269,7 @@
         "由认可页面按有效规则加载弹窗和操作数据"
       ],
       "expected": "同代际建立具体候选，未知状态先拒绝",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/response_grant_issue.rs",
-          "test": "response_grant_batch_is_atomic_replayable_and_usable"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "click -> GET /orders/ord-alice-1 (harvested ref)"
-        }
-      ],
-      "gap": "只以列表响应派生候选：存储层断言旧代际批次被拒，浏览器闭环断言列表后的详情通过；没有弹窗或延迟加载片段的测试，边缘层的同代际断言只在 scripts/test_gateway_identity.sh 中，而该脚本第 1345 行查找并不存在的 segment-*.xaj 日志，当前无法跑通。"
+      "status": "planned"
     },
     {
       "id": "GRANT-01",
@@ -511,14 +302,7 @@
         "源站返回 B 列表"
       ],
       "expected": "范围约束先拒绝，不洗白发行",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "new_account_query_status"
-        }
-      ],
-      "gap": "AUTHENTICATED_ROOT 且发放响应资格的列表带 customer 之类选择器查询串时，edge 以 FIELD_NOT_ALLOWED 拒绝且源站未收到，已有端到端断言；UI_ACTION_REQUIRED 非资源列表带查询串的同一拒绝只写在代码里，没有端到端断言，也没有验证源站返回他人列表时不发行资格的整条链路。"
+      "status": "planned"
     },
     {
       "id": "GRANT-03",
@@ -529,22 +313,7 @@
         "响应刚返回立即详情"
       ],
       "expected": "资格已原子提交；不等异步日志",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/response_grant_issue.rs",
-          "test": "response_grant_batch_is_atomic_replayable_and_usable"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "click -> GET /orders/ord-alice-1 (harvested ref)"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "response_grant_status"
-        }
-      ],
-      "gap": "只以 GET 列表响应验证资格随响应原子提交、在 outbox 发布前即可使用，未覆盖“创建（POST）成功后立即读取详情”的来源。"
+      "status": "planned"
     },
     {
       "id": "GRANT-04",
@@ -554,14 +323,7 @@
         "列表200但业务错误或登录页"
       ],
       "expected": "不发行资格",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/response_grant.rs",
-          "test": "extracts_only_the_approved_unique_string_path"
-        }
-      ],
-      "gap": "只在单元层断言非成功状态不发行、重复键 JSON 被拒，没有用“200 + 业务错误 JSON 或登录页 HTML”的列表响应经真实 edge 断言零资格行。"
+      "status": "planned"
     },
     {
       "id": "GRANT-05",
@@ -572,22 +334,7 @@
         "访问未取得资格的下一页资源"
       ],
       "expected": "拒绝直访；先从认可列表取资格",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "alice: another user's order (no reference exists)"
-        },
-        {
-          "path": "scripts/test_idor_lab.py",
-          "test": "assert all(result[0] == 403 for result in (other, missing, cross))"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "unknown_resource_status"
-        }
-      ],
-      "gap": "只断言从未列出的资源被直访拒绝，未覆盖分页场景中“下一页资源先被拒、经认可列表取得资格后才可访问”的顺序（页面签发的列表带查询参数时本身会被 FIELD_NOT_ALLOWED 拒绝）。"
+      "status": "planned"
     },
     {
       "id": "GRANT-06",
@@ -597,18 +344,7 @@
         "批量请求最后一个 ID 无资格"
       ],
       "expected": "逐资源检查，不能只查首项",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/protected_identity.rs",
-          "test": "query_adapter_decodes_once_and_rejects_ambiguity"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "ambiguous_resource_status"
-        }
-      ],
-      "gap": "产品没有批量/数组请求适配器，逐项检查既未实现也未测试，只断言同一请求带两个资源参数（后一项无资格）时整体拒绝且不到源站。"
+      "status": "planned"
     },
     {
       "id": "GRANT-07",
@@ -619,18 +355,7 @@
         "同时提交 role/password"
       ],
       "expected": "字段白名单拒绝",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-core/src/provenance.rs",
-          "test": "rejects_target_field_method_and_route_expansion"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "expanded_fields_status"
-        }
-      ],
-      "gap": "只断言 GET 资源路由追加查询字段被 FIELD_NOT_ALLOWED 拒绝、领域层发行时拒绝白名单外字段，edge 不按白名单检查写请求正文字段，正文注入 role/password 无拒绝也无测试。"
+      "status": "planned"
     },
     {
       "id": "GRANT-08",
@@ -640,18 +365,7 @@
         "分别见过订单A和条目B但B不属A"
       ],
       "expected": "检查组合关系，不以独立存在代替关系",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-core/src/grant.rs",
-          "test": "separately_seen_parent_and_child_never_authorize_their_composite"
-        },
-        {
-          "path": "crates/xshield-gateway/src/lib.rs",
-          "test": "parent_child_route_is_refused_rather_than_split_into_independent_resources"
-        }
-      ],
-      "gap": "领域层只断言分别见过的父、子授予都不能代替组合资源键、配置层只断言含父子两个参数的路由被拒；edge 不支持嵌套父子路由，也没有从父列表响应发行组合资源键的适配器，真实请求下的组合关系检查既无实现也无测试。"
+      "status": "planned"
     },
     {
       "id": "GRANT-09",
@@ -661,22 +375,7 @@
         "账本容量耗尽或资格到期"
       ],
       "expected": "明确拒绝/重建，不退化为全资源允许",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/response_grant_issue.rs",
-          "test": "response_grant_batch_is_atomic_replayable_and_usable"
-        },
-        {
-          "path": "crates/xshield-postgres/tests/grant_issue.rs",
-          "test": "grant_issue_is_atomic_idempotent_and_capacity_bounded"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "alice: expired reference (app-style call)"
-        }
-      ],
-      "gap": "未经真实 edge 断言列表响应在 max_active_grants 耗尽时扣留正文且不发行，也未覆盖资格到期后经认可列表重建。"
+      "status": "planned"
     },
     {
       "id": "SHARE-01",
@@ -687,22 +386,7 @@
         "取同患者完整病历"
       ],
       "expected": "超视图/资源范围拒绝",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/share_grant_read.rs",
-          "test": "share_grant_is_exact_expiring_and_revocable"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "issued_share_wrong_resource"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "expanded_share_status"
-        }
-      ],
-      "gap": "只断言换资源与追加 expand 参数被拒（边缘层断言在当前无法跑通的身份脚本中），未断言把摘要分享 token 用于同一资源的完整病历操作/视图会被拒绝。"
+      "status": "planned"
     },
     {
       "id": "SHARE-02",
@@ -712,21 +396,7 @@
         "无分享资格者要求给任意资源生成分享链接"
       ],
       "expected": "拒绝发行，不能包装原有漏洞",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/share_grant_issue.rs",
-          "test": "share_issue_is_qualified_atomic_idempotent_and_bounded"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "wrong_issue_resource"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "missing_issue_action"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "SHARE-03",
@@ -736,14 +406,7 @@
         "通过公开分享入口请求带攻击内容"
       ],
       "expected": "保留内容检查和完整审计链",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/main.rs",
-          "test": "share_entry_requests_keep_the_site_content_check"
-        }
-      ],
-      "gap": "只在网关单元层断言带分享令牌的请求仍经站点 WAF 内容检查、令牌不豁免；未经真实 edge 断言公开分享入口被拒后的完整审计链（决定、原因码、终态事件写入日志），身份脚本配置也没有启用站点 WAF 策略。"
+      "status": "planned"
     },
     {
       "id": "SHARE-04",
@@ -753,17 +416,7 @@
         "有效限权分享进行合法Range/分片"
       ],
       "expected": "按资源协议允许重复，不误套一次性票据",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "range_share_status"
-        },
-        {
-          "path": "crates/xshield-core/src/access.rs",
-          "test": "limited_share_allows_repeated_reads_within_its_lease"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "SENSOR-01",
@@ -773,18 +426,7 @@
         "页面休眠、后台冻结、WSS断线"
       ],
       "expected": "保留身份/资格检查，状态变stale，不凭心跳缺失定攻击",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "sensor/test/sensor-1.1.0.test.mjs",
-          "test": "a hidden, frozen or disconnected page keeps its edge checks and never fakes liveness"
-        },
-        {
-          "path": "crates/xshield-gateway/src/sensor.rs",
-          "test": "a_page_resuming_after_missed_heartbeats_is_accepted_not_flagged"
-        }
-      ],
-      "gap": "产品没有 WSS 通道，也没有 stale 状态：心跳只是经 HTTPS prepare 端点上报、仅入审计的观测，网关不维护页面活性；测试只在探针层断言休眠/冻结/遥测失败时业务请求照常携带边缘签发的引用、不补发心跳，并在解析层断言心跳缺口后的批次照常接受，没有经真实 edge 断言身份/资格检查保持不变、心跳缺失不触发拒绝或告警。"
+      "status": "planned"
     },
     {
       "id": "SENSOR-02",
@@ -815,22 +457,7 @@
         "并发页面动作和不同业务身份"
       ],
       "expected": "按page和auth快照关联，不用单一最新页面",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-postgres/tests/page_provenance.rs",
-          "test": "page_actions_are_returned_only_to_their_live_binding"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "bob bootstraps alice's page handle"
-        },
-        {
-          "path": "scripts/test_browser_loop.mjs",
-          "test": "bob: reference harvested in alice's browser context"
-        }
-      ],
-      "gap": "未断言同一身份多个标签/页面实例并发时各页动作互不串用（§20.19 明确不覆盖并发多标签），也没有并发页面动作的测试。"
+      "status": "planned"
     },
     {
       "id": "SENSOR-04",
@@ -840,22 +467,7 @@
         "注入新版本，保留旧缓存、SRI及Worker"
       ],
       "expected": "按站验证兼容，不全局关闭安全策略",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_gateway_request_crypto.sh",
-          "test": "assert \"require-sri-for script\" in headers"
-        },
-        {
-          "path": "scripts/test_gateway_request_crypto.sh",
-          "test": "cmp \"$repo_root/sensor/src/sensor.ts\" \"$test_dir/sensor.js\""
-        },
-        {
-          "path": "crates/xshield-gateway/src/buffered_json.rs",
-          "test": "injects_only_approved_utf8_html_without_csp"
-        }
-      ],
-      "gap": "没有站点自带 Service Worker/旧缓存与新探针版本并存的真实浏览器验证，按站兼容只体现为网关注入时保留 CSP/SRI 或拒绝注入。"
+      "status": "planned"
     },
     {
       "id": "CRYPTO-01",
@@ -866,18 +478,7 @@
         "实际封包含其他参数"
       ],
       "expected": "以真实解包P检查并重建，不相信镜像",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_gateway_request_crypto.sh",
-          "test": "\"$(cat \"$capture\")\" == \"$plaintext\""
-        },
-        {
-          "path": "crates/xshield-gateway/src/request_crypto.rs",
-          "test": "decrypts_only_the_exact_bound_request"
-        }
-      ],
-      "gap": "没有“良性明文镜像 + 不同实包”的反例（实现中也无镜像通道），且对解密后的 P 只做严格 JSON 对象校验、未做业务字段/目标检查。"
+      "status": "planned"
     },
     {
       "id": "CRYPTO-02",
@@ -888,18 +489,7 @@
         "端点为enforce"
       ],
       "expected": "不得静默回退",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_gateway_request_crypto.sh",
-          "test": "plaintext-response"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "encrypted_fallback_status"
-        }
-      ],
-      "gap": "未以源站原始媒体类型（如 application/json，不带 Xshield 加密类型）请求 enforce 端点，validate_encrypted_request_headers 的媒体类型拒绝分支没有测试（只测了查询串分支）。"
+      "status": "planned"
     },
     {
       "id": "CRYPTO-03",
@@ -909,22 +499,7 @@
         "修改WAF封包AAD/tag/版本"
       ],
       "expected": "拒绝，不透传给源站",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "scripts/test_gateway_request_crypto.sh",
-          "test": "tampered-response"
-        },
-        {
-          "path": "crates/xshield-gateway/src/request_crypto.rs",
-          "test": "decrypts_only_the_exact_bound_request"
-        },
-        {
-          "path": "crates/xshield-gateway/src/request_crypto.rs",
-          "test": "tampered_and_malformed_envelope_members_are_refused_with_their_reason"
-        }
-      ],
-      "gap": "单元层已逐项断言：篡改 schema_version、adapter_revision、key_id、成员类型/长度及额外成员以 RequestEnvelopeInvalid 拒绝，篡改 message_id、签发/到期时间、nonce、密文以 RequestCryptoAuthenticationFailed 拒绝，未来签发与超长寿命各有原因码；经真实 edge 并断言源站日志无该请求的只有 tag 篡改，其余成员没有端到端断言。"
+      "status": "planned"
     },
     {
       "id": "CRYPTO-04",
@@ -934,26 +509,7 @@
         "请求解密成功、列表响应解密失败"
       ],
       "expected": "单独记录响应覆盖缺口，不发资格",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/response_grant.rs",
-          "test": "an_unreadable_list_response_issues_no_grants"
-        },
-        {
-          "path": "crates/xshield-gateway/src/buffered_json.rs",
-          "test": "rejects_oversize_encoded_or_invalid_json_without_releasing_a_chunk"
-        },
-        {
-          "path": "crates/xshield-gateway/src/durable_audit.rs",
-          "test": "records_response_validation_failure_as_received_and_aborted"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "sealed_state"
-        }
-      ],
-      "gap": "网关不解密源站响应，只要求源站返回可读的严格 JSON：单元层断言不可读的列表响应（密封信封、不透明字节、看不到条目内容）在提取阶段以 RESPONSE_VALIDATION_FAILED 失败、不派生资格，审计层断言响应失败作为独立 crypto_encode 阶段记录；但没有“请求解密成功 + 响应失败”同一请求的组合回归，也没有经真实 edge 读回 journal 和资格表的断言。resource_grant 与响应加密组合时，资格在加密成功后才写入，scripts/test_gateway_identity.sh 经真实 edge 断言加密失败不留下响应证据与资格事件。"
+      "status": "planned"
     },
     {
       "id": "CRYPTO-05",
@@ -964,26 +520,7 @@
         "不支持格式"
       ],
       "expected": "标记未覆盖，保留可执行检查，不从回退发资格",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/durable_audit.rs",
-          "test": "compatibility_audit_keeps_the_server_approval_and_page_evidence"
-        },
-        {
-          "path": "crates/xshield-gateway/src/lib.rs",
-          "test": "compatibility_is_ui_build_approval_scoped"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "compatibility_status"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "unapproved_build_status"
-        }
-      ],
-      "gap": "真实网关回归未读回 journal 断言兼容请求被标记为未覆盖，且“不从回退发资格”只在配置编译层对响应加密与 share_issue 断言，resource_grant/身份类响应副作用组合没有反例。"
+      "status": "planned"
     },
     {
       "id": "CRYPTO-06",
@@ -993,26 +530,7 @@
         "重复JSON键、查询覆盖、编码变体"
       ],
       "expected": "与源站语义一致或拒绝歧义",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/response_grant.rs",
-          "test": "extracts_only_the_approved_unique_string_path"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "ambiguous_resource_status"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "encoded_slash_status"
-        },
-        {
-          "path": "crates/xshield-gateway/src/request_crypto.rs",
-          "test": "only_a_strict_bounded_json_object_survives_decryption"
-        }
-      ],
-      "gap": "解密后明文中的重复键（含嵌套）、非对象、空与超长在单元层已断言拒绝；仍没有与真实源站解析语义的对照（只断言拒绝歧义），也没有经真实 edge 的端到端断言。"
+      "status": "planned"
     },
     {
       "id": "CRYPTO-07",
@@ -1022,18 +540,7 @@
         "决策后适配器改变业务目标"
       ],
       "expected": "不满足同一冻结P不变量，禁止转发并告警",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/request_crypto.rs",
-          "test": "the_dispatched_entity_is_the_checked_plaintext_and_cannot_be_retargeted"
-        },
-        {
-          "path": "crates/xshield-gateway/src/request_crypto.rs",
-          "test": "decrypts_only_the_exact_bound_request"
-        }
-      ],
-      "gap": "产品没有决策后可改写请求的适配器/插件阶段，冻结 P 不变量由类型保证（FrozenRequest 只能整体移交）：单元层断言转发字节与审计 rebuilt_sha256 一致，同一密封 P 改投其他 operation/method/路径时认证失败；没有决策后篡改业务目标的反例、转发前的不变量复核或告警，也没有经真实 edge 断言源站收到的正是被检查的 P。"
+      "status": "planned"
     },
     {
       "id": "CRYPTO-08",
@@ -1043,14 +550,7 @@
         "源站写请求发出后连接中断"
       ],
       "expected": "记录origin_unknown，不自动重发",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/durable_audit.rs",
-          "test": "distinguishes_complete_response_delivery_failure_from_truncation"
-        }
-      ],
-      "gap": "没有真实中断源站写连接的回归，也没有断言网关不自动重发（不重发 POST/PATCH 依赖 Pingora 默认行为，PUT/DELETE 在复用连接上仍可能重试）。"
+      "status": "planned"
     },
     {
       "id": "MODEL-01",
@@ -1095,22 +595,7 @@
         "确定性绑定拒绝"
       ],
       "expected": "proof_kind=deterministic，confidence=null",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/tests/browser_loop_audit.rs",
-          "test": "every_browser_loop_request_is_audited_with_its_reason"
-        },
-        {
-          "path": "crates/xshield-worker/src/lib.rs",
-          "test": "model_stage_preserves_explicit_absent_confidence_and_legacy_deterministic_events"
-        },
-        {
-          "path": "scripts/validate_library.py",
-          "test": "negative:deterministic_fake_confidence_rejected"
-        }
-      ],
-      "gap": "没有测试对真实身份绑定拒绝写出的阶段事件直接断言 proof_kind=deterministic，null 置信度只由发布端解析器与 Schema 对 deterministic 事件的约束间接保证。"
+      "status": "planned"
     },
     {
       "id": "MODEL-04",
@@ -1256,22 +741,7 @@
         "用request_id打开详情"
       ],
       "expected": "返回阶段、决策、身份、资格、模型和转换证据图",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-control/src/lib.rs",
-          "test": "request_summary_reports_completeness_and_is_audited"
-        },
-        {
-          "path": "crates/xshield-gateway/tests/browser_loop_audit.rs",
-          "test": "every_browser_loop_request_is_audited_with_its_reason"
-        },
-        {
-          "path": "web/console/tests/request-detail.spec.ts",
-          "test": "every observed stage shows its outcome, reason, proof and timing; skipped ones say why"
-        }
-      ],
-      "gap": "按 request_id 读取的详情只含阶段与判定摘要（控制面测试用模拟 ClickHouse、控制台用合成响应），身份、资格与转换证据不在请求详情中返回，未断言完整证据图。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-02",
@@ -1306,22 +776,7 @@
         "请求超过capture上限或含秘密"
       ],
       "expected": "分别显示捕获状态和fidelity，不能标原始完整包",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/tests/evidence_capture.rs",
-          "test": "response_capture_is_durable_redacted_and_fail_closed"
-        },
-        {
-          "path": "crates/xshield-gateway/src/evidence_capture.rs",
-          "test": "captures_business_values_and_records_every_secret_exclusion"
-        },
-        {
-          "path": "web/console/tests/request-detail.spec.ts",
-          "test": "evidence is read when its tab opens; only catalogue metadata is shown"
-        }
-      ],
-      "gap": "只覆盖响应 JSON 捕获：超限时整笔中止而非保存带截断状态的证据，请求侧捕获及控制台对捕获状态的显示均未断言（控制台解码器只接受 capture_status=complete）。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-04",
@@ -1357,22 +812,7 @@
         "高危新请求"
       ],
       "expected": "不满足耐久要求就503/不转发；保留告警与恢复记录",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/durable_audit.rs",
-          "test": "quota_failure_closes_the_admission_barrier"
-        },
-        {
-          "path": "crates/xshield-gateway/src/durable_audit.rs",
-          "test": "a_closed_barrier_reopens_once_the_journal_has_room_and_records_it"
-        },
-        {
-          "path": "crates/xshield-gateway/src/apply_api.rs",
-          "test": "health_reports_audit_barrier_and_listener_state"
-        }
-      ],
-      "gap": "503 与不转发只在 DurableAudit 单元层断言（没有真实 edge/Pingora 回归在 journal 写满后观察 503 且源站未收到请求），也未注入 fsync 失败，只模拟配额耗尽。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-06",
@@ -1392,21 +832,7 @@
         "forward_intent后进程崩溃"
       ],
       "expected": "恢复产生不确定/补偿终态，不能捏造业务失败或成功",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/durable_audit.rs",
-          "test": "reconciles_crashed_forward_once_before_reopening_traffic"
-        },
-        {
-          "path": "crates/xshield-gateway/src/durable_audit.rs",
-          "test": "reconciles_an_accepted_crash_prefix_once"
-        },
-        {
-          "path": "crates/xshield-worker/src/lib.rs",
-          "test": "indexes_reconciled_abort_without_inventing_an_http_status"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "AUDIT-08",
@@ -1573,22 +999,7 @@
         "Cookie/Authorization/password/privatekey穿过各层"
       ],
       "expected": "普通日志与模型禁止；证据fidelity明确脱敏",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/tests/evidence_capture.rs",
-          "test": "response_capture_is_durable_redacted_and_fail_closed"
-        },
-        {
-          "path": "crates/xshield-worker/src/model_eval/transport.rs",
-          "test": "excludes_key_echo_from_body_and_allowed_metadata"
-        },
-        {
-          "path": "scripts/test_gateway_identity.sh",
-          "test": "share_secret_events"
-        }
-      ],
-      "gap": "没有测试让 Cookie/Authorization/password/私钥同时穿过各层并检查 tracing 日志、journal、outbox、证据与模型输入；证据脱敏默认字段不含 private_key 类字段，模型输入只扫描供应商 API key。"
+      "status": "planned"
     },
     {
       "id": "DEV-01",
@@ -1657,22 +1068,7 @@
         "大量超时/大包/队列满"
       ],
       "expected": "有界资源和取消清理，无无限任务/内存增长",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-gateway/src/buffered_json.rs",
-          "test": "holds_and_releases_aggregate_buffer_capacity"
-        },
-        {
-          "path": "crates/xshield-gateway/src/rate_limit.rs",
-          "test": "eviction_keeps_the_table_at_its_bound_and_each_insert_cheap"
-        },
-        {
-          "path": "crates/xshield-control/src/lib.rs",
-          "test": "cancelled_evidence_task_keeps_admission_until_blocking_work_finishes"
-        }
-      ],
-      "gap": "只有各组件有界容量与取消释放的单测，没有大量超时、大包、队列满的压力或长时运行测试来断言任务数与内存不随负载无界增长。"
+      "status": "planned"
     },
     {
       "id": "DEV-05",

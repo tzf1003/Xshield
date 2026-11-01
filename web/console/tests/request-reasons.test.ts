@@ -14,12 +14,11 @@ import { reasonData } from "../src/ui/request-reasons-data.ts";
 const repo = fileURLToPath(new URL("../../../", import.meta.url));
 
 /**
- * Where reason codes are written. The three `src/*.rs` levels hold the request pipeline, the
- * audit contract and the worker; `model_eval` holds the model lifecycle codes. Test modules are
- * skipped: their fixtures are not part of the contract.
+ * Where reason codes are written. The two `src/*.rs` levels hold the core domain logic and the
+ * worker; `model_eval` holds the model lifecycle codes. Test modules are skipped: their fixtures
+ * are not part of the contract.
  */
 const roots = [
-  { dir: "crates/xshield-gateway/src", recursive: false },
   { dir: "crates/xshield-core/src", recursive: false },
   { dir: "crates/xshield-worker/src", recursive: false },
   { dir: "crates/xshield-worker/src/model_eval", recursive: true },
@@ -39,7 +38,6 @@ const notReasonCodes: Readonly<Record<string, string>> = {
   SENSOR_HTML: "site policy response mode",
   COMPATIBILITY: "request-crypto coverage mode",
   DIRECT_ENCRYPT: "site policy crypto mode",
-  ENVELOPE_HOOK: "site policy crypto mode",
   ENFORCE: "request-crypto coverage mode",
   OBSERVE: "request-crypto coverage mode",
   PUBLIC: "admission class and sensitivity label",
@@ -59,12 +57,6 @@ const notReasonCodes: Readonly<Record<string, string>> = {
   VISIBILITY: "browser sensor event type",
   CARGO_PKG_VERSION: "cargo build environment variable",
   SCREAMING_SNAKE_CASE: "serde rename rule",
-  AUDIT_UNAVAILABLE: "edge readiness reason on the unauthenticated ops endpoint",
-  NO_LISTENERS: "edge readiness reason on the unauthenticated ops endpoint",
-  EVIDENCE_PURGE_TIMEOUT: "edge evidence retention failure label on the ops metrics endpoint",
-  EVIDENCE_PURGE_UNAVAILABLE: "edge evidence retention failure label on the ops metrics endpoint",
-  EVIDENCE_CAPACITY_REFRESH_FAILED:
-    "edge evidence retention failure label on the ops metrics endpoint",
 };
 /** Environment variable names and API key names are configuration, not reasons. */
 const notReasonPatterns: readonly RegExp[] = [/^XSHIELD_/, /_API_KEY$/];
@@ -118,7 +110,7 @@ test("the scan finds the Rust sources it is meant to guard", () => {
   const files = new Set(hits.map((hit) => hit.where.split(":")[0]));
   for (const expected of [
     "crates/xshield-core/src/audit.rs",
-    "crates/xshield-gateway/src/protected_identity.rs",
+    "crates/xshield-core/src/site.rs",
     "crates/xshield-worker/src/model_eval/mod.rs",
   ]) {
     assert.ok(files.has(expected), expected);

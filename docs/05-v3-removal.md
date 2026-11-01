@@ -29,7 +29,7 @@
 | 位置 | 处理 |
 |---|---|
 | `crates/xshield-core` | 保留领域 ID 和站点配置类型（按 [03.2](03-admin-config-audit.md#32-站点配置) 精简）；新增会话上下文、请求值提取、判定步骤；删除 `calibration`、资格与审批相关类型 |
-| `crates/xshield-gateway` | 保留代理、TLS、监听器；新增上下文存储、Jev 调用、判定日志写入；删除资格检查、探针、加密接管、分享签发、服务身份、快照 apply |
+| `crates/xshield-gateway` | 已删除；代理、TLS、监听器、上下文存储、Jev 调用与判定日志写入由全新的 `crates/xshield-edge`（配合 `crates/xshield-judge`）取代，而非在原地改造 |
 | `crates/xshield-control` | 保留站点增改、模式切换；新增判定日志查询、配置历史与回滚、口令登录；删除审批状态机、案件、证据访问、保全、导出、校准报告、任务管理、API Key、OIDC |
 | `crates/xshield-worker` | 把 `model_eval` 中的 Jev 传输与响应校验移入网关（或单独小 crate）；其余（离线 CLI、outbox、检索、证据迁移与清理、校准）删除，整个 crate 随之删除 |
 | `crates/xshield-audit`、`crates/xshield-evidence` | 删除 |
@@ -37,7 +37,7 @@
 | `migrations/`、`sql/` | 产品尚未上线，用一份新的基线迁移取代现有迁移；删除 ClickHouse schema |
 | `web/console` | 只留站点配置、模式切换、判定日志、Jev 状态（[03.5](03-admin-config-audit.md#35-控制台范围)） |
 | `sensor/` | 删除 |
-| `deploy/` | 只留 `compose`；删除 `helm`、`systemd`、`prometheus` |
+| `deploy/` | 已删除（含 `compose`）；v4 尚无参考部署，这是已知且接受的缺口（[04](04-deployment-testing.md)），不在本次改造中补上 |
 | `schemas/`、`examples/`、`validation/`、`templates/` | 换成 v4 的站点配置和判定日志样例，删除 v3 契约及其校验 |
 | `tests/`、`scripts/` | IDOR 靶场改造成 [04.3](04-deployment-testing.md#43-验收场景) 的场景；删除只服务于已删机制的回归脚本 |
 | `fuzz/` | 保留请求值提取、响应解析相关的 fuzz 目标，其余删除 |

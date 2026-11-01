@@ -21,7 +21,7 @@ WORKDIR /src
 COPY . .
 # `--locked`: the lockfile is the dependency record; a drifting build must fail.
 RUN cargo build --release --locked \
-    -p xshield-gateway -p xshield-edge -p xshield-control -p xshield-worker -p xshield-audit
+    -p xshield-edge -p xshield-control -p xshield-worker -p xshield-audit
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime-base
 RUN apt-get update \
@@ -31,8 +31,8 @@ RUN apt-get update \
 USER 10001:10001
 
 FROM runtime-base AS edge
-COPY --from=builder /src/target/release/xshield-gateway /usr/local/bin/xshield-gateway
-ENTRYPOINT ["/usr/local/bin/xshield-gateway"]
+COPY --from=builder /src/target/release/xshield-edge /usr/local/bin/xshield-edge
+ENTRYPOINT ["/usr/local/bin/xshield-edge"]
 
 FROM runtime-base AS control
 COPY --from=builder /src/target/release/xshield-control /usr/local/bin/xshield-control

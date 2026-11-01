@@ -2,7 +2,7 @@
 """Raw durable-append latency of a directory's volume (docs/21 section 21.7).
 
 The edge's no-model latency is dominated by the journal's durable sync (13.9),
-so before reading `bench_gateway.py` numbers on a machine, measure what one
+so before reading durable-write latency numbers on a machine, measure what one
 sync costs there: append a block the size of one audit batch, `fdatasync`
 (`F_FULLFSYNC` on macOS, as `File::sync_data` does), repeat, and print the
 latency distribution. Comparing two volumes (an NVMe disk and a tmpfs, say)

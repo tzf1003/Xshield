@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Local verification gates from docs/17 section 17.10, one log file per step.
 #
-#   scripts/verify_all.sh [rust] [gateway] [console]    (no argument: all three groups)
+#   scripts/verify_all.sh [rust] [sensor] [console]    (no argument: all three groups)
 #
 # Groups
 #   rust     fmt, audit-event coverage, environment-variable and secret guards,
 #            dependency policy (cargo-deny), library
 #            validation, clippy, tests,
 #            doc tests, PostgreSQL integration suite
-#   gateway  the browser sensor unit tests, the real-binary gateway scripts
-#            (transport, dynamic listeners, request crypto, identity), the
-#            Docker-free IDOR lab and the real-browser provenance loop
+#   sensor   the browser sensor unit tests (sensor/, still used by the not-yet-
+#            removed v3 control plane; xshield-gateway and its real-binary
+#            regression scripts were deleted with it, docs/05-v3-removal.md)
 #   console  npm ci, lint, unit tests, production build, Playwright e2e
 #
 # Environment
@@ -52,13 +52,13 @@ cd "$repo_root" || exit 2
 
 groups=("$@")
 if [ "${#groups[@]}" -eq 0 ]; then
-    groups=(rust gateway console)
+    groups=(rust sensor console)
 fi
 for group in "${groups[@]}"; do
     case "$group" in
-        rust | gateway | console) ;;
+        rust | sensor | console) ;;
         *)
-            printf 'error: unknown group %s (expected rust, gateway or console)\n' "$group" >&2
+            printf 'error: unknown group %s (expected rust, sensor or console)\n' "$group" >&2
             exit 2
             ;;
     esac
@@ -124,38 +124,11 @@ group_rust() {
     fi
 }
 
-have_playwright() {
-    have node && node -e 'require("node:module").createRequire(process.argv[1]).resolve("@playwright/test")' \
-        "${XSHIELD_PLAYWRIGHT_PACKAGE:-$repo_root/web/console/package.json}" >/dev/null 2>&1
-}
-
-group_gateway() {
-    if ! have cargo; then
-        skip_step gateway-all "cargo not found"
-        return
-    fi
+group_sensor() {
     if have node; then
         run_step sensor-unit node --test sensor/test/sensor.test.mjs sensor/test/sensor-1.1.0.test.mjs sensor/test/sensor-1.2.0.test.mjs sensor/test/sensor-1.3.0.test.mjs
     else
         skip_step sensor-unit "node not found"
-    fi
-    run_step gw-dynamic scripts/test_gateway_dynamic_listeners.sh
-    if have psql && have createdb; then
-        run_step gw-transport scripts/test_gateway_transport.sh
-        run_step gw-request-crypto scripts/test_gateway_request_crypto.sh
-        run_step gw-identity scripts/test_gateway_identity.sh
-        run_step idor-lab scripts/test_idor_lab_local.sh
-        if have_playwright; then
-            run_step browser-loop scripts/test_browser_loop.sh
-        else
-            skip_step browser-loop "@playwright/test not installed (npm ci in web/console)"
-        fi
-    else
-        skip_step gw-transport "psql/createdb not found"
-        skip_step gw-request-crypto "psql/createdb not found"
-        skip_step gw-identity "psql/createdb not found"
-        skip_step idor-lab "psql/createdb not found"
-        skip_step browser-loop "psql/createdb not found"
     fi
 }
 

@@ -353,11 +353,6 @@ export const reasonDictionary = {
     "edge 的回执与请求不匹配，已按“未确认”处理。",
     "刷新状态；仍未确认时重新应用并检查 edge。",
   ),
-  EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE: entry(
-    "danger",
-    "edge 无法持久化快照，拒绝切换配置；它继续使用上一份快照。",
-    "检查 edge 快照目录的磁盘空间与权限后重新应用。",
-  ),
   EDGE_HEALTH_UNAVAILABLE: entry(
     "warning",
     "edge 健康接口不可用。",

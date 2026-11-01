@@ -56,7 +56,7 @@ name="xshield-${version}-${platform}"
 stage="$dist_dir/stage/$name"
 
 binaries=(
-    xshield-gateway
+    xshield-edge
     xshield-control
     xshield-worker
     xshield-outbox-worker
@@ -71,7 +71,7 @@ mkdir -p -- "$stage/bin" "$stage/docs"
 
 printf '==> cargo build --release (target: %s)\n' "$target_dir"
 (cd "$repo_root" && cargo build --release --locked \
-    -p xshield-gateway -p xshield-control -p xshield-worker -p xshield-audit)
+    -p xshield-edge -p xshield-control -p xshield-worker -p xshield-audit)
 for binary in "${binaries[@]}"; do
     install -m 0755 -- "$target_dir/release/$binary" "$stage/bin/$binary"
 done

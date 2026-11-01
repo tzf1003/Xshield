@@ -44,7 +44,7 @@ const FORBIDDEN_PREFIXES: &[(&str, &str)] = &[
     ("xshield-postgres", "storage adapter"),
     ("xshield-audit", "journal adapter"),
     ("xshield-evidence", "evidence storage adapter"),
-    ("xshield-gateway", "edge adapter"),
+    ("xshield-edge", "edge adapter"),
     ("xshield-control", "control-plane adapter"),
     ("xshield-worker", "worker adapter"),
 ];
