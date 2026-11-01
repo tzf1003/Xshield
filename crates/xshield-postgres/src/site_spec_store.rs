@@ -542,28 +542,6 @@ pub async fn version(
     row.as_ref().map(row_to_history).transpose()
 }
 
-/// Every version of every site with a configuration, oldest first. Used to find
-/// when a site started or stopped observing.
-///
-/// # Errors
-/// Returns [`SiteSpecStoreError`] on a database or serialization failure.
-pub async fn history_of_site_chronological(
-    pool: &PgPool,
-    name: &str,
-    limit: i64,
-) -> Result<Vec<HistoryEntry>, SiteSpecStoreError> {
-    let rows = sqlx::query(
-        "SELECT version, change, rollback_of, note, changed_at, spec
-         FROM site_config_history WHERE site = $1
-         ORDER BY version ASC LIMIT $2",
-    )
-    .bind(name)
-    .bind(limit.clamp(1, 10_000))
-    .fetch_all(pool)
-    .await?;
-    rows.iter().map(row_to_history).collect()
-}
-
 #[cfg(test)]
 mod tests {
     // These storage-layer tests need a reachable PostgreSQL instance. They run
@@ -602,6 +580,45 @@ mod tests {
     async fn connect_test_pool() -> PgPool {
         let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
         PgPool::connect(&url).await.expect("connect")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn history_pages_back_from_a_version() {
+        let pool = connect_test_pool().await;
+        let name = unique_name("paging");
+        create(&pool, &minimal_spec(&name, &["/one"]), None)
+            .await
+            .unwrap();
+        update(
+            &pool,
+            &name,
+            &minimal_spec(&name, &["/one", "/two"]),
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+        update(
+            &pool,
+            &name,
+            &minimal_spec(&name, &["/one", "/two", "/three"]),
+            2,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let numbers = |entries: Vec<HistoryEntry>| -> Vec<i64> {
+            entries.iter().map(|entry| entry.version).collect()
+        };
+        let newest = history(&pool, &name, None, 2).await.unwrap();
+        assert_eq!(numbers(newest), vec![3, 2]);
+        let older = history(&pool, &name, Some(3), 2).await.unwrap();
+        assert_eq!(numbers(older), vec![2, 1]);
+        let oldest = history(&pool, &name, Some(2), 2).await.unwrap();
+        assert_eq!(numbers(oldest), vec![1]);
+        assert!(history(&pool, &name, Some(1), 2).await.unwrap().is_empty());
     }
 
     #[tokio::test]
