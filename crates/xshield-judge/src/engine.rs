@@ -238,10 +238,19 @@ impl<J: JevPort> Judge<J> {
             if values.is_empty() {
                 return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
             }
-            return Plan::Ask {
-                limit_key: self.key.mac("address", request.client.as_bytes()),
-                values,
-            };
+            // Pages poll the same public endpoints; a repeat that was judged
+            // clean must not use up the address's call budget, which the
+            // next injection attempt from that address would then miss.
+            let limit_key = self.key.mac("address", request.client.as_bytes());
+            if self
+                .lock()
+                .store
+                .session(limit_key, request.now_ms)
+                .cached_allow(cache_key, request.now_ms)
+            {
+                return Plan::Done(Verdict::Safe(DecisionPath::CachedAllow));
+            }
+            return Plan::Ask { limit_key, values };
         };
         let mut inner = self.lock();
         let session = inner.store.session(session_id, request.now_ms);
@@ -249,15 +258,17 @@ impl<J: JevPort> Judge<J> {
         let mut values = Vec::new();
         for value in extracted.values.iter().filter(|v| !v.inert) {
             let seen = session.lookup(&self.key, &value.value);
-            all_known &= seen.is_some_and(|seen| seen.is_specific(&value.value, request.path));
+            all_known &= seen.is_some_and(|seen| {
+                seen.is_specific(&value.value, request.path, value.key.as_deref())
+            });
             values.push(StateValue {
                 at: value.at.clone(),
                 value: value.value.clone(),
                 key: value.key.clone(),
                 seen_as: seen
                     .map(|seen| {
-                        seen.origins
-                            .iter()
+                        seen.ranked(request.path, value.key.as_deref())
+                            .into_iter()
                             .map(|o| format!("{} @ {}", o.field, o.request))
                             .collect()
                     })
@@ -369,12 +380,10 @@ impl<J: JevPort> Judge<J> {
         };
         let verdict = match conclude(&answers) {
             Conclusion::Allow => {
-                if let Some(id) = session_id {
-                    self.lock()
-                        .store
-                        .session(id, request.now_ms)
-                        .cache_allow(*cache_key, request.now_ms);
-                }
+                self.lock()
+                    .store
+                    .session(session_id.unwrap_or(limit_key), request.now_ms)
+                    .cache_allow(*cache_key, request.now_ms);
                 Verdict::Safe(DecisionPath::JevAllow)
             }
             Conclusion::Deny => Verdict::Unsafe(DecisionPath::JevDeny),
@@ -905,6 +914,38 @@ mod tests {
         let cookie_in_query = get("/api/x", Some("next=SECRETCOOKIE"), Some("SECRETCOOKIE"), 1);
         judge.judge(&site, &cookie_in_query).await;
         assert!(!fake.sent.lock().unwrap()[1].contains("SECRETCOOKIE"));
+    }
+
+    #[tokio::test]
+    async fn a_clean_entry_request_without_a_session_is_judged_once() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let poll = RequestFacts {
+            method: "GET",
+            path: "/login",
+            query: Some("name=Score%20Board"),
+            ..get("/login", None, None, 0)
+        };
+        for index in 0..(ADDRESS_CALLS_PER_MINUTE * 2) {
+            let at = RequestFacts {
+                now_ms: 1_000 + u64::from(index),
+                ..poll
+            };
+            let verdict = judge.judge(&site, &at).await;
+            assert!(verdict.forward, "poll {index}");
+        }
+        assert_eq!(fake.calls(), 1);
+        // The injection that follows still reaches Jev with budget left.
+        fake.answer("ALLOW", "ATTACK");
+        let attack = RequestFacts {
+            query: Some("name=%27%20OR%201%3D1--"),
+            now_ms: 9_000,
+            ..poll
+        };
+        let verdict = judge.judge(&site, &attack).await;
+        assert!(!verdict.forward);
+        assert_eq!(fake.calls(), 2);
     }
 
     #[tokio::test]
