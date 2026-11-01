@@ -956,8 +956,11 @@ mod tests {
     }
 
     /// Creates the partition of `day`, fills it with rows in which the session
-    /// label, the outcome and the Jev call are each rare, and analyzes it.
-    /// Returns the bounds of the day in Unix milliseconds.
+    /// label, the outcome and the Jev call are each rare, and analyzes it. Returns
+    /// the first and the last millisecond of the day, both inclusive. A plan probe
+    /// over that window reaches the probe day's partition alone: the next day's
+    /// first millisecond would also reach its partition, which other tests fill
+    /// while this one plans.
     async fn fill_probe_day(pool: &PgPool, day: NaiveDate) -> (i64, i64) {
         ensure_partition(pool, day).await.expect("partition");
         let (start, end) = day_bounds_millis(day).expect("bounds");
@@ -985,7 +988,7 @@ mod tests {
             .execute(pool)
             .await
             .expect("analyze");
-        (start, end)
+        (start, end - 1)
     }
 
     /// Held by the two tests that write to the 2099-08-04 partition, so that they
@@ -1051,7 +1054,7 @@ mod tests {
     async fn the_session_timeline_scans_the_session_index() {
         let pool = connect_test_pool().await;
         let day = NaiveDate::from_ymd_opt(2099, 8, 1).expect("date");
-        let (start, end) = fill_probe_day(&pool, day).await;
+        let (start, last) = fill_probe_day(&pool, day).await;
         let mut connection = prepared_on_own_connection(
             "PREPARE probe (text, bigint, bigint, bigint) AS
              SELECT id FROM decision_log
@@ -1061,7 +1064,7 @@ mod tests {
         .await;
         let plan = explain_execute(
             &mut connection,
-            &format!("probe('session-probe', {start}, {end}, 100)"),
+            &format!("probe('session-probe', {start}, {last}, 100)"),
         )
         .await;
         assert_plan_scans(&mut connection, "decision_log_session_idx", &plan).await;
@@ -1072,7 +1075,7 @@ mod tests {
     async fn the_attention_listing_scans_the_attention_index() {
         let pool = connect_test_pool().await;
         let day = NaiveDate::from_ymd_opt(2099, 8, 2).expect("date");
-        let (start, end) = fill_probe_day(&pool, day).await;
+        let (start, last) = fill_probe_day(&pool, day).await;
         let mut connection = prepared_on_own_connection(
             "PREPARE probe (text[], bigint, bigint, bigint) AS
              SELECT id FROM decision_log
@@ -1083,7 +1086,7 @@ mod tests {
         .await;
         let plan = explain_execute(
             &mut connection,
-            &format!("probe(ARRAY['blocked', 'would_block', 'unjudged'], {start}, {end}, 100)"),
+            &format!("probe(ARRAY['blocked', 'would_block', 'unjudged'], {start}, {last}, 100)"),
         )
         .await;
         assert_plan_scans(&mut connection, "decision_log_attention_idx", &plan).await;
@@ -1094,7 +1097,7 @@ mod tests {
     async fn the_jev_listing_scans_the_jev_index() {
         let pool = connect_test_pool().await;
         let day = NaiveDate::from_ymd_opt(2099, 8, 3).expect("date");
-        let (start, end) = fill_probe_day(&pool, day).await;
+        let (start, last) = fill_probe_day(&pool, day).await;
         let mut connection = prepared_on_own_connection(&format!(
             "PREPARE probe (bigint, bigint, bigint) AS
              SELECT id FROM decision_log
@@ -1102,7 +1105,7 @@ mod tests {
              ORDER BY at_millis DESC, id DESC LIMIT $3"
         ))
         .await;
-        let plan = explain_execute(&mut connection, &format!("probe({start}, {end}, 100)")).await;
+        let plan = explain_execute(&mut connection, &format!("probe({start}, {last}, 100)")).await;
         assert_plan_scans(&mut connection, "decision_log_jev_idx", &plan).await;
     }
 
