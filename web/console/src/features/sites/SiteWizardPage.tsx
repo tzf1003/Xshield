@@ -5,7 +5,7 @@
 
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Segmented } from "antd";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSaveSite, useValidate } from "../../api/queries.ts";
 import type { SiteSpec } from "../../api/types.ts";
 import { useSetSearch } from "../../app/scope.ts";
@@ -26,17 +26,27 @@ export function SiteWizardPage() {
   const search = useSearch({ from: "/sites/new" });
   const setSearch = useSetSearch();
   const navigate = useNavigate();
-  // A configuration copied from a site ("复制为新站点") starts the form; the copy is used once.
-  const [spec, setSpec] = useState<SiteSpec>(() => readCopy() ?? emptySpec());
+  const yamlMode = search.from === "yaml";
+  // A configuration copied from a site ("复制为新站点") starts the form; the copy is used once. A new site starts
+  // in observe, so the copy's mode is set back to observe here: enforce is not carried over.
+  const [spec, setSpec] = useState<SiteSpec>(() => ({
+    ...(readCopy() ?? emptySpec()),
+    mode: "observe",
+  }));
   const [yamlBroken, setYamlBroken] = useState(false);
-  const settled = useDebounced(spec, 600);
-  const issues = validateSpec(spec);
+  // What the page creates. The YAML view creates the mode its text names (observe when it names none). The form
+  // always creates observe, even when a YAML that named enforce was pasted before the switch to the form.
+  const toCreate = useMemo<SiteSpec>(
+    () => (yamlMode ? spec : { ...spec, mode: "observe" }),
+    [spec, yamlMode],
+  );
+  const settled = useDebounced(toCreate, 600);
+  const issues = validateSpec(toCreate);
   const localOk = issues.errors.length === 0;
   const settledOk = validateSpec(settled).errors.length === 0;
   const validate = useValidate();
   const validateRemote = validate.mutate;
   const create = useSaveSite();
-  const yamlMode = search.from === "yaml";
 
   useEffect(() => {
     clearCopy();
@@ -48,20 +58,20 @@ export function SiteWizardPage() {
 
   // The server's answer counts only for the configuration on the page now, not for an older one.
   const remote =
-    validate.variables !== undefined && sameJson(validate.variables, spec)
+    validate.variables !== undefined && sameJson(validate.variables, toCreate)
       ? validate.data
       : undefined;
-  const remoteFailed = validate.isError && sameJson(validate.variables, spec);
+  const remoteFailed = validate.isError && sameJson(validate.variables, toCreate);
   const remoteProblem =
-    remote && !remote.valid ? serverProblem(remote.error, remote.field, spec) : null;
+    remote && !remote.valid ? serverProblem(remote.error, remote.field, toCreate) : null;
   const canCreate = localOk && !yamlBroken && remote?.valid === true && !create.isPending;
 
   const submit = () => {
     create.mutate(
-      { name: null, spec, body: { spec } },
+      { name: null, spec: toCreate, body: { spec: toCreate } },
       {
         onSuccess: (site) => {
-          writeCreated(site.name, site.version);
+          writeCreated(site.name, site.version, site.mode);
           void navigate({ to: "/sites/$name", params: { name: site.name } });
         },
       },
@@ -106,7 +116,7 @@ export function SiteWizardPage() {
                 <ConfigForm
                   group={id}
                   mode="create"
-                  spec={spec}
+                  spec={toCreate}
                   saved={null}
                   onChange={setSpec}
                   issues={issues.errors}
@@ -121,7 +131,7 @@ export function SiteWizardPage() {
 
         <aside className="wizard-side stack">
           <Card title="将要创建的配置">
-            <pre className="codeblock">{specToYaml(spec)}</pre>
+            <pre className="codeblock">{specToYaml(toCreate)}</pre>
           </Card>
 
           <Card title="检查">
@@ -146,7 +156,7 @@ export function SiteWizardPage() {
                   <span className="muted">正在校验…</span>
                 ) : remoteFailed ? (
                   <span className="field-error" role="alert">
-                    {requestProblem(validate.error, spec)}
+                    {requestProblem(validate.error, toCreate)}
                   </span>
                 ) : remoteProblem ? (
                   <span className="field-error" role="alert">
@@ -158,7 +168,7 @@ export function SiteWizardPage() {
               </div>
               {create.isError ? (
                 <div className="errbar" role="alert">
-                  {requestProblem(create.error, spec)}
+                  {requestProblem(create.error, toCreate)}
                 </div>
               ) : null}
               <div className="row" style={{ justifyContent: "flex-end" }}>

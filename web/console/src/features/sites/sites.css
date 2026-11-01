@@ -136,6 +136,13 @@
   white-space: nowrap;
 }
 
+/* The dismiss link of the banner after a create: the accent blue is under 4.5:1 on the tinted info notice in the
+   light theme, so it takes the text colour with an underline. */
+.created-site .linkbtn {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
 /* Diff: unified lines come from global.css; the side-by-side view adds two columns per row. */
 .diff-box > summary {
   cursor: pointer;

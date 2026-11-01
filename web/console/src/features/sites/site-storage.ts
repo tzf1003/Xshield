@@ -2,7 +2,7 @@
 // not lose it), two hand-offs between pages (a copied configuration and a just-created site), and the
 // suggestions the user chose to ignore (localStorage, docs/07 7.9.11).
 
-import type { SiteSpec } from "../../api/types.ts";
+import type { SiteMode, SiteSpec } from "../../api/types.ts";
 import { isRecord, readJson, removeText, writeJson } from "../../lib/storage.ts";
 
 export type DraftRecord = { base: number; spec: SiteSpec };
@@ -58,16 +58,19 @@ export function clearCopy(): void {
   removeText(COPY_KEY, "session");
 }
 
+/** The site created last: its version, and the mode it was created with (an enforce site gets a hint). */
+export type CreatedSite = { name: string; version: number; mode?: SiteMode };
+
 /** The site created last, so its page can say what to do next. */
-export function writeCreated(name: string, version: number): void {
-  writeJson(CREATED_KEY, { name, version }, "session");
+export function writeCreated(name: string, version: number, mode: SiteMode): void {
+  writeJson(CREATED_KEY, { name, version, mode }, "session");
 }
 
-export function readCreated(name: string): { name: string; version: number } | null {
-  const value = readJson<{ name: string; version: number } | null>(
+export function readCreated(name: string): CreatedSite | null {
+  const value = readJson<CreatedSite | null>(
     CREATED_KEY,
     null,
-    (candidate): candidate is { name: string; version: number } | null => {
+    (candidate): candidate is CreatedSite | null => {
       return (
         candidate === null ||
         (isRecord(candidate) &&

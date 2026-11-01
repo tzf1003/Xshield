@@ -291,17 +291,24 @@ function SiteDetailBody({ name }: { name: string }) {
       />
 
       {created ? (
-        <Notice tone="info">
-          <div className="row between">
-            <span>
-              已创建 v{created.version}。下一步：把 Host
-              解析到网关；用浏览器走一遍正常流程，再回来看请求追溯。
-            </span>
-            <button type="button" className="linkbtn" onClick={() => setCreated(null)}>
-              知道了
-            </button>
-          </div>
-        </Notice>
+        <div className="created-site">
+          <Notice tone="info">
+            <div className="row between">
+              <span>
+                已创建 v{created.version}。下一步：把 Host
+                解析到网关；用浏览器走一遍正常流程，再回来看请求追溯。
+              </span>
+              <button type="button" className="linkbtn" onClick={() => setCreated(null)}>
+                知道了
+              </button>
+            </div>
+          </Notice>
+        </div>
+      ) : null}
+
+      {/* Written as enforce, the site has no observation period: a hint, not a block (docs/06 6.4.8). */}
+      {created?.mode === "enforce" ? (
+        <Notice>▲ 新站点没有观察期，入口和绕过设错会直接拦截正常请求</Notice>
       ) : null}
 
       {pending !== null ? (

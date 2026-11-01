@@ -317,21 +317,12 @@ function ModeGroup({
         label="模式"
         help={
           mode === "create"
-            ? "观察（推荐）：照常转发，只记录本应拦截的请求。拦截：按判定结果返回 401 / 403。"
+            ? "表单创建的站点从观察模式开始：照常转发，只记录本应拦截的请求。拦截模式在站点创建后，到站点页用“切换到拦截模式…”设置。"
             : "切换模式会生成新版本，并需要先看就绪检查。"
         }
       >
         {mode === "create" ? (
-          <Segmented
-            value={current}
-            options={[
-              { label: "观察（推荐）", value: "observe" },
-              { label: "拦截", value: "enforce" },
-            ]}
-            onChange={(value) =>
-              onChange({ ...spec, mode: value === "enforce" ? "enforce" : "observe" })
-            }
-          />
+          <span>观察模式</span>
         ) : (
           <div className="row">
             <span>
