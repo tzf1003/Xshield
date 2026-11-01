@@ -12,6 +12,13 @@ use sqlx::{AssertSqlSafe, PgPool, Row};
 /// (docs/07 section 7.8.2).
 pub const RETENTION_DAYS: u64 = 7;
 
+/// How many days after today get a partition ahead of time. The control plane can
+/// be down this long without the gateway's inserts failing (docs/07 section 7.8.2).
+pub const DAYS_AHEAD: u64 = 7;
+
+/// Milliseconds in a UTC day.
+const MILLIS_PER_DAY: i64 = 86_400_000;
+
 /// One partition of the decision log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionInfo {
@@ -49,6 +56,41 @@ pub fn day_bounds_millis(day: NaiveDate) -> Option<(i64, i64)> {
     let next = day.checked_add_days(Days::new(1))?;
     let end = next.and_time(NaiveTime::MIN).and_utc().timestamp_millis();
     Some((start, end))
+}
+
+/// The days that get a partition when the control plane runs on `today`: from
+/// [`RETENTION_DAYS`] before it to [`DAYS_AHEAD`] after it, both ends included.
+///
+/// The first day is the start of the retention period, not yesterday. Records that
+/// a file-mode import brings in are still kept, so they need a partition to go to
+/// (docs/07 section 7.8.2). A day outside the calendar is left out.
+#[must_use]
+pub fn partition_days(today: NaiveDate) -> Vec<NaiveDate> {
+    let Some(first) = today.checked_sub_days(Days::new(RETENTION_DAYS)) else {
+        return Vec::new();
+    };
+    (0..=RETENTION_DAYS + DAYS_AHEAD)
+        .filter_map(|step| first.checked_add_days(Days::new(step)))
+        .collect()
+}
+
+/// The decision times kept when the control plane runs at `now_millis`, both ends
+/// included: from [`RETENTION_DAYS`] before it to [`DAYS_AHEAD`] after it. Every
+/// instant in the span lies in a day that [`partition_days`] covers. A row outside
+/// the span has no partition to go to, so an import counts it as out of range
+/// (docs/07 section 7.9.9).
+#[must_use]
+pub fn kept_window_millis(now_millis: i64) -> (i64, i64) {
+    let back = i64::try_from(RETENTION_DAYS)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(MILLIS_PER_DAY);
+    let ahead = i64::try_from(DAYS_AHEAD)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(MILLIS_PER_DAY);
+    (
+        now_millis.saturating_sub(back),
+        now_millis.saturating_add(ahead),
+    )
 }
 
 /// Failure of a partition maintenance step.
@@ -212,6 +254,31 @@ mod tests {
         assert_eq!(end - start, 86_400_000);
     }
 
+    #[test]
+    fn partitions_run_from_the_retention_start_to_seven_days_ahead() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 1).expect("date");
+        let days = partition_days(today);
+        assert_eq!(days.len(), 15);
+        assert_eq!(days.first(), NaiveDate::from_ymd_opt(2026, 10, 25).as_ref());
+        assert_eq!(days.last(), NaiveDate::from_ymd_opt(2026, 11, 8).as_ref());
+    }
+
+    #[test]
+    fn every_instant_in_the_kept_window_has_a_partition() {
+        // 2026-11-01 12:00 UTC. The window runs from 2026-10-25 12:00 to 2026-11-08 12:00.
+        let now: i64 = 1_793_491_200_000 + 12 * 3_600_000;
+        let (low, high) = kept_window_millis(now);
+        assert_eq!(low, now - 7 * MILLIS_PER_DAY);
+        assert_eq!(high, now + 7 * MILLIS_PER_DAY);
+        let days = partition_days(NaiveDate::from_ymd_opt(2026, 11, 1).expect("date"));
+        for at in [low, high] {
+            let day = DateTime::from_timestamp_millis(at)
+                .expect("time")
+                .date_naive();
+            assert!(days.contains(&day), "{day} has no partition");
+        }
+    }
+
     // The database tests need a reachable PostgreSQL instance and run when
     // `XSHIELD_TEST_DATABASE_URL` is set (scripts/test_postgres.sh does that).
 
@@ -285,5 +352,68 @@ mod tests {
         drop_partitions_ended_before(&pool, kept_end)
             .await
             .expect("cleanup");
+    }
+
+    /// A minimal decision row at `at_millis`, for the window test.
+    fn probe_row(at_millis: i64) -> crate::decision_log_store::NewDecision {
+        crate::decision_log_store::NewDecision {
+            at_millis,
+            request_id: format!("req_window_probe_{at_millis}"),
+            site: Some("window-probe".to_owned()),
+            site_version: None,
+            edge: "import".to_owned(),
+            host: "probe.example".to_owned(),
+            client: "203.0.113.7".to_owned(),
+            session: String::new(),
+            context: None,
+            method: "GET".to_owned(),
+            path: "/".to_owned(),
+            query: None,
+            status: Some(200),
+            decision_path: "fast_allow".to_owned(),
+            outcome: "allowed".to_owned(),
+            trace: serde_json::json!({ "v": 0 }),
+            jev: None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_partition_pass_covers_the_window_and_a_five_day_old_record_writes() {
+        let pool = connect_test_pool().await;
+        // A fixed clock: the window runs from 2026-10-25 12:00 to 2026-11-08 12:00 UTC.
+        let now: i64 = 1_793_491_200_000 + 12 * 3_600_000;
+        let today = NaiveDate::from_ymd_opt(2026, 11, 1).expect("date");
+
+        // A pass creates every day of the window, and a second pass is harmless.
+        for _ in 0..2 {
+            for day in partition_days(today) {
+                ensure_partition(&pool, day).await.expect("ensure");
+            }
+        }
+        let names: Vec<String> = list_partitions(&pool)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|partition| partition.name)
+            .collect();
+        for day in partition_days(today) {
+            assert!(
+                names.contains(&partition_name(day)),
+                "{day} has no partition"
+            );
+        }
+
+        // A record five days old is inside the window and writes. One nine days old
+        // lies before the window, so an import counts it as out of range.
+        let (low, high) = kept_window_millis(now);
+        let five_days_old = now - 5 * MILLIS_PER_DAY;
+        let nine_days_old = now - 9 * MILLIS_PER_DAY;
+        assert!((low..=high).contains(&five_days_old));
+        assert!(nine_days_old < low);
+        let written = crate::decision_log_store::insert_many(&pool, &[probe_row(five_days_old)])
+            .await
+            .expect("insert");
+        assert_eq!(written, 1);
     }
 }
