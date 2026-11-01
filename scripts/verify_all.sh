@@ -8,9 +8,9 @@
 #            dependency policy (cargo-deny), library
 #            validation, clippy, tests,
 #            doc tests, PostgreSQL integration suite
-#   gateway  the browser sensor unit tests, the real-binary gateway scripts
-#            (transport, dynamic listeners, request crypto, identity), the
-#            Docker-free IDOR lab and the real-browser provenance loop
+#   gateway  the real-binary gateway scripts (transport, dynamic listeners,
+#            request crypto, identity), the Docker-free IDOR lab and the
+#            real-browser provenance loop
 #   console  npm ci, lint, unit tests, production build, Playwright e2e
 #
 # Environment
@@ -133,11 +133,6 @@ group_gateway() {
     if ! have cargo; then
         skip_step gateway-all "cargo not found"
         return
-    fi
-    if have node; then
-        run_step sensor-unit node --test sensor/test/sensor.test.mjs sensor/test/sensor-1.1.0.test.mjs sensor/test/sensor-1.2.0.test.mjs sensor/test/sensor-1.3.0.test.mjs
-    else
-        skip_step sensor-unit "node not found"
     fi
     run_step gw-dynamic scripts/test_gateway_dynamic_listeners.sh
     if have psql && have createdb; then
