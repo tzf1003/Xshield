@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, QueryBuilder, Row};
 
 use crate::decision_log_store::{
-    DETAIL_COLUMNS, JEV_CALLED_SQL, RequestDetail, RequestSummary, SUMMARY_COLUMNS,
+    DETAIL_COLUMNS, JEV_CALLED_SQL, JEV_DEMAND_SQL, RequestDetail, RequestSummary, SUMMARY_COLUMNS,
     summary_from_row,
 };
 
@@ -667,7 +667,8 @@ pub struct MinutePeaks {
 
 /// Measures per-minute Jev calls per session (`by_address == false`, requests
 /// with a session) or per client address (`by_address == true`, requests
-/// without one), against `threshold`.
+/// without one), against `threshold`. A call the per-minute limit refused counts
+/// as demand: without it the peak could never exceed the limit.
 ///
 /// # Errors
 /// Returns [`sqlx::Error`] when the query fails.
@@ -702,7 +703,7 @@ pub async fn minute_peaks(
         .push(" AS key, (at_millis / 60000) AS minute, count(*) AS n FROM decision_log");
     push_scope(&mut query, scope);
     query.push(format!(
-        " AND {JEV_CALLED_SQL} AND {condition} GROUP BY 1, 2) AS per_minute"
+        " AND {JEV_DEMAND_SQL} AND {condition} GROUP BY 1, 2) AS per_minute"
     ));
     let row = query.build().fetch_one(pool).await?;
     Ok(MinutePeaks {
