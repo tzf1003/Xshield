@@ -4,4 +4,4 @@
 
 覆盖：JSON/YAML、JSON Schema、合成事件/证据/模型契约、摘要及引用闭合、负向约束、文档来源和本地链接。
 
-不覆盖：Rust 编译、PostgreSQL/ClickHouse 实际执行、代理部署、站点安全测试、模型准确率和性能。78 项安全验收用例：automated 2、partial 22、planned 54；覆盖声明只校验所引用的测试文本仍然存在，不表示该测试已执行或通过。
+不覆盖：Rust 编译、PostgreSQL/ClickHouse 实际执行、代理部署、站点安全测试、模型准确率和性能。78 项安全验收用例：automated 2、partial 19、planned 57；覆盖声明只校验所引用的测试文本仍然存在，不表示该测试已执行或通过。
