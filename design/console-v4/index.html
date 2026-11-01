@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Xshield 控制台原型</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="login-root" class="hidden"></div>
+  <div id="app">
+    <nav class="side" aria-label="主导航">
+      <div class="brand"><span class="logo" aria-hidden="true"></span><span>Xshield</span></div>
+      <div class="nav-items">
+        <button type="button" class="nav-item" data-route="overview" data-href="#/"><span class="ico" aria-hidden="true">▦</span><span class="label">总览</span></button>
+        <button type="button" class="nav-item" data-route="requests" data-href="#/requests"><span class="ico" aria-hidden="true">≡</span><span class="label">请求追溯</span></button>
+        <button type="button" class="nav-item" data-route="sessions" data-href="#/sessions"><span class="ico" aria-hidden="true">◎</span><span class="label">会话</span></button>
+        <button type="button" class="nav-item" data-route="jev" data-href="#/jev"><span class="ico" aria-hidden="true">✦</span><span class="label">Jev 调用</span></button>
+        <button type="button" class="nav-item" data-route="sites" data-href="#/sites"><span class="ico" aria-hidden="true">⚙</span><span class="label">站点</span></button>
+        <button type="button" class="nav-item" data-route="system" data-href="#/system"><span class="ico" aria-hidden="true">▤</span><span class="label">系统</span></button>
+      </div>
+      <div class="nav-foot">
+        <div class="modes" id="modes"></div>
+        <button type="button" class="nav-item" id="help-btn"><span class="ico" aria-hidden="true">?</span><span class="label">快捷键</span></button>
+        <button type="button" class="nav-item" id="logout-btn"><span class="ico" aria-hidden="true">⎋</span><span class="label">退出</span></button>
+        <button type="button" class="nav-item" id="nav-toggle"><span class="ico" aria-hidden="true">⇆</span><span class="label">折叠导航</span></button>
+      </div>
+    </nav>
+    <main>
+      <div class="topbar">
+        <select class="select" id="site-select" aria-label="站点范围"></select>
+        <button type="button" class="search" id="search-box" aria-label="打开命令面板">⌕ <span>粘贴请求 ID、会话、路径或站点名…</span><kbd>⌘K</kbd></button>
+        <span class="rangechip" title="原型数据固定为最近 24 小时">最近 24 小时</span>
+        <div class="lights">
+          <button type="button" class="light" id="theme-toggle" title="切换主题：跟随系统、浅色、深色">主题</button>
+          <button type="button" class="light" id="light-gw" aria-haspopup="dialog"></button>
+          <button type="button" class="light" id="light-jev" aria-haspopup="dialog"></button>
+        </div>
+      </div>
+      <div class="page" id="page"></div>
+    </main>
+  </div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <script src="prompts.js"></script>
+  <script src="data.js"></script>
+  <script src="core.js"></script>
+  <script src="pages-trace.js"></script>
+  <script src="jev.js"></script>
+  <script src="pages-config.js"></script>
+  <script src="boot.js"></script>
+</body>
+</html>
