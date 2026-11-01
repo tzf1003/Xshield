@@ -224,11 +224,41 @@ pub fn extract_request(
     out
 }
 
+/// A field *name* that carries syntax (`$ne`, `a'b`, `x;y`) is itself input:
+/// `NoSQL` operators and key-based injections travel in names, not values.
+fn push_unusual_key(out: &mut ExtractedRequest, at: &str, name: &str) {
+    let unusual = name.starts_with('$')
+        || name.chars().any(|c| {
+            matches!(
+                c,
+                '$' | '\''
+                    | '"'
+                    | ';'
+                    | '|'
+                    | '&'
+                    | '<'
+                    | '>'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '`'
+                    | '\\'
+                    | '/'
+                    | ' '
+            )
+        });
+    if unusual {
+        push(out, format!("{at}#name"), None, name.to_owned());
+    }
+}
+
 fn pairs(out: &mut ExtractedRequest, prefix: &str, text: &str) {
     for pair in text.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key, true);
         let value = percent_decode(value, true);
+        push_unusual_key(out, &format!("{prefix}.{key}"), &key);
         push(out, format!("{prefix}.{key}"), Some(key), value);
     }
 }
@@ -247,6 +277,7 @@ fn walk_request(
     match json {
         Value::Object(map) => {
             for (name, inner) in map {
+                push_unusual_key(out, &format!("{at}.{name}"), name);
                 walk_request(out, inner, &format!("{at}.{name}"), Some(name), depth + 1);
             }
         }
@@ -524,5 +555,30 @@ mod tests {
         assert_eq!(percent_decode("a%2Fb%zz%", false), "a/b%zz%");
         assert_eq!(percent_decode("a+b", true), "a b");
         assert_eq!(percent_decode("a+b", false), "a+b");
+    }
+
+    #[test]
+    fn operator_and_syntax_bearing_field_names_are_values() {
+        let body = br#"{"username":{"$ne":null},"password":{"$ne":null},"ok_name":"fine1x"}"#;
+        let out = extract_request("/", None, Some("application/json"), body);
+        let names: Vec<&str> = out
+            .values
+            .iter()
+            .filter(|v| v.at.ends_with("#name"))
+            .map(|v| v.value.as_str())
+            .collect();
+        assert_eq!(names, vec!["$ne", "$ne"]);
+        let form = extract_request(
+            "/",
+            None,
+            Some("application/x-www-form-urlencoded"),
+            b"user%5B%24ne%5D=&plain=1",
+        );
+        assert!(
+            form.values
+                .iter()
+                .any(|v| v.at.ends_with("#name") && v.value == "user[$ne]")
+        );
+        assert!(!form.values.iter().any(|v| v.at.ends_with("plain#name")));
     }
 }
