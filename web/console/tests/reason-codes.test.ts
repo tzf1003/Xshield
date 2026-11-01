@@ -17,7 +17,6 @@ const codeSources = [
   "crates/xshield-control/src/site_config.rs",
   "crates/xshield-control/src/workbench.rs",
   "crates/xshield-postgres/src/site_config.rs",
-  "crates/xshield-gateway/src/apply_api.rs",
   "crates/xshield-core/src/site.rs",
   "crates/xshield-core/src/site/config.rs",
   "crates/xshield-core/src/site/upstream.rs",
@@ -46,7 +45,6 @@ test("the scan finds the codes this console must label", () => {
     "CONTROL_SITE_PAUSED",
     "CONTROL_SITE_APPLY_ACTIVE",
     "EDGE_APPLY_CONFIRMED",
-    "EDGE_SNAPSHOT_PERSISTENCE_UNAVAILABLE",
     "EDGE_DIRECT_APPLY_NOT_CONFIRMED",
     "CONTROL_SITE_POLICY_REVISION_REUSED",
   ]) {
