@@ -61,8 +61,9 @@ pub async fn list(
 
 /// `GET /api/sessions/{label}`: `{"summary": ..., "rows": [...], "next_cursor": ...}`.
 /// The summary is one list row. The rows are the session's requests in time order;
-/// `only` picks them and defaults to the judged ones, as the request list does.
-/// `next_cursor` is set only when the page is full.
+/// `only` picks them and defaults to the judged ones, as the request list does. On
+/// the first page of `judged` or `all`, the login that opened the session leads the
+/// rows. `next_cursor` is set only when the page is full.
 ///
 /// # Errors
 /// `INVALID_FILTER` naming `label` or another bad parameter, `SESSION_NOT_FOUND`
@@ -99,8 +100,19 @@ pub async fn detail(
         .last()
         .filter(|_| full_page)
         .map(|row| format_cursor(row.summary.at_millis, row.summary.id));
+    // The login that opened the session precedes its requests (docs/07 section 7.9.6).
+    // It is not on the session's own rows, so it is looked up apart.
+    let opening = if cursor.is_none() && matches!(only, TimelineOnly::Judged | TimelineOnly::All) {
+        decision_stats::issuing_row(&state.pool, &label).await?
+    } else {
+        None
+    };
     let issued = issuing_request_ids(&state.pool, std::slice::from_ref(&summary)).await?;
-    let rows: Vec<Value> = page.iter().map(timeline_row_json).collect();
+    let rows: Vec<Value> = opening
+        .iter()
+        .chain(page.iter())
+        .map(timeline_row_json)
+        .collect();
     Ok(Json(json!({
         "summary": session_json(&summary, issued.get(&label).map(String::as_str)),
         "rows": rows,

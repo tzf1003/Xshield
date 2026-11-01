@@ -409,6 +409,31 @@ pub async fn session_timeline(
     Ok(timeline)
 }
 
+/// The login request that opened the session `label`, as a timeline row. A login is
+/// recorded under its client address rather than under the session it opens, so it
+/// is found by `trace.response.issued_session`. `None` when that request is past
+/// retention.
+///
+/// # Errors
+/// Returns [`sqlx::Error`] when the query fails.
+pub async fn issuing_row(pool: &PgPool, label: &str) -> Result<Option<TimelineRow>, sqlx::Error> {
+    let mut query =
+        QueryBuilder::<Postgres>::new(format!("SELECT {SUMMARY_COLUMNS}, trace FROM decision_log"));
+    query
+        .push(" WHERE trace #>> '{response,issued_session}' = ")
+        .push_bind(label.to_owned())
+        .push(" ORDER BY at_millis ASC, id ASC LIMIT 1");
+    let row = query.build().fetch_optional(pool).await?;
+    row.as_ref()
+        .map(|row| -> Result<TimelineRow, sqlx::Error> {
+            Ok(TimelineRow {
+                summary: summary_from_row(row)?,
+                trace: row.try_get("trace")?,
+            })
+        })
+        .transpose()
+}
+
 /// Jev round trips over a window.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct JevStats {

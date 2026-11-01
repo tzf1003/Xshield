@@ -1090,4 +1090,60 @@ mod tests {
         let plan = explain_execute(&mut connection, &format!("probe({start}, {end}, 100)")).await;
         assert_plan_scans(&mut connection, "decision_log_jev_idx", &plan).await;
     }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_login_is_found_by_the_session_it_issued_and_is_not_on_its_rows() {
+        use crate::decision_stats::{self, Scope, TimelineOnly};
+
+        let pool = connect_test_pool().await;
+        let day = NaiveDate::from_ymd_opt(2099, 8, 4).expect("date");
+        ensure_partition(&pool, day).await.expect("partition");
+        let (start, end) = day_bounds_millis(day).expect("bounds");
+        // The login is recorded under its client address with no session label. The
+        // request after it carries the label that the login issued.
+        sqlx::query(
+            r#"INSERT INTO decision_log
+                   (at_millis, request_id, site, edge, host, client, session, context,
+                    method, path, decision_path, outcome, trace)
+               VALUES
+                   ($1, 'req_login_issue', 'emr', 'edge-1', 'emr.test', '192.0.2.9', '',
+                    'address', 'POST', '/login', 'entry', 'allowed',
+                    '{"response":{"issued_session":"sess-issued-1"}}'::jsonb),
+                   ($2, 'req_after_login', 'emr', 'edge-1', 'emr.test', '192.0.2.9',
+                    'sess-issued-1', 'session', 'GET', '/patients', 'fast_allow', 'allowed',
+                    '{"response":{"entry_passed":false}}'::jsonb)"#,
+        )
+        .bind(start + 1_000)
+        .bind(start + 2_000)
+        .execute(&pool)
+        .await
+        .expect("rows");
+        let scope = Scope {
+            site: Some("emr".to_owned()),
+            since_millis: start,
+            until_millis: end,
+        };
+        let opening = decision_stats::issuing_row(&pool, "sess-issued-1")
+            .await
+            .expect("query")
+            .expect("the login that issued the session");
+        assert_eq!(opening.summary.request_id, "req_login_issue");
+        let timeline = decision_stats::session_timeline(
+            &pool,
+            &scope,
+            "sess-issued-1",
+            TimelineOnly::All,
+            None,
+            10,
+        )
+        .await
+        .expect("timeline");
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0].summary.request_id, "req_after_login");
+        let never = decision_stats::issuing_row(&pool, "sess-never-issued")
+            .await
+            .expect("query");
+        assert!(never.is_none());
+    }
 }

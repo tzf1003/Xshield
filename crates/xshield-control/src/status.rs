@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State};
 use chrono::{DateTime, Days, NaiveDate, Utc};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use xshield_postgres::{
     edge_status_store::{self, EdgeStatus},
     partitions::{self, PartitionInfo},
@@ -44,10 +44,9 @@ pub async fn status(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Va
     let jev_health = jev::health_summary(&state.pool, now_ms).await?;
     let problems = collect_problems(&edges, &sites, &daily, now);
     let online = edges.iter().filter(|edge| edge.is_online(now)).count();
-    let recent_floor = now_ms.saturating_sub(DAY_MILLIS);
     let total = edges
         .iter()
-        .filter(|edge| edge.seen_at.timestamp_millis() >= recent_floor)
+        .filter(|edge| heard_within_a_day(edge, now_ms))
         .count();
     Ok(Json(json!({
         "gateway": {
@@ -84,6 +83,7 @@ fn collect_problems(
     let online: Vec<&EdgeStatus> = edges.iter().filter(|edge| edge.is_online(now)).collect();
     let mut found = site_load_failures(&online);
     found.extend(versions_behind(&online, sites, now_ms));
+    found.extend(offline_edges(edges, now));
     found.extend(log_gaps(edges, now_ms));
     found.extend(queue_pressure(&online));
     found.extend(partition_missing(daily, now));
@@ -153,6 +153,49 @@ fn versions_behind(online: &[&EdgeStatus], sites: &[SiteRecord], now_ms: i64) ->
         }
     }
     found
+}
+
+/// Whether an instance sent a heartbeat within the last day.
+#[must_use]
+fn heard_within_a_day(edge: &EdgeStatus, now_ms: i64) -> bool {
+    edge.seen_at.timestamp_millis() >= now_ms.saturating_sub(DAY_MILLIS)
+}
+
+/// Instances that sent a heartbeat within the last day but not within the last 30
+/// seconds, with the version of each site they stopped at. They are left out of
+/// `version_behind`, so one fault is reported once.
+#[must_use]
+fn offline_edges(edges: &[EdgeStatus], now: DateTime<Utc>) -> Vec<Value> {
+    let now_ms = now.timestamp_millis();
+    edges
+        .iter()
+        .filter(|edge| !edge.is_online(now) && heard_within_a_day(edge, now_ms))
+        .map(|edge| {
+            json!({
+                "kind": "edge_offline",
+                "edge": edge.edge,
+                "last_seen_ms": edge.seen_at.timestamp_millis(),
+                "loaded": loaded_versions(edge),
+            })
+        })
+        .collect()
+}
+
+/// The version each site an instance reports has loaded, by site name. A site with
+/// no version, such as one that never loaded, is left out.
+#[must_use]
+fn loaded_versions(edge: &EdgeStatus) -> Value {
+    let loaded: Map<String, Value> = edge
+        .sites
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(site, entry)| {
+            let version = entry.get("version").and_then(Value::as_i64)?;
+            Some((site.clone(), json!(version)))
+        })
+        .collect();
+    Value::Object(loaded)
 }
 
 /// Log gaps that ended within the last 15 minutes, from each instance's history.
@@ -262,6 +305,7 @@ fn late_heartbeats(online: &[&EdgeStatus], now_ms: i64) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeDelta;
 
     fn partition(day: NaiveDate) -> PartitionInfo {
         PartitionInfo {
@@ -293,5 +337,52 @@ mod tests {
             1
         );
         assert_eq!(days_ahead(&[partition(plus(2))], today), 0);
+    }
+
+    fn edge(name: &str, seen_at: DateTime<Utc>, sites: Value) -> EdgeStatus {
+        EdgeStatus {
+            edge: name.to_owned(),
+            started_at: seen_at,
+            seen_at,
+            build: String::new(),
+            listen: String::new(),
+            tls: false,
+            sites,
+            sessions: 0,
+            queue: 0,
+            written: 0,
+            dropped: 0,
+            dropped_bypass: 0,
+            write_errors: 0,
+            gaps: json!([]),
+            jev: json!({}),
+            params: json!({}),
+        }
+    }
+
+    #[test]
+    fn an_instance_silent_for_over_thirty_seconds_is_offline_at_the_versions_it_stopped_at() {
+        let now = DateTime::from_timestamp_millis(1_793_538_000_000).expect("time");
+        let fresh = edge("edge-1", now, json!({}));
+        let silent = edge(
+            "edge-2",
+            now - TimeDelta::seconds(60),
+            json!({
+                "emr": {"version": 11, "error": null},
+                "juice": {"version": 7, "error": null},
+                "shop": {"error": "SITE_CONFIG_ORIGIN_INVALID"},
+            }),
+        );
+        let gone = edge(
+            "edge-3",
+            now - TimeDelta::hours(25),
+            json!({"emr": {"version": 1, "error": null}}),
+        );
+        let found = offline_edges(&[fresh, silent, gone], now);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["kind"], json!("edge_offline"));
+        assert_eq!(found[0]["edge"], json!("edge-2"));
+        assert_eq!(found[0]["last_seen_ms"], json!(1_793_537_940_000_i64));
+        assert_eq!(found[0]["loaded"], json!({"emr": 11, "juice": 7}));
     }
 }
