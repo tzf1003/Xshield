@@ -82,9 +82,7 @@ test("countHits agrees with a split over every request path", () => {
   }
 });
 
-test("a hit is placed on the original text even when lowercasing changes its length", {
-  todo: "splitHighlight indexes the lowercased copy: 'İ' (U+0130) lowercases to two code units",
-}, () => {
+test("a hit is placed on the original text even when lowercasing changes its length", () => {
   assert.deepEqual(splitHighlight("İa", "a"), [
     { text: "İ", hit: false },
     { text: "a", hit: true },
