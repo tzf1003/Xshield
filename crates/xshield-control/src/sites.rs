@@ -89,8 +89,8 @@ pub struct EdgeLoadBody {
     pub version: Option<i64>,
     /// The error code when the instance rejected the site.
     pub error: Option<String>,
-    /// When the instance loaded the version. The heartbeat does not carry it yet, so
-    /// this is `None` until a gateway reports it.
+    /// When the instance loaded `version`, Unix milliseconds. `None` while it has no
+    /// version, or when the instance does not report the time.
     pub loaded_at_millis: Option<i64>,
 }
 
@@ -191,6 +191,15 @@ fn loaded_version_of(edge: &EdgeStatus, name: &str) -> Option<i64> {
         .and_then(Value::as_i64)
 }
 
+/// When a gateway loaded the version it reports for a site, Unix milliseconds.
+#[must_use]
+fn loaded_at_of(edge: &EdgeStatus, name: &str) -> Option<i64> {
+    edge.sites
+        .get(name)
+        .and_then(|entry| entry.get("loaded_at_millis"))
+        .and_then(Value::as_i64)
+}
+
 /// The error a gateway reports for a site it refused.
 #[must_use]
 fn error_of(edge: &EdgeStatus, name: &str) -> Option<String> {
@@ -267,7 +276,7 @@ fn site_summary(
                 edge: edge.edge.clone(),
                 version: loaded_version_of(edge, name),
                 error: error_of(edge, name),
-                loaded_at_millis: None,
+                loaded_at_millis: loaded_at_of(edge, name),
             })
             .collect(),
         rollout: rollout_of(name, record.version, edges, now),
@@ -827,5 +836,46 @@ mod tests {
         let long = "x".repeat(NOTE_MAX_CHARS + 1);
         assert!(note_from(&json!({"note": long})).is_err());
         assert_eq!(note_from(&json!({"note": ""})).expect("empty"), None);
+    }
+
+    #[test]
+    fn the_site_list_says_when_each_gateway_loaded_its_version() {
+        let now = DateTime::from_timestamp_millis(1_793_538_000_000).expect("time");
+        let record = SiteRecord {
+            spec: spec(BASE),
+            version: 3,
+            created_at: now,
+            updated_at: now,
+        };
+        let edge = |name: &str, juice: Value| EdgeStatus {
+            edge: name.to_owned(),
+            started_at: now,
+            seen_at: now,
+            build: String::new(),
+            listen: String::new(),
+            tls: false,
+            sites: json!({ "juice": juice }),
+            sessions: 0,
+            queue: 0,
+            written: 0,
+            dropped: 0,
+            dropped_bypass: 0,
+            write_errors: 0,
+            gaps: json!([]),
+            jev: json!({}),
+            params: json!({}),
+        };
+        let edges = [
+            edge(
+                "edge-1",
+                json!({ "version": 3, "loaded_at_millis": 1_793_537_900_000_i64 }),
+            ),
+            // An instance that predates the load time reports only its version.
+            edge("edge-2", json!({ "version": 3 })),
+        ];
+        let summary = site_summary(&record, &edges, None, 0, None, now);
+        assert_eq!(summary.edges[0].loaded_at_millis, Some(1_793_537_900_000));
+        assert_eq!(summary.edges[1].version, Some(3));
+        assert_eq!(summary.edges[1].loaded_at_millis, None);
     }
 }

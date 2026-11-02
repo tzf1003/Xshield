@@ -73,25 +73,31 @@ impl SiteLoader {
                 None => return Ok(()),
             },
         };
+        // A version read for the first time is loaded now; one already loaded keeps the
+        // time it was loaded at.
+        let now = i64::try_from(crate::sink::now_millis()).unwrap_or(i64::MAX);
         let mut next: HashMap<String, (i64, Arc<EdgeSite>)> = HashMap::new();
         let mut statuses: BTreeMap<String, SiteStatus> = BTreeMap::new();
         for (name, version, value) in rows {
             if let Some((known_version, site)) = self.known.get(&name)
                 && *known_version == version
             {
-                statuses.insert(name.clone(), SiteStatus::serving(version));
+                statuses.insert(
+                    name.clone(),
+                    SiteStatus::serving(version, site.loaded_at_millis()),
+                );
                 next.insert(name, (version, Arc::clone(site)));
                 continue;
             }
-            match build(&value, version) {
+            match build(&value, version, now) {
                 Ok(site) => {
-                    statuses.insert(name.clone(), SiteStatus::serving(version));
+                    statuses.insert(name.clone(), SiteStatus::serving(version, now));
                     next.insert(name, (version, Arc::new(site)));
                 }
                 Err(rejection) => {
                     eprintln!("xshield-edge: site {name} not loaded: {}", rejection.detail);
                     let previous = self.known.get(&name).cloned();
-                    let served = previous.as_ref().map(|(version, _)| *version);
+                    let served = previous.as_ref().map(|(_, site)| &**site);
                     statuses.insert(name.clone(), SiteStatus::failed(served, &rejection.code));
                     if let Some(previous) = previous {
                         next.insert(name, previous);
@@ -140,7 +146,11 @@ impl SiteLoader {
     }
 }
 
-fn build(value: &serde_json::Value, version: i64) -> Result<EdgeSite, Rejection> {
+fn build(
+    value: &serde_json::Value,
+    version: i64,
+    loaded_at_millis: i64,
+) -> Result<EdgeSite, Rejection> {
     let spec = SiteSpec::from_value(value).map_err(|error| {
         let code = error.to_string();
         Rejection {
@@ -148,7 +158,7 @@ fn build(value: &serde_json::Value, version: i64) -> Result<EdgeSite, Rejection>
             code,
         }
     })?;
-    EdgeSite::new(spec, version).map_err(|error| Rejection {
+    EdgeSite::new(spec, version, loaded_at_millis).map_err(|error| Rejection {
         code: ORIGIN_INVALID.to_owned(),
         detail: error.to_string(),
     })
@@ -234,6 +244,7 @@ mod tests {
         assert!(table.find("a.test").is_some());
         let stale = &table.statuses()["a"];
         assert_eq!(stale.version, first.version);
+        assert_eq!(stale.loaded_at_millis, first.loaded_at_millis);
         assert_eq!(stale.error.as_deref(), Some(ORIGIN_INVALID));
 
         // A removed site disappears.
@@ -241,6 +252,31 @@ mod tests {
         loader.refresh().await.expect("fourth");
         assert!(table.find("a.test").is_none());
         assert!(!table.statuses().contains_key("a"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_site_keeps_its_load_time_until_its_version_changes() {
+        let dir = std::env::temp_dir().join(format!("xshield-edge-loaded-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("sites.json");
+        std::fs::write(&path, format!("[{}]", spec("a", "a.test"))).expect("write");
+        let table = Arc::new(SiteTable::new());
+        let mut loader = SiteLoader::new(SiteSource::File(path.clone()), Arc::clone(&table));
+        loader.refresh().await.expect("first");
+        let first_load = table.statuses()["a"].loaded_at_millis.expect("a load time");
+
+        // The same version, read again later, keeps the time it was first loaded at.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        loader.refresh().await.expect("same");
+        assert_eq!(table.statuses()["a"].loaded_at_millis, Some(first_load));
+
+        // A new version is loaded now.
+        let changed = spec("a", "a.test").replace("/login", "/signin");
+        std::fs::write(&path, format!("[{changed}]")).expect("write");
+        loader.refresh().await.expect("changed");
+        let status = &table.statuses()["a"];
+        assert!(status.loaded_at_millis.is_some_and(|at| at > first_load));
         std::fs::remove_dir_all(dir).ok();
     }
 

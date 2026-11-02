@@ -14,11 +14,13 @@ pub const ORIGIN_INVALID: &str = "SITE_CONFIG_ORIGIN_INVALID";
 /// The stable code for a site that lost its host to an earlier site.
 pub const HOST_TAKEN: &str = "SITE_HOST_TAKEN";
 
-/// A site together with the parsed origin address and the version it was loaded at.
+/// A site together with the parsed origin address, the version it was loaded at and
+/// when this process loaded that version.
 #[derive(Debug)]
 pub struct EdgeSite {
     spec: SiteSpec,
     version: i64,
+    loaded_at_millis: i64,
     address: (String, u16),
     tls: bool,
 }
@@ -37,11 +39,11 @@ impl std::error::Error for OriginError {}
 
 impl EdgeSite {
     /// Parses `spec.origin()` (`http(s)://host[:port]`, no path) and records the
-    /// configuration `version` the site was loaded at.
+    /// configuration `version` the site was loaded at, and when it was loaded.
     ///
     /// # Errors
     /// [`OriginError`] when the origin is not an http(s) authority.
-    pub fn new(spec: SiteSpec, version: i64) -> Result<Self, OriginError> {
+    pub fn new(spec: SiteSpec, version: i64, loaded_at_millis: i64) -> Result<Self, OriginError> {
         let fail = |why: &str| OriginError(format!("{}: {why}", spec.name()));
         let uri: Uri = spec.origin().parse().map_err(|_| fail("not a valid URL"))?;
         let tls = match uri.scheme_str() {
@@ -57,6 +59,7 @@ impl EdgeSite {
         Ok(Self {
             spec,
             version,
+            loaded_at_millis,
             address: (host, port),
             tls,
         })
@@ -72,6 +75,12 @@ impl EdgeSite {
     #[must_use]
     pub fn version(&self) -> i64 {
         self.version
+    }
+
+    /// When this process loaded that version, Unix milliseconds.
+    #[must_use]
+    pub fn loaded_at_millis(&self) -> i64 {
+        self.loaded_at_millis
     }
 
     /// Origin host and port.
@@ -93,27 +102,33 @@ pub struct SiteStatus {
     /// The version the site serves, when it serves one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<i64>,
+    /// When this instance loaded `version`, Unix milliseconds; absent with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loaded_at_millis: Option<i64>,
     /// Why the newest version is not in service; absent when all is well.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl SiteStatus {
-    /// A site serving `version` without trouble.
+    /// A site serving `version`, which this instance loaded at `loaded_at_millis`,
+    /// without trouble.
     #[must_use]
-    pub fn serving(version: i64) -> Self {
+    pub fn serving(version: i64, loaded_at_millis: i64) -> Self {
         Self {
             version: Some(version),
+            loaded_at_millis: Some(loaded_at_millis),
             error: None,
         }
     }
 
-    /// A site whose newest version could not be used; `version` is the one
-    /// still served, when there is one.
+    /// A site whose newest version could not be used; `served` is the site still in
+    /// service, when there is one.
     #[must_use]
-    pub fn failed(version: Option<i64>, code: &str) -> Self {
+    pub fn failed(served: Option<&EdgeSite>, code: &str) -> Self {
         Self {
-            version,
+            version: served.map(EdgeSite::version),
+            loaded_at_millis: served.map(EdgeSite::loaded_at_millis),
             error: Some(code.to_owned()),
         }
     }
@@ -234,7 +249,7 @@ mod tests {
             r#"{{"name":"{name}","hosts":["{host}"],"origin":"{origin}","session":{{"cookie":"sid"}},"entries":["/login"]}}"#
         );
         let spec = SiteSpec::from_json(&json).map_err(|e| e.to_string())?;
-        EdgeSite::new(spec, 7)
+        EdgeSite::new(spec, 7, 1_700)
             .map(Arc::new)
             .map_err(|e| e.to_string())
     }
@@ -245,6 +260,7 @@ mod tests {
         assert_eq!(plain.address(), ("10.0.0.5", 8080));
         assert!(!plain.tls());
         assert_eq!(plain.version(), 7);
+        assert_eq!(plain.loaded_at_millis(), 1_700);
         let secure = site("b", "b.test", "https://origin.test").expect("secure");
         assert_eq!(secure.address(), ("origin.test", 443));
         assert!(secure.tls());
@@ -274,7 +290,7 @@ mod tests {
         let table = SiteTable::new();
         let changed = table.changed();
         let mut statuses = BTreeMap::new();
-        statuses.insert("a".to_owned(), SiteStatus::serving(1));
+        statuses.insert("a".to_owned(), SiteStatus::serving(1, 1_700));
         table.set_statuses(statuses.clone());
         assert_eq!(table.statuses(), statuses);
         // The change left a permit, so the waiter wakes once.
@@ -292,8 +308,12 @@ mod tests {
 
     #[test]
     fn a_status_serializes_with_only_the_fields_it_has() {
-        let served = serde_json::to_value(SiteStatus::serving(12)).expect("json");
-        assert_eq!(served, serde_json::json!({"version": 12}));
+        let served =
+            serde_json::to_value(SiteStatus::serving(12, 1_793_537_900_000)).expect("json");
+        assert_eq!(
+            served,
+            serde_json::json!({"version": 12, "loaded_at_millis": 1_793_537_900_000_i64})
+        );
         let failed = serde_json::to_value(SiteStatus::failed(None, ORIGIN_INVALID)).expect("json");
         assert_eq!(
             failed,

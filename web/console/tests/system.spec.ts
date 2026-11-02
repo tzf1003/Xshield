@@ -31,6 +31,11 @@ test("the gateway tab lists each instance, and a gateway's detail shows its loss
   const siteLoad = page.getByRole("table", { name: "这个实例的站点加载结果" });
   await expect(siteLoad.getByText("已加载 v13")).toBeVisible();
   await expect(siteLoad.getByText("已加载 v7")).toBeVisible();
+  await expect(siteLoad.getByText(/已加载 v13（\d{2}-\d{2} \d{2}:\d{2}:\d{2}）/)).toBeVisible();
+  // A failed new version: the error shows, and the version still served with its load time.
+  await expect(siteLoad.getByText("SITE_CONFIG_ORIGIN_INVALID")).toBeVisible();
+  await expect(siteLoad.getByText(/已加载 v4（\d{2}-\d{2} \d{2}:\d{2}:\d{2}）/)).toBeVisible();
+  await expect(siteLoad.getByText(/已加载 v4/)).toHaveAttribute("title", /UTC$/);
 
   const gaps = page.getByRole("table", { name: "这个实例的日志缺口" });
   const window = gapRow(gaps, "11-01 21:10:00 – 21:12");

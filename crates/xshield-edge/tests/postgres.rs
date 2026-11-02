@@ -240,7 +240,7 @@ async fn sites_follow_the_table_and_report_their_status() {
     let mut loader = SiteLoader::new(SiteSource::Postgres(pool.clone()), Arc::clone(&table));
     loader.refresh().await.expect("first refresh");
     assert!(table.find("a.test").is_some());
-    assert_eq!(table.statuses()["emr"], SiteStatus::serving(1));
+    assert_eq!(table.statuses()["emr"].version, Some(1));
 
     // A new version moves the host.
     sqlx::query("UPDATE site_configs SET spec = $1, version = version + 1 WHERE name = 'emr'")
@@ -250,7 +250,8 @@ async fn sites_follow_the_table_and_report_their_status() {
         .expect("update");
     loader.refresh().await.expect("second refresh");
     assert!(table.find("a.test").is_none() && table.find("b.test").is_some());
-    assert_eq!(table.statuses()["emr"], SiteStatus::serving(2));
+    assert_eq!(table.statuses()["emr"].version, Some(2));
+    let loaded_v2 = table.statuses()["emr"].loaded_at_millis;
 
     // An invalid version leaves the old one serving, and the status says both.
     sqlx::query("UPDATE site_configs SET spec = $1, version = version + 1 WHERE name = 'emr'")
@@ -260,10 +261,11 @@ async fn sites_follow_the_table_and_report_their_status() {
         .expect("bad update");
     loader.refresh().await.expect("third refresh");
     assert!(table.find("b.test").is_some() && table.find("c.test").is_none());
-    assert_eq!(
-        table.statuses()["emr"],
-        SiteStatus::failed(Some(2), ORIGIN_INVALID)
-    );
+    // Version 2 is still served, with the time it was loaded at.
+    let stale = &table.statuses()["emr"];
+    assert_eq!(stale.version, Some(2));
+    assert_eq!(stale.loaded_at_millis, loaded_v2);
+    assert_eq!(stale.error.as_deref(), Some(ORIGIN_INVALID));
 
     sqlx::query("DELETE FROM site_configs")
         .execute(&pool)
@@ -462,7 +464,7 @@ async fn the_heartbeat_is_one_row_per_instance_and_is_rewritten() {
     let mut beat = Beat {
         sites: BTreeMap::from([
             ("bad".to_owned(), SiteStatus::failed(None, ORIGIN_INVALID)),
-            ("emr".to_owned(), SiteStatus::serving(2)),
+            ("emr".to_owned(), SiteStatus::serving(2, 1_793_537_900_000)),
         ]),
         sessions: 3,
         queue: 4,
@@ -515,7 +517,10 @@ async fn the_heartbeat_is_one_row_per_instance_and_is_rewritten() {
     assert!((row.get::<i64, _>("started") - instance.started_at_millis).abs() <= 1);
 
     let sites: serde_json::Value = row.get("sites");
-    assert_eq!(sites["emr"], json!({"version": 2}));
+    assert_eq!(
+        sites["emr"],
+        json!({"version": 2, "loaded_at_millis": 1_793_537_900_000_i64})
+    );
     assert_eq!(sites["bad"], json!({"error": "SITE_CONFIG_ORIGIN_INVALID"}));
     let gaps: serde_json::Value = row.get("gaps");
     assert_eq!(gaps[0]["from_ms"], 60_000);
