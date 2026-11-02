@@ -16,7 +16,8 @@ use axum::{
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::PgPool;
 use xshield_core::context::{Mode, OnJevUnavailable, SiteSpec};
 use xshield_postgres::{
@@ -253,6 +254,122 @@ pub(crate) fn scan_states(states: &[(String, String)], wanted: &[&str]) -> Secre
     scan
 }
 
+/// `GET /api/sites/{name}/insights` (docs/07 section 7.9.11): the tuning suggestions
+/// of the window and, in observe mode, the readiness check. `readiness` is null in
+/// enforce mode, where nothing is left to observe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InsightsBody {
+    pub window_hours: i64,
+    pub suggestions: Vec<SuggestionBody>,
+    pub readiness: Option<ReadinessBody>,
+    pub complete: bool,
+}
+
+/// One suggestion: what it concerns, the requests behind it, and the ways to apply it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SuggestionBody {
+    /// The same suggestion keeps its id from one window to the next.
+    pub id: String,
+    pub kind: String,
+    /// Null for a suggestion about a setting rather than about requests.
+    pub method: Option<String>,
+    pub path: Option<String>,
+    pub count: i64,
+    /// A request id to look at, when one is known.
+    pub sample: Option<String>,
+    pub actions: Vec<ActionBody>,
+    pub reason: String,
+}
+
+/// One way to apply a suggestion. `matches` counts the requests the pattern covers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ActionBody {
+    AddEntry {
+        label: MatchLabel,
+        add_entry: String,
+        matches: i64,
+    },
+    AddBypass {
+        label: MatchLabel,
+        add_bypass: String,
+        matches: i64,
+    },
+    AddSecretField {
+        add_secret_field: String,
+    },
+    SetAdvanced {
+        set_advanced: BTreeMap<String, i64>,
+    },
+}
+
+/// Whether a pattern matches one path exactly, or every path under a prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchLabel {
+    Exact,
+    Prefix,
+}
+
+/// The readiness check of an observe-mode site (docs/07 section 7.9.11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadinessBody {
+    /// When the site started observing, Unix milliseconds.
+    pub observing_since_millis: i64,
+    /// Requests observe mode would have refused, by the decision path that refused them.
+    pub would_block: BTreeMap<String, i64>,
+    pub open_suggestions: i64,
+    /// `idle`, `ok`, `degraded` or `down`.
+    pub jev_health: String,
+    /// The 95th percentile of the window's Jev round trips, in whole milliseconds.
+    pub jev_p95_ms: Option<i64>,
+    /// Timeouts over calls, from 0 to 1; null when the window has no Jev call.
+    pub jev_timeout_ratio: Option<f64>,
+    /// How often a value learned from a would-be refused request was cited later.
+    pub after_would_block_refs: i64,
+    pub on_jev_unavailable: OnJevUnavailable,
+}
+
+/// `GET /api/sites/{name}/evidence` (docs/07 section 7.9.2): the Jev latency, timeouts,
+/// call-limit peaks and hits, and cached allows of the last 24 hours.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceBody {
+    pub window_hours: i64,
+    pub jev: JevEvidenceBody,
+    pub call_limit: CallLimitEvidenceBody,
+    pub cache: CacheEvidenceBody,
+    /// Jev calls per latency bucket, each `histogram_bucket_ms` wide.
+    pub histogram: Vec<i64>,
+    pub histogram_bucket_ms: i64,
+}
+
+/// The Jev round trips of the window, and the timeout the site applies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JevEvidenceBody {
+    pub calls: i64,
+    /// Latency percentiles in whole milliseconds; null when there is no call.
+    pub p50_ms: Option<i64>,
+    pub p95_ms: Option<i64>,
+    pub p99_ms: Option<i64>,
+    pub timeouts: i64,
+    pub timeout_ms_used: u32,
+}
+
+/// The per-minute call limits: the busiest minute of each scope, and the calls refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallLimitEvidenceBody {
+    pub session_peak: i64,
+    pub address_peak: i64,
+    pub session_hits: i64,
+    pub address_hits: i64,
+}
+
+/// The allow cache: the requests it answered in the window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheEvidenceBody {
+    pub cached_allows: i64,
+}
+
 /// A suggestion before it is sent. `key` names what it concerns (a pattern, a
 /// word, a template or a setting). The id is made of the kind, the method and the
 /// key, so the same suggestion keeps its id from one window to the next.
@@ -263,22 +380,26 @@ struct Draft {
     key: String,
     count: i64,
     sample: Option<String>,
-    actions: Vec<Value>,
+    actions: Vec<ActionBody>,
     reason: String,
 }
 
-impl Draft {
-    fn to_json(&self) -> Value {
-        json!({
-            "id": suggestion_id(self.kind, self.method.as_deref().unwrap_or(""), &self.key),
-            "kind": self.kind,
-            "method": self.method,
-            "path": self.path,
-            "count": self.count,
-            "sample": self.sample,
-            "actions": self.actions,
-            "reason": self.reason,
-        })
+impl From<&Draft> for SuggestionBody {
+    fn from(draft: &Draft) -> Self {
+        Self {
+            id: suggestion_id(
+                draft.kind,
+                draft.method.as_deref().unwrap_or(""),
+                &draft.key,
+            ),
+            kind: draft.kind.to_owned(),
+            method: draft.method.clone(),
+            path: draft.path.clone(),
+            count: draft.count,
+            sample: draft.sample.clone(),
+            actions: draft.actions.clone(),
+            reason: draft.reason.clone(),
+        }
     }
 }
 
@@ -480,22 +601,22 @@ fn entry_drafts(groups: &[PathGroup], spec: &SiteSpec) -> Vec<Draft> {
         .into_iter()
         .map(|((method, path), total)| {
             let parent = parent_dir(&path);
-            let mut actions = vec![json!({
-                "label": "exact",
-                "add_entry": path,
-                "matches": total.count,
-            })];
+            let mut actions = vec![ActionBody::AddEntry {
+                label: MatchLabel::Exact,
+                add_entry: path.clone(),
+                matches: total.count,
+            }];
             let mut reason =
                 "无会话的请求被拒绝。登记为入口后，这类请求改为按地址判定。".to_owned();
             if let Some(family) = parents
                 .get(parent)
                 .filter(|family| !parent.is_empty() && family.paths.len() >= PREFIX_MIN_PATHS)
             {
-                actions.push(json!({
-                    "label": "prefix",
-                    "add_entry": format!("{parent}/*"),
-                    "matches": family.count,
-                }));
+                actions.push(ActionBody::AddEntry {
+                    label: MatchLabel::Prefix,
+                    add_entry: format!("{parent}/*"),
+                    matches: family.count,
+                });
                 let _ = write!(
                     reason,
                     "同一父路径下有 {} 个路径；前缀入口会放大无会话可达的范围。",
@@ -552,18 +673,22 @@ fn bypass_drafts(groups: &[PathGroup], spec: &SiteSpec) -> Vec<Draft> {
     totals
         .into_iter()
         .map(|(pattern, (prefix, total))| {
-            let label = if prefix { "prefix" } else { "exact" };
+            let label = if prefix {
+                MatchLabel::Prefix
+            } else {
+                MatchLabel::Exact
+            };
             Draft {
                 kind: BYPASS_CANDIDATE,
                 method: total.method(),
                 path: Some(pattern.clone()),
                 count: total.count,
                 sample: total.example(),
-                actions: vec![json!({
-                    "label": label,
-                    "add_bypass": pattern,
-                    "matches": total.count,
-                })],
+                actions: vec![ActionBody::AddBypass {
+                    label,
+                    add_bypass: pattern.clone(),
+                    matches: total.count,
+                }],
                 reason: format!(
                     "静态资源，涉及 {} 个路径，合并为 {pattern}。绕过后这些请求不再判定。",
                     total.paths.len()
@@ -592,7 +717,11 @@ async fn upload_drafts(pool: &PgPool, scope: &Scope) -> ApiResult<Vec<Draft>> {
                 path: Some(path.clone()),
                 count,
                 sample: Some(sample),
-                actions: vec![json!({ "label": "exact", "add_bypass": path, "matches": count })],
+                actions: vec![ActionBody::AddBypass {
+                    label: MatchLabel::Exact,
+                    add_bypass: path.clone(),
+                    matches: count,
+                }],
                 reason: "请求体无法检查（过大或长度未知）。加入绕过后，该接口不做越权判定。"
                     .to_owned(),
                 key: path,
@@ -624,7 +753,9 @@ async fn secret_drafts(pool: &PgPool, scope: &Scope, spec: &SiteSpec) -> ApiResu
             path: None,
             count: hit.calls,
             sample: hit.sample,
-            actions: vec![json!({ "add_secret_field": word })],
+            actions: vec![ActionBody::AddSecretField {
+                add_secret_field: word.clone(),
+            }],
             reason: format!(
                 "字段 {word} 的值未脱敏（{} 次 Jev 调用，{} 个值）。加入 secret_fields 后这些值不再发给 Jev；Jev 无法据此判断越权。",
                 hit.calls, hit.values
@@ -688,10 +819,10 @@ async fn sample_request(
 
 /// An action that sets one advanced parameter of the site.
 #[must_use]
-fn set_advanced(key: &str, value: i64) -> Value {
-    let mut section = Map::new();
-    section.insert(key.to_owned(), json!(value));
-    json!({ "set_advanced": section })
+fn set_advanced(key: &str, value: i64) -> ActionBody {
+    ActionBody::SetAdvanced {
+        set_advanced: BTreeMap::from([(key.to_owned(), value)]),
+    }
 }
 
 /// Orders suggestions by rule, then by count, and keeps `SUGGESTIONS_PER_RULE`
@@ -885,45 +1016,48 @@ async fn readiness_of(
     analysis: &Analysis,
     hours: i64,
     now: i64,
-) -> ApiResult<Value> {
+) -> ApiResult<ReadinessBody> {
     let name = record.spec.name();
     let since = observing_since(pool, name)
         .await?
         .unwrap_or(record.created_at);
-    let mut would_block: BTreeMap<&str, i64> = BTreeMap::new();
+    let mut would_block: BTreeMap<String, i64> = BTreeMap::new();
     for group in analysis
         .groups
         .iter()
         .filter(|group| group.outcome == WOULD_BLOCK)
     {
-        *would_block.entry(group.decision_path.as_str()).or_insert(0) += group.count;
+        *would_block.entry(group.decision_path.clone()).or_insert(0) += group.count;
     }
     let stats = &analysis.stats;
     let last = decision_stats::last_calls(pool, 5).await?;
     let health = health_of(
         stats.calls,
         stats.calls - stats.ok,
-        stats.p95_ms.map(|ms| ms.round() as i64),
+        whole_ms(stats.p95_ms),
         i64::from(Effective::of(&record.spec).jev_timeout_ms),
         last.len() == 5 && last.iter().all(Option::is_some),
     );
     let refs =
         decision_stats::after_would_block_references(pool, name, now - hours * HOUR_MILLIS).await?;
     let ratio = (stats.calls > 0).then(|| stats.timeouts as f64 / stats.calls as f64);
-    let on_unavailable = match record.spec.on_jev_unavailable() {
-        OnJevUnavailable::Deny => "deny",
-        OnJevUnavailable::Allow => "allow",
-    };
-    Ok(json!({
-        "observing_since_millis": since.timestamp_millis(),
-        "would_block": would_block,
-        "open_suggestions": analysis.drafts.len(),
-        "jev_health": health.as_str(),
-        "jev_p95_ms": stats.p95_ms,
-        "jev_timeout_ratio": ratio,
-        "after_would_block_refs": refs,
-        "on_jev_unavailable": on_unavailable,
-    }))
+    Ok(ReadinessBody {
+        observing_since_millis: since.timestamp_millis(),
+        would_block,
+        open_suggestions: i64::try_from(analysis.drafts.len()).unwrap_or(i64::MAX),
+        jev_health: health.as_str().to_owned(),
+        jev_p95_ms: whole_ms(stats.p95_ms),
+        jev_timeout_ratio: ratio,
+        after_would_block_refs: refs,
+        on_jev_unavailable: record.spec.on_jev_unavailable(),
+    })
+}
+
+/// A latency in whole milliseconds, rounded the way the API reports them (docs/07
+/// section 7.9.2).
+#[allow(clippy::cast_possible_truncation)]
+fn whole_ms(ms: Option<f64>) -> Option<i64> {
+    ms.map(|ms| ms.round() as i64)
 }
 
 /// The `window_hours` parameter: a whole number of hours from 1 to 168, 24 by
@@ -949,7 +1083,7 @@ pub async fn insights(
     State(state): State<Arc<ControlState>>,
     Path(name): Path<String>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<InsightsBody>> {
     let hours = window_hours(&Params::from(query))?;
     let now = now_millis();
     let record = site_spec_store::get(&state.pool, &name)
@@ -960,13 +1094,12 @@ pub async fn insights(
         Mode::Observe => Some(readiness_of(&state.pool, &record, &analysis, hours, now).await?),
         Mode::Enforce => None,
     };
-    let suggestions: Vec<Value> = analysis.drafts.iter().map(Draft::to_json).collect();
-    Ok(Json(json!({
-        "window_hours": hours,
-        "suggestions": suggestions,
-        "readiness": readiness,
-        "complete": analysis.complete,
-    })))
+    Ok(Json(InsightsBody {
+        window_hours: hours,
+        suggestions: analysis.drafts.iter().map(SuggestionBody::from).collect(),
+        readiness,
+        complete: analysis.complete,
+    }))
 }
 
 /// The evidence shown beside the judging parameters: the last 24 hours of Jev
@@ -979,7 +1112,7 @@ pub async fn insights(
 pub async fn evidence(
     State(state): State<Arc<ControlState>>,
     Path(name): Path<String>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<EvidenceBody>> {
     let record = site_spec_store::get(&state.pool, &name)
         .await?
         .ok_or_else(site_not_found)?;
@@ -1005,26 +1138,26 @@ pub async fn evidence(
     let session_hits = refused_count(&rows, SESSION_CONTEXT, JEV_CALL_LIMIT);
     let address_hits = refused_count(&rows, ADDRESS_CONTEXT, JEV_CALL_LIMIT);
     let cached_allows = sum_rows(&rows, |row| row.decision_path == CACHED_ALLOW);
-    Ok(Json(json!({
-        "window_hours": EVIDENCE_WINDOW_HOURS,
-        "jev": {
-            "calls": stats.calls,
-            "p50_ms": stats.p50_ms,
-            "p95_ms": stats.p95_ms,
-            "p99_ms": stats.p99_ms,
-            "timeouts": stats.timeouts,
-            "timeout_ms_used": limits.jev_timeout_ms,
+    Ok(Json(EvidenceBody {
+        window_hours: EVIDENCE_WINDOW_HOURS,
+        jev: JevEvidenceBody {
+            calls: stats.calls,
+            p50_ms: whole_ms(stats.p50_ms),
+            p95_ms: whole_ms(stats.p95_ms),
+            p99_ms: whole_ms(stats.p99_ms),
+            timeouts: stats.timeouts,
+            timeout_ms_used: limits.jev_timeout_ms,
         },
-        "call_limit": {
-            "session_peak": session_peak,
-            "address_peak": address_peak,
-            "session_hits": session_hits,
-            "address_hits": address_hits,
+        call_limit: CallLimitEvidenceBody {
+            session_peak,
+            address_peak,
+            session_hits,
+            address_hits,
         },
-        "cache": { "cached_allows": cached_allows },
-        "histogram": histogram_counts(&histogram),
-        "histogram_bucket_ms": HISTOGRAM_BUCKET_MS,
-    })))
+        cache: CacheEvidenceBody { cached_allows },
+        histogram: histogram_counts(&histogram),
+        histogram_bucket_ms: HISTOGRAM_BUCKET_MS,
+    }))
 }
 
 /// The number of suggestions `insights` lists for the default window, from the same

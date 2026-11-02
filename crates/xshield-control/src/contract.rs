@@ -8,7 +8,9 @@ use serde_json::{Map, Value, json};
 use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 
 use crate::auth::SessionStateBody;
+use crate::insights::{EvidenceBody, InsightsBody};
 use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
+use crate::preview::PreviewBody;
 use crate::requests::{CountsBody, RequestRow};
 use crate::sessions::{SessionDetailBody, SessionsBody};
 use crate::sites::{SiteDetailBody, SitesBody, VersionsBody};
@@ -33,6 +35,9 @@ const SITES: &str = include_str!("../../../web/console/tests/fixtures/sites.json
 const SITE_JUICE: &str = include_str!("../../../web/console/tests/fixtures/site-juice.json");
 const SITE_EMR: &str = include_str!("../../../web/console/tests/fixtures/site-emr.json");
 const VERSIONS_EMR: &str = include_str!("../../../web/console/tests/fixtures/versions-emr.json");
+const INSIGHTS: &str = include_str!("../../../web/console/tests/fixtures/insights.json");
+const EVIDENCE: &str = include_str!("../../../web/console/tests/fixtures/evidence.json");
+const PREVIEW: &str = include_str!("../../../web/console/tests/fixtures/preview.json");
 const SESSION_TIMELINE: &str =
     include_str!("../../../web/console/tests/fixtures/session-timeline.json");
 const DETAILS: [&str; 3] = [
@@ -260,6 +265,100 @@ fn site_details_round_trip_through_the_detail_type() {
 #[test]
 fn versions_round_trip_through_the_versions_type() {
     assert_round_trips::<VersionsBody>(&fixture(VERSIONS_EMR), exactly);
+}
+
+#[test]
+fn insights_round_trip_through_the_insights_type() {
+    assert_round_trips::<InsightsBody>(&fixture(INSIGHTS), exactly);
+
+    // An enforce-mode site has no readiness check, so the field is null, not absent.
+    let mut enforce = fixture(INSIGHTS);
+    enforce["readiness"] = Value::Null;
+    assert_round_trips::<InsightsBody>(&enforce, exactly);
+
+    // Each kind of action a suggestion carries, and a suggestion about a setting
+    // rather than about requests, which has no method or path.
+    let mut every_kind = fixture(INSIGHTS);
+    every_kind["suggestions"] = json!([
+        {
+            "id": "7f3a9c1e5b2d4a60",
+            "kind": "raise_jev_timeout",
+            "method": null,
+            "path": null,
+            "count": 3,
+            "sample": null,
+            "actions": [{ "set_advanced": { "jev_timeout_ms": 3000 } }],
+            "reason": "timeouts",
+        },
+        {
+            "id": "0c4e8b2a9f1d7360",
+            "kind": "secret_field_candidate",
+            "method": null,
+            "path": null,
+            "count": 2,
+            "sample": "req_01a1973940107ebea1af2c54ce635f38",
+            "actions": [{ "add_secret_field": "ssn" }],
+            "reason": "unredacted",
+        },
+        {
+            "id": "b1d5f0e8c3a72946",
+            "kind": "hot_would_block",
+            "method": "GET",
+            "path": "/rest/products",
+            "count": 5,
+            "sample": "req_01a1973ed5c0732b8f29804d7fc746d3",
+            "actions": [],
+            "reason": "most refused",
+        },
+    ]);
+    assert_round_trips::<InsightsBody>(&every_kind, exactly);
+}
+
+#[test]
+fn evidence_round_trips_through_the_evidence_type() {
+    assert_round_trips::<EvidenceBody>(&fixture(EVIDENCE), exactly);
+
+    // A window with no Jev call has no latency percentiles.
+    let mut quiet = fixture(EVIDENCE);
+    quiet["jev"]["calls"] = json!(0);
+    quiet["jev"]["p50_ms"] = Value::Null;
+    quiet["jev"]["p95_ms"] = Value::Null;
+    quiet["jev"]["p99_ms"] = Value::Null;
+    assert_round_trips::<EvidenceBody>(&quiet, exactly);
+}
+
+#[test]
+fn preview_round_trips_through_the_preview_type() {
+    assert_round_trips::<PreviewBody>(&fixture(PREVIEW), exactly);
+
+    // Each kind of change the preview reports: a call limit that tightens, one that
+    // loosens, the cache, and a secret field. A window not read in full says so.
+    let mut every_kind = fixture(PREVIEW);
+    every_kind["complete"] = json!(false);
+    every_kind["changes"] = json!([
+        {
+            "kind": "call_limit",
+            "count": 4,
+            "detail": { "scope": "session", "old": 60, "new": 30, "keys": 2 },
+        },
+        {
+            "kind": "call_limit",
+            "count": 9,
+            "detail": { "scope": "address", "old": 30, "new": 60, "upper_bound": true },
+        },
+        {
+            "kind": "cache",
+            "count": 86,
+            "top": [["GET", "/assets/app.js", 86]],
+            "sample": "req_01a1973940107ebea1af2c54ce635f38",
+        },
+        {
+            "kind": "secret_fields",
+            "count": 5,
+            "detail": { "values": 7, "fields": [["ssn", 7]] },
+        },
+    ]);
+    assert_round_trips::<PreviewBody>(&every_kind, exactly);
 }
 
 #[test]
