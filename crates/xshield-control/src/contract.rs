@@ -7,20 +7,39 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 
+use crate::auth::SessionStateBody;
+use crate::insights::{EvidenceBody, InsightsBody};
 use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
-use crate::requests::{CountsBody, RequestRow};
-use crate::stats::TimeseriesBody;
+use crate::preview::PreviewBody;
+use crate::requests::{CountsBody, LookupBody, RequestDetailBody, RequestRow, RequestsPageBody};
+use crate::sessions::{SessionDetailBody, SessionsBody};
+use crate::sites::{SiteDetailBody, SitesBody, VersionsBody};
+use crate::stats::{SummaryBody, TimeseriesBody};
 use crate::status::StatusBody;
+use crate::system::SystemBody;
 
 const REQUESTS: &str = include_str!("../../../web/console/tests/fixtures/requests.json");
 const LOOKUP: &str = include_str!("../../../web/console/tests/fixtures/lookup.json");
 const COUNTS: &str = include_str!("../../../web/console/tests/fixtures/counts.json");
+const SUMMARY: &str = include_str!("../../../web/console/tests/fixtures/summary.json");
 const TIMESERIES: &str = include_str!("../../../web/console/tests/fixtures/timeseries.json");
 const JEV_STATUS: &str = include_str!("../../../web/console/tests/fixtures/jev-status.json");
 const JEV_STATS: &str = include_str!("../../../web/console/tests/fixtures/jev-stats.json");
 const PROMPT: &str = include_str!("../../../web/console/tests/fixtures/prompt.json");
 const STATUS: &str = include_str!("../../../web/console/tests/fixtures/status.json");
 const STATUS_DOWN: &str = include_str!("../../../web/console/tests/fixtures/status-down.json");
+const SYSTEM: &str = include_str!("../../../web/console/tests/fixtures/system.json");
+const SESSION: &str = include_str!("../../../web/console/tests/fixtures/session.json");
+const SESSIONS: &str = include_str!("../../../web/console/tests/fixtures/sessions.json");
+const SITES: &str = include_str!("../../../web/console/tests/fixtures/sites.json");
+const SITE_JUICE: &str = include_str!("../../../web/console/tests/fixtures/site-juice.json");
+const SITE_EMR: &str = include_str!("../../../web/console/tests/fixtures/site-emr.json");
+const VERSIONS_EMR: &str = include_str!("../../../web/console/tests/fixtures/versions-emr.json");
+const INSIGHTS: &str = include_str!("../../../web/console/tests/fixtures/insights.json");
+const EVIDENCE: &str = include_str!("../../../web/console/tests/fixtures/evidence.json");
+const PREVIEW: &str = include_str!("../../../web/console/tests/fixtures/preview.json");
+const SESSION_TIMELINE: &str =
+    include_str!("../../../web/console/tests/fixtures/session-timeline.json");
 const DETAILS: [&str; 3] = [
     include_str!(
         "../../../web/console/tests/fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json"
@@ -93,6 +112,28 @@ fn list_rows_round_trip_through_the_row_type() {
     assert!(!rows.is_empty());
     for row in rows {
         assert_round_trips::<RequestRow>(row, exactly);
+    }
+}
+
+#[test]
+fn request_page_round_trips_through_the_page_type() {
+    assert_round_trips::<RequestsPageBody>(&fixture(REQUESTS), exactly);
+
+    // A full page carries the cursor of the next one. The console treats it as opaque.
+    let mut full = fixture(REQUESTS);
+    full["next_cursor"] = json!("opaque-cursor");
+    assert_round_trips::<RequestsPageBody>(&full, exactly);
+}
+
+#[test]
+fn lookup_round_trips_through_the_lookup_type() {
+    assert_round_trips::<LookupBody>(&fixture(LOOKUP), exactly);
+}
+
+#[test]
+fn request_details_round_trip_through_the_detail_type() {
+    for text in DETAILS {
+        assert_round_trips::<RequestDetailBody>(&fixture(text), exactly);
     }
 }
 
@@ -185,6 +226,18 @@ fn timeseries_round_trips_through_the_timeseries_type() {
 }
 
 #[test]
+fn summary_round_trips_through_the_summary_type() {
+    let summary = fixture(SUMMARY);
+    assert_round_trips::<SummaryBody>(&summary, exactly);
+
+    // `scanned` is written only when the window was not read in full (docs/07 section 7.9.1).
+    let mut partial = summary.clone();
+    partial["complete"] = json!(false);
+    partial["scanned"] = json!(18204);
+    assert_round_trips::<SummaryBody>(&partial, exactly);
+}
+
+#[test]
 fn jev_status_round_trips_through_the_status_type() {
     assert_round_trips::<JevStatusBody>(&fixture(JEV_STATUS), exactly);
 }
@@ -203,4 +256,139 @@ fn prompt_round_trips_through_the_prompt_type() {
 fn status_fixtures_round_trip_through_the_status_type() {
     assert_round_trips::<StatusBody>(&fixture(STATUS), exactly);
     assert_round_trips::<StatusBody>(&fixture(STATUS_DOWN), exactly);
+}
+
+#[test]
+fn system_round_trips_through_the_system_type() {
+    assert_round_trips::<SystemBody>(&fixture(SYSTEM), exactly);
+}
+
+#[test]
+fn session_round_trips_through_the_session_state_type() {
+    assert_round_trips::<SessionStateBody>(&fixture(SESSION), exactly);
+
+    // The sign-in check answers `false` with a 401 when no session is valid.
+    let mut signed_out = fixture(SESSION);
+    signed_out["authenticated"] = json!(false);
+    assert_round_trips::<SessionStateBody>(&signed_out, exactly);
+}
+
+#[test]
+fn sites_round_trip_through_the_sites_type() {
+    assert_round_trips::<SitesBody>(&fixture(SITES), exactly);
+}
+
+#[test]
+fn site_details_round_trip_through_the_detail_type() {
+    assert_round_trips::<SiteDetailBody>(&fixture(SITE_JUICE), exactly);
+    assert_round_trips::<SiteDetailBody>(&fixture(SITE_EMR), exactly);
+}
+
+#[test]
+fn versions_round_trip_through_the_versions_type() {
+    assert_round_trips::<VersionsBody>(&fixture(VERSIONS_EMR), exactly);
+}
+
+#[test]
+fn insights_round_trip_through_the_insights_type() {
+    assert_round_trips::<InsightsBody>(&fixture(INSIGHTS), exactly);
+
+    // An enforce-mode site has no readiness check, so the field is null, not absent.
+    let mut enforce = fixture(INSIGHTS);
+    enforce["readiness"] = Value::Null;
+    assert_round_trips::<InsightsBody>(&enforce, exactly);
+
+    // Each kind of action a suggestion carries, and a suggestion about a setting
+    // rather than about requests, which has no method or path.
+    let mut every_kind = fixture(INSIGHTS);
+    every_kind["suggestions"] = json!([
+        {
+            "id": "7f3a9c1e5b2d4a60",
+            "kind": "raise_jev_timeout",
+            "method": null,
+            "path": null,
+            "count": 3,
+            "sample": null,
+            "actions": [{ "set_advanced": { "jev_timeout_ms": 3000 } }],
+            "reason": "timeouts",
+        },
+        {
+            "id": "0c4e8b2a9f1d7360",
+            "kind": "secret_field_candidate",
+            "method": null,
+            "path": null,
+            "count": 2,
+            "sample": "req_01a1973940107ebea1af2c54ce635f38",
+            "actions": [{ "add_secret_field": "ssn" }],
+            "reason": "unredacted",
+        },
+        {
+            "id": "b1d5f0e8c3a72946",
+            "kind": "hot_would_block",
+            "method": "GET",
+            "path": "/rest/products",
+            "count": 5,
+            "sample": "req_01a1973ed5c0732b8f29804d7fc746d3",
+            "actions": [],
+            "reason": "most refused",
+        },
+    ]);
+    assert_round_trips::<InsightsBody>(&every_kind, exactly);
+}
+
+#[test]
+fn evidence_round_trips_through_the_evidence_type() {
+    assert_round_trips::<EvidenceBody>(&fixture(EVIDENCE), exactly);
+
+    // A window with no Jev call has no latency percentiles.
+    let mut quiet = fixture(EVIDENCE);
+    quiet["jev"]["calls"] = json!(0);
+    quiet["jev"]["p50_ms"] = Value::Null;
+    quiet["jev"]["p95_ms"] = Value::Null;
+    quiet["jev"]["p99_ms"] = Value::Null;
+    assert_round_trips::<EvidenceBody>(&quiet, exactly);
+}
+
+#[test]
+fn preview_round_trips_through_the_preview_type() {
+    assert_round_trips::<PreviewBody>(&fixture(PREVIEW), exactly);
+
+    // Each kind of change the preview reports: a call limit that tightens, one that
+    // loosens, the cache, and a secret field. A window not read in full says so.
+    let mut every_kind = fixture(PREVIEW);
+    every_kind["complete"] = json!(false);
+    every_kind["changes"] = json!([
+        {
+            "kind": "call_limit",
+            "count": 4,
+            "detail": { "scope": "session", "old": 60, "new": 30, "keys": 2 },
+        },
+        {
+            "kind": "call_limit",
+            "count": 9,
+            "detail": { "scope": "address", "old": 30, "new": 60, "upper_bound": true },
+        },
+        {
+            "kind": "cache",
+            "count": 86,
+            "top": [["GET", "/assets/app.js", 86]],
+            "sample": "req_01a1973940107ebea1af2c54ce635f38",
+        },
+        {
+            "kind": "secret_fields",
+            "count": 5,
+            "detail": { "values": 7, "fields": [["ssn", 7]] },
+        },
+    ]);
+    assert_round_trips::<PreviewBody>(&every_kind, exactly);
+}
+
+#[test]
+fn sessions_round_trip_through_the_sessions_type() {
+    assert_round_trips::<SessionsBody>(&fixture(SESSIONS), exactly);
+}
+
+#[test]
+fn session_timeline_round_trips_through_the_detail_type() {
+    assert_round_trips::<SessionDetailBody>(&fixture(SESSION_TIMELINE), exactly);
 }

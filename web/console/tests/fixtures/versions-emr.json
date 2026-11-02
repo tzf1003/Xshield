@@ -33,7 +33,16 @@
             "ssn"
           ]
         }
-      }
+      },
+      "summary": [
+        {
+          "field": "advanced.secret_fields",
+          "added": [
+            "ssn"
+          ],
+          "removed": []
+        }
+      ]
     },
     {
       "version": 12,
@@ -67,7 +76,16 @@
             "idcard"
           ]
         }
-      }
+      },
+      "summary": [
+        {
+          "field": "entries",
+          "added": [],
+          "removed": [
+            "/api/admin"
+          ]
+        }
+      ]
     },
     {
       "version": 11,
@@ -102,7 +120,16 @@
             "idcard"
           ]
         }
-      }
+      },
+      "summary": [
+        {
+          "field": "entries",
+          "added": [
+            "/api/admin"
+          ],
+          "removed": []
+        }
+      ]
     },
     {
       "version": 10,
@@ -136,7 +163,14 @@
             "idcard"
           ]
         }
-      }
+      },
+      "summary": [
+        {
+          "field": "advanced.jev_timeout_ms",
+          "from": 2500,
+          "to": 3000
+        }
+      ]
     },
     {
       "version": 9,
@@ -170,7 +204,16 @@
             "idcard"
           ]
         }
-      }
+      },
+      "summary": [
+        {
+          "field": "advanced.secret_fields",
+          "from": null,
+          "to": [
+            "idcard"
+          ]
+        }
+      ]
     },
     {
       "version": 8,
@@ -201,7 +244,14 @@
         "advanced": {
           "jev_timeout_ms": 2500
         }
-      }
+      },
+      "summary": [
+        {
+          "field": "advanced.jev_timeout_ms",
+          "from": 2000,
+          "to": 2500
+        }
+      ]
     },
     {
       "version": 7,
@@ -232,7 +282,14 @@
         "advanced": {
           "jev_timeout_ms": 2000
         }
-      }
+      },
+      "summary": [
+        {
+          "field": "mode",
+          "from": "observe",
+          "to": "enforce"
+        }
+      ]
     },
     {
       "version": 6,
@@ -263,7 +320,14 @@
         "advanced": {
           "jev_timeout_ms": 2000
         }
-      }
+      },
+      "summary": [
+        {
+          "field": "advanced.jev_timeout_ms",
+          "from": null,
+          "to": 2000
+        }
+      ]
     },
     {
       "version": 5,
@@ -290,9 +354,17 @@
           "/favicon.ico"
         ],
         "mode": "observe",
-        "on_jev_unavailable": "deny",
-        "advanced": {}
-      }
+        "on_jev_unavailable": "deny"
+      },
+      "summary": [
+        {
+          "field": "bypass",
+          "added": [
+            "/favicon.ico"
+          ],
+          "removed": []
+        }
+      ]
     },
     {
       "version": 4,
@@ -318,9 +390,17 @@
           "/static/*"
         ],
         "mode": "observe",
-        "on_jev_unavailable": "deny",
-        "advanced": {}
-      }
+        "on_jev_unavailable": "deny"
+      },
+      "summary": [
+        {
+          "field": "bypass",
+          "added": [
+            "/static/*"
+          ],
+          "removed": []
+        }
+      ]
     },
     {
       "version": 3,
@@ -344,9 +424,17 @@
         ],
         "bypass": [],
         "mode": "observe",
-        "on_jev_unavailable": "deny",
-        "advanced": {}
-      }
+        "on_jev_unavailable": "deny"
+      },
+      "summary": [
+        {
+          "field": "entries",
+          "added": [
+            "/api/patients"
+          ],
+          "removed": []
+        }
+      ]
     },
     {
       "version": 2,
@@ -369,9 +457,17 @@
         ],
         "bypass": [],
         "mode": "observe",
-        "on_jev_unavailable": "deny",
-        "advanced": {}
-      }
+        "on_jev_unavailable": "deny"
+      },
+      "summary": [
+        {
+          "field": "entries",
+          "added": [
+            "/api/home"
+          ],
+          "removed": []
+        }
+      ]
     },
     {
       "version": 1,
@@ -393,9 +489,10 @@
         ],
         "bypass": [],
         "mode": "observe",
-        "on_jev_unavailable": "deny",
-        "advanced": {}
-      }
+        "on_jev_unavailable": "deny"
+      },
+      "summary": []
     }
-  ]
+  ],
+  "next_before": null
 }

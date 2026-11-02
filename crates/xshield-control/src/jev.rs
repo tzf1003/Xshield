@@ -14,7 +14,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sqlx::PgPool;
 use xshield_postgres::{
     decision_stats::{self, Scope},
@@ -91,7 +91,7 @@ pub(crate) struct Report {
     /// The newest failure within the retention: when, which code, which site.
     last_failure: Option<(i64, String, Option<String>)>,
     /// The configuration of the newest online gateway; `None` when none is online.
-    config: Option<Value>,
+    config: Option<JevConfigBody>,
 }
 
 /// The Jev health fields that `GET /api/jev/status` and the `jev` block of
@@ -123,7 +123,18 @@ pub struct JevFailure {
 pub struct JevStatusBody {
     #[serde(flatten)]
     pub fields: JevStatusFields,
-    pub config: Option<Value>,
+    pub config: Option<JevConfigBody>,
+}
+
+/// The Jev configuration one gateway reports: its route, endpoint host name, model,
+/// default timeout and prompt id. A value it does not report is `null`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JevConfigBody {
+    pub route: Option<String>,
+    pub endpoint_host: Option<String>,
+    pub model: Option<String>,
+    pub default_timeout_ms: Option<i64>,
+    pub prompt: Option<String>,
 }
 
 /// `GET /api/jev/stats`: calls, conclusions, failure codes, latency and confidence
@@ -338,17 +349,22 @@ fn newest_online(edges: &[EdgeStatus], now: DateTime<Utc>) -> Option<&EdgeStatus
 }
 
 /// The Jev configuration one instance reports: route, endpoint host, model, default
-/// timeout and prompt id. A value it does not report is `null`.
+/// timeout and prompt id. A value it does not report is `None`.
 #[must_use]
-pub(crate) fn reported_config(edge: &EdgeStatus) -> Value {
-    let field = |name: &str| edge.jev.get(name).cloned().unwrap_or(Value::Null);
-    json!({
-        "route": field("route"),
-        "endpoint_host": field("endpoint_host"),
-        "model": field("model"),
-        "default_timeout_ms": field("default_timeout_ms"),
-        "prompt": field("prompt"),
-    })
+pub(crate) fn reported_config(edge: &EdgeStatus) -> JevConfigBody {
+    let text = |name: &str| {
+        edge.jev
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    JevConfigBody {
+        route: text("route"),
+        endpoint_host: text("endpoint_host"),
+        model: text("model"),
+        default_timeout_ms: edge.jev.get("default_timeout_ms").and_then(Value::as_i64),
+        prompt: text("prompt"),
+    }
 }
 
 /// The health rule of docs/07 section 7.9.7 over one window. `failed` counts the
@@ -396,10 +412,9 @@ async fn timeout_for(pool: &PgPool, site: Option<&str>) -> ApiResult<i64> {
 
 /// The timeout a reported configuration names, or the deployment default.
 #[must_use]
-fn timeout_of(config: Option<&Value>) -> i64 {
+fn timeout_of(config: Option<&JevConfigBody>) -> i64 {
     config
-        .and_then(|config| config.get("default_timeout_ms"))
-        .and_then(Value::as_i64)
+        .and_then(|config| config.default_timeout_ms)
         .unwrap_or(DEFAULT_TIMEOUT_MS)
 }
 
@@ -414,7 +429,7 @@ fn newest_all_failed(recent: &[Option<String>]) -> bool {
 /// A latency in whole milliseconds, rounded to the nearest.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // a latency is far below the range of i64
-fn whole_ms(value: Option<f64>) -> Option<i64> {
+pub(crate) fn whole_ms(value: Option<f64>) -> Option<i64> {
     value.map(|ms| ms.round() as i64)
 }
 
@@ -542,6 +557,8 @@ fn confidence_counts(histogram: &[(i32, i64)]) -> Vec<i64> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]

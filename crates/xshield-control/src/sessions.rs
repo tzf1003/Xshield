@@ -11,10 +11,11 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::PgPool;
 use xshield_postgres::{
-    decision_log_store::{self, RequestSummary},
+    decision_log_store,
     decision_stats::{self, SessionFlag, SessionRow, TimelineOnly, TimelineRow},
 };
 
@@ -22,6 +23,7 @@ use crate::{
     ControlState,
     error::{ApiError, ApiResult},
     params::{Params, format_cursor, now_millis},
+    requests::RequestRow,
     stats::scope_from,
 };
 
@@ -36,6 +38,58 @@ const TIMELINE_MAX: i64 = 500;
 /// The longest session label.
 const LABEL_MAX_CHARS: usize = 64;
 
+/// `GET /api/sessions` (docs/07 section 7.9.6): the sessions active in the window,
+/// newest activity first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionsBody {
+    pub rows: Vec<SessionRowBody>,
+}
+
+/// One session as the list shows it, and as the detail's `summary` does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionRowBody {
+    /// Session label (16 hex digits).
+    pub label: String,
+    /// `session` or `address`.
+    pub context: Option<String>,
+    /// Site the session belongs to, when one site was seen.
+    pub site: Option<String>,
+    /// Oldest request, Unix milliseconds.
+    pub first_at_millis: i64,
+    /// Newest request, Unix milliseconds.
+    pub last_at_millis: i64,
+    /// Requests in the window.
+    pub requests: i64,
+    /// Jev round trips.
+    pub jev_calls: i64,
+    /// Refused requests.
+    pub blocked: i64,
+    /// Requests observe mode would have refused.
+    pub would_block: i64,
+    /// The request that issued the session, when it is still within retention.
+    pub issued_by: Option<String>,
+}
+
+/// `GET /api/sessions/{label}` (docs/07 section 7.9.6): the session's summary, its
+/// requests in time order, and the cursor for the next page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionDetailBody {
+    pub summary: SessionRowBody,
+    pub rows: Vec<TimelineRowBody>,
+    pub next_cursor: Option<String>,
+}
+
+/// One timeline row: the request row, then what its response taught the session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimelineRowBody {
+    #[serde(flatten)]
+    pub request: RequestRow,
+    pub learned: Option<i64>,
+    pub entry_passed: bool,
+    pub issued_session: Option<String>,
+    pub after_would_block: bool,
+}
+
 /// `GET /api/sessions`: `{"rows": [...]}`, the sessions active in the window,
 /// newest activity first.
 ///
@@ -45,18 +99,18 @@ const LABEL_MAX_CHARS: usize = 64;
 pub async fn list(
     State(state): State<Arc<ControlState>>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SessionsBody>> {
     let params = Params::from(query);
     let (scope, _) = scope_from(&params, now_millis())?;
     let flag = flag_param(&params)?;
     let limit = params.limit(LIST_DEFAULT, LIST_MAX)?;
     let sessions = decision_stats::sessions(&state.pool, &scope, None, flag, limit).await?;
     let issued = issuing_request_ids(&state.pool, &sessions).await?;
-    let rows: Vec<Value> = sessions
+    let rows = sessions
         .iter()
-        .map(|session| session_json(session, issued.get(&session.label).map(String::as_str)))
+        .map(|session| session_row(session, issued.get(&session.label).map(String::as_str)))
         .collect();
-    Ok(Json(json!({ "rows": rows })))
+    Ok(Json(SessionsBody { rows }))
 }
 
 /// `GET /api/sessions/{label}`: `{"summary": ..., "rows": [...], "next_cursor": ...}`.
@@ -73,7 +127,7 @@ pub async fn detail(
     State(state): State<Arc<ControlState>>,
     Path(label): Path<String>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SessionDetailBody>> {
     if !label_is_valid(&label) {
         return Err(ApiError::invalid_filter("label"));
     }
@@ -108,94 +162,63 @@ pub async fn detail(
         None
     };
     let issued = issuing_request_ids(&state.pool, std::slice::from_ref(&summary)).await?;
-    let rows: Vec<Value> = opening
+    let rows = opening
         .iter()
         .chain(page.iter())
-        .map(timeline_row_json)
+        .map(timeline_row)
         .collect();
-    Ok(Json(json!({
-        "summary": session_json(&summary, issued.get(&label).map(String::as_str)),
-        "rows": rows,
-        "next_cursor": next_cursor,
-    })))
+    Ok(Json(SessionDetailBody {
+        summary: session_row(&summary, issued.get(&label).map(String::as_str)),
+        rows,
+        next_cursor,
+    }))
 }
 
-/// One session as a list row shows it, and as the timeline's `summary` does: its
-/// label, context and site, the first and last request in Unix milliseconds, the
-/// counts, and the request that issued it.
-fn session_json(session: &SessionRow, issued_by: Option<&str>) -> Value {
-    json!({
-        "label": session.label,
-        "context": session.context,
-        "site": session.site,
-        "first_at_millis": session.first_at,
-        "last_at_millis": session.last_at,
-        "requests": session.requests,
-        "jev_calls": session.jev_calls,
-        "blocked": session.blocked,
-        "would_block": session.would_block,
-        "issued_by": issued_by,
-    })
-}
-
-/// One request as the request list shows it (docs/07 section 7.9.3). The keys
-/// match `requests::row_json`; the trace is left out.
-fn request_json(row: &RequestSummary) -> Value {
-    json!({
-        "id": row.id,
-        "request_id": row.request_id,
-        "at_millis": row.at_millis,
-        "site": row.site,
-        "site_version": row.site_version,
-        "method": row.method,
-        "host": row.host,
-        "path": row.path,
-        "query": row.query,
-        "status": row.status,
-        "decision_path": row.decision_path,
-        "outcome": row.outcome,
-        "session": row.session,
-        "context": row.context,
-        "client": row.client,
-        "total_ms": row.total_ms,
-        "jev": row.has_jev.then(|| json!({
-            "access": row.jev_access,
-            "attack": row.jev_attack,
-            "confidence": row.jev_confidence,
-            "ms": row.jev_ms,
-            "failure": row.jev_failure,
-        })),
-    })
-}
-
-/// A timeline row: the request row, then what its response taught the session
-/// (docs/07 section 7.4.3). `learned` is the count of new values, or null when the
-/// trace has no response section. `entry_passed` and `after_would_block` are false
-/// and `issued_session` is null in that case.
-fn timeline_row_json(row: &TimelineRow) -> Value {
-    let mut value = request_json(&row.summary);
-    let response = row.trace.get("response");
-    let learned = response
-        .and_then(|response| response.get("new_values"))
-        .and_then(Value::as_i64);
-    let entry_passed = response
-        .and_then(|response| response.get("entry_passed"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let after_would_block = response
-        .and_then(|response| response.get("after_would_block"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let issued_session = response
-        .and_then(|response| response.get("issued_session"))
-        .and_then(Value::as_str);
-    if let Value::Object(map) = &mut value {
-        map.insert("learned".to_owned(), json!(learned));
-        map.insert("entry_passed".to_owned(), json!(entry_passed));
-        map.insert("issued_session".to_owned(), json!(issued_session));
-        map.insert("after_would_block".to_owned(), json!(after_would_block));
+/// One session as the list shows it, and as the detail's `summary` does: its label,
+/// context and site, the first and last request in Unix milliseconds, the counts, and
+/// the request that issued it.
+#[must_use]
+fn session_row(session: &SessionRow, issued_by: Option<&str>) -> SessionRowBody {
+    SessionRowBody {
+        label: session.label.clone(),
+        context: session.context.clone(),
+        site: session.site.clone(),
+        first_at_millis: session.first_at,
+        last_at_millis: session.last_at,
+        requests: session.requests,
+        jev_calls: session.jev_calls,
+        blocked: session.blocked,
+        would_block: session.would_block,
+        issued_by: issued_by.map(str::to_owned),
     }
-    value
+}
+
+/// A timeline row: the request row as the request list shows it (docs/07 section
+/// 7.9.3), then what its response taught the session (section 7.4.3). `learned` is
+/// the count of new values, or null when the trace has no response section.
+/// `entry_passed` and `after_would_block` are false and `issued_session` is null in
+/// that case.
+#[must_use]
+fn timeline_row(row: &TimelineRow) -> TimelineRowBody {
+    let response = row.trace.get("response");
+    TimelineRowBody {
+        request: RequestRow::from(&row.summary),
+        learned: response
+            .and_then(|response| response.get("new_values"))
+            .and_then(Value::as_i64),
+        entry_passed: response
+            .and_then(|response| response.get("entry_passed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        issued_session: response
+            .and_then(|response| response.get("issued_session"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        after_would_block: response
+            .and_then(|response| response.get("after_would_block"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
 }
 
 /// The request that issued each of `sessions`, keyed by session label. Sessions

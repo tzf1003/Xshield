@@ -16,7 +16,8 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::PgPool;
 use xshield_core::context::{Mode, SiteSpec};
 use xshield_postgres::{
@@ -102,6 +103,83 @@ fn mode_change(before: Mode, after: Mode) -> Option<(&'static str, &'static str)
     }
 }
 
+/// `POST /api/sites/{name}/preview` (docs/07 section 7.9.10): what a proposed
+/// configuration would change over the last 24 hours. Nothing is written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewBody {
+    pub window_hours: i64,
+    /// Requests in the window.
+    pub rows: i64,
+    /// Path groups the requests fell into.
+    pub groups: usize,
+    /// False when the window was not read in full.
+    pub complete: bool,
+    pub changes: Vec<ChangeBody>,
+    pub patterns: PatternsBody,
+    /// Codes for what the history cannot estimate.
+    pub warnings: Vec<String>,
+}
+
+/// One change the proposed configuration would make. Route and cache changes name the
+/// requests they touch in `top`; setting changes say what moves in `detail`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChangeBody {
+    pub kind: String,
+    /// Requests the change affects.
+    pub count: i64,
+    /// The busiest method and path pairs, most requests first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<Vec<PathCount>>,
+    /// Requests observe mode would have refused, when some were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub would_block: Option<i64>,
+    /// A request id from the largest group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ChangeDetailBody>,
+}
+
+/// A method, a path and the requests they account for: `[method, path, requests]`.
+pub type PathCount = (String, String, i64);
+
+/// What a setting change moves. Each shape has its own fields, so the variants are
+/// told apart by them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChangeDetailBody {
+    /// A Jev timeout, in milliseconds, before and after.
+    Timeout { old_ms: u32, new_ms: u32 },
+    /// A per-minute limit that tightens, and how many keys would go over it.
+    CallLimit {
+        scope: String,
+        old: u32,
+        new: u32,
+        keys: i64,
+    },
+    /// A per-minute limit that loosens, and the refused calls it may let through.
+    CallLimitBound {
+        scope: String,
+        old: u32,
+        new: u32,
+        upper_bound: bool,
+    },
+    /// Unredacted values that a new secret field would hide, and the field locations
+    /// holding them most, as `[field, values]` pairs.
+    Secret {
+        values: i64,
+        fields: Vec<(String, i64)>,
+    },
+}
+
+/// The entries and bypass patterns the proposed configuration adds, with the requests
+/// each one matches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternsBody {
+    pub entries: BTreeMap<String, i64>,
+    pub bypass: BTreeMap<String, i64>,
+}
+
 /// The requests of one change kind: how many, how many observe mode would have
 /// refused, the method and path pairs they touch, and an example from the
 /// largest group.
@@ -132,23 +210,23 @@ impl Tally {
         }
     }
 
-    fn to_json(&self, kind: &str, count: i64) -> Value {
+    fn change(&self, kind: &str, count: i64) -> ChangeBody {
         let mut paths: Vec<(&(String, String), i64)> =
             self.paths.iter().map(|(key, n)| (key, *n)).collect();
         paths.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let top: Vec<Value> = paths
+        let top = paths
             .into_iter()
             .take(TOP_PATHS)
-            .map(|((method, path), n)| json!([method, path, n]))
+            .map(|((method, path), n)| (method.clone(), path.clone(), n))
             .collect();
-        let mut change = json!({ "kind": kind, "count": count, "top": top });
-        if self.would_block > 0 {
-            change["would_block"] = json!(self.would_block);
+        ChangeBody {
+            kind: kind.to_owned(),
+            count,
+            top: Some(top),
+            would_block: (self.would_block > 0).then_some(self.would_block),
+            sample: self.sample.as_ref().map(|(_, sample)| sample.clone()),
+            detail: None,
         }
-        if let Some((_, sample)) = &self.sample {
-            change["sample"] = json!(sample);
-        }
-        change
     }
 }
 
@@ -192,13 +270,18 @@ fn path_changes(current: &SiteSpec, proposed: &SiteSpec, groups: &[PathGroup]) -
 }
 
 /// A change that counts requests, or `None` when nothing is affected.
-fn plain_change(kind: &str, count: i64, detail: Value) -> Option<Value> {
+fn plain_change(kind: &str, count: i64, detail: ChangeDetailBody) -> Option<ChangeBody> {
     if count <= 0 {
         return None;
     }
-    let mut change = json!({ "kind": kind, "count": count });
-    change["detail"] = detail;
-    Some(change)
+    Some(ChangeBody {
+        kind: kind.to_owned(),
+        count,
+        top: None,
+        would_block: None,
+        sample: None,
+        detail: Some(detail),
+    })
 }
 
 /// The Jev timeout change: calls a shorter timeout would cut off, or timeouts a
@@ -208,7 +291,7 @@ async fn timeout_change(
     scope: &Scope,
     old: u32,
     new: u32,
-) -> ApiResult<Option<Value>> {
+) -> ApiResult<Option<ChangeBody>> {
     if old == new {
         return Ok(None);
     }
@@ -217,7 +300,10 @@ async fn timeout_change(
     Ok(plain_change(
         "jev_timeout",
         count,
-        json!({ "old_ms": old, "new_ms": new }),
+        ChangeDetailBody::Timeout {
+            old_ms: old,
+            new_ms: new,
+        },
     ))
 }
 
@@ -230,7 +316,7 @@ async fn call_limit_changes(
     rows: &[Breakdown],
     current: Effective,
     proposed: Effective,
-) -> ApiResult<Vec<Value>> {
+) -> ApiResult<Vec<ChangeBody>> {
     let limits = [
         (
             "session",
@@ -257,13 +343,23 @@ async fn call_limit_changes(
                 decision_stats::minute_peaks(pool, scope, by_address, i64::from(new)).await?;
             (
                 peaks.excess,
-                json!({ "scope": name, "old": old, "new": new, "keys": peaks.keys_over }),
+                ChangeDetailBody::CallLimit {
+                    scope: name.to_owned(),
+                    old,
+                    new,
+                    keys: peaks.keys_over,
+                },
             )
         } else {
             let refused = refused_count(rows, context, JEV_CALL_LIMIT);
             (
                 refused,
-                json!({ "scope": name, "old": old, "new": new, "upper_bound": true }),
+                ChangeDetailBody::CallLimitBound {
+                    scope: name.to_owned(),
+                    old,
+                    new,
+                    upper_bound: true,
+                },
             )
         };
         changes.extend(plain_change("call_limit", count, detail));
@@ -278,7 +374,7 @@ fn cache_change(
     groups: &[PathGroup],
     current: Effective,
     proposed: Effective,
-) -> Option<Value> {
+) -> Option<ChangeBody> {
     if proposed.cache_minutes != 0 || current.cache_minutes == 0 {
         return None;
     }
@@ -290,7 +386,7 @@ fn cache_change(
     {
         tally.add(group);
     }
-    (count > 0).then(|| tally.to_json("cache", count))
+    (count > 0).then(|| tally.change("cache", count))
 }
 
 /// The secret field change: Jev calls whose state holds a value that a newly
@@ -300,7 +396,7 @@ async fn secret_change(
     scope: &Scope,
     current: &SiteSpec,
     proposed: &SiteSpec,
-) -> ApiResult<Option<Value>> {
+) -> ApiResult<Option<ChangeBody>> {
     let added: Vec<String> = proposed
         .advanced()
         .secret_fields()
@@ -314,21 +410,22 @@ async fn secret_change(
     let words: Vec<&str> = added.iter().map(String::as_str).collect();
     let states = decision_stats::jev_state_rows(pool, scope).await?;
     let scan = scan_states(&states, &words);
-    let detail = json!({ "values": scan.values, "fields": top_fields(&scan.fields) });
+    let detail = ChangeDetailBody::Secret {
+        values: scan.values,
+        fields: top_fields(&scan.fields),
+    };
     Ok(plain_change("secret_fields", scan.calls, detail))
 }
 
 /// The field locations affected most, with their counts, most first.
-fn top_fields(fields: &BTreeMap<String, i64>) -> Value {
+fn top_fields(fields: &BTreeMap<String, i64>) -> Vec<(String, i64)> {
     let mut ranked: Vec<(&String, i64)> = fields.iter().map(|(name, n)| (name, *n)).collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-    Value::Array(
-        ranked
-            .into_iter()
-            .take(TOP_FIELDS)
-            .map(|(name, n)| json!([name, n]))
-            .collect(),
-    )
+    ranked
+        .into_iter()
+        .take(TOP_FIELDS)
+        .map(|(name, n)| (name.clone(), n))
+        .collect()
 }
 
 fn hosts_of(spec: &SiteSpec) -> BTreeSet<&str> {
@@ -381,7 +478,7 @@ pub async fn preview(
     Path(name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<PreviewBody>> {
     let body: Value = json_body(&headers, &body)?;
     let proposed = spec_from_body(&body)?;
     if proposed.name() != name {
@@ -402,7 +499,7 @@ pub async fn preview(
     let current = Effective::of(&record.spec);
     let next = Effective::of(&proposed);
 
-    let mut changes: Vec<Value> = Vec::new();
+    let mut changes: Vec<ChangeBody> = Vec::new();
     for kind in [
         NO_SESSION_TO_ENTRY,
         ENTRY_TO_NO_SESSION,
@@ -412,7 +509,7 @@ pub async fn preview(
         BLOCKED_TO_WOULD_BLOCK,
     ] {
         if let Some(tally) = paths.changed.get(kind) {
-            changes.push(tally.to_json(kind, tally.count));
+            changes.push(tally.change(kind, tally.count));
         }
     }
     changes.extend(
@@ -429,15 +526,21 @@ pub async fn preview(
     changes.extend(secret_change(&state.pool, &scope, &record.spec, &proposed).await?);
 
     let total: i64 = groups.iter().map(|group| group.count).sum();
-    Ok(Json(json!({
-        "window_hours": WINDOW_HOURS,
-        "rows": total,
-        "groups": groups.len(),
-        "complete": complete,
-        "changes": changes,
-        "patterns": { "entries": paths.entries, "bypass": paths.bypass },
-        "warnings": warning_codes(&record.spec, &proposed),
-    })))
+    Ok(Json(PreviewBody {
+        window_hours: WINDOW_HOURS,
+        rows: total,
+        groups: groups.len(),
+        complete,
+        changes,
+        patterns: PatternsBody {
+            entries: paths.entries,
+            bypass: paths.bypass,
+        },
+        warnings: warning_codes(&record.spec, &proposed)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    }))
 }
 
 #[cfg(test)]
@@ -523,11 +626,12 @@ mod tests {
         tally.add(&group("/a", true, "jev_allow", "allowed", 2));
         tally.add(&group("/b", true, "jev_deny", "would_block", 5));
         tally.add(&group("/a", true, "jev_allow", "allowed", 4));
-        let change = tally.to_json("judged_to_bypass", tally.count);
-        assert_eq!(change["top"][0], json!(["GET", "/a", 6]));
-        assert_eq!(change["top"][1], json!(["GET", "/b", 5]));
-        assert_eq!(change["would_block"], 5);
-        assert_eq!(change["sample"], "req_5");
+        let change = tally.change("judged_to_bypass", tally.count);
+        let top = change.top.expect("a tally lists its paths");
+        assert_eq!(top[0], ("GET".to_owned(), "/a".to_owned(), 6));
+        assert_eq!(top[1], ("GET".to_owned(), "/b".to_owned(), 5));
+        assert_eq!(change.would_block, Some(5));
+        assert_eq!(change.sample.as_deref(), Some("req_5"));
     }
 
     #[test]
