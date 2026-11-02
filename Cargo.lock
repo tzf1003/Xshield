@@ -3353,7 +3353,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xshield-audit"
-version = "0.1.1"
+version = "4.0.0-rc1"
 dependencies = [
  "crc32fast",
  "openssl",
@@ -3364,7 +3364,7 @@ dependencies = [
 
 [[package]]
 name = "xshield-control"
-version = "0.1.1"
+version = "4.0.0-rc1"
 dependencies = [
  "axum",
  "chrono",
@@ -3381,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "xshield-core"
-version = "0.1.1"
+version = "4.0.0-rc1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3391,7 +3391,7 @@ dependencies = [
 
 [[package]]
 name = "xshield-edge"
-version = "0.1.1"
+version = "4.0.0-rc1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3408,7 +3408,7 @@ dependencies = [
 
 [[package]]
 name = "xshield-evidence"
-version = "0.1.1"
+version = "4.0.0-rc1"
 dependencies = [
  "chrono",
  "openssl",
@@ -3423,7 +3423,7 @@ dependencies = [
 
 [[package]]
 name = "xshield-judge"
-version = "0.1.1"
+version = "4.0.0-rc1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3442,7 +3442,7 @@ dependencies = [
 
 [[package]]
 name = "xshield-postgres"
-version = "0.1.1"
+version = "4.0.0-rc1"
 dependencies = [
  "chrono",
  "serde_json",
@@ -3453,7 +3453,7 @@ dependencies = [
 
 [[package]]
 name = "xshield-worker"
-version = "0.1.1"
+version = "4.0.0-rc1"
 dependencies = [
  "bytes",
  "chrono",

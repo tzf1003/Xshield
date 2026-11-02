@@ -27,7 +27,7 @@ use crate::{
 
 /// `GET /api/system` (docs/07 section 7.9.8): the control build and the database
 /// version, every gateway instance with its last heartbeat, the decision log's
-/// partitions and loss intervals, and the run parameters.
+/// partitions, and the run parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemBody {
     /// The control plane's build version.
@@ -36,7 +36,7 @@ pub struct SystemBody {
     pub postgres: String,
     /// Every gateway instance, online or not, with its last heartbeat.
     pub edges: Vec<EdgeBody>,
-    /// The decision log's partitions, loss intervals and retention.
+    /// The decision log's partitions and retention.
     pub storage: StorageBody,
     /// The run parameters in their two groups.
     pub params: ParamsBody,
@@ -86,14 +86,12 @@ pub struct SiteStateBody {
     pub error: Option<String>,
 }
 
-/// The decision log's storage: retention, the earliest record, the daily partitions
-/// and the loss intervals of every instance, flattened into one list.
+/// The decision log's storage: retention, the earliest record and the daily partitions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StorageBody {
     pub retention_days: u64,
     pub earliest_millis: Option<i64>,
     pub partitions: Vec<PartitionBody>,
-    pub gaps: Vec<StorageGapBody>,
 }
 
 /// One daily partition of the decision log. `to_millis` is exclusive.
@@ -104,24 +102,6 @@ pub struct PartitionBody {
     pub bytes: i64,
     pub from_millis: Option<i64>,
     pub to_millis: Option<i64>,
-}
-
-/// A loss interval of one instance, as the storage section lists it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StorageGapBody {
-    pub edge: String,
-    pub from_millis: i64,
-    pub to_millis: i64,
-    pub rows: i64,
-    pub reason: GapReason,
-}
-
-/// Why rows were lost in an interval: the queue was full, or an insert failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GapReason {
-    QueueFull,
-    WriteError,
 }
 
 /// The run parameters in the two groups of docs/07 section 7.9.8.
@@ -159,8 +139,8 @@ pub struct FixedParamsBody {
 }
 
 /// `GET /api/system`: the control build and the database version, every gateway
-/// instance with its last heartbeat, the decision log's partitions and loss
-/// intervals, and the run parameters.
+/// instance with its last heartbeat, the decision log's partitions, and the run
+/// parameters.
 ///
 /// # Errors
 /// `INTERNAL` when the database cannot be read.
@@ -184,7 +164,6 @@ pub async fn system(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Sy
             retention_days: partitions::RETENTION_DAYS,
             earliest_millis: earliest,
             partitions: daily.iter().map(partition_body).collect(),
-            gaps: storage_gaps(&edges),
         },
         params: runtime_params(reported),
     }))
@@ -246,45 +225,6 @@ fn gap_list(gaps: &Value) -> Vec<GapBody> {
                 dropped_bypass: count(gap, "dropped_bypass"),
                 write_errors: count(gap, "write_errors"),
             })
-        })
-        .collect()
-}
-
-/// The loss intervals of every instance, flattened into one list for the storage
-/// section.
-#[must_use]
-fn storage_gaps(edges: &[EdgeStatus]) -> Vec<StorageGapBody> {
-    edges
-        .iter()
-        .flat_map(|edge| storage_gap_rows(&edge.edge, &edge.gaps))
-        .collect()
-}
-
-/// The loss intervals one instance reports, as the storage section lists them.
-/// A gap is a `write_error` when writes failed in it and `queue_full` otherwise.
-/// Its rows are every row it dropped, on the queue or bypassing it, or failed to
-/// write.
-#[must_use]
-fn storage_gap_rows(edge: &str, gaps: &Value) -> Vec<StorageGapBody> {
-    gap_list(gaps)
-        .into_iter()
-        .map(|gap| {
-            let rows = gap
-                .dropped
-                .saturating_add(gap.dropped_bypass)
-                .saturating_add(gap.write_errors);
-            let reason = if gap.write_errors > 0 {
-                GapReason::WriteError
-            } else {
-                GapReason::QueueFull
-            };
-            StorageGapBody {
-                edge: edge.to_owned(),
-                from_millis: gap.from_ms,
-                to_millis: gap.to_ms,
-                rows,
-                reason,
-            }
         })
         .collect()
 }
@@ -403,29 +343,20 @@ mod tests {
     }
 
     #[test]
-    fn a_gap_is_a_write_error_when_writes_failed_and_counts_every_lost_row() {
+    fn a_gap_without_its_bounds_is_left_out_and_a_missing_counter_reads_as_zero() {
         let gaps = json!([
-            { "from_ms": 1_000, "to_ms": 2_000, "dropped": 3, "dropped_bypass": 1, "write_errors": 0 },
-            { "from_ms": 3_000, "to_ms": 4_000, "dropped": 0, "dropped_bypass": 0, "write_errors": 2 }
+            { "from_ms": 1_000, "dropped": 3 },
+            { "from_ms": 3_000, "to_ms": 4_000, "dropped": 2, "write_errors": 1 }
         ]);
         assert_eq!(
-            storage_gap_rows("edge-a", &gaps),
-            vec![
-                StorageGapBody {
-                    edge: "edge-a".to_owned(),
-                    from_millis: 1_000,
-                    to_millis: 2_000,
-                    rows: 4,
-                    reason: GapReason::QueueFull,
-                },
-                StorageGapBody {
-                    edge: "edge-a".to_owned(),
-                    from_millis: 3_000,
-                    to_millis: 4_000,
-                    rows: 2,
-                    reason: GapReason::WriteError,
-                },
-            ]
+            gap_list(&gaps),
+            vec![GapBody {
+                from_ms: 3_000,
+                to_ms: 4_000,
+                dropped: 2,
+                dropped_bypass: 0,
+                write_errors: 1,
+            }]
         );
     }
 
