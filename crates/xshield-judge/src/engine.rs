@@ -10,10 +10,11 @@ use xshield_core::context::{
     ObservationSummary, Observed, OnJevUnavailable, Outcome, SessionCredential, ShapeField,
     SiteSpec, Skip, Trace, TraceSession,
 };
+use xshield_core::kind::{Rules, Used};
 
 use crate::context::{
     CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Recent, SENT_MAX, SentRecord,
-    Source, label, request_number, request_text, site_synonym,
+    Source, label, request_number, request_text,
 };
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX};
 use crate::slots::{request_slot, route_template};
@@ -23,7 +24,7 @@ use crate::state::{
 use crate::trace::{entry_trace, recent_trace, redacted_query, value_entry};
 use crate::values::{
     ExtractedRequest, ResponseValue, extract_request, extract_response_facts, json_unescape,
-    percent_decode,
+    path_segment, percent_decode,
 };
 
 /// Jev calls allowed per session per minute (docs/02 section 2.5).
@@ -185,8 +186,8 @@ struct Tuning<'a> {
     address_calls: u32,
     /// Allow reuse window in milliseconds; 0 turns the cache off.
     cache_ms: u64,
-    /// The site's synonym pairs, reduced as the context compares them.
-    synonyms: Vec<(String, String)>,
+    /// The site's kind rules: synonym pairs and declared field kinds.
+    rules: Rules,
     secret_words: &'a [String],
 }
 
@@ -199,11 +200,7 @@ impl<'a> Tuning<'a> {
             session_calls: advanced.session_calls_per_minute_or(SESSION_CALLS_PER_MINUTE),
             address_calls: advanced.address_calls_per_minute_or(ADDRESS_CALLS_PER_MINUTE),
             cache_ms: u64::from(advanced.allow_cache_minutes_or(CACHE_MINUTES)) * 60_000,
-            synonyms: advanced
-                .synonyms()
-                .iter()
-                .filter_map(|(first, second)| site_synonym(first, second))
-                .collect(),
+            rules: Rules::of(advanced),
             secret_words: advanced.secret_fields(),
         }
     }
@@ -373,17 +370,20 @@ impl<J: JevPort> Judge<J> {
         let mut values = Vec::new();
         let mut shown = Vec::with_capacity(turn.extracted.values.len());
         for value in &turn.extracted.values {
-            let key = value.key.as_deref();
+            let used = Used {
+                value: &value.value,
+                path: request.path,
+                key: value.key.as_deref(),
+                segment: path_segment(&value.at),
+            };
             let seen = session.lookup(&self.key, &value.value);
             // The state and the trace both take their sources from this one
             // ranking, so `seen_as[j]` and `sources[j]` always name the same origin.
             let ranked = seen
-                .map(|seen| seen.ranked(&value.value, request.path, key, &tuning.synonyms))
+                .map(|seen| seen.ranked(used, &tuning.rules))
                 .unwrap_or_default();
-            let verified = !value.inert
-                && seen.is_some_and(|seen| {
-                    seen.is_specific(&value.value, request.path, key, &tuning.synonyms)
-                });
+            let verified =
+                !value.inert && seen.is_some_and(|seen| seen.is_specific(used, &tuning.rules));
             if !verified {
                 // An origin that echoes this value would otherwise teach it.
                 sent.push(self.key.mac("value", value.value.as_bytes()));
@@ -1697,6 +1697,108 @@ mod tests {
             )
             .await;
         assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    /// Whether the origin's response `body` at `origin_path` lets the request to
+    /// `path` pass without Jev. The session is new, so only this response counts.
+    async fn fast_allowed(
+        judge: &Judge<FakeJev>,
+        site: &SiteSpec,
+        session: &str,
+        (origin_path, body): (&str, &[u8]),
+        path: &str,
+    ) -> bool {
+        judge.observe(site, &shown(origin_path, body, session));
+        let verdict = judge
+            .judge(site, &get(path, None, Some(session), 1_000))
+            .await;
+        verdict.forward && verdict.record.decision_path == DecisionPath::FastAllow
+    }
+
+    #[tokio::test]
+    async fn a_declared_field_kind_decides_which_path_a_value_unlocks() {
+        // The rows of docs/field-kinds-design.md section 3, where `doc_id` names a doctor.
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let everywhere = site(
+            r#","mode":"enforce","advanced":{"field_kinds":[{"field":"doc_id","kind":"doctor"}]}"#,
+        );
+        // The declaration's name and kind are written differently; both still match.
+        let appointments = site(
+            r#","mode":"enforce","advanced":{"field_kinds":[{"field":"DocID","kind":"doctors","in":["/api/appointments*"]}]}"#,
+        );
+        let appointment = ("/api/appointments", br#"{"doc_id":2}"#.as_slice());
+        // A: the appointment's doc_id is a doctor, so the doctor path passes.
+        assert!(fast_allowed(&judge, &everywhere, "a", appointment, "/doctor/2").await);
+        assert!(fast_allowed(&judge, &appointments, "a2", appointment, "/doctor/2").await);
+        // B: a document id from the documents list is not a doctor.
+        let documents = ("/api/docs", br#"{"id":5}"#.as_slice());
+        assert!(!fast_allowed(&judge, &everywhere, "b", documents, "/doctor/5").await);
+        // C: the declared doctor is not a document.
+        assert!(!fast_allowed(&judge, &everywhere, "c", appointment, "/docs/2").await);
+        // D: a record's doc_id names a document. Without a scope the declaration
+        // makes it a doctor everywhere; the scope is what keeps it out of doctor paths.
+        let record = (
+            "/api/records/7",
+            br#"{"attachments":{"doc_id":5}}"#.as_slice(),
+        );
+        assert!(fast_allowed(&judge, &everywhere, "d", record, "/doctor/5").await);
+        assert!(!fast_allowed(&judge, &appointments, "d2", record, "/doctor/5").await);
+        // D': on a document path the record's id is a document again.
+        assert!(!fast_allowed(&judge, &everywhere, "d3", record, "/docs/5").await);
+        assert!(fast_allowed(&judge, &appointments, "d4", record, "/docs/5").await);
+    }
+
+    #[tokio::test]
+    async fn a_declared_kind_on_a_query_key_decides_by_the_key() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let plain = site(r#","mode":"enforce""#);
+        let declared = site(
+            r#","mode":"enforce","advanced":{"field_kinds":[{"field":"doc","kind":"doctor"}]}"#,
+        );
+        let scheduled = site(
+            r#","mode":"enforce","advanced":{"field_kinds":[{"field":"doc","kind":"doctor","in":["/api/schedule*"]}]}"#,
+        );
+        // Without a declaration the abbreviated `doc` names a document, not a doctor.
+        judge.observe(&plain, &shown("/api/home", br#"{"doctor_id":2}"#, "plain"));
+        let verdict = judge
+            .judge(
+                &plain,
+                &get("/doctor/2", Some("doc=2"), Some("plain"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(fake.calls(), 1);
+        // With the declaration the key names a doctor, so the value passes.
+        judge.observe(
+            &declared,
+            &shown("/api/home", br#"{"doctor_id":2}"#, "declared"),
+        );
+        let verdict = judge
+            .judge(
+                &declared,
+                &get("/doctor/2", Some("doc=2"), Some("declared"), 1_000),
+            )
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1);
+        // A scope limited to schedule paths does not cover this request's path.
+        judge.observe(
+            &scheduled,
+            &shown("/api/home", br#"{"doctor_id":2}"#, "scheduled"),
+        );
+        let verdict = judge
+            .judge(
+                &scheduled,
+                &get("/doctor/2", Some("doc=2"), Some("scheduled"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
         assert_eq!(fake.calls(), 2);
     }
 

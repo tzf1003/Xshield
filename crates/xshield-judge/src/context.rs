@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
-use crate::values::{ResponseValue, is_id_like, percent_decode};
+use xshield_core::kind::{Rules, Shown, Used, affinity, declares};
+
+use crate::values::{ResponseValue, is_id_like};
 
 /// Most values remembered per session.
 pub const SEEN_MAX: usize = 5_000;
@@ -147,6 +149,14 @@ pub struct Seen {
     pub origins: Vec<Origin>,
 }
 
+/// What an origin shows a value as, for the kind rules.
+fn as_shown(origin: &Origin) -> Shown<'_> {
+    Shown {
+        field: &origin.field,
+        request: &origin.request,
+    }
+}
+
 impl Seen {
     /// Adds an origin. The same field at the same position of the same request
     /// is one origin: the first sighting is kept and a repeat changes nothing
@@ -173,26 +183,21 @@ impl Seen {
         self.origins.push(origin);
     }
 
-    /// Whether the value is safe to fast-allow for a request to `path` under
-    /// the field `key`. Only an id-like field shows an object reference: a value
-    /// seen only under a name, a text or a note field never counts, so an echoed
-    /// search query or a comment does not. A long value (at least
-    /// [`LONG_VALUE_CHARS`]) then counts whatever kind of object its field
-    /// names. A short value collides across unrelated objects (basket 1,
-    /// product 1), so it also needs the origin field or the request that showed
-    /// it to name the same kind of object as the path or key. `synonyms` are the
-    /// site's extra pairs (see [`site_synonym`]).
+    /// Whether the value is safe to fast-allow for the request that uses it.
+    /// Only an id-like field shows an object reference, or a field the site
+    /// declares an identifier: a value seen only under a name, a text or a note
+    /// field never counts, so an echoed search query or a comment does not. A
+    /// long value (at least [`LONG_VALUE_CHARS`]) then counts whatever kind of
+    /// object its field names. A short value collides across unrelated objects
+    /// (basket 1, product 1), so it also needs the origin to show it as the kind
+    /// the request names for it (see `xshield_core::kind`).
     #[must_use]
-    pub fn is_specific(
-        &self,
-        value: &str,
-        path: &str,
-        key: Option<&str>,
-        synonyms: &[(String, String)],
-    ) -> bool {
-        let long = value.chars().count() >= LONG_VALUE_CHARS;
+    pub fn is_specific(&self, used: Used<'_>, rules: &Rules) -> bool {
+        let long = used.value.chars().count() >= LONG_VALUE_CHARS;
         self.origins.iter().any(|origin| {
-            is_id_like(&origin.field) && (long || affinity(origin, value, path, key, synonyms))
+            let shown = as_shown(origin);
+            (is_id_like(&origin.field) || declares(shown, rules))
+                && (long || affinity(shown, used, rules))
         })
     }
 
@@ -201,167 +206,15 @@ impl Seen {
     /// model sees only the last few, so a recent unrelated match (a stock
     /// count) must not push out the product list that really showed the id.
     #[must_use]
-    pub fn ranked(
-        &self,
-        value: &str,
-        path: &str,
-        key: Option<&str>,
-        synonyms: &[(String, String)],
-    ) -> Vec<&Origin> {
+    pub fn ranked(&self, used: Used<'_>, rules: &Rules) -> Vec<&Origin> {
         let mut origins: Vec<&Origin> = self.origins.iter().collect();
         origins.sort_by_key(|origin| {
-            u8::from(is_id_like(&origin.field))
-                + 2 * u8::from(affinity(origin, value, path, key, synonyms))
+            let shown = as_shown(origin);
+            u8::from(is_id_like(&origin.field) || declares(shown, rules))
+                + 2 * u8::from(affinity(shown, used, rules))
         });
         origins
     }
-}
-
-/// A site's synonym pair as the context compares it: the same reduction
-/// `kind_words` applies to field and path names (lower case, trailing `s`
-/// removed), so `address` matches the `addre` that `/api/Addresss` yields.
-/// A pair with a word shorter than three letters after that is dropped: an
-/// empty word would match every field.
-#[must_use]
-pub fn site_synonym(first: &str, second: &str) -> Option<(String, String)> {
-    let first = first.to_ascii_lowercase();
-    let second = second.to_ascii_lowercase();
-    let (first, second) = (first.trim_end_matches('s'), second.trim_end_matches('s'));
-    (first.len() >= 3 && second.len() >= 3).then(|| (first.to_owned(), second.to_owned()))
-}
-
-/// Whether the origin shows the value as the kind of object every use of it in
-/// the request names (see [`wanted_kinds`]).
-fn affinity(
-    origin: &Origin,
-    value: &str,
-    path: &str,
-    key: Option<&str>,
-    synonyms: &[(String, String)],
-) -> bool {
-    let shown = shown_kinds(origin);
-    let wanted = wanted_kinds(value, path, key);
-    !wanted.is_empty()
-        && wanted.iter().all(|words| {
-            words
-                .iter()
-                .any(|word| shown.iter().any(|other| related(word, other, synonyms)))
-        })
-}
-
-/// The kinds an origin shows a value as. The field's own name says what it
-/// identifies (`ProductId` is a product, whatever object carried it); a bare
-/// `id` takes the kind of its parent (`Products.id`), and a bare top-level `id`
-/// the kind of the request that returned it.
-fn shown_kinds(origin: &Origin) -> Vec<String> {
-    let (parent, last) = origin.field.rsplit_once('.').unwrap_or(("", &origin.field));
-    let mut shown = kind_words(last);
-    if shown.is_empty() {
-        shown = kind_words(parent);
-    }
-    if shown.is_empty() {
-        shown = kind_words(origin.request.split_once(' ').map_or("", |(_, path)| path));
-    }
-    shown
-}
-
-/// The kinds each use of the value in the request names, one list per use.
-///
-/// A query, form or body value takes the kind its key names, or the whole
-/// path's kinds when the key names none (a bare `id`). A path segment has no
-/// key: it takes the route word nearest before it, so in
-/// `/api/doctors/7/files/9` the 9 is a file whatever else the path names, and
-/// only a segment with no route word before it takes the whole path. A value
-/// that occurs in several segments names its kind in each of them. Segments
-/// are compared decoded, as the values were extracted.
-fn wanted_kinds(value: &str, path: &str, key: Option<&str>) -> Vec<Vec<String>> {
-    let by_key = key.map(kind_words).unwrap_or_default();
-    if !by_key.is_empty() {
-        return vec![by_key];
-    }
-    let whole = kind_words(path);
-    if key.is_some() {
-        return vec![whole];
-    }
-    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
-    let uses: Vec<Vec<String>> = segments
-        .iter()
-        .enumerate()
-        .filter(|&(_, segment)| percent_decode(segment, false) == value)
-        .map(|(index, _)| {
-            segments[..index]
-                .iter()
-                .rev()
-                .map(|segment| kind_words(segment))
-                .find(|words| !words.is_empty())
-                .unwrap_or_else(|| whole.clone())
-        })
-        .collect();
-    if uses.is_empty() { vec![whole] } else { uses }
-}
-
-const GENERIC_WORDS: [&str; 8] = ["api", "rest", "v1", "v2", "v3", "data", "value", "id"];
-
-/// Lower-cased words of a path or field name, camel case split, plural
-/// endings and generic route prefixes removed: `/api/Addresss/7` gives
-/// `address`, `ProductId` gives `product`.
-fn kind_words(text: &str) -> Vec<String> {
-    let mut spaced = String::with_capacity(text.len() + 8);
-    let mut previous_lower = false;
-    for c in text.chars() {
-        if c.is_ascii_uppercase() && previous_lower {
-            spaced.push(' ');
-        }
-        previous_lower = c.is_ascii_lowercase();
-        spaced.push(c);
-    }
-    spaced
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .map(|word| word.to_ascii_lowercase().trim_end_matches('s').to_owned())
-        .filter(|word| word.len() >= 3 && !GENERIC_WORDS.contains(&word.as_str()))
-        .collect()
-}
-
-/// Words for one kind of object that differ between a field and the endpoint
-/// that lists it (`paymentId` selects a card of `/api/Cards`).
-const SYNONYMS: [(&str, &str); 1] = [("payment", "card")];
-
-/// Identifier endings a compound word may carry (`doctorid`, `patientno`).
-/// Longer endings come first so that `uuid` is not read as `id`.
-const ID_SUFFIXES: [&str; 6] = ["uuid", "code", "num", "ref", "id", "no"];
-
-/// The kind a word names: a compound with an identifier ending loses the ending
-/// (`doctorid` names a doctor); any other word is its own kind. Containment does
-/// not make two words one kind: `doc` is part of `doctor`, and `outpatient` of
-/// `patient`, so a document id must not unlock a doctor path.
-fn kind_of(word: &str) -> &str {
-    ID_SUFFIXES
-        .into_iter()
-        .find_map(|suffix| word.strip_suffix(suffix))
-        .filter(|rest| rest.len() >= 3)
-        .unwrap_or(word)
-}
-
-fn same_kind(left: &str, right: &str) -> bool {
-    kind_of(left) == kind_of(right)
-}
-
-/// Whether two words name the same kind of object, or are a built-in or site
-/// synonym pair.
-fn related(left: &str, right: &str, synonyms: &[(String, String)]) -> bool {
-    let pairs = SYNONYMS
-        .iter()
-        .map(|(first, second)| (*first, *second))
-        .chain(
-            synonyms
-                .iter()
-                .map(|(first, second)| (first.as_str(), second.as_str())),
-        );
-    same_kind(left, right)
-        || pairs.into_iter().any(|(first, second)| {
-            (same_kind(left, first) && same_kind(right, second))
-                || (same_kind(left, second) && same_kind(right, first))
-        })
 }
 
 /// One remembered request.
@@ -695,6 +548,22 @@ impl ContextStore {
 
 #[cfg(test)]
 mod tests {
+    /// The use of a value as the engine makes it: a path value carries the index
+    /// of its segment.
+    fn used<'a>(value: &'a str, path: &'a str, key: Option<&'a str>) -> Used<'a> {
+        let segment = key.is_none().then(|| {
+            path.split('/')
+                .filter(|part| !part.is_empty())
+                .position(|part| part == value)
+        });
+        Used {
+            value,
+            path,
+            key,
+            segment: segment.flatten(),
+        }
+    }
+
     use super::*;
 
     fn key() -> ContextKey {
@@ -754,12 +623,12 @@ mod tests {
         );
         let seen = session.lookup(&key, "7").unwrap();
         assert_eq!(seen.origins[0].field, "id");
-        assert!(seen.is_specific("7", "/api/patients/7", None, &[]));
+        assert!(seen.is_specific(used("7", "/api/patients/7", None), &Rules::default()));
         assert!(
             !session
                 .lookup(&key, "8")
                 .unwrap()
-                .is_specific("8", "/api/patients/8", None, &[])
+                .is_specific(used("8", "/api/patients/8", None), &Rules::default())
         );
         assert!(session.lookup(&key, "9").is_none());
     }
@@ -782,14 +651,21 @@ mod tests {
         );
         let seen = session.lookup(&key, "1").unwrap();
         assert!(seen.is_specific(
-            "1",
-            "/rest/basket/22/checkout",
-            Some("deliveryMethodId"),
-            &[]
+            used("1", "/rest/basket/22/checkout", Some("deliveryMethodId")),
+            &Rules::default()
         ));
-        assert!(!seen.is_specific("1", "/rest/basket/22/checkout", Some("couponId"), &[]));
-        assert!(seen.is_specific("1", "/api/BasketItems/", Some("ProductId"), &[]));
-        let ranked = seen.ranked("1", "/api/BasketItems/", Some("ProductId"), &[]);
+        assert!(!seen.is_specific(
+            used("1", "/rest/basket/22/checkout", Some("couponId")),
+            &Rules::default()
+        ));
+        assert!(seen.is_specific(
+            used("1", "/api/BasketItems/", Some("ProductId")),
+            &Rules::default()
+        ));
+        let ranked = seen.ranked(
+            used("1", "/api/BasketItems/", Some("ProductId")),
+            &Rules::default(),
+        );
         assert_eq!(ranked.last().unwrap().request, "GET /rest/products/search");
         assert_eq!(ranked[0].field, "quantity");
     }
@@ -801,8 +677,14 @@ mod tests {
         let session = store.session(key.mac("session", b"cookie"), 0);
         session.remember(&key, &at("GET /api/Cards"), &[response("id", "7")]);
         let seen = session.lookup(&key, "7").unwrap();
-        assert!(seen.is_specific("7", "/rest/basket/22/checkout", Some("paymentId"), &[]));
-        assert!(!seen.is_specific("7", "/rest/basket/22/checkout", Some("addressId"), &[]));
+        assert!(seen.is_specific(
+            used("7", "/rest/basket/22/checkout", Some("paymentId")),
+            &Rules::default()
+        ));
+        assert!(!seen.is_specific(
+            used("7", "/rest/basket/22/checkout", Some("addressId")),
+            &Rules::default()
+        ));
     }
 
     #[test]
@@ -817,19 +699,19 @@ mod tests {
             &[response("outpatient_id", "3"), response("clinical_id", "4")],
         );
         let document = session.lookup(&key, "2").unwrap();
-        assert!(!document.is_specific("2", "/doctor/2", None, &[]));
-        assert!(document.is_specific("2", "/docs/2", None, &[]));
+        assert!(!document.is_specific(used("2", "/doctor/2", None), &Rules::default()));
+        assert!(document.is_specific(used("2", "/docs/2", None), &Rules::default()));
         assert!(
             !session
                 .lookup(&key, "3")
                 .unwrap()
-                .is_specific("3", "/patients/3", None, &[])
+                .is_specific(used("3", "/patients/3", None), &Rules::default())
         );
         assert!(
             !session
                 .lookup(&key, "4")
                 .unwrap()
-                .is_specific("4", "/clinic/4", None, &[])
+                .is_specific(used("4", "/clinic/4", None), &Rules::default())
         );
     }
 
@@ -844,13 +726,16 @@ mod tests {
             &[response("doctorid", "1"), response("doctorno", "5")],
         );
         let doctor = session.lookup(&key, "1").unwrap();
-        assert!(doctor.is_specific("1", "/doctor/1", None, &[]));
-        assert!(doctor.is_specific("1", "/api/doctors/1", Some("doctorId"), &[]));
+        assert!(doctor.is_specific(used("1", "/doctor/1", None), &Rules::default()));
+        assert!(doctor.is_specific(
+            used("1", "/api/doctors/1", Some("doctorId")),
+            &Rules::default()
+        ));
         assert!(
             session
                 .lookup(&key, "5")
                 .unwrap()
-                .is_specific("5", "/api/doctors/5", None, &[])
+                .is_specific(used("5", "/api/doctors/5", None), &Rules::default())
         );
     }
 
@@ -865,10 +750,12 @@ mod tests {
                 at_ms: 0,
             }],
         };
-        assert!(shown_as("patient_id").is_specific("P-0000042", "/x", None, &[]));
-        assert!(!shown_as("name").is_specific("P-0000042", "/x", None, &[]));
-        assert!(!shown_as("query").is_specific("P-0000042", "/x", None, &[]));
-        assert!(!shown_as("name").is_specific("alice", "/x", None, &[]));
+        assert!(
+            shown_as("patient_id").is_specific(used("P-0000042", "/x", None), &Rules::default())
+        );
+        assert!(!shown_as("name").is_specific(used("P-0000042", "/x", None), &Rules::default()));
+        assert!(!shown_as("query").is_specific(used("P-0000042", "/x", None), &Rules::default()));
+        assert!(!shown_as("name").is_specific(used("alice", "/x", None), &Rules::default()));
     }
 
     #[test]
@@ -883,23 +770,21 @@ mod tests {
             &[response("BasketItem.id", "9"), response("BasketId", "22")],
         );
         let delivery = session.lookup(&key, "1").unwrap();
-        assert!(delivery.is_specific("1", "/api/Deliverys/1", None, &[]));
-        assert!(!delivery.is_specific("1", "/rest/basket/1", None, &[]));
+        assert!(delivery.is_specific(used("1", "/api/Deliverys/1", None), &Rules::default()));
+        assert!(!delivery.is_specific(used("1", "/rest/basket/1", None), &Rules::default()));
         session.remember(
             &key,
             &at("GET /rest/basket/22"),
             &[response("Products.id", "1")],
         );
         let both = session.lookup(&key, "1").unwrap();
-        assert!(!both.is_specific("1", "/rest/basket/1", None, &[]));
-        assert!(both.is_specific("1", "/api/Products/1", None, &[]));
+        assert!(!both.is_specific(used("1", "/rest/basket/1", None), &Rules::default()));
+        assert!(both.is_specific(used("1", "/api/Products/1", None), &Rules::default()));
         let item = session.lookup(&key, "9").unwrap();
-        assert!(item.is_specific("9", "/api/BasketItems/9", None, &[]));
+        assert!(item.is_specific(used("9", "/api/BasketItems/9", None), &Rules::default()));
         assert!(session.lookup(&key, "22").unwrap().is_specific(
-            "22",
-            "/rest/basket/22/checkout",
-            None,
-            &[]
+            used("22", "/rest/basket/22/checkout", None),
+            &Rules::default()
         ));
     }
 
@@ -915,21 +800,47 @@ mod tests {
         );
         let doctor_7 = session.lookup(&key, "7").unwrap();
         let doctor_9 = session.lookup(&key, "9").unwrap();
+        let rules = Rules::default();
+        let segment = |value, path, segment| Used {
+            value,
+            path,
+            key: None,
+            segment: Some(segment),
+        };
         // `9` is a doctor in `/api/doctors/9`, but a file in the next path.
-        assert!(doctor_9.is_specific("9", "/api/doctors/9", None, &[]));
-        assert!(!doctor_9.is_specific("9", "/api/doctors/7/files/9", None, &[]));
-        assert!(doctor_7.is_specific("7", "/api/doctors/7/files/9", None, &[]));
+        assert!(doctor_9.is_specific(segment("9", "/api/doctors/9", 2), &rules));
+        assert!(!doctor_9.is_specific(segment("9", "/api/doctors/7/files/9", 4), &rules));
+        assert!(doctor_7.is_specific(segment("7", "/api/doctors/7/files/9", 2), &rules));
         // An id segment between a route word and the value does not hide the word.
-        assert!(doctor_9.is_specific("9", "/api/doctors/7/9", None, &[]));
-        // The same segment, percent-encoded, is the same value.
-        assert!(!doctor_9.is_specific("9", "/api/doctors/7/files/%39", None, &[]));
+        assert!(doctor_9.is_specific(segment("9", "/api/doctors/7/9", 3), &rules));
+        // The engine decodes a segment before it is compared: `%39` is the 9 at
+        // segment 4, and its route word is `files`.
+        assert!(!doctor_9.is_specific(segment("9", "/api/doctors/7/files/%39", 4), &rules));
         // A value in two segments must name its kind in both of them.
-        assert!(!doctor_7.is_specific("7", "/api/doctors/7/files/7", None, &[]));
-        assert!(doctor_7.is_specific("7", "/api/doctors/7/doctors/7", None, &[]));
+        assert!(doctor_7.is_specific(segment("7", "/api/doctors/7/doctors/7", 4), &rules));
+        assert!(!doctor_7.is_specific(segment("7", "/api/doctors/7/files/7", 4), &rules));
         // A segment with no route word before it takes the whole path.
-        assert!(doctor_7.is_specific("7", "/7/doctors", None, &[]));
+        assert!(doctor_7.is_specific(segment("7", "/7/doctors", 0), &rules));
         // A named parameter still decides by its name.
-        assert!(doctor_9.is_specific("9", "/api/files", Some("doctorId"), &[]));
+        assert!(doctor_9.is_specific(used("9", "/api/files", Some("doctorId")), &rules));
+    }
+
+    #[test]
+    fn a_declared_name_that_looks_like_no_id_is_an_identifier() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(&key, &at("GET /api/home"), &[response("doc", "2")]);
+        let seen = session.lookup(&key, "2").unwrap();
+        let spec = xshield_core::context::SiteSpec::from_json(
+            r#"{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{"cookie":"SID"},
+               "entries":["/login"],"advanced":{"field_kinds":[{"field":"doc","kind":"doctor"}]}}"#,
+        )
+        .unwrap();
+        let declared = Rules::of(spec.advanced());
+        assert!(!is_id_like("doc"));
+        assert!(!seen.is_specific(used("2", "/doctor/2", None), &Rules::default()));
+        assert!(seen.is_specific(used("2", "/doctor/2", None), &declared));
     }
 
     #[test]

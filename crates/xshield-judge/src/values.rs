@@ -204,6 +204,13 @@ fn inert_value(key: Option<&str>, value: &str) -> bool {
     }
 }
 
+/// The index of the path segment a value sits in, from its location: `path[2]`
+/// is segment 2 among the non-empty segments. `None` for any other location.
+#[must_use]
+pub fn path_segment(at: &str) -> Option<usize> {
+    at.strip_prefix("path[")?.strip_suffix(']')?.parse().ok()
+}
+
 /// Percent-decodes `text`; `plus` also maps `+` to a space (query and forms).
 #[must_use]
 pub fn percent_decode(text: &str, plus: bool) -> String {

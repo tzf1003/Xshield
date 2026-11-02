@@ -41,7 +41,7 @@ advanced:                      # 可选：站点级判定参数，省略的项�
 | `bypass` | 否 | 静态资源等无需判定的路径，默认空 |
 | `mode` | 否 | 默认 `observe` |
 | `on_jev_unavailable` | 否 | 默认 `deny`；设为 `allow` 时，未经判定放行的请求在判定日志里单独标注 |
-| `advanced` | 否 | 站点级判定参数：`jev_timeout_ms`、`session_calls_per_minute`、`address_calls_per_minute`、`allow_cache_minutes`、`secret_fields`、`synonyms`。每项都可省略，省略时取代码默认值，判定行为不变。取值范围、作用和调整的代价见 [07.6](07-console-architecture.md#76-站点级判定参数advanced) |
+| `advanced` | 否 | 站点级判定参数：`jev_timeout_ms`、`session_calls_per_minute`、`address_calls_per_minute`、`allow_cache_minutes`、`secret_fields`、`synonyms`、`field_kinds`。每项都可省略，省略时取代码默认值，判定行为不变。取值范围、作用和调整的代价见 [07.6](07-console-architecture.md#76-站点级判定参数advanced) |
 
 Jev 超时、调用限额、放行缓存时长、追加脱敏字段、同义词可以按站点在 `advanced` 里覆盖（管理员 2026-11-01 决定，原因见 [07.1.3](07-console-architecture.md#713-新增项必要性审查)）。上下文容量、会话过期时间、请求体和响应的解析上限、`state` 大小等其余参数仍是代码默认值，不出现在配置里；控制台只读展示网关的实际值。
 
