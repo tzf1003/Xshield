@@ -157,6 +157,8 @@ export type SiteSearch = GlobalSearch & {
   group?: string;
   /** The version to compare with the current one, in the history tab. */
   diff?: string;
+  /** A path for a new interface-name rule in the configuration tab (`route=/gw/path`). */
+  route?: string;
 };
 
 export function validateSite(raw: Record<string, unknown>): SiteSearch {
@@ -166,6 +168,7 @@ export function validateSite(raw: Record<string, unknown>): SiteSearch {
     edit: oneOf(raw.edit, ["form", "yaml"] as const),
     group: str(raw.group),
     diff: str(raw.diff),
+    route: str(raw.route),
   };
 }
 

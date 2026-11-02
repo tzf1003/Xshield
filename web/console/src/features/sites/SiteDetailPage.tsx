@@ -5,7 +5,7 @@
 
 import { Link, useBlocker, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { Modal, Tabs } from "antd";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useDeleteSite, useSite } from "../../api/queries.ts";
 import type { SiteDetail, SiteSpec, SiteVersion } from "../../api/types.ts";
 import { useKeys } from "../../app/keys.ts";
@@ -14,7 +14,7 @@ import { canonical, semanticChanges } from "../../lib/diff.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { validateSpec } from "../../lib/site-validate.ts";
 import { ErrorBar, Loading, Notice, PageHead } from "../../ui/Page.tsx";
-import { ConfigTab, isConfigGroup } from "./ConfigTab.tsx";
+import { type ConfigGroupId, ConfigTab, isConfigGroup } from "./ConfigTab.tsx";
 import { HistoryTab } from "./HistoryTab.tsx";
 import { InsightsTab } from "./InsightsTab.tsx";
 import { ModeSwitchDialog } from "./ModeSwitchDialog.tsx";
@@ -90,6 +90,12 @@ function RolloutBanner({
   );
 }
 
+/** The group a configuration link opens: the one it names, else the rules when it names a path, else the basics. */
+function groupOf(search: { group?: string; route?: string }): ConfigGroupId {
+  if (isConfigGroup(search.group)) return search.group;
+  return search.route ? "routes" : "basics";
+}
+
 function SiteDetailBody({ name }: { name: string }) {
   const search = useSearch({ from: "/sites/$name" });
   const setSearch = useSetSearch();
@@ -148,24 +154,41 @@ function SiteDetailBody({ name }: { name: string }) {
     withResolver: true,
   });
 
-  const changeDraft = (next: SiteSpec) => {
-    if (data === undefined) return;
-    setFlash(null);
-    if (canonical(next) === canonical(data.spec)) {
-      clearDraft(name);
-      setDraft(null);
-      return;
-    }
-    const record = { base: draft?.base ?? data.version, spec: next };
-    writeDraft(name, record);
-    setDraft(record);
-  };
+  const changeDraft = useCallback(
+    (next: SiteSpec) => {
+      if (data === undefined) return;
+      setFlash(null);
+      if (canonical(next) === canonical(data.spec)) {
+        clearDraft(name);
+        setDraft(null);
+        return;
+      }
+      const record = { base: draft?.base ?? data.version, spec: next };
+      writeDraft(name, record);
+      setDraft(record);
+    },
+    [data, draft, name],
+  );
 
   const discard = () => {
     clearDraft(name);
     setDraft(null);
     setFlash(null);
   };
+
+  // A link to the configuration with `route=<path>` adds a rule for that path, its segment reading a request header
+  // and its name left for the user to fill in. Each link adds it once: a rule for the path already there is kept.
+  const routeLink = useRef<string | null>(null);
+  useEffect(() => {
+    const route = search.route;
+    if (!route || search.tab !== "config" || data === undefined) return;
+    const key = `${name}\n${route}`;
+    if (routeLink.current === key) return;
+    routeLink.current = key;
+    const rules = working.routes ?? [];
+    if (rules.some((rule) => rule.path === route)) return;
+    changeDraft({ ...working, routes: [...rules, { path: route, name_from: [["header."]] }] });
+  }, [search.route, search.tab, data, name, working, changeDraft]);
 
   /** Save (⌘S or the draft bar): a configuration with errors goes to the first wrong group, otherwise the dialog. */
   const requestSave = () => {
@@ -230,7 +253,7 @@ function SiteDetailBody({ name }: { name: string }) {
 
   const tab = search.tab ?? "overview";
   const edit = search.edit ?? "form";
-  const group = isConfigGroup(search.group) ? search.group : "basics";
+  const group = groupOf(search);
   const tabItems = [
     { key: "overview", label: "概览" },
     { key: "config", label: "配置" },

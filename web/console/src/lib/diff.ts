@@ -177,6 +177,7 @@ export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null)
   const bypass = setDiff(before.bypass ?? [], after.bypass ?? []);
   for (const rule of bypass.added) changes.push(`绕过 ＋1：${rule}`);
   for (const rule of bypass.removed) changes.push(`绕过 －1：${rule}`);
+  changes.push(...routeChanges(before.routes ?? [], after.routes ?? []));
   if (before.hosts.join(",") !== after.hosts.join(",")) {
     changes.push(`Host ${before.hosts.join("、")} → ${after.hosts.join("、")}`);
   }

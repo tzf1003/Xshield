@@ -3,7 +3,13 @@
 // a suggestion to a draft, and how a value reads in words. Pure functions: no React, no requests.
 
 import { parseDocument } from "yaml";
-import type { Advanced, SessionCredential, SiteSpec, SuggestionAction } from "../../api/types.ts";
+import type {
+  Advanced,
+  RouteRule,
+  SessionCredential,
+  SiteSpec,
+  SuggestionAction,
+} from "../../api/types.ts";
 import { isRecord } from "../../lib/storage.ts";
 import { parseSiteText } from "../../lib/yaml.ts";
 import { PARAM_INFO } from "../../lib/vocab.ts";
@@ -168,6 +174,33 @@ function sessionOf(value: unknown): Check<SessionCredential> {
   return { ok: true, value: { header: header.value } };
 }
 
+/** The interface-name rules of a YAML or JSON configuration: each rule has a path and its segments. */
+function routesOf(value: unknown): Check<RouteRule[] | undefined> {
+  if (value === undefined || value === null) return { ok: true, value: undefined };
+  if (!Array.isArray(value)) return fail("接口名规则应写成列表，每条有 path 和 name_from");
+  const rules: RouteRule[] = [];
+  const items: unknown[] = value;
+  for (const item of items) {
+    if (!isRecord(item) || typeof item.path !== "string" || !Array.isArray(item.name_from)) {
+      return fail("接口名规则每条要写成 path 和 name_from 两个键");
+    }
+    const segments: unknown[] = item.name_from;
+    const groups: string[][] = [];
+    for (const segment of segments) {
+      const locations: unknown[] = Array.isArray(segment) ? segment : [];
+      const texts = locations.filter(
+        (location): location is string => typeof location === "string",
+      );
+      if (!Array.isArray(segment) || texts.length !== locations.length) {
+        return fail("name_from 每一段要写成位置列表，例如 [header.X-Service-Id]");
+      }
+      groups.push(texts);
+    }
+    rules.push({ path: item.path, name_from: groups });
+  }
+  return { ok: true, value: rules };
+}
+
 function advancedOf(value: unknown): Check<Advanced | undefined> {
   if (value === undefined || value === null) return { ok: true, value: undefined };
   if (!isRecord(value)) return fail("高级判定参数应写成 名称: 值 的形式");
@@ -227,6 +260,8 @@ export function normalizeSpec(raw: unknown): Check<SiteSpec> {
   if (!unavailable.ok) return unavailable;
   const advanced = advancedOf(raw.advanced);
   if (!advanced.ok) return advanced;
+  const routes = routesOf(raw.routes);
+  if (!routes.ok) return routes;
   const spec: SiteSpec = {
     name: name.value,
     hosts: hosts.value,
@@ -238,6 +273,7 @@ export function normalizeSpec(raw: unknown): Check<SiteSpec> {
   if (mode.value !== undefined) spec.mode = mode.value;
   if (unavailable.value !== undefined) spec.on_jev_unavailable = unavailable.value;
   if (advanced.value !== undefined) spec.advanced = advanced.value;
+  if (routes.value !== undefined && routes.value.length > 0) spec.routes = routes.value;
   return { ok: true, value: spec };
 }
 
@@ -358,6 +394,11 @@ export function rebaseSpec(
     ),
     advanced: Object.keys(advanced).length > 0 ? advanced : undefined,
   };
+  // A rule is identified by its whole text: an edited rule is a removal and an addition.
+  const routes = mergeList(base.routes ?? [], mine.routes ?? [], latest.routes ?? [], (rule) =>
+    JSON.stringify(rule),
+  );
+  if (routes.length > 0) spec.routes = routes;
   return { spec, conflicts };
 }
 
