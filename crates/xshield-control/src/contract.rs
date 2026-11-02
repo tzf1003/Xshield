@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 
+use crate::auth::SessionStateBody;
 use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
 use crate::requests::{CountsBody, RequestRow};
 use crate::sessions::{SessionDetailBody, SessionsBody};
@@ -25,6 +26,7 @@ const PROMPT: &str = include_str!("../../../web/console/tests/fixtures/prompt.js
 const STATUS: &str = include_str!("../../../web/console/tests/fixtures/status.json");
 const STATUS_DOWN: &str = include_str!("../../../web/console/tests/fixtures/status-down.json");
 const SYSTEM: &str = include_str!("../../../web/console/tests/fixtures/system.json");
+const SESSION: &str = include_str!("../../../web/console/tests/fixtures/session.json");
 const SESSIONS: &str = include_str!("../../../web/console/tests/fixtures/sessions.json");
 const SESSION_TIMELINE: &str =
     include_str!("../../../web/console/tests/fixtures/session-timeline.json");
@@ -227,6 +229,16 @@ fn status_fixtures_round_trip_through_the_status_type() {
 #[test]
 fn system_round_trips_through_the_system_type() {
     assert_round_trips::<SystemBody>(&fixture(SYSTEM), exactly);
+}
+
+#[test]
+fn session_round_trips_through_the_session_state_type() {
+    assert_round_trips::<SessionStateBody>(&fixture(SESSION), exactly);
+
+    // The sign-in check answers `false` with a 401 when no session is valid.
+    let mut signed_out = fixture(SESSION);
+    signed_out["authenticated"] = json!(false);
+    assert_round_trips::<SessionStateBody>(&signed_out, exactly);
 }
 
 #[test]

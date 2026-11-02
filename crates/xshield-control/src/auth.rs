@@ -30,8 +30,7 @@ use openssl::{
     rand::rand_bytes,
     sign::Signer,
 };
-use serde::Deserialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
 use xshield_core::constant_time;
 
 use crate::{
@@ -361,7 +360,10 @@ pub async fn login(
     state.login_limiter.clear(address);
     let token = issue_session_token(&state.session_key)
         .ok_or_else(|| ApiError::internal("session", "could not sign a token"))?;
-    let mut response = axum::Json(json!({ "authenticated": true })).into_response();
+    let mut response = axum::Json(SessionStateBody {
+        authenticated: true,
+    })
+    .into_response();
     set_session_cookie(&mut response, &token, SESSION_LIFETIME_SECS);
     Ok(response)
 }
@@ -369,20 +371,35 @@ pub async fn login(
 /// `POST /api/logout`: clears the session cookie. Needs no session.
 #[allow(clippy::unused_async)] // axum handlers are async functions.
 pub async fn logout() -> Response {
-    let mut response = axum::Json(json!({ "authenticated": false })).into_response();
+    let mut response = axum::Json(SessionStateBody {
+        authenticated: false,
+    })
+    .into_response();
     set_session_cookie(&mut response, "", 0);
     response
+}
+
+/// Whether the request carries a valid session, as `GET /api/session` and the sign-in
+/// and sign-out responses report it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionStateBody {
+    pub authenticated: bool,
 }
 
 /// `GET /api/session`: whether the request carries a valid session.
 #[allow(clippy::unused_async)] // axum handlers are async functions.
 pub async fn session(State(state): State<Arc<ControlState>>, headers: HeaderMap) -> Response {
     if session_authenticated(&state, &headers) {
-        axum::Json(json!({ "authenticated": true })).into_response()
+        axum::Json(SessionStateBody {
+            authenticated: true,
+        })
+        .into_response()
     } else {
         (
             StatusCode::UNAUTHORIZED,
-            axum::Json(json!({ "authenticated": false })),
+            axum::Json(SessionStateBody {
+                authenticated: false,
+            }),
         )
             .into_response()
     }
