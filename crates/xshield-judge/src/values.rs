@@ -210,6 +210,32 @@ pub fn percent_decode(text: &str, plus: bool) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Decodes the JSON `\uXXXX` escapes of `text`, so that the tokens of an escaped
+/// value match the value the origin decodes from it. A malformed escape stays as
+/// it is. The other JSON escapes (`\"`, `\\`, `\/`) only sit beside a token, where
+/// the tokenizer already splits.
+#[must_use]
+pub fn json_unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find("\\u") {
+        out.push_str(&rest[..index]);
+        let decoded = rest
+            .get(index + 2..index + 6)
+            .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+            .and_then(char::from_u32);
+        if let Some(c) = decoded {
+            out.push(c);
+            rest = &rest[index + 6..];
+        } else {
+            out.push_str("\\u");
+            rest = &rest[index + 2..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn hex(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -699,6 +725,16 @@ mod tests {
         assert_eq!(percent_decode("a%2Fb%zz%", false), "a/b%zz%");
         assert_eq!(percent_decode("a+b", true), "a b");
         assert_eq!(percent_decode("a+b", false), "a+b");
+    }
+
+    #[test]
+    fn json_unicode_escapes_decode_and_malformed_ones_stay() {
+        assert_eq!(
+            json_unescape(r#"{"id":"P-0000099"}"#),
+            r#"{"id":"P-0000099"}"#
+        );
+        assert_eq!(json_unescape(r"\uZZZZ \u00"), r"\uZZZZ \u00");
+        assert_eq!(json_unescape("plain text"), "plain text");
     }
 
     #[test]

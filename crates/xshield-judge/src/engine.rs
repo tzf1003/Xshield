@@ -1,7 +1,7 @@
 //! The decision flow of docs/01 section 1.4, and the row that describes each
 //! decision (docs/07 sections 7.4 and 7.5).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -12,15 +12,18 @@ use xshield_core::context::{
 };
 
 use crate::context::{
-    CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Recent, Source, label,
-    request_number, request_text, site_synonym,
+    CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Recent, SENT_MAX, SentRecord,
+    Source, label, request_number, request_text, site_synonym,
 };
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX};
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
 };
 use crate::trace::{entry_trace, recent_trace, redacted_query, value_entry};
-use crate::values::{ExtractedRequest, ResponseValue, extract_request, extract_response};
+use crate::values::{
+    ExtractedRequest, ResponseValue, extract_request, extract_response, json_unescape,
+    percent_decode,
+};
 
 /// Jev calls allowed per session per minute (docs/02 section 2.5).
 pub const SESSION_CALLS_PER_MINUTE: u32 = 60;
@@ -66,6 +69,12 @@ pub struct Judgement {
     /// request gets one, bypassed paths included. The gateway completes the
     /// edge fields and the status before the row is written.
     pub record: DecisionRecord,
+    /// Digests of the values the request sent that the session had not seen as
+    /// references, or of every token of the request when its values were not all
+    /// extracted. Empty unless the request is forwarded. The edge hands them back
+    /// in the [`Observation`] of the response, which teaches the session nothing
+    /// from an echo of them.
+    pub sent: Vec<Digest16>,
 }
 
 /// A response the origin returned, for [`Judge::observe`].
@@ -97,6 +106,8 @@ pub struct Observation<'a> {
     pub would_block: bool,
     /// Unix time in milliseconds.
     pub now_ms: u64,
+    /// The digests of the values the request sent (see [`Judgement::sent`]).
+    pub sent: &'a [Digest16],
 }
 
 #[derive(Default)]
@@ -250,6 +261,7 @@ impl<J: JevPort> Judge<J> {
                 forward: true,
                 refuse_status: 0,
                 record,
+                sent: Vec::new(),
             };
         }
         let entry = site.matching_entry(request.path);
@@ -282,7 +294,8 @@ impl<J: JevPort> Judge<J> {
             tuning: &tuning,
         };
         let mut jev = None;
-        let verdict = match self.plan(&turn, &mut record.trace) {
+        let mut sent = Vec::new();
+        let verdict = match self.plan(&turn, &mut record.trace, &mut sent) {
             Plan::Done(verdict) => verdict,
             Plan::Ask { limit_key, values } => {
                 let (verdict, row) = self
@@ -293,6 +306,20 @@ impl<J: JevPort> Judge<J> {
             }
         };
         let (decision_path, outcome, forward, refuse_status) = apply_policy(site, verdict);
+        if forward && extracted.truncated {
+            // Values the extraction did not reach are echoed like any other, so
+            // every token of the request is noted instead. When they do not fit,
+            // the session stops learning from responses.
+            match self.token_digests(request) {
+                Some(digests) => sent.extend(digests),
+                None => self.stop_learning(
+                    session_id.or_else(|| {
+                        entry.map(|_| self.key.mac("address", request.client.as_bytes()))
+                    }),
+                    request.now_ms,
+                ),
+            }
+        }
         record.decision_path = decision_path;
         record.outcome = outcome;
         record.jev = jev;
@@ -314,12 +341,14 @@ impl<J: JevPort> Judge<J> {
             forward,
             refuse_status,
             record,
+            sent: if forward { sent } else { Vec::new() },
         }
     }
 
     /// Steps 2 to 5: everything that can be settled without calling Jev. Fills
-    /// the trace's values and session as it goes.
-    fn plan(&self, turn: &Turn<'_>, trace: &mut Trace) -> Plan {
+    /// the trace's values and session as it goes, and collects into `sent` the
+    /// digests of the values the session had not seen as references.
+    fn plan(&self, turn: &Turn<'_>, trace: &mut Trace, sent: &mut Vec<Digest16>) -> Plan {
         let request = turn.request;
         let tuning = turn.tuning;
         // Without a credential only an entry may pass (a login, a sign-up
@@ -348,6 +377,10 @@ impl<J: JevPort> Judge<J> {
                 && seen.is_some_and(|seen| {
                     seen.is_specific(&value.value, request.path, key, &tuning.synonyms)
                 });
+            if !verified {
+                // An origin that echoes this value would otherwise teach it.
+                sent.push(self.key.mac("value", value.value.as_bytes()));
+            }
             if !value.inert {
                 all_known &= verified;
                 values.push(StateValue {
@@ -564,6 +597,10 @@ impl<J: JevPort> Judge<J> {
             summary.skip = Some(Skip::Bypass);
             return summary;
         }
+        // The origin answered the request, so an echo of what it sent teaches
+        // nothing, whatever the status: a refused request's values can still come
+        // back in a later response, such as a list of recent attempts.
+        let inherited = self.note_request_sent(observation, issued.is_some());
         let success = (200..300).contains(&observation.status);
         let issuing_redirect = (300..400).contains(&observation.status) && issued.is_some();
         if !success {
@@ -622,6 +659,12 @@ impl<J: JevPort> Judge<J> {
                 self.key.mac("session", credential.as_bytes()),
                 observation.now_ms,
             );
+            if issued == Some(credential) {
+                if let Some(record) = &inherited {
+                    session.inherit_sent(record);
+                }
+                session.note_sent(observation.sent);
+            }
             let added = session.remember(&self.key, &source, &values);
             if new_values.is_none() {
                 new_values = Some(added);
@@ -639,6 +682,76 @@ impl<J: JevPort> Judge<J> {
         }
         summary.new_values = new_values.unwrap_or(0);
         summary
+    }
+
+    /// Stops the session that `context` names from learning from responses.
+    fn stop_learning(&self, context: Option<Digest16>, now_ms: u64) {
+        if let Some(context) = context {
+            let mut inner = self.lock();
+            inner.store.session(context, now_ms).stop_learning();
+        }
+    }
+
+    /// The digests of every token of a request's path, query and body, for a
+    /// request whose values were not all extracted: an echo of any token is then
+    /// not learned either. Each token is taken from the text as sent and as the
+    /// origin may decode it: percent escapes in the path, query and body, and
+    /// JSON `\uXXXX` escapes in the body. `None` when the distinct tokens do not
+    /// fit in what a session may have sent.
+    fn token_digests(&self, request: &RequestFacts<'_>) -> Option<Vec<Digest16>> {
+        let query = request.query.unwrap_or("");
+        let body = String::from_utf8_lossy(request.body);
+        let texts = [
+            request.path.to_owned(),
+            percent_decode(request.path, false),
+            query.to_owned(),
+            percent_decode(query, true),
+            body.to_string(),
+            percent_decode(&body, false),
+            json_unescape(&body),
+        ];
+        let mut digests = HashSet::new();
+        for text in &texts {
+            for token in text
+                .split(|c: char| {
+                    !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '+'))
+                })
+                .filter(|token| !token.is_empty())
+            {
+                digests.insert(self.key.mac("value", token.as_bytes()));
+                if digests.len() > SENT_MAX {
+                    return None;
+                }
+            }
+        }
+        Some(digests.into_iter().collect())
+    }
+
+    /// Records the values the request sent in the session it was judged in: its
+    /// credential, or the client address when it had none. When the response
+    /// issues a credential, returns what the request's session sent, for the new
+    /// session to inherit.
+    fn note_request_sent(
+        &self,
+        observation: &Observation<'_>,
+        issuing: bool,
+    ) -> Option<SentRecord> {
+        let request_context = match observation
+            .credential
+            .filter(|credential| !credential.is_empty())
+        {
+            Some(credential) => self.key.mac("session", credential.as_bytes()),
+            None => self.key.mac("address", observation.client.as_bytes()),
+        };
+        let mut inner = self.lock();
+        let inherited = issuing.then(|| inner.store.sent_record(&request_context));
+        if !observation.sent.is_empty() {
+            inner
+                .store
+                .session(request_context, observation.now_ms)
+                .note_sent(observation.sent);
+        }
+        inherited
     }
 
     /// Extracts the configured credential from `cookie_header` / header values.
@@ -944,6 +1057,7 @@ mod tests {
             content_type: Some("application/json"),
             body: br#"{"items":[{"id":"7","name":"A","age":8},{"id":"9","name":"B"}]}"#,
             now_ms,
+            sent: &[],
         }
     }
 
@@ -1032,6 +1146,21 @@ mod tests {
             content_type: Some("application/json"),
             body,
             now_ms: 0,
+            sent: &[],
+        }
+    }
+
+    /// What the origin showed the session of `verdict` for `GET path`: the
+    /// response to that request, with the digests the judgement sent.
+    fn answered<'a>(
+        verdict: &'a Judgement,
+        path: &'a str,
+        body: &'a [u8],
+        credential: &'a str,
+    ) -> Observation<'a> {
+        Observation {
+            sent: &verdict.sent,
+            ..shown(path, body, credential)
         }
     }
 
@@ -1091,6 +1220,427 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_search_that_echoes_its_query_does_not_make_the_id_seen() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // Jev allows the search, and the origin echoes the query back.
+        let search = judge
+            .judge(
+                &site,
+                &get("/api/search", Some("q=P-0000099"), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(search.forward);
+        judge.observe(
+            &site,
+            &answered(
+                &search,
+                "/api/search",
+                br#"{"query":"P-0000099","results":[]}"#,
+                "alice",
+            ),
+        );
+        // The id is not known, so Jev is asked again; its DENY blocks the request.
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 2_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(object.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_id_field_that_echoes_a_sent_value_does_not_make_it_seen() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let search = judge
+            .judge(
+                &site,
+                &get(
+                    "/api/search",
+                    Some("patientId=P-0000099"),
+                    Some("alice"),
+                    1_000,
+                ),
+            )
+            .await;
+        assert!(search.forward);
+        judge.observe(
+            &site,
+            &answered(
+                &search,
+                "/api/search",
+                br#"{"patientId":"P-0000099","results":[]}"#,
+                "alice",
+            ),
+        );
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 2_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_later_listing_of_an_earlier_search_does_not_make_the_id_seen() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let search = judge
+            .judge(
+                &site,
+                &get("/api/search", Some("q=P-0000099"), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(search.forward);
+        judge.observe(
+            &site,
+            &answered(&search, "/api/search", br#"{"results":[]}"#, "alice"),
+        );
+        // Later the origin lists the searches it ran, with the id under an id field.
+        let history = judge
+            .judge(
+                &site,
+                &get("/api/search/history", None, Some("alice"), 2_000),
+            )
+            .await;
+        assert!(history.forward);
+        judge.observe(
+            &site,
+            &answered(
+                &history,
+                "/api/search/history",
+                br#"{"recent":[{"patientId":"P-0000099"}]}"#,
+                "alice",
+            ),
+        );
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 3_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_long_value_in_a_free_text_field_is_not_an_object_reference() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &shown(
+                "/api/comments",
+                br#"{"items":[{"text":"P-0000077"}]}"#,
+                "alice",
+            ),
+        );
+        let comment = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000077", None, Some("alice"), 1_000),
+            )
+            .await;
+        assert!(!comment.forward);
+        assert_eq!(fake.calls(), 1);
+        // The same id under an id field is an object the origin showed.
+        judge.observe(
+            &site,
+            &shown(
+                "/api/patients",
+                br#"{"items":[{"patient_id":"P-0000077"}]}"#,
+                "carol",
+            ),
+        );
+        let listed = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000077", None, Some("carol"), 2_000),
+            )
+            .await;
+        assert!(listed.forward);
+        assert_eq!(listed.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_login_that_echoes_its_input_does_not_seed_the_session_it_issues() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let login = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: br#"{"userId":"P-0000099"}"#,
+            client: "10.0.0.1",
+            ..get("/login", None, None, 1_000)
+        };
+        let judged = judge.judge(&site, &login).await;
+        assert!(judged.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                request_id: RID,
+                unread: None,
+                would_block: false,
+                credential: None,
+                client: "10.0.0.1",
+                issued_credential: Some("fresh"),
+                method: "POST",
+                path: "/login",
+                status: 200,
+                content_type: Some("application/json"),
+                body: br#"{"userId":"P-0000099","token":"t"}"#,
+                now_ms: 1_001,
+                sent: &judged.sent,
+            },
+        );
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("fresh"), 2_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_renewed_credential_does_not_learn_what_the_old_one_sent() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let search = judge
+            .judge(
+                &site,
+                &get("/api/search", Some("q=P-0000099"), Some("alice"), 1_000),
+            )
+            .await;
+        judge.observe(
+            &site,
+            &answered(&search, "/api/search", br#"{"results":[]}"#, "alice"),
+        );
+        // A later response renews the session and echoes the id under the new credential.
+        let renew = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method: "POST",
+                    ..get("/api/session/renew", None, Some("alice"), 2_000)
+                },
+            )
+            .await;
+        assert!(renew.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                request_id: RID,
+                unread: None,
+                would_block: false,
+                credential: Some("alice"),
+                client: "10.0.0.1",
+                issued_credential: Some("renewed"),
+                method: "POST",
+                path: "/api/session/renew",
+                status: 200,
+                content_type: Some("application/json"),
+                body: br#"{"patientId":"P-0000099"}"#,
+                now_ms: 2_001,
+                sent: &renew.sent,
+            },
+        );
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("renewed"), 3_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_request_with_more_tokens_than_a_session_can_hold_stops_its_learning() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // Its tokens cannot all be recorded as sent, so no later echo can be told apart.
+        let body = (0..=SENT_MAX)
+            .map(|index| format!("t{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let upload = RequestFacts {
+            method: "POST",
+            content_type: Some("text/plain"),
+            body: body.as_bytes(),
+            ..get("/api/import", None, Some("alice"), 1_000)
+        };
+        assert!(judge.judge(&site, &upload).await.forward);
+        judge.observe(
+            &site,
+            &shown(
+                "/api/patients",
+                br#"{"items":[{"id":"P-0000042"}]}"#,
+                "alice",
+            ),
+        );
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000042", None, Some("alice"), 2_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_body_declared_as_text_that_the_origin_parses_teaches_its_echo_nothing() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // The gateway cannot read this body, but the origin parses it and echoes the id.
+        let search = RequestFacts {
+            method: "POST",
+            content_type: Some("text/plain"),
+            body: br#"{"patientId":"P-0000099"}"#,
+            ..get("/api/search", None, Some("alice"), 1_000)
+        };
+        let searched = judge.judge(&site, &search).await;
+        assert!(searched.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                method: "POST",
+                ..answered(
+                    &searched,
+                    "/api/search",
+                    br#"{"patientId":"P-0000099","results":[]}"#,
+                    "alice",
+                )
+            },
+        );
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 2_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_value_a_refused_request_sent_is_not_learned_from_a_later_echo() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // Jev allows the request, and the origin refuses it with 403.
+        let refused = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 1_000),
+            )
+            .await;
+        assert!(refused.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                status: 403,
+                ..answered(
+                    &refused,
+                    "/api/patients/P-0000099",
+                    br#"{"error":"forbidden"}"#,
+                    "alice",
+                )
+            },
+        );
+        // A later response lists the refused id under an id field.
+        let home = judge
+            .judge(&site, &get("/api/home", None, Some("alice"), 2_000))
+            .await;
+        assert!(home.forward);
+        judge.observe(
+            &site,
+            &answered(
+                &home,
+                "/api/home",
+                br#"{"recent":[{"id":"P-0000099"}]}"#,
+                "alice",
+            ),
+        );
+        fake.answer("DENY", "BENIGN");
+        // The first request's allow is cached for minutes, so the same request an
+        // hour on is judged afresh.
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 3_600_000),
+            )
+            .await;
+        assert!(!object.forward);
+        // Jev was asked for the refused request and for the object; the list needed none.
+        assert_eq!(fake.calls(), 2);
+        assert_eq!(home.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_body_with_a_json_escape_teaches_its_echo_nothing() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // The gateway cannot read this body as JSON, but the origin does, and it
+        // decodes the escaped id before echoing it. The body is `{"patientId":"\u0050-0000099"}`.
+        let search = RequestFacts {
+            method: "POST",
+            content_type: Some("text/plain"),
+            body: b"{\"patientId\":\"\\u0050-0000099\"}",
+            ..get("/api/search", None, Some("alice"), 1_000)
+        };
+        let searched = judge.judge(&site, &search).await;
+        assert!(searched.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                method: "POST",
+                ..answered(
+                    &searched,
+                    "/api/search",
+                    br#"{"patientId":"P-0000099","results":[]}"#,
+                    "alice",
+                )
+            },
+        );
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 2_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
     async fn a6_a_share_redemption_seeds_the_context() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
@@ -1108,6 +1658,7 @@ mod tests {
             content_type: Some("application/json"),
             body: br#"{"patient":{"id":"P-0000001"}}"#,
             now_ms: 0,
+            sent: &[],
         };
         judge.observe(&site, &redeem);
         let verdict = judge
@@ -1479,6 +2030,7 @@ mod tests {
                 content_type: None,
                 body: b"",
                 now_ms: 1,
+                sent: &[],
             },
         );
         assert_eq!(judge.session_count(), 1);
@@ -1497,6 +2049,7 @@ mod tests {
                 content_type: None,
                 body: b"",
                 now_ms: 2,
+                sent: &[],
             },
         );
         assert_eq!(judge.session_count(), 1, "a plain redirect teaches nothing");
@@ -1522,6 +2075,7 @@ mod tests {
                 content_type: Some("application/json"),
                 body: br#"{"user":{"id":"U-0000001"}}"#,
                 now_ms: 0,
+                sent: &[],
             },
         );
         let verdict = judge
@@ -1708,6 +2262,7 @@ mod tests {
                 content_type: Some("application/json"),
                 body: br#"{"id":7,"name":"Acme"}"#,
                 now_ms: 0,
+                sent: &[],
             },
         );
         let request = get(

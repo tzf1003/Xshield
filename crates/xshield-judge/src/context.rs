@@ -3,7 +3,7 @@
 //! Values are stored only as keyed hashes. The store lives in gateway memory;
 //! a restart empties it and users re-enter through an entry.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
@@ -12,6 +12,10 @@ use crate::values::{ResponseValue, is_id_like};
 
 /// Most values remembered per session.
 pub const SEEN_MAX: usize = 5_000;
+/// Most values a session may have sent that the origin had not shown it. Past
+/// it the session stops learning from responses: evicting one of them would let
+/// its echo be learned later.
+pub const SENT_MAX: usize = SEEN_MAX;
 /// Most origins of one value kept.
 pub const SOURCES_MAX: usize = 6;
 /// Most recent requests kept per session.
@@ -169,11 +173,14 @@ impl Seen {
     }
 
     /// Whether the value is safe to fast-allow for a request to `path` under
-    /// the field `key`: long, or seen under an id field of the same kind of
-    /// object. Short values collide across unrelated objects (basket 1,
-    /// product 1), so they only count when the origin field or the request
-    /// that showed them names the same kind of object as the path or key.
-    /// `synonyms` are the site's extra pairs (see [`site_synonym`]).
+    /// the field `key`. Only an id-like field shows an object reference: a value
+    /// seen only under a name, a text or a note field never counts, so an echoed
+    /// search query or a comment does not. A long value (at least
+    /// [`LONG_VALUE_CHARS`]) then counts whatever kind of object its field
+    /// names. A short value collides across unrelated objects (basket 1,
+    /// product 1), so it also needs the origin field or the request that showed
+    /// it to name the same kind of object as the path or key. `synonyms` are the
+    /// site's extra pairs (see [`site_synonym`]).
     #[must_use]
     pub fn is_specific(
         &self,
@@ -182,11 +189,10 @@ impl Seen {
         key: Option<&str>,
         synonyms: &[(String, String)],
     ) -> bool {
-        value.chars().count() >= LONG_VALUE_CHARS
-            || self
-                .origins
-                .iter()
-                .any(|origin| is_id_like(&origin.field) && affinity(origin, path, key, synonyms))
+        let long = value.chars().count() >= LONG_VALUE_CHARS;
+        self.origins.iter().any(|origin| {
+            is_id_like(&origin.field) && (long || affinity(origin, path, key, synonyms))
+        })
     }
 
     /// The origins ordered for the model, most useful last: ones of the same
@@ -346,6 +352,14 @@ struct CachedAllow {
     source: u128,
 }
 
+/// The values a session sent, copied into a session that a response issues a
+/// credential to, so that an echo in that response is not learned either.
+#[derive(Debug, Clone, Default)]
+pub struct SentRecord {
+    overflow: bool,
+    digests: HashSet<Digest16>,
+}
+
 /// Everything remembered about one session.
 #[derive(Debug)]
 pub struct SessionContext {
@@ -356,6 +370,10 @@ pub struct SessionContext {
     recent: VecDeque<Recent>,
     entries: Vec<EntryPass>,
     cache: HashMap<Digest16, CachedAllow>,
+    /// Values the session sent that the origin had not shown it.
+    sent: HashSet<Digest16>,
+    /// The session stopped learning from responses (see [`SENT_MAX`]).
+    sent_overflow: bool,
 }
 
 impl SessionContext {
@@ -368,6 +386,8 @@ impl SessionContext {
             recent: VecDeque::new(),
             entries: Vec::new(),
             cache: HashMap::new(),
+            sent: HashSet::new(),
+            sent_overflow: false,
         }
     }
 
@@ -384,16 +404,24 @@ impl SessionContext {
     }
 
     /// Records the values of a successful response and returns how many of
-    /// them the session had not seen before.
+    /// them the session had not seen before. A value the session sent is not
+    /// recorded: its echo shows nothing the origin showed (see
+    /// [`SessionContext::note_sent`]).
     pub fn remember(
         &mut self,
         key: &ContextKey,
         source: &Source<'_>,
         values: &[ResponseValue],
     ) -> usize {
+        if self.sent_overflow {
+            return 0;
+        }
         let mut new = 0;
         for value in values {
             let digest = key.mac("value", value.value.as_bytes());
+            if self.sent.contains(&digest) {
+                continue;
+            }
             let origin = Origin {
                 field: value.field.clone(),
                 request: source.request.to_owned(),
@@ -419,6 +447,56 @@ impl SessionContext {
             new += 1;
         }
         new
+    }
+
+    /// Notes values this session sent in a request the origin answered. Later
+    /// responses do not teach the session these values, whichever field echoes
+    /// them. The record never evicts: an evicted value could be echoed back, so a
+    /// session that overflows [`SENT_MAX`] stops learning from responses.
+    pub fn note_sent(&mut self, digests: &[Digest16]) {
+        for digest in digests {
+            self.note(*digest);
+        }
+    }
+
+    fn note(&mut self, digest: Digest16) {
+        if self.sent_overflow || self.sent.contains(&digest) {
+            return;
+        }
+        if self.sent.len() >= SENT_MAX {
+            self.stop_learning();
+            return;
+        }
+        self.sent.insert(digest);
+    }
+
+    /// Stops learning from responses. Used when a request's values could not all
+    /// be read, so an echo of one of them cannot be told apart from what the
+    /// origin shows. What was learned before stays.
+    pub fn stop_learning(&mut self) {
+        self.sent_overflow = true;
+        self.sent.clear();
+    }
+
+    /// What the session sent, for a session that a response is about to issue a
+    /// credential to.
+    #[must_use]
+    pub fn sent_record(&self) -> SentRecord {
+        SentRecord {
+            overflow: self.sent_overflow,
+            digests: self.sent.clone(),
+        }
+    }
+
+    /// Takes over what another session sent. A credential a response issues
+    /// starts with what the request sent, so the response cannot teach it an echo.
+    pub fn inherit_sent(&mut self, record: &SentRecord) {
+        if record.overflow {
+            self.stop_learning();
+        }
+        for digest in &record.digests {
+            self.note(*digest);
+        }
     }
 
     /// Appends one request to the recent list.
@@ -544,6 +622,15 @@ impl ContextStore {
         self.sessions
             .get(id)
             .is_some_and(|session| now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS)
+    }
+
+    /// What the session sent, for a session a response is about to issue a
+    /// credential to. Creates nothing.
+    #[must_use]
+    pub fn sent_record(&self, id: &Digest16) -> SentRecord {
+        self.sessions
+            .get(id)
+            .map_or_else(SentRecord::default, SessionContext::sent_record)
     }
 
     /// Number of sessions held.
@@ -720,17 +807,19 @@ mod tests {
     }
 
     #[test]
-    fn long_values_are_specific_whatever_their_field() {
-        let seen = Seen {
+    fn long_values_need_an_id_field_to_show_them() {
+        let shown_as = |field: &str| Seen {
             origins: vec![Origin {
-                field: "name".into(),
+                field: field.into(),
                 request: "GET /x".into(),
                 request_id: 0,
                 at_ms: 0,
             }],
         };
-        assert!(seen.is_specific("P-0000042", "/x", None, &[]));
-        assert!(!seen.is_specific("alice", "/x", None, &[]));
+        assert!(shown_as("patient_id").is_specific("P-0000042", "/x", None, &[]));
+        assert!(!shown_as("name").is_specific("P-0000042", "/x", None, &[]));
+        assert!(!shown_as("query").is_specific("P-0000042", "/x", None, &[]));
+        assert!(!shown_as("name").is_specific("alice", "/x", None, &[]));
     }
 
     #[test]
@@ -898,6 +987,55 @@ mod tests {
         let fresh = store.session(id, IDLE_MAX_MS + 1);
         assert!(fresh.lookup(&key, "7").is_none());
         assert_eq!(fresh.age_seconds(IDLE_MAX_MS + 1), 0);
+    }
+
+    #[test]
+    fn a_value_the_session_sent_is_not_learned_from_an_echo() {
+        let key = key();
+        let mut session = SessionContext::new(0);
+        session.note_sent(&[key.mac("value", b"P-0000099")]);
+        session.remember(
+            &key,
+            &at("GET /api/search"),
+            &[
+                response("patientId", "P-0000099"),
+                response("patientId", "P-0000042"),
+            ],
+        );
+        assert!(session.lookup(&key, "P-0000099").is_none());
+        assert!(session.lookup(&key, "P-0000042").is_some());
+    }
+
+    #[test]
+    fn a_new_credential_starts_with_what_the_request_sent() {
+        let key = key();
+        let mut old = SessionContext::new(0);
+        old.note_sent(&[key.mac("value", b"P-0000099")]);
+        let mut fresh = SessionContext::new(0);
+        fresh.inherit_sent(&old.sent_record());
+        fresh.remember(
+            &key,
+            &at("GET /api/history"),
+            &[response("patientId", "P-0000099")],
+        );
+        assert!(fresh.lookup(&key, "P-0000099").is_none());
+    }
+
+    #[test]
+    fn a_full_sent_record_stops_learning_rather_than_forgetting() {
+        let key = key();
+        let mut session = SessionContext::new(0);
+        session.remember(&key, &at("GET /x"), &[response("id", "before")]);
+        let sent: Vec<Digest16> = (0..=SENT_MAX)
+            .map(|index| key.mac("value", format!("s{index}").as_bytes()))
+            .collect();
+        session.note_sent(&sent);
+        assert_eq!(
+            session.remember(&key, &at("GET /y"), &[response("id", "later")]),
+            0
+        );
+        assert!(session.lookup(&key, "later").is_none());
+        assert!(session.lookup(&key, "before").is_some());
     }
 
     #[test]

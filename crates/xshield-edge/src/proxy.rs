@@ -13,6 +13,7 @@ use pingora::{Error, ErrorSource, ErrorType, Result};
 use xshield_core::context::{
     DecisionPath, DecisionRecord, ObservationSummary, Outcome, SessionCredential, SiteSpec, Skip,
 };
+use xshield_judge::context::Digest16;
 use xshield_judge::engine::{Judge, Observation, RequestFacts, refused_row};
 use xshield_judge::jev::JevPort;
 use xshield_judge::values::RESPONSE_PARSE_MAX;
@@ -72,6 +73,9 @@ pub struct RequestContext {
     issued: Option<String>,
     status: u16,
     observed: bool,
+    /// Digests of the request values the judge found unseen, handed to the
+    /// judge with the response (see `Judgement::sent`).
+    sent: Vec<Digest16>,
 }
 
 /// A response body being copied for observation while it streams through.
@@ -279,6 +283,7 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
                 unread,
                 would_block,
                 now_ms: now_ms(),
+                sent: &ctx.sent,
             },
         ))
     }
@@ -305,6 +310,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
             issued: None,
             status: 0,
             observed: false,
+            sent: Vec::new(),
         }
     }
 
@@ -374,6 +380,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
             )
             .await;
         ctx.credential = credential;
+        ctx.sent = judgement.sent;
         let mut record = judgement.record;
         record.edge.clone_from(&self.edge);
         record.host.clone_from(&ctx.host);
