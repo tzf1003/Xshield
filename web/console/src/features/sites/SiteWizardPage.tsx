@@ -23,7 +23,7 @@ import "./sites.css";
 const STEPS: ReadonlyArray<{ title: string; groups: readonly FormGroup[] }> = [
   { title: "基本信息", groups: ["basics"] },
   { title: "会话凭证", groups: ["session"] },
-  { title: "入口与绕过", groups: ["entries", "bypass"] },
+  { title: "接口名、入口与绕过", groups: ["routes", "entries", "bypass"] },
   { title: "确认", groups: ["mode"] },
 ];
 
@@ -145,6 +145,7 @@ export function SiteWizardPage() {
                   key={group}
                   group={group}
                   mode="create"
+                  site={null}
                   spec={spec}
                   saved={null}
                   onChange={setSpec}

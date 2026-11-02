@@ -20,6 +20,7 @@ export type ConfigGroupId = FormGroup | "advanced";
 export const CONFIG_GROUPS: ConfigGroupId[] = [
   "basics",
   "session",
+  "routes",
   "entries",
   "bypass",
   "mode",
@@ -52,6 +53,9 @@ function focusIdFor(issue: FieldIssue): string {
   if (issue.field === "origin") return "site-field-origin";
   if (issue.field === "session") return "site-field-session";
   if (issue.field === "secret_fields") return "site-field-secret";
+  // A rule's problem focuses its path field (`routes[2].name_from[0]` focuses rule 3).
+  const rule = /^routes\[(\d+)\]/.exec(issue.field);
+  if (rule?.[1] !== undefined) return `site-field-route-${rule[1]}`;
   return "";
 }
 
@@ -121,6 +125,10 @@ export function ConfigTab({
 
   const groupError = (id: ConfigGroupId) => issues.errors.some((issue) => issue.group === id);
   const groupCount = (id: ConfigGroupId): string | null => {
+    if (id === "routes") {
+      const rules = draft.routes ?? [];
+      return rules.length > 0 ? String(rules.length) : null;
+    }
     if (id === "entries") return String(draft.entries.length);
     if (id === "bypass") return String((draft.bypass ?? []).length);
     if (id === "advanced") return customCount > 0 ? `已自定义 ${customCount} 项` : null;
@@ -186,6 +194,7 @@ export function ConfigTab({
               <ConfigForm
                 group={group}
                 mode="edit"
+                site={site.name}
                 spec={draft}
                 saved={site.spec}
                 onChange={onDraft}
