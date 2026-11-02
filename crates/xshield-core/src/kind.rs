@@ -6,10 +6,13 @@
 //!
 //! Both sides of a comparison reduce to kind words. What an origin showed a
 //! value as: the field's own name (`ProductId` names a product), a bare `id`'s
-//! parent object (`Products.id`), or the path that returned it. What a request
-//! uses a value as: its key's name, or for a path segment the route word just
-//! before it. A site may also declare the kind of a field or parameter with
-//! `advanced.field_kinds`, which overrides the name for that field.
+//! parent object (`Products.id`), or with no parent the route word nearest the
+//! end of the path that returned it. What a request
+//! uses a value as: its key's name (a bare `id` nested in a named object travels
+//! as `Object.id`), for a path segment the route word just before it, and for a
+//! key with no name the route word nearest the end of the path. A site may also
+//! declare the kind of a field or parameter with `advanced.field_kinds`, which
+//! overrides the name for that field.
 
 use super::context::advanced::{Advanced, FieldKind};
 
@@ -135,7 +138,8 @@ pub struct Used<'a> {
     pub value: &'a str,
     /// The request path, without query.
     pub path: &'a str,
-    /// The query, form or body key the value travels under, if it has one.
+    /// The query, form or body key the value travels under, if it has one. A
+    /// bare `id` nested in a named object travels under `Object.id`.
     pub key: Option<&'a str>,
     /// For a path value, the index of its segment among the non-empty segments
     /// of `path`. A path value has no key, so this is what places it.
@@ -165,8 +169,8 @@ pub fn declares(shown: Shown<'_>, rules: &Rules) -> bool {
 
 /// The kinds an origin shows a value as: the declared kind of its field when a
 /// declaration names it, else the field's own name. A bare `id` takes the kind
-/// of its parent (`Products.id`), and a bare top-level `id` the kind of the
-/// request that returned it.
+/// of its parent (`Products.id`). With no parent it takes the route word nearest
+/// the end of the request that returned it, the object that request addresses.
 fn shown_kinds(shown: Shown<'_>, rules: &Rules) -> Vec<String> {
     if let Some(kind) = declared_for(&rules.fields, shown.field, request_path(shown.request)) {
         return vec![kind.to_owned()];
@@ -177,18 +181,18 @@ fn shown_kinds(shown: Shown<'_>, rules: &Rules) -> Vec<String> {
         words = kind_words(parent);
     }
     if words.is_empty() {
-        words = kind_words(request_path(shown.request));
+        words = object_kinds(request_path(shown.request));
     }
     words
 }
 
 /// The kinds a use of a value names. A query, form or body value takes the
 /// kind its key names: a declared kind when a declaration names the key in the
-/// request's scope, else the key's words. A key with no words (a bare `id`)
-/// takes the whole path's words. A path segment has no key: it takes the route
-/// word nearest before it, so in `/api/doctors/7/files/9` the 9 is a file
-/// whatever else the path names. Only a segment with no route word before it
-/// takes the whole path.
+/// request's scope, else the key's words. A key with no words (a bare `id`, or
+/// `ids`) names no kind, so it takes the route word nearest the end of the path:
+/// `?id=9` on `/api/doctors/7/files` is a file, the object the path addresses. A
+/// path segment has no key: it takes the route word nearest before it, so in
+/// `/api/doctors/7/files/9` the 9 is a file whatever else the path names.
 fn wanted_kinds(used: Used<'_>, rules: &Rules) -> Vec<String> {
     if let Some(key) = used.key {
         if let Some(kind) = declared_for(&rules.fields, key, used.path) {
@@ -198,26 +202,44 @@ fn wanted_kinds(used: Used<'_>, rules: &Rules) -> Vec<String> {
         if !by_key.is_empty() {
             return by_key;
         }
-        return kind_words(used.path);
     }
-    if let Some(index) = used.segment {
-        let segments: Vec<&str> = used
-            .path
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .collect();
-        let route = segments
-            .get(..index)
-            .unwrap_or_default()
-            .iter()
-            .rev()
-            .map(|segment| kind_words(segment))
-            .find(|words| !words.is_empty());
-        if let Some(words) = route {
-            return words;
-        }
-    }
-    kind_words(used.path)
+    route_kinds(used.path, used.segment)
+}
+
+/// The kinds of the route word nearest before segment `before` of the path,
+/// counting its non-empty segments from zero, or nearest the end of the path
+/// without one. A path with no route word there takes the whole path's words.
+fn route_kinds(path: &str, before: Option<usize>) -> Vec<String> {
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let end = before.unwrap_or(segments.len()).min(segments.len());
+    segments[..end]
+        .iter()
+        .rev()
+        .map(|segment| kind_words(segment))
+        .find(|words| !words.is_empty())
+        .unwrap_or_else(|| kind_words(path))
+}
+
+/// Words that name an action on a path's objects, not an object: a search
+/// returns the objects it names, so `/rest/products/search` lists products.
+const ACTION_WORDS: [&str; 6] = ["search", "list", "find", "query", "filter", "lookup"];
+
+/// The kinds a response's bare id takes from the request that returned it: the
+/// route word nearest the end of the path that names an object, skipping action
+/// words, else the whole path's words.
+fn object_kinds(path: &str) -> Vec<String> {
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    segments
+        .iter()
+        .rev()
+        .map(|segment| kind_words(segment))
+        .find(|words| {
+            !words.is_empty()
+                && !words
+                    .iter()
+                    .all(|word| ACTION_WORDS.contains(&word.as_str()))
+        })
+        .unwrap_or_else(|| kind_words(path))
 }
 
 /// The declared kind of a field or key name, when a declaration names it and its
@@ -354,5 +376,110 @@ mod tests {
             },
             &rules
         ));
+    }
+
+    #[test]
+    fn a_nameless_key_takes_the_route_word_at_the_end_of_the_path() {
+        let rules = Rules::default();
+        let doctor = Shown {
+            field: "id",
+            request: "GET /api/doctors",
+        };
+        let query = |path: &'static str| Used {
+            value: "9",
+            path,
+            key: Some("id"),
+            segment: None,
+        };
+        // `?id=9` on a file path names the file the path addresses, not the doctor.
+        assert!(!affinity(doctor, query("/api/doctors/7/files"), &rules));
+        assert!(affinity(doctor, query("/api/doctors"), &rules));
+        // With no route word in the path there is nothing for the key to take.
+        assert!(!affinity(doctor, query("/7"), &rules));
+    }
+
+    #[test]
+    fn a_value_without_a_key_takes_the_route_word_at_the_end_too() {
+        let rules = Rules::default();
+        let doctor = Shown {
+            field: "id",
+            request: "GET /api/doctors",
+        };
+        let body = |path: &'static str| Used {
+            value: "9",
+            path,
+            key: None,
+            segment: None,
+        };
+        assert!(!affinity(doctor, body("/api/doctors/7/files"), &rules));
+        assert!(affinity(doctor, body("/api/doctors"), &rules));
+    }
+
+    #[test]
+    fn a_bare_id_nested_in_a_named_object_takes_that_name() {
+        let rules = Rules::default();
+        let document = Shown {
+            field: "id",
+            request: "GET /api/docs",
+        };
+        // `{"doc": {"id": 5}}` travels as `doc.id`: a document, as `?doc=5` would be.
+        let nested = Used {
+            value: "5",
+            path: "/api/records",
+            key: Some("doc.id"),
+            segment: None,
+        };
+        assert!(affinity(document, nested, &rules));
+        // The bare key names the record, so the same id is no document there.
+        assert!(!affinity(
+            document,
+            Used {
+                key: Some("id"),
+                ..nested
+            },
+            &rules
+        ));
+    }
+
+    #[test]
+    fn a_bare_id_in_a_response_takes_the_route_word_at_the_end() {
+        let rules = Rules::default();
+        // Doctor 7's file list shows bare ids, and they are files, not doctors.
+        let files = Shown {
+            field: "id",
+            request: "GET /api/doctors/7/files",
+        };
+        let doctor_path = Used {
+            value: "9",
+            path: "/api/doctors/9",
+            key: None,
+            segment: Some(2),
+        };
+        assert!(!affinity(files, doctor_path, &rules));
+        let file_path = Used {
+            value: "9",
+            path: "/api/files/9",
+            key: None,
+            segment: Some(2),
+        };
+        assert!(affinity(files, file_path, &rules));
+        // A doctor list's bare ids are still doctors.
+        let doctors = Shown {
+            field: "id",
+            request: "GET /api/doctors",
+        };
+        assert!(affinity(doctors, doctor_path, &rules));
+        // A search returns the objects it names, so its bare ids are products.
+        let search = Shown {
+            field: "id",
+            request: "GET /rest/products/search",
+        };
+        let basket_product = Used {
+            value: "9",
+            path: "/api/BasketItems/9",
+            key: Some("ProductId"),
+            segment: None,
+        };
+        assert!(affinity(search, basket_product, &rules));
     }
 }

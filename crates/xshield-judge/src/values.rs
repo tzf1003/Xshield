@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 use xshield_core::context::{SHAPE_FIELDS_MAX, ShapeField};
+use xshield_core::kind::kind_words;
 
 /// Longest value kept; longer scalars are not object references.
 pub const VALUE_MAX_CHARS: usize = 128;
@@ -29,7 +30,9 @@ pub struct RequestValue {
     pub at: String,
     /// The decoded value.
     pub value: String,
-    /// The key it travels under, when it has one (`doctor`, `patient.id`).
+    /// The key it travels under, when it has one: a query, form or body name
+    /// (`doctor`), or for a bare identifier nested in a named object that
+    /// object's name (`patient.id`).
     pub key: Option<String>,
     /// Whether the value can never be an object reference or an injection
     /// payload on its own (a route word, a pagination number).
@@ -395,6 +398,24 @@ fn pairs(out: &mut ExtractedRequest, prefix: &str, text: &str) {
     }
 }
 
+/// The key a JSON member travels under. A bare identifier nested in a named
+/// object takes the object's name (`doc.id`), as the response side names
+/// `Doc.id`, so the object decides what the id is. The member's own name still
+/// decides how the value is judged.
+fn member_key(parent: Option<&str>, name: &str) -> String {
+    match parent {
+        Some(parent)
+            if is_id_like(name)
+                && kind_words(name).is_empty()
+                && !is_wrapper_key(parent)
+                && !kind_words(parent).is_empty() =>
+        {
+            format!("{parent}.{name}")
+        }
+        _ => name.to_owned(),
+    }
+}
+
 fn walk_request(
     out: &mut ExtractedRequest,
     json: &Value,
@@ -410,7 +431,8 @@ fn walk_request(
         Value::Object(map) => {
             for (name, inner) in map {
                 push_unusual_key(out, &format!("{at}.{name}"), name);
-                walk_request(out, inner, &format!("{at}.{name}"), Some(name), depth + 1);
+                let named = member_key(key, name);
+                walk_request(out, inner, &format!("{at}.{name}"), Some(&named), depth + 1);
             }
         }
         Value::Array(items) => {
@@ -737,6 +759,31 @@ mod tests {
         assert!(got.contains(&("body.patient.tags[]", "a", true)));
         assert!(got.contains(&("body.note", "x' OR 1=1", false)));
         assert!(!request.truncated);
+    }
+
+    #[test]
+    fn a_bare_id_nested_in_a_named_object_travels_under_the_object_name() {
+        let body = br#"{"doc":{"id":5,"no":"A1"},"data":{"id":6},"ids":[7],"id":8,"patient":{"ok":"active"}}"#;
+        let request = extract_request("/api/records", None, Some("application/json"), body);
+        let keys: Vec<(&str, Option<&str>)> = request
+            .values
+            .iter()
+            .map(|value| (value.at.as_str(), value.key.as_deref()))
+            .collect();
+        assert!(keys.contains(&("body.doc.id", Some("doc.id"))));
+        assert!(keys.contains(&("body.doc.no", Some("doc.no"))));
+        // A wrapper object says nothing about its id, and `ids` is no identifier name.
+        assert!(keys.contains(&("body.data.id", Some("id"))));
+        assert!(keys.contains(&("body.ids[]", Some("ids"))));
+        assert!(keys.contains(&("body.id", Some("id"))));
+        // Only the key changes: a name that is no identifier is judged as before.
+        let ok = request
+            .values
+            .iter()
+            .find(|value| value.at == "body.patient.ok")
+            .unwrap();
+        assert_eq!(ok.key.as_deref(), Some("ok"));
+        assert!(ok.inert);
     }
 
     #[test]
