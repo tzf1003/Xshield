@@ -37,26 +37,6 @@
         }
       ],
       "reason": "国际化资源文件，属于静态资源，不需要判定。按目录加入 /assets/* 后，同目录下的请求都不再判定。"
-    },
-    {
-      "id": "object_proposals:juice",
-      "kind": "object_proposals",
-      "method": null,
-      "path": null,
-      "count": 7,
-      "sample": null,
-      "actions": [],
-      "reason": "这些位置的值已经有稳定的对象类别。确认后按对象表核验，不必每次整体交给 Jev 判定。"
-    },
-    {
-      "id": "route_rule_candidate:POST:/weixin/wx/mp/wx361163d21a65f679/gateway",
-      "kind": "route_rule_candidate",
-      "method": "POST",
-      "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-      "count": 9812,
-      "sample": "req_01a19728dcc071aab225b9e0f5d7b63f",
-      "actions": [],
-      "reason": "同一个路径下的请求分属多个接口，接口名放在正文里。配置接口名规则后，每个接口分别判定。"
     }
   ],
   "readiness": {
