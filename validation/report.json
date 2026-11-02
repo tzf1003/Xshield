@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3950,
-  "passed_count": 3950,
+  "checks_total": 3956,
+  "passed_count": 3956,
   "acceptance_cases": {
     "total": 78,
     "planned": 61,
@@ -197,6 +197,11 @@
     },
     {
       "name": "json:web/console/tests/fixtures/jev-status.json",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "json:web/console/tests/fixtures/logical-path-cases.json",
       "passed": true,
       "detail": ""
     },
@@ -19186,6 +19191,16 @@
       "detail": ""
     },
     {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:README.md:docs/05-v3-removal.md",
       "passed": true,
       "detail": ""
@@ -19282,6 +19297,11 @@
     },
     {
       "name": "link:docs/01-request-flow.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/01-request-flow.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -19666,6 +19686,11 @@
       "detail": ""
     },
     {
+      "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/07-console-architecture.md:01-request-flow.md",
       "passed": true,
       "detail": ""
@@ -19727,6 +19752,11 @@
     },
     {
       "name": "link:docs/07-console-architecture.md:04-deployment-testing.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:06-console-ui.md",
       "passed": true,
       "detail": ""
     },

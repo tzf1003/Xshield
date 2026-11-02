@@ -87,6 +87,7 @@ async fn live_business_traffic_and_evasions() {
     judge.observe(
         &site,
         &Observation {
+            route: None,
             request_id: RID,
             unread: None,
             would_block: false,
@@ -246,6 +247,7 @@ async fn live_acceptance_scenarios() {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -266,6 +268,7 @@ async fn live_acceptance_scenarios() {
     judge.observe(
         &site,
         &Observation {
+            route: None,
             request_id: RID,
             unread: None,
             would_block: false,
@@ -395,6 +398,8 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
             .judge(
                 site,
                 &RequestFacts {
+                    route: None,
+                    request_headers: &[],
                     request_id: &request_id,
                     method: case.method,
                     path: case.path,
@@ -461,6 +466,7 @@ async fn live_juice_shop_checkout_flow() {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -665,7 +671,7 @@ async fn live_juice_shop_sign_up_flow() {
     ] {
         judge.observe(
             &site,
-            &Observation { request_id: RID, unread: None, would_block: false,
+            &Observation { route: None, request_id: RID, unread: None, would_block: false,
                 credential: None,
                 client: "10.0.0.1",
                 issued_credential: None,

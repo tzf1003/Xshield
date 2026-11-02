@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::route::Api;
 use super::trace::Trace;
 
 /// Which step settled the request: docs/01 section 1.4, or one of the early
@@ -137,8 +138,20 @@ pub struct DecisionRecord {
     pub context: Option<ContextKind>,
     /// HTTP method.
     pub method: String,
-    /// Request path without query.
+    /// Request path without query, as sent.
     pub path: String,
+    /// The path the request was judged by: `path`, followed by the interface
+    /// name a route read from the request (docs/header-routes-design section 2).
+    /// Without a route it equals `path`.
+    #[serde(default)]
+    pub logical_path: String,
+    /// The interface name, or why there is none. `None` when no route covers the
+    /// request.
+    #[serde(default)]
+    pub api: Option<Api>,
+    /// Request header names: lower case, no values, at most 64 of them.
+    #[serde(default)]
+    pub request_headers: Vec<String>,
     /// The query string with secrets redacted, at most 2 KiB.
     #[serde(default)]
     pub query: Option<String>,
