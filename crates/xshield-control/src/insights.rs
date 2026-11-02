@@ -305,6 +305,10 @@ pub struct SuggestionBody {
     pub sample: Option<String>,
     pub actions: Vec<ActionBody>,
     pub reason: String,
+    /// The figures a card of the kind shows. `route_rule_candidate` has the path's share of
+    /// the site's requests and, for a body field, the field and its distinct names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Value>,
 }
 
 /// One way to apply a suggestion. `matches` counts the requests the pattern covers.
@@ -425,6 +429,7 @@ struct Draft {
     sample: Option<String>,
     actions: Vec<ActionBody>,
     reason: String,
+    detail: Option<Value>,
 }
 
 impl From<&Draft> for SuggestionBody {
@@ -442,6 +447,7 @@ impl From<&Draft> for SuggestionBody {
             sample: draft.sample.clone(),
             actions: draft.actions.clone(),
             reason: draft.reason.clone(),
+            detail: draft.detail.clone(),
         }
     }
 }
@@ -558,6 +564,7 @@ async fn timeout_draft(
         .checked_div(stats.calls)
         .unwrap_or(0);
     Ok(Some(Draft {
+        detail: None,
         kind: RAISE_JEV_TIMEOUT,
         method: None,
         path: None,
@@ -609,6 +616,7 @@ async fn call_limit_drafts(
             continue;
         }
         drafts.push(Draft {
+            detail: None,
             kind: RAISE_CALL_LIMIT,
             method: None,
             path: None,
@@ -670,6 +678,7 @@ fn entry_drafts(groups: &[PathGroup], spec: &SiteSpec) -> Vec<Draft> {
                 );
             }
             Draft {
+                detail: None,
                 kind: ENTRY_CANDIDATE,
                 method: Some(method),
                 path: Some(path.clone()),
@@ -725,6 +734,7 @@ fn bypass_drafts(groups: &[PathGroup], spec: &SiteSpec) -> Vec<Draft> {
                 MatchLabel::Exact
             };
             Draft {
+                detail: None,
                 kind: BYPASS_CANDIDATE,
                 method: total.method(),
                 path: Some(pattern.clone()),
@@ -758,6 +768,7 @@ async fn upload_drafts(pool: &PgPool, scope: &Scope) -> ApiResult<Vec<Draft>> {
                  count,
                  sample,
              }| Draft {
+                detail: None,
                 kind: UPLOAD_CANDIDATE,
                 method: Some(method),
                 path: Some(path.clone()),
@@ -794,6 +805,7 @@ async fn secret_drafts(pool: &PgPool, scope: &Scope, spec: &SiteSpec) -> ApiResu
         .into_iter()
         .filter(|(_, hit)| hit.calls > 0)
         .map(|(word, hit)| Draft {
+            detail: None,
             kind: SECRET_FIELD_CANDIDATE,
             method: None,
             path: None,
@@ -828,6 +840,7 @@ fn hot_drafts(groups: &[PathGroup]) -> Vec<Draft> {
         .into_iter()
         .take(HOT_TEMPLATES)
         .map(|((method, path), total)| Draft {
+            detail: None,
             kind: HOT_WOULD_BLOCK,
             method: Some(method),
             path: Some(path.clone()),
@@ -881,6 +894,7 @@ async fn route_rule_drafts(
     let headers = header_field_rows(pool, site, scope, &paths).await?;
     let bodies = body_field_rows(pool, site, scope, &paths).await?;
     let mut fields = field_sources(&headers, &bodies);
+    let site_requests: i64 = groups.iter().map(|group| group.count).sum();
     let drafts: Vec<Draft> = totals
         .iter()
         .filter_map(|(path, total)| {
@@ -889,6 +903,7 @@ async fn route_rule_drafts(
                 &document,
                 path,
                 total,
+                site_requests,
                 fields.remove(path).unwrap_or_default(),
             )
         })
@@ -903,17 +918,22 @@ struct RouteField {
     source: String,
     /// Requests of the window on the path that carry the field.
     matches: i64,
+    /// For a body field, the distinct names it takes, numbers left out; `None` for a header.
+    values: Option<i64>,
 }
 
 /// The route rule suggestion for one path, or `None` when no field of the path can name
 /// its interface. A field is kept only when the gateway would save the site with its
 /// rule, so no suggestion offers a rule the gateway refuses. The most frequent fields
-/// come first, ties by source, and at most `ROUTE_FIELDS_PER_PATH` are offered.
+/// come first, ties by source, and at most `ROUTE_FIELDS_PER_PATH` are offered. The
+/// figures of the card (`route_rule_detail`) take `site_requests`, the window's requests on
+/// the whole site, as their denominator.
 fn route_rule_draft(
     spec: &SiteSpec,
     document: &Value,
     path: &str,
     total: &Total,
+    site_requests: i64,
     mut fields: Vec<RouteField>,
 ) -> Option<Draft> {
     if !route_path_eligible(spec, path, total.count) {
@@ -937,6 +957,7 @@ fn route_rule_draft(
     if fields.is_empty() {
         return None;
     }
+    let detail = route_rule_detail(total, site_requests, &fields);
     let actions = fields
         .into_iter()
         .map(|field| ActionBody::AddRoute {
@@ -949,6 +970,7 @@ fn route_rule_draft(
         })
         .collect();
     Some(Draft {
+        detail: Some(detail),
         kind: ROUTE_RULE_CANDIDATE,
         method: None,
         path: Some(path.to_owned()),
@@ -959,6 +981,32 @@ fn route_rule_draft(
             .to_owned(),
         key: path.to_owned(),
     })
+}
+
+/// The figures of the route rule card (`Suggestion.detail`): the path's share of the site's
+/// requests in the window and, when one of the offered fields is a body field, the most
+/// frequent such field with the number of distinct names it takes. A header has no figures
+/// of its own, so a suggestion that offers only headers carries the share alone.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+fn route_rule_detail(total: &Total, site_requests: i64, offered: &[RouteField]) -> Value {
+    let mut detail = serde_json::Map::new();
+    if site_requests > 0 {
+        detail.insert(
+            "share".to_owned(),
+            Value::from(total.count as f64 / site_requests as f64),
+        );
+    }
+    // `offered` is most frequent first, so the first body field is the one the card names.
+    let body = offered.iter().find_map(|field| {
+        let name = field.source.strip_prefix("body.")?;
+        Some((name, field.values?))
+    });
+    if let Some((name, values)) = body {
+        detail.insert("field".to_owned(), Value::from(name));
+        detail.insert("values".to_owned(), Value::from(values));
+    }
+    Value::Object(detail)
 }
 
 /// Whether a path may take a route rule of its own: enough requests, a path the gateway
@@ -1026,20 +1074,22 @@ fn body_source(location: &str, key: Option<&str>) -> Option<String> {
 /// string alike, and the route parser refuses a number as a name.
 fn field_sources(
     headers: &[(String, String, i64)],
-    bodies: &[(String, String, Option<String>, i64, i64)],
+    bodies: &[BodyFieldRow],
 ) -> BTreeMap<String, Vec<RouteField>> {
     let mut fields: BTreeMap<String, Vec<RouteField>> = BTreeMap::new();
     for (path, name, requests) in headers.iter().filter(|(_, name, _)| method_header(name)) {
         fields.entry(path.clone()).or_default().push(RouteField {
             source: format!("header.{name}"),
             matches: *requests,
+            values: None,
         });
     }
-    for (path, location, key, requests, _) in bodies.iter().filter(|row| row.4 > 0) {
+    for (path, location, key, requests, _, values) in bodies.iter().filter(|row| row.4 > 0) {
         if let Some(source) = body_source(location, key.as_deref()) {
             fields.entry(path.clone()).or_default().push(RouteField {
                 source,
                 matches: *requests,
+                values: Some(*values),
             });
         }
     }
@@ -1085,19 +1135,23 @@ async fn header_field_rows(
     .await
 }
 
+/// One body field row of the route scan: `(path, location, key, requests, named, values)`.
+type BodyFieldRow = (String, String, Option<String>, i64, i64, i64);
+
 /// The body fields of the newest `ROUTE_SCAN_LIMIT` requests of `paths` in the window
-/// whose location ends in a method word: `(path, location, key, requests, named)`, where
-/// `named` counts the requests whose value is not a number. The location and the key
-/// are as the trace records them (`body.params.method`, `method`).
+/// whose location ends in a method word: `(path, location, key, requests, named, values)`,
+/// where `named` counts the requests whose value is not a number, and `values` the distinct
+/// values that are not numbers. The location and the key are as the trace records them
+/// (`body.params.method`, `method`).
 async fn body_field_rows(
     pool: &PgPool,
     site: &str,
     scope: &Scope,
     paths: &[String],
-) -> Result<Vec<(String, String, Option<String>, i64, i64)>, sqlx::Error> {
+) -> Result<Vec<BodyFieldRow>, sqlx::Error> {
     // The key list is the cheap filter on the expanded values; the location pattern then
     // makes the match exact, as `body_source` checks it.
-    sqlx::query_as::<_, (String, String, Option<String>, i64, i64)>(
+    sqlx::query_as::<_, BodyFieldRow>(
         "WITH recent AS (
              SELECT id, path, trace FROM decision_log
              WHERE site = $1 AND at_millis >= $2 AND at_millis <= $3 AND path = ANY($4)
@@ -1115,7 +1169,8 @@ async fn body_field_rows(
          )
          SELECT path, at_location, field_key,
                 count(DISTINCT id),
-                count(DISTINCT id) FILTER (WHERE field_value !~ '^-?[0-9.]+$')
+                count(DISTINCT id) FILTER (WHERE field_value !~ '^-?[0-9.]+$'),
+                count(DISTINCT field_value) FILTER (WHERE field_value !~ '^-?[0-9.]+$')
          FROM fields
          WHERE at_location ~* $7
          GROUP BY path, at_location, field_key",
@@ -1663,6 +1718,16 @@ mod tests {
         RouteField {
             source: source.to_owned(),
             matches,
+            values: None,
+        }
+    }
+
+    /// A body field the requests carry, with `values` distinct names.
+    fn body_field(source: &str, matches: i64, values: i64) -> RouteField {
+        RouteField {
+            source: source.to_owned(),
+            matches,
+            values: Some(values),
         }
     }
 
@@ -1688,12 +1753,26 @@ mod tests {
         let document = serde_json::to_value(&spec).expect("document");
         let fields = || vec![field("header.x-service-method", 25)];
         assert!(
-            route_rule_draft(&spec, &document, "/api/rpc", &requests_on_rpc(19), fields())
-                .is_none()
+            route_rule_draft(
+                &spec,
+                &document,
+                "/api/rpc",
+                &requests_on_rpc(19),
+                19,
+                fields()
+            )
+            .is_none()
         );
         assert!(
-            route_rule_draft(&spec, &document, "/api/rpc", &requests_on_rpc(20), fields())
-                .is_some()
+            route_rule_draft(
+                &spec,
+                &document,
+                "/api/rpc",
+                &requests_on_rpc(20),
+                20,
+                fields()
+            )
+            .is_some()
         );
         // A prefix route covering the path, and an exact route on it, both leave it alone.
         for routes in [
@@ -1703,8 +1782,15 @@ mod tests {
             let spec = site_with_routes(routes);
             let document = serde_json::to_value(&spec).expect("document");
             assert!(
-                route_rule_draft(&spec, &document, "/api/rpc", &requests_on_rpc(40), fields())
-                    .is_none(),
+                route_rule_draft(
+                    &spec,
+                    &document,
+                    "/api/rpc",
+                    &requests_on_rpc(40),
+                    40,
+                    fields()
+                )
+                .is_none(),
                 "{routes}"
             );
         }
@@ -1720,8 +1806,15 @@ mod tests {
             field("body.method", 25),
             field("header.x-service-method", 30),
         ];
-        let draft = route_rule_draft(&spec, &document, "/api/rpc", &requests_on_rpc(30), fields)
-            .expect("a draft");
+        let draft = route_rule_draft(
+            &spec,
+            &document,
+            "/api/rpc",
+            &requests_on_rpc(30),
+            30,
+            fields,
+        )
+        .expect("a draft");
         assert_eq!(draft.count, 30);
         assert_eq!(
             offered(&draft),
@@ -1744,8 +1837,15 @@ mod tests {
             field(&long, 39),
             field("header.x-service-method", 10),
         ];
-        let draft = route_rule_draft(&spec, &document, "/api/rpc", &requests_on_rpc(30), fields)
-            .expect("a draft");
+        let draft = route_rule_draft(
+            &spec,
+            &document,
+            "/api/rpc",
+            &requests_on_rpc(30),
+            30,
+            fields,
+        )
+        .expect("a draft");
         assert_eq!(
             offered(&draft),
             [("header.x-service-method".to_owned(), 10)]
@@ -1759,7 +1859,15 @@ mod tests {
         let document = serde_json::to_value(&spec).expect("document");
         let fields = vec![field("header.x-service-method", 30)];
         assert!(
-            route_rule_draft(&spec, &document, "/api/rpc", &requests_on_rpc(30), fields).is_none()
+            route_rule_draft(
+                &spec,
+                &document,
+                "/api/rpc",
+                &requests_on_rpc(30),
+                30,
+                fields
+            )
+            .is_none()
         );
     }
 
@@ -1775,7 +1883,15 @@ mod tests {
         let document = serde_json::to_value(&spec).expect("document");
         let fields = vec![field("header.x-service-method", 30)];
         assert!(
-            route_rule_draft(&spec, &document, "/api/rpc", &requests_on_rpc(30), fields).is_none()
+            route_rule_draft(
+                &spec,
+                &document,
+                "/api/rpc",
+                &requests_on_rpc(30),
+                30,
+                fields
+            )
+            .is_none()
         );
     }
 
@@ -1819,6 +1935,7 @@ mod tests {
                 Some("method".to_owned()),
                 20,
                 20,
+                3,
             ),
             // Only numbers: the trace keeps them as text, but the parser refuses them.
             (
@@ -1827,6 +1944,7 @@ mod tests {
                 Some("op".to_owned()),
                 25,
                 0,
+                0,
             ),
             (
                 "/api/rpc".to_owned(),
@@ -1834,6 +1952,7 @@ mod tests {
                 Some("cmd".to_owned()),
                 9,
                 9,
+                2,
             ),
         ];
         let fields = field_sources(&headers, &bodies);
@@ -1841,8 +1960,8 @@ mod tests {
             fields["/api/rpc"],
             [
                 field("header.x-service-method", 30),
-                field("body.method", 20),
-                field("body.params.cmd", 9),
+                body_field("body.method", 20, 3),
+                body_field("body.params.cmd", 9, 2),
             ]
         );
     }
@@ -1852,8 +1971,15 @@ mod tests {
         let spec = site_with_routes("");
         let document = serde_json::to_value(&spec).expect("document");
         let fields = vec![field("header.x-service-method", 30)];
-        let draft = route_rule_draft(&spec, &document, "/api/rpc", &requests_on_rpc(30), fields)
-            .expect("a draft");
+        let draft = route_rule_draft(
+            &spec,
+            &document,
+            "/api/rpc",
+            &requests_on_rpc(30),
+            30,
+            fields,
+        )
+        .expect("a draft");
         let suggestion = SuggestionBody::from(&draft);
         let json = serde_json::to_value(&suggestion).expect("json");
         assert_eq!(json["kind"], "route_rule_candidate");
@@ -1873,8 +1999,46 @@ mod tests {
                 "matches": 30
             }])
         );
+        assert_eq!(json["detail"], json!({"share": 1.0}));
         let back: SuggestionBody = serde_json::from_value(json).expect("reads back");
         assert_eq!(back, suggestion);
+    }
+
+    #[test]
+    fn the_card_figures_are_the_share_and_the_first_body_field() {
+        let spec = site_with_routes("");
+        let document = serde_json::to_value(&spec).expect("document");
+        // 30 of the site's 100 requests are on the path. The first body field offered is
+        // `params.op`, which takes four names; the header is offered too.
+        let fields = vec![
+            field("header.x-service-method", 30),
+            body_field("body.params.op", 30, 4),
+            body_field("body.method", 25, 3),
+        ];
+        let draft = route_rule_draft(
+            &spec,
+            &document,
+            "/api/rpc",
+            &requests_on_rpc(30),
+            100,
+            fields,
+        )
+        .expect("a draft");
+        assert_eq!(
+            draft.detail,
+            Some(json!({"share": 0.3, "field": "params.op", "values": 4}))
+        );
+        // Headers alone: the share, and no field.
+        let draft = route_rule_draft(
+            &spec,
+            &document,
+            "/api/rpc",
+            &requests_on_rpc(30),
+            100,
+            vec![field("header.x-service-method", 30)],
+        )
+        .expect("a draft");
+        assert_eq!(draft.detail, Some(json!({"share": 0.3})));
     }
 
     /// 2026-11-02 12:00 UTC, in Unix milliseconds.
@@ -1999,6 +2163,12 @@ mod tests {
                 ("body.method".to_owned(), 20),
             ]
         );
+        // The share is of the 74 requests the window holds, and `method` takes one name.
+        let figures = drafts[0].detail.as_ref().expect("figures");
+        assert_eq!(figures["field"], "method");
+        assert_eq!(figures["values"], 1);
+        let share = figures["share"].as_f64().expect("share");
+        assert!((share - 30.0 / 74.0).abs() < 1e-9);
 
         pool.close().await;
         sqlx::query(AssertSqlSafe(format!("DROP DATABASE IF EXISTS {name}")))
