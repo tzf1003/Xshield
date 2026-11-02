@@ -13,8 +13,8 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use xshield_core::context::learning::{
-    Evidence, RETIRE_DAYS, Thresholds, WINDOW_DAYS, contradicts, day_of, kind_share, observe,
-    propose,
+    Evidence, KEEP_RETIRED_DAYS, RETIRE_DAYS, Thresholds, WINDOW_DAYS, contradicts, day_of,
+    kind_share, observe, propose,
 };
 use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec};
 use xshield_postgres::object_learning_store::{self as store, Cursor, Judgement, LearnedState};
@@ -51,7 +51,8 @@ pub async fn learn_once(pool: &PgPool, now_millis: i64) {
 
 /// Reads one site's decision log from its cursor up to the lag horizon, batch by
 /// batch, then prunes the evidence older than the window, judges the proposals again,
-/// and retires the positions no vote has reached for the retirement period.
+/// and retires the positions no vote has reached for the retirement period, then forgets
+/// the retired ones unused for the retention period.
 ///
 /// `generation` is the creation time of the configuration the pass read. The store
 /// drops each write once the site has another configuration, so a pass that outlives a
@@ -128,6 +129,7 @@ async fn learn_site(
     store::prune_evidence(pool, site, oldest_day).await?;
     rejudge_proposals(pool, spec, generation, oldest_day, today, now_millis).await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
+    store::prune_retired(pool, site, today.saturating_sub(KEEP_RETIRED_DAYS)).await?;
     Ok(())
 }
 
@@ -438,14 +440,8 @@ mod pass_tests {
     /// Partitions for the days the test rows fall on. The pass reads from its
     /// cursor, so rows must exist before the first pass.
     async fn partitions(pool: &PgPool, now: i64) {
-        for days in 0..=5 {
-            let day = chrono::DateTime::from_timestamp_millis(now - days * DAY_MILLIS)
-                .expect("a day")
-                .date_naive();
-            xshield_postgres::partitions::ensure_partition(pool, day)
-                .await
-                .expect("create the partition");
-        }
+        let days: Vec<i64> = (0..=5).map(|days| now - days * DAY_MILLIS).collect();
+        crate::test_support::ensure_days(pool, &days).await;
     }
 
     /// One decision row of `GET /doctor/7` at `at_millis`. Five sessions make uses in

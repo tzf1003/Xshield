@@ -32,8 +32,8 @@ use xshield_core::context::trace::Trace;
 const EVIDENCE_CHUNK: usize = 1_000;
 /// Milliseconds in a UTC day.
 const DAY_MILLIS: i64 = 86_400_000;
-/// Other ends listed for one position's flows.
-const FLOW_LIMIT: i64 = 20;
+/// Decision rows read to find the responses a response position's examples come from.
+const EXAMPLE_ROWS_READ: i64 = 200;
 
 /// Failure of an object learning storage operation.
 #[derive(Debug)]
@@ -559,6 +559,28 @@ pub async fn retire_unseen(
     Ok(result.rows_affected())
 }
 
+/// Forgets the retired positions whose last use is on or before `last_day_at_most`, so a
+/// position keeps its row for the retention period after its last use. Like the retirement
+/// it needs no generation: it acts only on rows the window has aged out. Returns how many
+/// rows were forgotten.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn prune_retired(
+    pool: &PgPool,
+    site: &str,
+    last_day_at_most: u64,
+) -> Result<u64, LearningStoreError> {
+    let result = sqlx::query(
+        "DELETE FROM object_positions WHERE site = $1 AND state = 'retired' AND last_day <= $2",
+    )
+    .bind(site)
+    .bind(day_i64(last_day_at_most))
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// The last decision row the pass has read for the site, if it has started.
 ///
 /// # Errors
@@ -740,7 +762,9 @@ pub struct Flow {
 
 /// The other ends of a position's votes on or after `oldest_day`, most used first. A
 /// request position's other ends are the response positions its votes were shown at; a
-/// response position's are the request positions that showed a value at it.
+/// response position's are the request positions that showed a value at it. Every end the
+/// votes reached is listed, so the rows are bounded by the positions the votes reached. The
+/// drawer caps what it shows after it merges them with the decisions.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -755,18 +779,17 @@ pub async fn flows(
         "SELECT e.slot AS other, count(*) AS uses, count(DISTINCT e.session) AS sessions
          FROM object_evidence e
          WHERE e.site = $1 AND e.kind = 'vote' AND e.day >= $3 AND $2 = ANY(e.from_slots)
-         GROUP BY e.slot ORDER BY uses DESC, other LIMIT $4"
+         GROUP BY e.slot ORDER BY uses DESC, other"
     } else {
         "SELECT f.other, count(*) AS uses, count(DISTINCT e.session) AS sessions
          FROM object_evidence e CROSS JOIN LATERAL unnest(e.from_slots) AS f(other)
          WHERE e.site = $1 AND e.slot = $2 AND e.kind = 'vote' AND e.day >= $3
-         GROUP BY f.other ORDER BY uses DESC, other LIMIT $4"
+         GROUP BY f.other ORDER BY uses DESC, other"
     };
     let rows = sqlx::query(sql)
         .bind(site)
         .bind(slot)
         .bind(day_i64(oldest_day))
-        .bind(FLOW_LIMIT)
         .fetch_all(pool)
         .await?;
     rows.iter()
@@ -810,6 +833,156 @@ pub async fn uses(
     .fetch_one(pool)
     .await?;
     Ok(total)
+}
+
+/// Jev's decisions on the requests that reached one other end of a position's flows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JevFlow {
+    /// The position at the other end.
+    pub other: String,
+    /// Requests that reached it and that Jev allowed.
+    pub allow: i64,
+    /// Requests that reached it and that Jev refused.
+    pub deny: i64,
+}
+
+/// Up to `limit` request ids that used a position, newest first. A request position's
+/// examples are the requests whose values sat at it. A response position's are the
+/// responses that showed a value at it, newest observed first: the requests that used such
+/// a value name the response in their `sources`, and only the newest [`EXAMPLE_ROWS_READ`]
+/// of those requests are read. A source without its observation time is placed by the
+/// request that used it. Only decision rows at or after `since_millis` count.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn examples(
+    pool: &PgPool,
+    site: &str,
+    slot: &str,
+    slot_side: &str,
+    since_millis: i64,
+    limit: i64,
+) -> Result<Vec<String>, LearningStoreError> {
+    let rows = if slot_side == "response" {
+        sqlx::query(
+            "WITH recent AS (
+                 SELECT d.trace, d.at_millis FROM decision_log d
+                 WHERE d.site = $1 AND d.at_millis >= $3
+                   AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+                       jsonb_build_object('sources', jsonb_build_array(
+                           jsonb_build_object('slot', $2::text)))))
+                 ORDER BY d.at_millis DESC
+                 LIMIT $5
+             )
+             SELECT s ->> 'request_id' AS request_id
+             FROM recent
+             CROSS JOIN LATERAL jsonb_array_elements(
+                 COALESCE(recent.trace -> 'values', '[]'::jsonb)) AS v
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
+             WHERE s ->> 'slot' = $2 AND s ->> 'request_id' IS NOT NULL
+             GROUP BY s ->> 'request_id'
+             ORDER BY max(COALESCE((s ->> 'at_millis')::bigint, recent.at_millis)) DESC
+             LIMIT $4",
+        )
+        .bind(site)
+        .bind(slot)
+        .bind(since_millis)
+        .bind(limit)
+        .bind(EXAMPLE_ROWS_READ)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT d.request_id FROM decision_log d
+             WHERE d.site = $1 AND d.at_millis >= $3
+               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+                   jsonb_build_object('slot', $2::text)))
+             ORDER BY d.at_millis DESC
+             LIMIT $4",
+        )
+        .bind(site)
+        .bind(slot)
+        .bind(since_millis)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+    rows.iter()
+        .map(|row| {
+            row.try_get::<String, _>("request_id")
+                .map_err(LearningStoreError::from)
+        })
+        .collect()
+}
+
+/// Jev's decisions on the requests of a position's flows since `since_millis`, most decided
+/// first. A request position's other ends are the response positions its values were shown
+/// at; a response position's are the request positions that used its values. Each request
+/// counts once per other end. There is one row per other end Jev decided on, whether or not
+/// the votes reached it, so the drawer's flows always carry their decisions. The rows are
+/// bounded by the positions the values reached, so no limit is applied. Only calls to Jev
+/// are read, which the partial index on them covers.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn jev_flows(
+    pool: &PgPool,
+    site: &str,
+    slot: &str,
+    slot_side: &str,
+    since_millis: i64,
+) -> Result<Vec<JevFlow>, LearningStoreError> {
+    let sql: &'static str = if slot_side == "response" {
+        "WITH judged AS (
+             SELECT DISTINCT d.at_millis, d.id, d.decision_path, v ->> 'slot' AS other
+             FROM decision_log d
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.trace -> 'values', '[]'::jsonb)) AS v
+             WHERE d.site = $1 AND d.at_millis >= $3 AND d.jev IS NOT NULL
+               AND d.decision_path IN ('jev_allow', 'jev_deny')
+               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+                   jsonb_build_object('sources', jsonb_build_array(
+                       jsonb_build_object('slot', $2::text)))))
+               AND v ->> 'slot' IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
+                   WHERE s ->> 'slot' = $2)
+         )
+         SELECT other,
+                count(*) FILTER (WHERE decision_path = 'jev_allow') AS allow,
+                count(*) FILTER (WHERE decision_path = 'jev_deny') AS deny
+         FROM judged GROUP BY other ORDER BY count(*) DESC, other"
+    } else {
+        "WITH judged AS (
+             SELECT DISTINCT d.at_millis, d.id, d.decision_path, s ->> 'slot' AS other
+             FROM decision_log d
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.trace -> 'values', '[]'::jsonb)) AS v
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
+             WHERE d.site = $1 AND d.at_millis >= $3 AND d.jev IS NOT NULL
+               AND d.decision_path IN ('jev_allow', 'jev_deny')
+               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+                   jsonb_build_object('slot', $2::text)))
+               AND v ->> 'slot' = $2 AND s ->> 'slot' IS NOT NULL
+         )
+         SELECT other,
+                count(*) FILTER (WHERE decision_path = 'jev_allow') AS allow,
+                count(*) FILTER (WHERE decision_path = 'jev_deny') AS deny
+         FROM judged GROUP BY other ORDER BY count(*) DESC, other"
+    };
+    let rows = sqlx::query(sql)
+        .bind(site)
+        .bind(slot)
+        .bind(since_millis)
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|row| -> Result<JevFlow, LearningStoreError> {
+            Ok(JevFlow {
+                other: row.try_get("other")?,
+                allow: row.try_get("allow")?,
+                deny: row.try_get("deny")?,
+            })
+        })
+        .collect()
 }
 
 /// Dismisses the proposal of a request position, or the position while it is pending: the
@@ -1095,6 +1268,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded["GET /doctor/{id} path[1]"].votes(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_retired_position_is_forgotten_once_its_retention_period_ends() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("retention");
+        let generation = with_site(&pool, &site).await;
+        // One position last used on day 10, and one used on day 50.
+        let old = Judgement {
+            last_day: 10,
+            ..proposal()
+        };
+        let recent = Judgement {
+            slot: "GET /other/{id} path[1]",
+            last_day: 50,
+            ..proposal()
+        };
+        put_judgement(&pool, &site, generation, &old, 1)
+            .await
+            .unwrap();
+        put_judgement(&pool, &site, generation, &recent, 1)
+            .await
+            .unwrap();
+        // Unused for the retirement period, only the old position is retired.
+        assert_eq!(retire_unseen(&pool, &site, 10, 2).await.unwrap(), 1);
+        // It is kept until its retention period has passed, and then forgotten.
+        assert_eq!(prune_retired(&pool, &site, 9).await.unwrap(), 0);
+        assert_eq!(prune_retired(&pool, &site, 10).await.unwrap(), 1);
+        let kept: Vec<String> = positions(&pool, &site)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.slot)
+            .collect();
+        assert_eq!(kept, vec!["GET /other/{id} path[1]".to_owned()]);
     }
 
     #[tokio::test]
@@ -1501,6 +1710,35 @@ mod tests {
             2
         );
         assert_eq!(uses(&pool, &site, records, "response", 0).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn the_flows_of_a_position_list_every_end_its_votes_reached() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("flows_all");
+        let generation = with_site(&pool, &site).await;
+        // Twenty-one response positions, each reached by one vote from its own session.
+        let ends: Vec<String> = (0..21)
+            .map(|index| format!("GET /api/source{index} [].id"))
+            .collect();
+        let votes: Vec<Vote> = ends
+            .iter()
+            .enumerate()
+            .map(|(index, end)| vote(&format!("s{index}"), 3, &[end.as_str()]))
+            .collect();
+        record_evidence(&pool, &site, generation, &votes, &[])
+            .await
+            .unwrap();
+        // The store lists all of them, so the drawer can take the flows it shows only after
+        // it merges them with the decisions. A cap here would show zero uses for a flow past it.
+        let reached = flows(&pool, &site, SLOT, "request", 0).await.unwrap();
+        assert_eq!(reached.len(), 21);
+        assert!(
+            reached
+                .iter()
+                .all(|flow| flow.uses == 1 && flow.sessions == 1)
+        );
     }
 
     #[tokio::test]
