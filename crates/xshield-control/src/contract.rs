@@ -357,9 +357,11 @@ fn preview_round_trips_through_the_preview_type() {
     assert_round_trips::<PreviewBody>(&fixture(PREVIEW), exactly);
 
     // Each kind of change the preview reports: a call limit that tightens, one that
-    // loosens, the cache, and a secret field. A window not read in full says so.
+    // loosens, the cache, a secret field, and an estimate, which carries its approximate
+    // mark. A window not read in full says so, and a route that names requests warns.
     let mut every_kind = fixture(PREVIEW);
     every_kind["complete"] = json!(false);
+    every_kind["warnings"] = json!(["SESSION_CHANGED", "INTERFACE_UNVERIFIED"]);
     every_kind["changes"] = json!([
         {
             "kind": "call_limit",
@@ -381,6 +383,13 @@ fn preview_round_trips_through_the_preview_type() {
             "kind": "secret_fields",
             "count": 5,
             "detail": { "values": 7, "fields": [["ssn", 7]] },
+        },
+        {
+            "kind": "api_split",
+            "count": 4,
+            "top": [["POST", "/api/rpc", 4]],
+            "sample": "req_01a19728dcc071aab225b9e0f5d7b63f",
+            "detail": { "approximate": true },
         },
     ]);
     assert_round_trips::<PreviewBody>(&every_kind, exactly);
