@@ -1,7 +1,8 @@
 //! Storage of the object-map learning (docs/object-map-design.md section 3): the
 //! evidence the rules count, the state of each position they have judged, and each
 //! site's cursor over its decision log. Only the control plane writes these tables,
-//! which `migrations/0003_object_learning.sql` defines.
+//! which `migrations/0003_object_learning.sql` and `migrations/0004_object_positions_ids.sql`
+//! define.
 //!
 //! Every write is idempotent. The evidence of a position, session and UTC day is
 //! counted once, and a judgement overwrites only the rows the rules own, so a pass
@@ -17,7 +18,7 @@
 //! traffic the old one logged. Pruning and retirement only act on rows the window has
 //! aged out, so they need no generation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -29,6 +30,10 @@ use xshield_core::context::trace::Trace;
 
 /// Evidence rows per insert statement, which bounds the size of one statement.
 const EVIDENCE_CHUNK: usize = 1_000;
+/// Milliseconds in a UTC day.
+const DAY_MILLIS: i64 = 86_400_000;
+/// Other ends listed for one position's flows.
+const FLOW_LIMIT: i64 = 20;
 
 /// Failure of an object learning storage operation.
 #[derive(Debug)]
@@ -203,7 +208,7 @@ pub async fn record_evidence(
             session: vote.session.as_str(),
             day: day_i64(vote.day),
             kind: "vote",
-            from: vote.from.clone(),
+            from: distinct(&vote.from),
         })
         .chain(denials.iter().map(|denial| EvidenceRow {
             slot: denial.slot.as_str(),
@@ -246,6 +251,164 @@ pub async fn record_evidence(
         builder.push(" AND created_at = ");
         builder.push_bind(generation);
         builder.push(" FOR SHARE) ON CONFLICT DO NOTHING");
+        builder.build().execute(pool).await?;
+    }
+    let stored = stored_sources(pool, site, votes).await?;
+    record_positions(pool, site, generation, votes, denials, &stored).await?;
+    Ok(())
+}
+
+/// The day and the response positions of each vote the evidence holds, whether this call wrote
+/// that evidence or an earlier call did. The evidence and the positions are written by separate
+/// statements, so a call can fail between them, and its retry finds the evidence already there:
+/// the sources it holds name the positions to write, not what this call happened to insert.
+async fn stored_sources(
+    pool: &PgPool,
+    site: &str,
+    votes: &[Vote],
+) -> Result<Vec<(i64, Vec<String>)>, LearningStoreError> {
+    let mut stored: Vec<(i64, Vec<String>)> = Vec::new();
+    for chunk in votes.chunks(EVIDENCE_CHUNK) {
+        let slots: Vec<String> = chunk.iter().map(|vote| vote.slot.clone()).collect();
+        let sessions: Vec<String> = chunk.iter().map(|vote| vote.session.clone()).collect();
+        let days: Vec<i64> = chunk.iter().map(|vote| day_i64(vote.day)).collect();
+        let rows = sqlx::query(
+            "SELECT e.day, e.from_slots
+             FROM object_evidence e
+             JOIN unnest($2::text[], $3::text[], $4::bigint[]) AS k(slot, session, day)
+                 ON e.slot = k.slot AND e.session = k.session AND e.day = k.day
+             WHERE e.site = $1 AND e.kind = 'vote'",
+        )
+        .bind(site)
+        .bind(slots)
+        .bind(sessions)
+        .bind(days)
+        .fetch_all(pool)
+        .await?;
+        for row in rows {
+            stored.push((row.try_get("day")?, row.try_get("from_slots")?));
+        }
+    }
+    Ok(stored)
+}
+
+/// Keeps a row for every position the batch names: a request position a value sat at, and a
+/// response position a vote's evidence holds. A new row is pending until a judgement arrives,
+/// and a row the window retired comes back pending when a vote sees it again. A refusal is not
+/// a use: it adds a pending row when the position has none, and it never moves the day the
+/// position was last used, so retirement counts from the last vote.
+async fn record_positions(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    votes: &[Vote],
+    denials: &[Denial],
+    stored: &[(i64, Vec<String>)],
+) -> Result<(), LearningStoreError> {
+    // One entry per position: a statement may not change the same row twice.
+    let mut used: BTreeMap<&str, (&'static str, i64)> = BTreeMap::new();
+    for vote in votes {
+        note_position(&mut used, &vote.slot, "request", day_i64(vote.day));
+    }
+    // A response position comes from the sources the evidence holds. A repeat of a vote holds
+    // none of its own sources, so they name no flow and make no position.
+    for (day, from) in stored {
+        for position in from {
+            note_position(&mut used, position.as_str(), "response", *day);
+        }
+    }
+    let mut refused: BTreeMap<&str, i64> = BTreeMap::new();
+    for denial in denials {
+        let day = day_i64(denial.day);
+        let last = refused.entry(denial.slot.as_str()).or_insert(day);
+        *last = (*last).max(day);
+    }
+    refused.retain(|slot, _| !used.contains_key(slot));
+    let used: Vec<(&str, &str, i64)> = used
+        .into_iter()
+        .map(|(slot, (side, day))| (slot, side, day))
+        .collect();
+    let refused: Vec<(&str, &str, i64)> = refused
+        .into_iter()
+        .map(|(slot, day)| (slot, "request", day))
+        .collect();
+    write_positions(pool, site, generation, &used, USED_CONFLICT).await?;
+    write_positions(pool, site, generation, &refused, REFUSED_CONFLICT).await?;
+    Ok(())
+}
+
+/// Notes that `slot` was seen on `side` on `day`. A position seen as a request keeps the
+/// request side, and its last day is the latest day it was seen.
+fn note_position<'a>(
+    positions: &mut BTreeMap<&'a str, (&'static str, i64)>,
+    slot: &'a str,
+    side: &'static str,
+    day: i64,
+) {
+    let entry = positions.entry(slot).or_insert((side, day));
+    entry.1 = entry.1.max(day);
+    if side == "request" {
+        entry.0 = "request";
+    }
+}
+
+/// A vote's response positions, each once. A value can match one position twice, when two
+/// history items sit at the same location, but a vote reached each position once.
+fn distinct(from: &[String]) -> Vec<String> {
+    let mut from = from.to_vec();
+    from.sort_unstable();
+    from.dedup();
+    from
+}
+
+/// How a used position's row changes when a vote sees it: its last day moves to the latest day
+/// it was used, and a retired row comes back pending.
+const USED_CONFLICT: &str = " ON CONFLICT (site, slot) DO UPDATE SET
+         last_day = GREATEST(object_positions.last_day, EXCLUDED.last_day),
+         updated_millis = GREATEST(object_positions.updated_millis, EXCLUDED.updated_millis),
+         state = CASE WHEN object_positions.state = 'retired' THEN 'pending'
+                      ELSE object_positions.state END,
+         class = CASE WHEN object_positions.state = 'retired' THEN NULL
+                      ELSE object_positions.class END";
+
+/// How a refused position's row changes: a row the position already has stays as it is.
+const REFUSED_CONFLICT: &str = " ON CONFLICT (site, slot) DO NOTHING";
+
+/// Writes position rows in chunks, while the site still has the configuration of `generation`.
+/// Each row is a slot, its side, and the day it was used or refused.
+async fn write_positions(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    rows: &[(&str, &str, i64)],
+    on_conflict: &'static str,
+) -> Result<(), LearningStoreError> {
+    for chunk in rows.chunks(EVIDENCE_CHUNK) {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO object_positions (site, slot, side, state, last_day, updated_millis)
+             SELECT site, slot, side, 'pending', day, updated FROM (",
+        );
+        builder.push_values(chunk, |mut values, &(slot, side, day)| {
+            values.push_bind(site);
+            values.push_unseparated("::text");
+            values.push_bind(slot);
+            values.push_unseparated("::text");
+            values.push_bind(side);
+            values.push_unseparated("::text");
+            values.push_bind(day);
+            values.push_unseparated("::bigint");
+            values.push_bind(day.saturating_mul(DAY_MILLIS));
+            values.push_unseparated("::bigint");
+        });
+        builder.push(
+            ") AS v(site, slot, side, day, updated)
+             WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = ",
+        );
+        builder.push_bind(site);
+        builder.push(" AND created_at = ");
+        builder.push_bind(generation);
+        builder.push(" FOR SHARE)");
+        builder.push(on_conflict);
         builder.build().execute(pool).await?;
     }
     Ok(())
@@ -320,8 +483,9 @@ pub async fn prune_evidence(
 }
 
 /// Writes the state of one position of the site's `generation`. A row an administrator
-/// dismissed or marked ambiguous is left alone, and a confirmed write never undoes a
-/// suspension: that one waits for an administrator.
+/// marked ambiguous is left alone, and a confirmed write never undoes a suspension: that
+/// one waits for an administrator. A dismissed proposal is written again only when the
+/// evidence has changed significantly (see migration 0004).
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -345,9 +509,16 @@ pub async fn put_judgement(
              sessions = EXCLUDED.sessions,
              share_per_mille = EXCLUDED.share_per_mille,
              last_day = EXCLUDED.last_day,
-             updated_millis = EXCLUDED.updated_millis
-         WHERE object_positions.state NOT IN ('dismissed', 'ambiguous')
-           AND NOT (EXCLUDED.state = 'confirmed' AND object_positions.state = 'suspended')",
+             updated_millis = EXCLUDED.updated_millis,
+             dismissed = false,
+             dismissed_class = NULL,
+             dismissed_votes = 0
+         WHERE object_positions.state <> 'ambiguous'
+           AND NOT (EXCLUDED.state = 'confirmed' AND object_positions.state = 'suspended')
+           AND (EXCLUDED.state <> 'proposed' OR NOT object_positions.dismissed
+                OR (object_positions.dismissed_class IS NOT NULL
+                    AND EXCLUDED.class IS DISTINCT FROM object_positions.dismissed_class)
+                OR EXCLUDED.votes >= 2 * object_positions.dismissed_votes)",
     )
     .bind(site)
     .bind(judgement.slot)
@@ -364,7 +535,7 @@ pub async fn put_judgement(
     Ok(())
 }
 
-/// Retires the proposed, confirmed and suspended positions whose last vote is on or
+/// Retires the pending, proposed, confirmed and suspended positions whose last vote is on or
 /// before `last_day_at_most`, and returns the number retired.
 ///
 /// # Errors
@@ -377,7 +548,7 @@ pub async fn retire_unseen(
 ) -> Result<u64, LearningStoreError> {
     let result = sqlx::query(
         "UPDATE object_positions SET state = 'retired', updated_millis = $3
-         WHERE site = $1 AND state IN ('proposed', 'confirmed', 'suspended')
+         WHERE site = $1 AND state IN ('pending', 'proposed', 'confirmed', 'suspended')
            AND last_day <= $2",
     )
     .bind(site)
@@ -455,7 +626,8 @@ pub async fn proposed_slots(pool: &PgPool, site: &str) -> Result<Vec<String>, Le
 }
 
 /// Withdraws the proposal of a position of the site's `generation`, when it is still a
-/// proposal. Confirmed, suspended, retired, dismissed and ambiguous positions are left alone.
+/// proposal: the position returns to pending, so the console still lists it. Confirmed,
+/// suspended, retired, dismissed and ambiguous positions are left alone.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -464,17 +636,249 @@ pub async fn withdraw_proposal(
     site: &str,
     generation: DateTime<Utc>,
     slot: &str,
+    now_millis: i64,
 ) -> Result<(), LearningStoreError> {
     sqlx::query(
-        "DELETE FROM object_positions WHERE site = $1 AND slot = $2 AND state = 'proposed'
+        "UPDATE object_positions SET state = 'pending', class = NULL, updated_millis = $4
+         WHERE site = $1 AND slot = $2 AND state = 'proposed'
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $3 FOR SHARE)",
     )
     .bind(site)
     .bind(slot)
     .bind(generation)
+    .bind(now_millis)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// One position row as the console lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositionRow {
+    /// The row's identity. The console addresses a learned row as `s<id>`.
+    pub id: i64,
+    /// The position key, `METHOD route location`.
+    pub slot: String,
+    /// `request` for a position a request value sits at, `response` for a response position.
+    pub side: String,
+    /// The state the rules gave the position, or `pending` while it has no proposal.
+    pub state: String,
+    /// The kind the state is about, when it has one.
+    pub class: Option<String>,
+    /// Whether the proposal was dismissed, or the position was while it was pending.
+    pub dismissed: bool,
+    /// Votes in the window.
+    pub votes: i32,
+    /// Sessions that voted in the window.
+    pub sessions: i32,
+    /// Share of the votes whose response position has `class`, in thousandths.
+    pub share_per_mille: i32,
+    /// The last UTC day the position was seen.
+    pub last_day: i64,
+}
+
+/// The positions of a site, in the order they were first kept.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn positions(pool: &PgPool, site: &str) -> Result<Vec<PositionRow>, LearningStoreError> {
+    let rows = sqlx::query(
+        "SELECT id, slot, side, state, class, dismissed, votes, sessions, share_per_mille, last_day
+         FROM object_positions WHERE site = $1 ORDER BY id",
+    )
+    .bind(site)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(position_row).collect()
+}
+
+/// The position of the site with the given id, if there is one.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn position(
+    pool: &PgPool,
+    site: &str,
+    id: i64,
+) -> Result<Option<PositionRow>, LearningStoreError> {
+    let row = sqlx::query(
+        "SELECT id, slot, side, state, class, dismissed, votes, sessions, share_per_mille, last_day
+         FROM object_positions WHERE site = $1 AND id = $2",
+    )
+    .bind(site)
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(position_row).transpose()
+}
+
+fn position_row(row: &PgRow) -> Result<PositionRow, LearningStoreError> {
+    Ok(PositionRow {
+        id: row.try_get("id")?,
+        slot: row.try_get("slot")?,
+        side: row.try_get("side")?,
+        state: row.try_get("state")?,
+        class: row.try_get("class")?,
+        dismissed: row.try_get("dismissed")?,
+        votes: row.try_get("votes")?,
+        sessions: row.try_get("sessions")?,
+        share_per_mille: row.try_get("share_per_mille")?,
+        last_day: row.try_get("last_day")?,
+    })
+}
+
+/// One other end of a position's votes: how many reached it, and from how many sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Flow {
+    /// The position at the other end.
+    pub other: String,
+    /// Votes that reached it, on or after the window's first day.
+    pub uses: i64,
+    /// Sessions among those votes.
+    pub sessions: i64,
+}
+
+/// The other ends of a position's votes on or after `oldest_day`, most used first. A
+/// request position's other ends are the response positions its votes were shown at; a
+/// response position's are the request positions that showed a value at it.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn flows(
+    pool: &PgPool,
+    site: &str,
+    slot: &str,
+    slot_side: &str,
+    oldest_day: u64,
+) -> Result<Vec<Flow>, LearningStoreError> {
+    let sql: &'static str = if slot_side == "response" {
+        "SELECT e.slot AS other, count(*) AS uses, count(DISTINCT e.session) AS sessions
+         FROM object_evidence e
+         WHERE e.site = $1 AND e.kind = 'vote' AND e.day >= $3 AND $2 = ANY(e.from_slots)
+         GROUP BY e.slot ORDER BY uses DESC, other LIMIT $4"
+    } else {
+        "SELECT f.other, count(*) AS uses, count(DISTINCT e.session) AS sessions
+         FROM object_evidence e CROSS JOIN LATERAL unnest(e.from_slots) AS f(other)
+         WHERE e.site = $1 AND e.slot = $2 AND e.kind = 'vote' AND e.day >= $3
+         GROUP BY f.other ORDER BY uses DESC, other LIMIT $4"
+    };
+    let rows = sqlx::query(sql)
+        .bind(site)
+        .bind(slot)
+        .bind(day_i64(oldest_day))
+        .bind(FLOW_LIMIT)
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|row| -> Result<Flow, LearningStoreError> {
+            Ok(Flow {
+                other: row.try_get("other")?,
+                uses: row.try_get("uses")?,
+                sessions: row.try_get("sessions")?,
+            })
+        })
+        .collect()
+}
+
+/// The votes that reached a position on or after `oldest_day`: the uses its flows share. A
+/// request position's uses are its own votes, and a response position's are the votes that
+/// showed a value at it. A flow's share is its uses over these.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn uses(
+    pool: &PgPool,
+    site: &str,
+    slot: &str,
+    slot_side: &str,
+    oldest_day: u64,
+) -> Result<i64, LearningStoreError> {
+    let total: i64 = if slot_side == "response" {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM object_evidence
+             WHERE site = $1 AND kind = 'vote' AND day >= $3 AND $2 = ANY(from_slots)",
+        )
+    } else {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM object_evidence
+             WHERE site = $1 AND kind = 'vote' AND day >= $3 AND slot = $2",
+        )
+    }
+    .bind(site)
+    .bind(slot)
+    .bind(day_i64(oldest_day))
+    .fetch_one(pool)
+    .await?;
+    Ok(total)
+}
+
+/// Dismisses the proposal of a request position, or the position while it is pending: the
+/// rules stop proposing it. The baseline the evidence must double from is the votes the
+/// position has now, or `min_votes` when it has fewer. Returns whether a position was
+/// dismissed; a confirmed, suspended, retired or ambiguous position is not.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn dismiss(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    id: i64,
+    min_votes: i32,
+    now_millis: i64,
+) -> Result<bool, LearningStoreError> {
+    let result = sqlx::query(
+        "UPDATE object_positions SET
+             state = 'pending',
+             class = NULL,
+             dismissed = true,
+             dismissed_class = class,
+             dismissed_votes = GREATEST(votes, $3::integer),
+             updated_millis = $4
+         WHERE site = $1 AND id = $2 AND side = 'request' AND state IN ('proposed', 'pending')
+           AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $5 FOR SHARE)",
+    )
+    .bind(site)
+    .bind(id)
+    .bind(min_votes)
+    .bind(now_millis)
+    .bind(generation)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Marks a request position ambiguous: it stays with Jev, and the rules never propose it.
+/// Only a pending or proposed position is marked: a confirmed, suspended, retired or ambiguous
+/// one is not. Returns whether a position was marked.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn mark_ambiguous(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    id: i64,
+    now_millis: i64,
+) -> Result<bool, LearningStoreError> {
+    let result = sqlx::query(
+        "UPDATE object_positions SET
+             state = 'ambiguous',
+             class = NULL,
+             dismissed = false,
+             dismissed_class = NULL,
+             dismissed_votes = 0,
+             updated_millis = $3
+         WHERE site = $1 AND id = $2 AND side = 'request' AND state IN ('pending', 'proposed')
+           AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $4 FOR SHARE)",
+    )
+    .bind(site)
+    .bind(id)
+    .bind(now_millis)
+    .bind(generation)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// Forgets the learning state of a site inside the transaction that deletes the site.
@@ -587,6 +991,16 @@ mod tests {
 
     const SLOT: &str = "GET /doctor/{id} path[1]";
 
+    /// The row the store keeps for `slot` on `side`, as the console lists it.
+    async fn row_of(pool: &PgPool, site: &str, slot: &str, slot_side: &str) -> PositionRow {
+        positions(pool, site)
+            .await
+            .expect("list the positions")
+            .into_iter()
+            .find(|row| row.slot == slot && row.side == slot_side)
+            .expect("the position has a row")
+    }
+
     fn vote(session: &str, day: u64, from: &[&str]) -> Vote {
         Vote {
             slot: SLOT.to_owned(),
@@ -685,38 +1099,408 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
-    async fn a_dismissed_position_is_not_proposed_again() {
+    async fn a_dismissed_proposal_is_not_proposed_again_until_the_evidence_doubles() {
         let pool = connect_test_pool().await;
         let site = unique_site("dismissed");
         let generation = with_site(&pool, &site).await;
-        let slot = "GET /doctor/{id} path[1]";
-        let judgement = Judgement {
-            slot,
-            state: LearnedState::Proposed,
-            class: "doctor",
-            votes: 20,
-            sessions: 5,
-            share_per_mille: 950,
-            last_day: 3,
-        };
-        put_judgement(&pool, &site, generation, &judgement, 1)
+        put_judgement(&pool, &site, generation, &proposal(), 1)
             .await
             .unwrap();
-        sqlx::query("UPDATE object_positions SET state = 'dismissed' WHERE site = $1")
-            .bind(&site)
-            .execute(&pool)
-            .await
-            .unwrap();
-        put_judgement(&pool, &site, generation, &judgement, 2)
-            .await
-            .unwrap();
-        let state: String =
-            sqlx::query_scalar("SELECT state FROM object_positions WHERE site = $1")
-                .bind(&site)
-                .fetch_one(&pool)
+        let proposed = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(proposed.state, "proposed");
+        assert!(
+            dismiss(&pool, &site, generation, proposed.id, 20, 2)
                 .await
-                .unwrap();
-        assert_eq!(state, "dismissed");
+                .unwrap()
+        );
+        let dismissed = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(dismissed.state, "pending");
+        assert_eq!(dismissed.class, None);
+        assert!(dismissed.dismissed);
+        // The same evidence again changes nothing.
+        put_judgement(&pool, &site, generation, &proposal(), 3)
+            .await
+            .unwrap();
+        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "pending");
+        // Twice the votes the position had when it was dismissed is a significant change.
+        let doubled = Judgement {
+            votes: 40,
+            ..proposal()
+        };
+        put_judgement(&pool, &site, generation, &doubled, 4)
+            .await
+            .unwrap();
+        let returned = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(returned.state, "proposed");
+        assert!(!returned.dismissed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_dismissed_proposal_returns_when_its_kind_changes() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("dismissed_kind");
+        let generation = with_site(&pool, &site).await;
+        put_judgement(&pool, &site, generation, &proposal(), 1)
+            .await
+            .unwrap();
+        let proposed = row_of(&pool, &site, SLOT, "request").await;
+        dismiss(&pool, &site, generation, proposed.id, 20, 2)
+            .await
+            .unwrap();
+        // The same votes for another kind are a significant change.
+        let other = Judgement {
+            class: "document",
+            ..proposal()
+        };
+        put_judgement(&pool, &site, generation, &other, 3)
+            .await
+            .unwrap();
+        let returned = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(returned.state, "proposed");
+        assert_eq!(returned.class.as_deref(), Some("document"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_pending_position_can_be_dismissed_and_stays_pending() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("dismissed_pending");
+        let generation = with_site(&pool, &site).await;
+        record_evidence(&pool, &site, generation, &[vote("a", 3, &[])], &[])
+            .await
+            .unwrap();
+        let pending = row_of(&pool, &site, SLOT, "request").await;
+        assert!(
+            dismiss(&pool, &site, generation, pending.id, 20, 2)
+                .await
+                .unwrap()
+        );
+        // Fewer votes than twice the minimum: the rules do not propose it yet.
+        put_judgement(&pool, &site, generation, &proposal(), 3)
+            .await
+            .unwrap();
+        let row = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(row.state, "pending");
+        assert!(row.dismissed);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_confirmed_position_is_neither_dismissed_nor_marked_ambiguous() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("confirmed");
+        let generation = with_site(&pool, &site).await;
+        let confirmed = Judgement {
+            state: LearnedState::Confirmed,
+            ..proposal()
+        };
+        put_judgement(&pool, &site, generation, &confirmed, 1)
+            .await
+            .unwrap();
+        let row = row_of(&pool, &site, SLOT, "request").await;
+        assert!(
+            !dismiss(&pool, &site, generation, row.id, 20, 2)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !mark_ambiguous(&pool, &site, generation, row.id, 2)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            row_of(&pool, &site, SLOT, "request").await.state,
+            "confirmed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn an_ambiguous_position_is_never_proposed_again() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("ambiguous");
+        let generation = with_site(&pool, &site).await;
+        let response_slot = "GET /api/appointments [].doc_id";
+        record_evidence(
+            &pool,
+            &site,
+            generation,
+            &[vote("a", 3, &[response_slot])],
+            &[],
+        )
+        .await
+        .unwrap();
+        // Only a request position can be marked: a response position has no proposal.
+        let response = row_of(&pool, &site, response_slot, "response").await;
+        assert!(
+            !mark_ambiguous(&pool, &site, generation, response.id, 2)
+                .await
+                .unwrap()
+        );
+        let request = row_of(&pool, &site, SLOT, "request").await;
+        assert!(
+            mark_ambiguous(&pool, &site, generation, request.id, 2)
+                .await
+                .unwrap()
+        );
+        put_judgement(&pool, &site, generation, &proposal(), 3)
+            .await
+            .unwrap();
+        // The window retiring everything does not retire it either.
+        retire_unseen(&pool, &site, 100, 4).await.unwrap();
+        let row = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(row.state, "ambiguous");
+        assert_eq!(row.class, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_retired_position_is_not_marked_ambiguous() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("retired_ambiguous");
+        let generation = with_site(&pool, &site).await;
+        record_evidence(&pool, &site, generation, &[vote("a", 1, &[])], &[])
+            .await
+            .unwrap();
+        assert_eq!(retire_unseen(&pool, &site, 5, 2).await.unwrap(), 1);
+        let row = row_of(&pool, &site, SLOT, "request").await;
+        assert!(
+            !mark_ambiguous(&pool, &site, generation, row.id, 3)
+                .await
+                .unwrap()
+        );
+        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "retired");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_refusal_does_not_move_the_day_a_position_was_last_used() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("refusal_day");
+        let generation = with_site(&pool, &site).await;
+        record_evidence(&pool, &site, generation, &[vote("a", 1, &[])], &[])
+            .await
+            .unwrap();
+        // Refused on day 20. The last vote is still on day 1, so the pass that
+        // retires what was last used on or before day 5 retires the position.
+        let refusal = Denial {
+            slot: SLOT.to_owned(),
+            session: "b".to_owned(),
+            day: 20,
+        };
+        record_evidence(&pool, &site, generation, &[], &[refusal])
+            .await
+            .unwrap();
+        assert_eq!(row_of(&pool, &site, SLOT, "request").await.last_day, 1);
+        assert_eq!(retire_unseen(&pool, &site, 5, 2).await.unwrap(), 1);
+        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "retired");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_refused_position_without_a_row_is_listed_pending() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("refused_first");
+        let generation = with_site(&pool, &site).await;
+        let refusal = Denial {
+            slot: SLOT.to_owned(),
+            session: "b".to_owned(),
+            day: 7,
+        };
+        record_evidence(&pool, &site, generation, &[], &[refusal])
+            .await
+            .unwrap();
+        let row = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(row.state, "pending");
+        assert_eq!(row.last_day, 7);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_repeat_vote_makes_no_position_from_the_sources_it_lost() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("repeat_vote");
+        let generation = with_site(&pool, &site).await;
+        let first = "GET /api/a [].id";
+        let repeat = "GET /api/b [].id";
+        record_evidence(&pool, &site, generation, &[vote("a", 3, &[first])], &[])
+            .await
+            .unwrap();
+        // The same session's vote on the same day keeps its first evidence, so the sources
+        // of the repeat are not sources of any kept vote.
+        record_evidence(&pool, &site, generation, &[vote("a", 3, &[repeat])], &[])
+            .await
+            .unwrap();
+        let slots: Vec<String> = positions(&pool, &site)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.slot)
+            .collect();
+        assert!(slots.iter().any(|slot| slot == first));
+        assert!(!slots.iter().any(|slot| slot == repeat));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_source_named_twice_in_one_vote_counts_once() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("twice");
+        let generation = with_site(&pool, &site).await;
+        let source = "GET /api/doctors [].id";
+        record_evidence(
+            &pool,
+            &site,
+            generation,
+            &[vote("a", 3, &[source, source])],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(uses(&pool, &site, SLOT, "request", 0).await.unwrap(), 1);
+        let found = flows(&pool, &site, SLOT, "request", 0).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].other, source);
+        assert_eq!(found[0].uses, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_retried_vote_names_the_response_positions_its_evidence_holds() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("retried_vote");
+        let generation = with_site(&pool, &site).await;
+        let response_slot = "GET /api/appointments [].doc_id";
+        // An earlier call wrote this vote's evidence, then failed before it wrote the positions.
+        sqlx::query(
+            "INSERT INTO object_evidence (site, slot, session, day, kind, from_slots)
+             VALUES ($1, $2, 'a', 3, 'vote', $3)",
+        )
+        .bind(&site)
+        .bind(SLOT)
+        .bind(vec![response_slot.to_owned()])
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The retry carries the same vote, so its evidence is already there and its insert is a no-op.
+        record_evidence(
+            &pool,
+            &site,
+            generation,
+            &[vote("a", 3, &[response_slot])],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(row_of(&pool, &site, SLOT, "request").await.last_day, 3);
+        assert_eq!(
+            row_of(&pool, &site, response_slot, "response")
+                .await
+                .last_day,
+            3
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_seen_position_is_listed_pending_on_both_sides() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("both_sides");
+        let generation = with_site(&pool, &site).await;
+        let response_slot = "GET /api/appointments [].doc_id";
+        record_evidence(
+            &pool,
+            &site,
+            generation,
+            &[vote("a", 3, &[response_slot])],
+            &[],
+        )
+        .await
+        .unwrap();
+        let request = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(request.state, "pending");
+        assert_eq!(request.class, None);
+        assert_eq!(request.last_day, 3);
+        let response = row_of(&pool, &site, response_slot, "response").await;
+        assert_eq!(response.state, "pending");
+        assert_eq!(response.last_day, 3);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_retired_position_is_pending_again_when_it_is_seen() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("returns");
+        let generation = with_site(&pool, &site).await;
+        put_judgement(&pool, &site, generation, &proposal(), 1)
+            .await
+            .unwrap();
+        // The window has passed the position's last vote, on day 3.
+        assert_eq!(retire_unseen(&pool, &site, 5, 2).await.unwrap(), 1);
+        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "retired");
+        record_evidence(&pool, &site, generation, &[vote("b", 9, &[])], &[])
+            .await
+            .unwrap();
+        let row = row_of(&pool, &site, SLOT, "request").await;
+        assert_eq!(row.state, "pending");
+        assert_eq!(row.class, None);
+        assert_eq!(row.last_day, 9);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn the_flows_of_a_position_name_the_positions_its_votes_reached() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("flows");
+        let generation = with_site(&pool, &site).await;
+        let appointments = "GET /api/appointments [].doc_id";
+        let records = "GET /api/records [].doc_id";
+        let votes = vec![
+            vote("a", 3, &[appointments, records]),
+            vote("b", 3, &[appointments]),
+        ];
+        record_evidence(&pool, &site, generation, &votes, &[])
+            .await
+            .unwrap();
+        // A request position's flows are the response positions its votes reached, most used first.
+        let reached = flows(&pool, &site, SLOT, "request", 0).await.unwrap();
+        assert_eq!(
+            reached,
+            vec![
+                Flow {
+                    other: appointments.to_owned(),
+                    uses: 2,
+                    sessions: 2,
+                },
+                Flow {
+                    other: records.to_owned(),
+                    uses: 1,
+                    sessions: 1,
+                },
+            ]
+        );
+        // A response position's flows are the request positions whose votes reached it.
+        let reaching = flows(&pool, &site, appointments, "response", 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            reaching,
+            vec![Flow {
+                other: SLOT.to_owned(),
+                uses: 2,
+                sessions: 2,
+            }]
+        );
+        // The uses a flow's share is taken over: the votes of each position.
+        assert_eq!(uses(&pool, &site, SLOT, "request", 0).await.unwrap(), 2);
+        assert_eq!(
+            uses(&pool, &site, appointments, "response", 0)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(uses(&pool, &site, records, "response", 0).await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -824,6 +1608,7 @@ mod tests {
         record_evidence(&pool, &site, current, &[vote("b", 3, &[])], &[])
             .await
             .unwrap();
-        assert_eq!(learning_rows(&pool, &site).await, 2);
+        // The cursor, the evidence of the vote and the position the vote names.
+        assert_eq!(learning_rows(&pool, &site).await, 3);
     }
 }

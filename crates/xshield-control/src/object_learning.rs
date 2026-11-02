@@ -143,7 +143,7 @@ async fn judge(
     now_millis: i64,
 ) -> Result<(), store::LearningStoreError> {
     let Some(decision) = decide(slot, evidence, spec.objects(), today) else {
-        return store::withdraw_proposal(pool, spec.name(), generation, slot).await;
+        return store::withdraw_proposal(pool, spec.name(), generation, slot, now_millis).await;
     };
     let judgement = Judgement {
         slot,
@@ -549,11 +549,13 @@ mod pass_tests {
         }
         record(&pool, 20, now, "jev_deny", "blocked", 403).await;
         learn_once(&pool, now).await;
-        let judged: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM object_positions WHERE site = 'clinic'")
-                .fetch_one(&pool)
-                .await
-                .expect("count the judged positions");
+        // The position is listed as pending, and no judgement names it.
+        let judged: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM object_positions WHERE site = 'clinic' AND state <> 'pending'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count the judged positions");
         assert_eq!(judged, 0);
         drop_scratch(admin, pool, name).await;
     }
