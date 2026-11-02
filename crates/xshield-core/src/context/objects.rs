@@ -8,19 +8,25 @@
 //! kind of object; two of different kinds do not, whatever their names say.
 //!
 //! Only confirmed entries live here. Proposals and evidence are kept by the
-//! learning state, not by the site configuration, so a configuration version
-//! changes only when the map itself does.
+//! learning state, not by the site configuration. The learning settings
+//! (`objects.learning`) are configuration, so a change to them is a new
+//! configuration version, but they never change the map by themselves.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use super::config::ConfigError;
+use super::learning::{SESSIONS_MIN, VOTES_MIN};
 
 /// Most object kinds one site declares.
 pub const CLASSES_MAX: usize = 64;
 /// Most confirmed positions one site holds.
 pub const SLOTS_MAX: usize = 2_048;
+/// Largest uses or sessions a site may require before the rules propose a kind.
+pub const THRESHOLD_MAX: u32 = 10_000;
+/// Largest number of questions a site may allow the learning agent each day.
+pub const AGENT_DAILY_MAX: u32 = 100_000;
 /// Longest position key, in bytes.
 pub const KEY_MAX: usize = 256;
 /// Shortest and longest kind id, in bytes (lower-case ASCII letters).
@@ -67,6 +73,87 @@ pub struct ObjectSlot {
     pub source: SlotSource,
 }
 
+/// The learning settings of a site (`objects.learning`, console design 3.5). A key
+/// that is absent means its default. Settings that all hold their defaults are not
+/// written back, so a configuration that does not change them keeps no `learning`
+/// key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LearningSettings {
+    /// Off: the learning pass reads nothing for the site, and only hand-declared
+    /// and confirmed positions apply.
+    pub auto_learn: bool,
+    /// Tightening changes apply on their own; off sends them to the proposal queue
+    /// too. Stored now, acted on once the judge reads the learned states.
+    pub auto_tighten: bool,
+    /// Confirmed positions that turn abnormal are paused on their own. Stored now,
+    /// acted on once the judge reads the learned states.
+    pub auto_pause: bool,
+    /// How much evidence a position needs before the rules may propose a kind.
+    pub thresholds: LearningThresholds,
+    /// The learning agent's settings.
+    pub agent: LearningAgent,
+}
+
+/// The evidence a position needs before the rules may propose a kind for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LearningThresholds {
+    /// Requests that used the position (votes), at least 1.
+    pub uses: u32,
+    /// Distinct sessions that used it, at least 1.
+    pub sessions: u32,
+}
+
+/// The learning agent's settings. The agent is not built yet, so it stays off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LearningAgent {
+    /// Ask the agent about positions the rules cannot decide. Only true once an
+    /// agent is configured, so a site may not switch it on before then.
+    pub enabled: bool,
+    /// Most questions the agent may be asked in a day.
+    pub daily_limit: u32,
+}
+
+impl Default for LearningSettings {
+    fn default() -> Self {
+        Self {
+            auto_learn: true,
+            auto_tighten: true,
+            auto_pause: true,
+            thresholds: LearningThresholds::default(),
+            agent: LearningAgent::default(),
+        }
+    }
+}
+
+impl LearningSettings {
+    /// Whether every setting holds its default, in which case nothing is written.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl Default for LearningThresholds {
+    fn default() -> Self {
+        Self {
+            uses: VOTES_MIN,
+            sessions: SESSIONS_MIN,
+        }
+    }
+}
+
+impl Default for LearningAgent {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            daily_limit: 200,
+        }
+    }
+}
+
 /// The `objects` section as written. [`ObjectMap::try_from`] validates it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +164,9 @@ pub struct ObjectMapDto {
     /// Confirmed positions, at most [`SLOTS_MAX`].
     #[serde(default)]
     pub slots: Vec<ObjectSlot>,
+    /// Learning settings, at `objects.learning`. Absent or default settings are not written.
+    #[serde(default, skip_serializing_if = "LearningSettings::is_default")]
+    pub learning: LearningSettings,
 }
 
 /// A validated object map. Lookups go through [`ObjectMap::class_of`].
@@ -85,16 +175,25 @@ pub struct ObjectMapDto {
 pub struct ObjectMap {
     classes: Vec<ObjectClass>,
     slots: Vec<ObjectSlot>,
+    /// The learning settings. The default when the site sets none.
+    learning: LearningSettings,
     /// Position key to kind id, built once when the map is validated.
     #[serde(skip)]
     index: BTreeMap<String, String>,
 }
 
 impl ObjectMap {
-    /// Whether the site declares nothing (the common case before learning).
+    /// Whether the site declares nothing and keeps the default learning settings
+    /// (the common case before learning).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.classes.is_empty() && self.slots.is_empty()
+        self.classes.is_empty() && self.slots.is_empty() && self.learning.is_default()
+    }
+
+    /// The learning settings; the defaults when the site sets none.
+    #[must_use]
+    pub fn learning(&self) -> &LearningSettings {
+        &self.learning
     }
 
     /// The declared kinds, in the order they were written.
@@ -120,7 +219,10 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
     type Error = ConfigError;
 
     fn try_from(dto: ObjectMapDto) -> Result<Self, ConfigError> {
-        if dto.classes.len() > CLASSES_MAX || dto.slots.len() > SLOTS_MAX {
+        if dto.classes.len() > CLASSES_MAX
+            || dto.slots.len() > SLOTS_MAX
+            || !valid_learning(&dto.learning)
+        {
             return Err(ConfigError::Objects);
         }
         let mut ids = BTreeMap::new();
@@ -146,6 +248,7 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
         Ok(Self {
             classes: dto.classes,
             slots: dto.slots,
+            learning: dto.learning,
             index,
         })
     }
@@ -156,8 +259,19 @@ impl From<ObjectMap> for ObjectMapDto {
         Self {
             classes: map.classes,
             slots: map.slots,
+            learning: map.learning,
         }
     }
+}
+
+/// The learning settings a site may hold. The thresholds are at least one and at most
+/// [`THRESHOLD_MAX`], the agent's daily limit at most [`AGENT_DAILY_MAX`]. The agent
+/// may not be switched on: none is built yet, so nothing would answer its questions.
+fn valid_learning(learning: &LearningSettings) -> bool {
+    (1..=THRESHOLD_MAX).contains(&learning.thresholds.uses)
+        && (1..=THRESHOLD_MAX).contains(&learning.thresholds.sessions)
+        && learning.agent.daily_limit <= AGENT_DAILY_MAX
+        && !learning.agent.enabled
 }
 
 /// `lower-case` letters only, 3 to 24 bytes, as the kind rules of the
@@ -261,8 +375,20 @@ mod tests {
             slot("GET /doctor/{id} path[1] extra", "doctor"),
             // a name that is empty
             r#"{"classes":[{"id":"doctor","name":""}]}"#.to_owned(),
-            // an unknown field is refused
-            r#"{"classes":[],"learning":{}}"#.to_owned(),
+            // an unknown field is refused, at the top and inside the learning settings
+            r#"{"classes":[],"other":{}}"#.to_owned(),
+            r#"{"learning":{"auto_learn":true,"extra":1}}"#.to_owned(),
+            r#"{"learning":{"thresholds":{"uses":20,"extra":1}}}"#.to_owned(),
+            // learning settings of the wrong type, or out of range
+            r#"{"learning":null}"#.to_owned(),
+            r#"{"learning":{"auto_learn":"yes"}}"#.to_owned(),
+            r#"{"learning":{"thresholds":{"uses":0}}}"#.to_owned(),
+            r#"{"learning":{"thresholds":{"sessions":0}}}"#.to_owned(),
+            r#"{"learning":{"thresholds":{"uses":10001}}}"#.to_owned(),
+            r#"{"learning":{"thresholds":{"sessions":-1}}}"#.to_owned(),
+            r#"{"learning":{"agent":{"daily_limit":100001}}}"#.to_owned(),
+            // the agent is not built yet, so a site may not switch it on
+            r#"{"learning":{"agent":{"enabled":true}}}"#.to_owned(),
         ];
         for text in refused {
             assert!(map(&text).is_err(), "should be refused: {text}");
@@ -276,6 +402,52 @@ mod tests {
             .collect();
         let text = format!(r#"{{"classes":[{}]}}"#, classes.join(","));
         assert!(map(&text).is_err());
+    }
+
+    #[test]
+    fn absent_learning_settings_are_the_defaults() {
+        let loaded = map(VALID).unwrap();
+        assert_eq!(loaded.learning(), &LearningSettings::default());
+        assert!(loaded.learning().auto_learn);
+        assert_eq!(loaded.learning().thresholds.uses, VOTES_MIN);
+        assert_eq!(loaded.learning().thresholds.sessions, SESSIONS_MIN);
+        assert_eq!(loaded.learning().agent.daily_limit, 200);
+        assert!(!loaded.learning().agent.enabled);
+        // The defaults written out in full are the same settings.
+        let written = map(
+            r#"{"learning":{"auto_learn":true,"auto_tighten":true,"auto_pause":true,
+            "thresholds":{"uses":20,"sessions":5},"agent":{"enabled":false,"daily_limit":200}}}"#,
+        )
+        .unwrap();
+        assert!(written.learning().is_default());
+    }
+
+    #[test]
+    fn default_learning_settings_are_not_written() {
+        let defaults = map(r#"{"learning":{"auto_pause":true}}"#).unwrap();
+        let text = serde_json::to_string(&defaults).unwrap();
+        assert!(!text.contains("learning"), "{text}");
+        assert!(defaults.is_empty());
+        // One setting that differs writes the whole section back, and reads back the same.
+        let changed = map(r#"{"learning":{"auto_learn":false}}"#).unwrap();
+        let text = serde_json::to_string(&changed).unwrap();
+        assert!(text.contains(r#""learning":{"auto_learn":false"#), "{text}");
+        let back: ObjectMap = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, changed);
+        assert!(!back.is_empty());
+    }
+
+    #[test]
+    fn the_learning_limits_are_inclusive() {
+        let limits = serde_json::json!({"learning": {
+            "thresholds": {"uses": THRESHOLD_MAX, "sessions": 1},
+            "agent": {"daily_limit": AGENT_DAILY_MAX}
+        }});
+        let loaded: ObjectMap = serde_json::from_value(limits).unwrap();
+        assert_eq!(loaded.learning().thresholds.uses, THRESHOLD_MAX);
+        assert_eq!(loaded.learning().agent.daily_limit, AGENT_DAILY_MAX);
+        // A daily limit of zero is allowed: the agent is off, so the limit is unused.
+        assert!(map(r#"{"learning":{"agent":{"daily_limit":0}}}"#).is_ok());
     }
 
     /// Lower-case letters for a number, so that kind ids stay distinct.

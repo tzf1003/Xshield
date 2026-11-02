@@ -303,6 +303,14 @@ pub fn contradicts(
     })
 }
 
+/// The share of votes, in thousandths, whose response position the map gives
+/// `kind`. Zero when there are no votes.
+#[must_use]
+pub fn kind_share(evidence: &Evidence, map: &ObjectMap, kind: &str) -> u32 {
+    let count = evidence.kinds(map).get(kind).copied().unwrap_or(0);
+    share_of(count, evidence.votes())
+}
+
 /// Whether a position unseen since `last_day` is retired on `today`.
 #[must_use]
 pub fn is_retired(last_day: u64, today: u64) -> bool {
@@ -585,6 +593,22 @@ mod tests {
         let mut refused = record(DecisionPath::JevDeny, Outcome::Blocked, Some(403));
         refused.session = String::new();
         assert_eq!(observe(&refused).denials.len(), 1);
+    }
+
+    #[test]
+    fn the_kind_share_counts_the_votes_from_positions_of_that_kind() {
+        let map = map();
+        let mut mixed = evidence(18, 5, Some("GET /api/appointments [].doc_id"));
+        for index in 0..2 {
+            mixed.add_vote(vote(
+                &format!("x{index}"),
+                50 + index,
+                Some("GET /api/docs [].id"),
+            ));
+        }
+        assert_eq!(kind_share(&mixed, &map, "doctor"), 900);
+        assert_eq!(kind_share(&mixed, &map, "document"), 100);
+        assert_eq!(kind_share(&Evidence::default(), &map, "doctor"), 0);
     }
 
     #[test]

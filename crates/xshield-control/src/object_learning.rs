@@ -1,0 +1,751 @@
+//! The object-map learning pass of the control plane (docs/object-map-design.md
+//! section 3). Each maintenance pass reads every site's decision log since the
+//! site's cursor, counts the votes and refusals of the request positions, and
+//! writes the state of each position the rules judged: a proposal for a position
+//! the map does not know, or a confirmed position whose evidence now points at
+//! other kinds (suspended). An administrator confirms a proposal. This pass never
+//! changes a site configuration, and the judge does not read its states yet. A site
+//! turns the pass off, or sets how much evidence a proposal needs, with its
+//! `objects.learning` settings.
+
+use std::collections::BTreeSet;
+
+use chrono::{DateTime, Utc};
+use sqlx::PgPool;
+use xshield_core::context::learning::{
+    Evidence, RETIRE_DAYS, Thresholds, WINDOW_DAYS, contradicts, day_of, kind_share, observe,
+    propose,
+};
+use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec};
+use xshield_postgres::object_learning_store::{self as store, Cursor, Judgement, LearnedState};
+use xshield_postgres::site_spec_store;
+
+use crate::params::DAY_MILLIS;
+
+/// Decision rows this old are read. Newer rows may still be on their way from a gateway.
+const LAG_MILLIS: i64 = 10 * 60 * 1_000;
+/// Decision rows read per batch. A batch is held in memory, so this bounds the memory.
+const BATCH_ROWS: i64 = 5_000;
+/// Batches read per site in one pass. A site still behind resumes at its cursor next time.
+const BATCHES_PER_PASS: usize = 20;
+
+/// Runs one learning pass over every site at `now_millis`. A site that fails is
+/// logged, and the other sites still run.
+pub async fn learn_once(pool: &PgPool, now_millis: i64) {
+    let records = match site_spec_store::list(pool).await {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("xshield-control: object learning skipped, {error}");
+            return;
+        }
+    };
+    for record in &records {
+        if let Err(error) = learn_site(pool, &record.spec, record.created_at, now_millis).await {
+            eprintln!(
+                "xshield-control: object learning failed for site {}: {error}",
+                record.spec.name()
+            );
+        }
+    }
+}
+
+/// Reads one site's decision log from its cursor up to the lag horizon, batch by
+/// batch, then prunes the evidence older than the window, judges the proposals again,
+/// and retires the positions no vote has reached for the retirement period.
+///
+/// `generation` is the creation time of the configuration the pass read. The store
+/// drops each write once the site has another configuration, so a pass that outlives a
+/// deletion of the site writes nothing into the site created in its place.
+///
+/// A batch is recorded before its cursor moves, and recording is idempotent: when a
+/// step fails, the next pass reads the same rows again and changes nothing twice.
+async fn learn_site(
+    pool: &PgPool,
+    spec: &SiteSpec,
+    generation: DateTime<Utc>,
+    now_millis: i64,
+) -> Result<(), store::LearningStoreError> {
+    let site = spec.name();
+    if !spec.objects().learning().auto_learn {
+        // A site with learning off keeps no evidence and gets no proposals. Its cursor
+        // stays where it was, and the window below starts the next pass in range.
+        return Ok(());
+    }
+    let horizon = now_millis - LAG_MILLIS;
+    // The cursor once a pass has read every row up to the horizon.
+    let end = Cursor {
+        at_millis: horizon,
+        id: i64::MAX,
+    };
+    let today = day_of(u64::try_from(now_millis).unwrap_or(0));
+    let oldest_day = today.saturating_sub(WINDOW_DAYS - 1);
+    let window = i64::try_from(WINDOW_DAYS)
+        .unwrap_or(0)
+        .saturating_mul(DAY_MILLIS);
+    let window_start = Cursor {
+        at_millis: horizon.saturating_sub(window),
+        id: 0,
+    };
+    let mut after = store::cursor(pool, site)
+        .await?
+        .map_or(window_start, |cursor| cursor.max(window_start));
+    for _ in 0..BATCHES_PER_PASS {
+        if after >= end {
+            break;
+        }
+        let batch = store::read_batch(pool, site, after, horizon, BATCH_ROWS).await?;
+        let complete = batch.rows < usize::try_from(BATCH_ROWS).unwrap_or(usize::MAX);
+        let next = next_cursor(after, end, complete, batch.newest);
+        let mut votes = Vec::new();
+        let mut denials = Vec::new();
+        for facts in &batch.facts {
+            let observed = observe(facts);
+            votes.extend(observed.votes);
+            denials.extend(observed.denials);
+        }
+        store::record_evidence(pool, site, generation, &votes, &denials).await?;
+        let slots: Vec<String> = votes
+            .iter()
+            .map(|vote| vote.slot.clone())
+            .chain(denials.iter().map(|denial| denial.slot.clone()))
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect();
+        if !slots.is_empty() {
+            let evidence = store::load_evidence(pool, site, &slots, oldest_day).await?;
+            for slot in &slots {
+                if let Some(evidence) = evidence.get(slot) {
+                    judge(pool, spec, generation, slot, evidence, today, now_millis).await?;
+                }
+            }
+        }
+        store::advance_cursor(pool, site, generation, next, now_millis).await?;
+        after = next;
+        if complete {
+            break;
+        }
+    }
+    store::prune_evidence(pool, site, oldest_day).await?;
+    rejudge_proposals(pool, spec, generation, oldest_day, today, now_millis).await?;
+    store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
+    Ok(())
+}
+
+/// Writes the state the rules give one position. When the rules give it no proposal,
+/// an earlier proposal of the position is withdrawn.
+async fn judge(
+    pool: &PgPool,
+    spec: &SiteSpec,
+    generation: DateTime<Utc>,
+    slot: &str,
+    evidence: &Evidence,
+    today: u64,
+    now_millis: i64,
+) -> Result<(), store::LearningStoreError> {
+    let Some(decision) = decide(slot, evidence, spec.objects(), today) else {
+        return store::withdraw_proposal(pool, spec.name(), generation, slot).await;
+    };
+    let judgement = Judgement {
+        slot,
+        state: decision.state,
+        class: &decision.class,
+        votes: decision.votes,
+        sessions: decision.sessions,
+        share_per_mille: decision.share_per_mille,
+        last_day: decision.last_day,
+    };
+    store::put_judgement(pool, spec.name(), generation, &judgement, now_millis).await
+}
+
+/// Judges every proposal of the site again. The window has moved on and refusals may
+/// have arrived since a proposal was made, so a proposal the rules no longer make is
+/// withdrawn, and one that still stands keeps its place with its current counts.
+async fn rejudge_proposals(
+    pool: &PgPool,
+    spec: &SiteSpec,
+    generation: DateTime<Utc>,
+    oldest_day: u64,
+    today: u64,
+    now_millis: i64,
+) -> Result<(), store::LearningStoreError> {
+    let site = spec.name();
+    let slots = store::proposed_slots(pool, site).await?;
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let evidence = store::load_evidence(pool, site, &slots, oldest_day).await?;
+    let empty = Evidence::default();
+    for slot in &slots {
+        let evidence = evidence.get(slot).unwrap_or(&empty);
+        judge(pool, spec, generation, slot, evidence, today, now_millis).await?;
+    }
+    Ok(())
+}
+
+/// The state the rules give a position: a confirmed position is confirmed or
+/// suspended by its evidence, and an unknown position is proposed when the rules
+/// can tell its kind. `None` when the evidence says nothing yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Decision {
+    state: LearnedState,
+    class: String,
+    votes: u32,
+    sessions: u32,
+    share_per_mille: u32,
+    last_day: u64,
+}
+
+/// The thresholds a site's learning settings give the rules. The share is the design's own.
+fn thresholds_of(learning: &LearningSettings) -> Thresholds {
+    Thresholds {
+        votes: learning.thresholds.uses,
+        sessions: learning.thresholds.sessions,
+        ..Thresholds::default()
+    }
+}
+
+fn decide(slot: &str, evidence: &Evidence, map: &ObjectMap, today: u64) -> Option<Decision> {
+    let thresholds = thresholds_of(map.learning());
+    if let Some(class) = map.class_of(slot) {
+        // A confirmed position is judged by its votes alone. Refusals without a vote in
+        // the window leave its state as it is, and its last vote ages toward retirement.
+        let last_day = evidence.last_day()?;
+        let state = if contradicts(class, evidence, map, thresholds) {
+            LearnedState::Suspended
+        } else {
+            LearnedState::Confirmed
+        };
+        return Some(Decision {
+            state,
+            class: class.to_owned(),
+            votes: evidence.votes(),
+            sessions: evidence.sessions(),
+            share_per_mille: kind_share(evidence, map, class),
+            last_day,
+        });
+    }
+    let proposal = propose(evidence, map, thresholds)?;
+    Some(Decision {
+        state: LearnedState::Proposed,
+        class: proposal.class,
+        votes: proposal.votes,
+        sessions: proposal.sessions,
+        share_per_mille: proposal.share_per_mille,
+        last_day: evidence.last_day().unwrap_or(today),
+    })
+}
+
+/// The cursor after a batch. A batch that read every row up to the horizon moves the
+/// cursor to `end`. A full batch moves it to its newest row, and the rows after that
+/// row, including those that share its time, are read by the next batch.
+fn next_cursor(after: Cursor, end: Cursor, complete: bool, newest: Option<Cursor>) -> Cursor {
+    match (complete, newest) {
+        (true, _) => end,
+        (false, Some(newest)) if newest > after => newest,
+        (false, _) => after,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DOCTOR_FROM: &str = "GET /api/appointments [].doc_id";
+    const DOCUMENT_FROM: &str = "GET /api/docs [].id";
+    const SLOT: &str = "GET /doctor/{id} path[1]";
+
+    fn map() -> ObjectMap {
+        serde_json::from_str::<ObjectMap>(
+            r#"{
+                "classes": [{"id": "doctor", "name": "医生"}, {"id": "document", "name": "文档"}],
+                "slots": [
+                    {"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "rule"},
+                    {"key": "GET /api/docs [].id", "class": "document", "source": "admin"},
+                    {"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"}
+                ]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    /// Evidence of `SLOT`: `count` votes from `sessions` sessions, all from `from`.
+    fn evidence(count: u32, sessions: u32, from: &str) -> Evidence {
+        let mut evidence = Evidence::default();
+        for index in 0..count {
+            evidence.add_vote(xshield_core::context::learning::Vote {
+                slot: SLOT.to_owned(),
+                session: format!("s{}", index % sessions),
+                day: u64::from(index),
+                from: vec![from.to_owned()],
+            });
+        }
+        evidence
+    }
+
+    #[test]
+    fn an_unknown_position_is_proposed_when_the_rules_can_tell_its_kind() {
+        let map = map();
+        let slot = "GET /other/{id} path[1]";
+        let decision = decide(slot, &evidence(20, 5, DOCTOR_FROM), &map, 10).unwrap();
+        assert_eq!(decision.state, LearnedState::Proposed);
+        assert_eq!(decision.class, "doctor");
+        assert_eq!(decision.share_per_mille, 1_000);
+        // Too little evidence, or no kind the rules can name: nothing is written.
+        assert_eq!(decide(slot, &evidence(19, 5, DOCTOR_FROM), &map, 10), None);
+        assert_eq!(
+            decide(slot, &evidence(20, 5, "GET /api/x [].y"), &map, 10),
+            None
+        );
+    }
+
+    #[test]
+    fn a_confirmed_position_is_confirmed_while_its_evidence_agrees() {
+        let decision = decide(SLOT, &evidence(20, 5, DOCTOR_FROM), &map(), 10).unwrap();
+        assert_eq!(decision.state, LearnedState::Confirmed);
+        assert_eq!(decision.class, "doctor");
+        assert_eq!(decision.votes, 20);
+        assert_eq!(decision.last_day, 19);
+    }
+
+    #[test]
+    fn a_confirmed_position_whose_evidence_points_elsewhere_is_suspended() {
+        let decision = decide(SLOT, &evidence(20, 5, DOCUMENT_FROM), &map(), 10).unwrap();
+        assert_eq!(decision.state, LearnedState::Suspended);
+        assert_eq!(decision.class, "doctor");
+        assert_eq!(decision.share_per_mille, 0);
+    }
+
+    #[test]
+    fn refusals_alone_leave_a_confirmed_position_alone() {
+        let mut refused = Evidence::default();
+        refused.add_denial(xshield_core::context::learning::Denial {
+            slot: SLOT.to_owned(),
+            session: "s0".to_owned(),
+            day: 5,
+        });
+        assert_eq!(decide(SLOT, &refused, &map(), 10), None);
+    }
+
+    fn cursor_at(at_millis: i64, id: i64) -> Cursor {
+        Cursor { at_millis, id }
+    }
+
+    #[test]
+    fn the_cursor_reaches_the_horizon_only_when_a_batch_was_complete() {
+        let start = cursor_at(0, 0);
+        let end = cursor_at(100, i64::MAX);
+        // A short batch read every row up to the horizon.
+        assert_eq!(next_cursor(start, end, true, Some(cursor_at(40, 3))), end);
+        // A full batch stops at its newest row, and the rows after it are read next.
+        assert_eq!(
+            next_cursor(start, end, false, Some(cursor_at(50, 9))),
+            cursor_at(50, 9)
+        );
+        // Rows of one millisecond that did not fit are not skipped: the id resumes them.
+        assert_eq!(
+            next_cursor(cursor_at(50, 9), end, false, Some(cursor_at(50, 5_009))),
+            cursor_at(50, 5_009)
+        );
+        // A batch whose newest row is not past the cursor leaves the cursor where it was.
+        assert_eq!(
+            next_cursor(cursor_at(10, 2), end, false, Some(cursor_at(10, 2))),
+            cursor_at(10, 2)
+        );
+        assert_eq!(next_cursor(start, end, false, None), start);
+    }
+
+    #[test]
+    fn the_site_sets_how_much_evidence_a_proposal_needs() {
+        let lenient: ObjectMap = serde_json::from_str(
+            r#"{"classes": [{"id": "doctor", "name": "医生"}],
+                "slots": [{"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "rule"}],
+                "learning": {"thresholds": {"uses": 10, "sessions": 2}}}"#,
+        )
+        .unwrap();
+        let slot = "GET /other/{id} path[1]";
+        assert!(decide(slot, &evidence(10, 2, DOCTOR_FROM), &lenient, 10).is_some());
+        assert!(decide(slot, &evidence(9, 2, DOCTOR_FROM), &lenient, 10).is_none());
+        assert!(decide(slot, &evidence(10, 1, DOCTOR_FROM), &lenient, 10).is_none());
+        // A site that sets no thresholds keeps the design's bar of twenty uses.
+        assert!(decide(slot, &evidence(10, 2, DOCTOR_FROM), &map(), 10).is_none());
+    }
+}
+
+/// Passes over a migrated scratch database. They need a reachable PostgreSQL server
+/// (`XSHIELD_TEST_DATABASE_BASE_URL`, a server URL without a database name) and
+/// return at once without one, as the migration tests do.
+#[cfg(test)]
+mod pass_tests {
+    use super::*;
+    use crate::MIGRATOR;
+    use sqlx::{AssertSqlSafe, PgPool};
+
+    async fn scratch(tag: &str) -> Option<(PgPool, PgPool, String)> {
+        let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL").ok()?;
+        let admin = PgPool::connect(&format!("{base}/postgres"))
+            .await
+            .expect("admin connection");
+        let name = format!("object_learning_{}_{tag}", std::process::id());
+        sqlx::query(AssertSqlSafe(format!("DROP DATABASE IF EXISTS {name}")))
+            .execute(&admin)
+            .await
+            .expect("drop a database left by an earlier run");
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("create the scratch database");
+        let pool = PgPool::connect(&format!("{base}/{name}"))
+            .await
+            .expect("scratch connection");
+        MIGRATOR.run(&pool).await.expect("migrations");
+        Some((admin, pool, name))
+    }
+
+    async fn drop_scratch(admin: PgPool, pool: PgPool, name: String) {
+        pool.close().await;
+        sqlx::query(AssertSqlSafe(format!("DROP DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("drop the scratch database");
+    }
+
+    /// A site whose response position `GET /api/appointments [].doc_id` is confirmed
+    /// as a doctor, so the rules can tell the kind of a value that came from it.
+    fn clinic() -> SiteSpec {
+        clinic_with(serde_json::Value::Null)
+    }
+
+    /// The clinic site with the learning settings `learning`, or the defaults when null.
+    fn clinic_with(learning: serde_json::Value) -> SiteSpec {
+        let mut objects = serde_json::json!({
+            "classes": [{"id": "doctor", "name": "医生"}],
+            "slots": [{"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "admin"}]
+        });
+        if !learning.is_null() {
+            objects["learning"] = learning;
+        }
+        let spec = serde_json::json!({
+            "name": "clinic",
+            "hosts": ["clinic.example.com"],
+            "origin": "http://10.0.0.5:8080",
+            "session": {"cookie": "SESSIONID"},
+            "entries": ["/login"],
+            "objects": objects
+        });
+        SiteSpec::from_json(&spec.to_string()).expect("test spec")
+    }
+
+    /// Partitions for the days the test rows fall on. The pass reads from its
+    /// cursor, so rows must exist before the first pass.
+    async fn partitions(pool: &PgPool, now: i64) {
+        for days in 0..=5 {
+            let day = chrono::DateTime::from_timestamp_millis(now - days * DAY_MILLIS)
+                .expect("a day")
+                .date_naive();
+            xshield_postgres::partitions::ensure_partition(pool, day)
+                .await
+                .expect("create the partition");
+        }
+    }
+
+    /// One decision row of `GET /doctor/7` at `at_millis`. Five sessions make uses in
+    /// turn, so `index` names the request and, modulo five, the session that made it.
+    async fn record_at(
+        pool: &PgPool,
+        index: i64,
+        at_millis: i64,
+        path: &str,
+        outcome: &str,
+        status: i16,
+    ) {
+        let trace = serde_json::json!({
+            "v": 1,
+            "values_truncated": false,
+            "values": [{
+                "at": "path[1]",
+                "value": "7",
+                "kind": "reference",
+                "inert": false,
+                "seen": true,
+                "verified": true,
+                "slot": "GET /doctor/{id} path[1]",
+                "sources": [{
+                    "field": "doc_id",
+                    "request": "GET /api/appointments",
+                    "slot": "GET /api/appointments [].doc_id"
+                }]
+            }],
+            "timing": {"judge_ms": 1}
+        });
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace)
+             VALUES ($1, $2, 'clinic', 'edge-1', 'clinic.example.com', '10.0.0.1', $3,
+                'GET', '/doctor/7', $4, $5, $6, $7)",
+        )
+        .bind(at_millis)
+        .bind(format!("req_{index:032x}"))
+        .bind(format!("s{}", index % 5))
+        .bind(status)
+        .bind(path)
+        .bind(outcome)
+        .bind(trace)
+        .execute(pool)
+        .await
+        .expect("insert a decision row");
+    }
+
+    /// One decision row of `GET /doctor/7` made `1 + index / 5` days before `now`, so
+    /// twenty uses from five sessions fall on distinct days inside the window.
+    async fn record(pool: &PgPool, index: i64, now: i64, path: &str, outcome: &str, status: i16) {
+        record_at(
+            pool,
+            index,
+            now - (1 + index / 5) * DAY_MILLIS,
+            path,
+            outcome,
+            status,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn twenty_uses_from_five_sessions_propose_the_kind_of_their_source() {
+        let Some((admin, pool, name)) = scratch("proposal").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        let (state, class): (String, String) = sqlx::query_as(
+            "SELECT state, class FROM object_positions
+             WHERE site = 'clinic' AND slot = 'GET /doctor/{id} path[1]'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("the position is judged");
+        assert_eq!((state.as_str(), class.as_str()), ("proposed", "doctor"));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_refusal_in_the_window_keeps_the_position_unproposed() {
+        let Some((admin, pool, name)) = scratch("refusal").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        record(&pool, 20, now, "jev_deny", "blocked", 403).await;
+        learn_once(&pool, now).await;
+        let judged: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM object_positions WHERE site = 'clinic'")
+                .fetch_one(&pool)
+                .await
+                .expect("count the judged positions");
+        assert_eq!(judged, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn ten_uses_propose_a_kind_when_the_site_asks_for_ten() {
+        let Some((admin, pool, name)) = scratch("site_threshold").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        let learning = serde_json::json!({"thresholds": {"uses": 10, "sessions": 5}});
+        site_spec_store::create(&pool, &clinic_with(learning), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..10 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        let (state, class): (String, String) = sqlx::query_as(
+            "SELECT state, class FROM object_positions
+             WHERE site = 'clinic' AND slot = 'GET /doctor/{id} path[1]'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("the position is judged");
+        assert_eq!((state.as_str(), class.as_str()), ("proposed", "doctor"));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_site_with_learning_off_reads_nothing() {
+        let Some((admin, pool, name)) = scratch("learning_off").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        let learning = serde_json::json!({"auto_learn": false});
+        site_spec_store::create(&pool, &clinic_with(learning), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        let evidence: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM object_evidence WHERE site = 'clinic'")
+                .fetch_one(&pool)
+                .await
+                .expect("count the evidence");
+        let positions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM object_positions WHERE site = 'clinic'")
+                .fetch_one(&pool)
+                .await
+                .expect("count the judged positions");
+        let cursor = store::cursor(&pool, "clinic")
+            .await
+            .expect("read the cursor");
+        assert_eq!((evidence, positions, cursor), (0, 0, None));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    /// The positions of the clinic site that hold a proposal.
+    async fn proposed(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM object_positions WHERE site = 'clinic' AND state = 'proposed'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("count the proposals")
+    }
+
+    #[tokio::test]
+    async fn a_refusal_after_a_proposal_withdraws_it() {
+        let Some((admin, pool, name)) = scratch("withdrawn").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        assert_eq!(proposed(&pool).await, 1);
+        // Jev refuses the position after the proposal was made. The pass an hour later
+        // reads the refusal, which lies after the cursor the first pass left.
+        record_at(&pool, 20, now - 5 * 60_000, "jev_deny", "blocked", 403).await;
+        learn_once(&pool, now + 60 * 60_000).await;
+        assert_eq!(proposed(&pool).await, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_proposal_whose_evidence_ages_out_is_withdrawn() {
+        let Some((admin, pool, name)) = scratch("aged_out").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        assert_eq!(proposed(&pool).await, 1);
+        // Eight days later no vote is in the window, and no new row has arrived.
+        learn_once(&pool, now + 8 * DAY_MILLIS).await;
+        assert_eq!(proposed(&pool).await, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn deleting_a_site_forgets_what_it_learned() {
+        let Some((admin, pool, name)) = scratch("forget").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        let created = site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        assert_eq!(proposed(&pool).await, 1);
+        let deleted = site_spec_store::delete(&pool, "clinic", created.version, None)
+            .await
+            .expect("delete the site");
+        assert!(matches!(
+            deleted,
+            site_spec_store::DeleteOutcome::Deleted { .. }
+        ));
+        // The same name again. The traffic the old site logged before the deletion is
+        // never learned from, even once the passes have run past it.
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site again");
+        learn_once(&pool, now).await;
+        learn_once(&pool, now + 60 * 60_000).await;
+        let evidence: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM object_evidence WHERE site = 'clinic'")
+                .fetch_one(&pool)
+                .await
+                .expect("count the evidence");
+        assert_eq!((evidence, proposed(&pool).await), (0, 0));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_millisecond_with_more_rows_than_a_batch_is_read_to_the_end() {
+        let Some((admin, pool, name)) = scratch("same_millisecond").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        // One more row than a batch holds, all at one millisecond inside the window.
+        let at = now - 2 * DAY_MILLIS - 60 * 60_000;
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace)
+             SELECT $1::bigint, 'req_' || lpad(to_hex(n), 32, '0'), 'clinic', 'edge-1',
+                'clinic.example.com', '10.0.0.1', 's' || (n % 5), 'GET', '/doctor/7', 200,
+                'fast_allow', 'allowed', $2::jsonb
+             FROM generate_series(1, $3::bigint) AS n",
+        )
+        .bind(at)
+        .bind(serde_json::json!({"v": 1}))
+        .bind(BATCH_ROWS + 1)
+        .execute(&pool)
+        .await
+        .expect("insert the rows of one millisecond");
+        learn_once(&pool, now).await;
+        // The pass read the log up to its horizon, past the first batch and into the next.
+        let cursor = store::cursor(&pool, "clinic")
+            .await
+            .expect("read the cursor");
+        assert_eq!(
+            cursor,
+            Some(Cursor {
+                at_millis: now - LAG_MILLIS,
+                id: i64::MAX,
+            })
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+}
