@@ -224,7 +224,6 @@ export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null)
   );
   for (const pair of synDiff.added) changes.push(`同义词 ＋${pair}`);
   for (const pair of synDiff.removed) changes.push(`同义词 －${pair}`);
-  changes.push(...routeChanges(before.routes ?? [], after.routes ?? []));
   const oldObjects = before.objects ?? {};
   const newObjects = after.objects ?? {};
   changes.push(...fieldKindChanges(oldObjects.field_kinds ?? [], newObjects.field_kinds ?? []));
