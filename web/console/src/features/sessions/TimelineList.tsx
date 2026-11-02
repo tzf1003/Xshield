@@ -10,11 +10,18 @@ import type { TimelineRow } from "../../api/types.ts";
 import { useKeys } from "../../app/keys.ts";
 import { keepScope } from "../../app/scope.ts";
 import { fmtClock, fmtElapsed, fmtInt } from "../../lib/format.ts";
+import { lostReasons } from "../../lib/health.ts";
 import { isRequestId, shortSession } from "../../lib/ids.ts";
 import { CONTEXT_LABEL } from "../../lib/vocab.ts";
 import { DecisionTag, JevCell, OutcomeTag } from "../../ui/Badges.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
-import { withGaps } from "./sessions-model.ts";
+import { hm } from "../overview/clock.ts";
+import {
+  lostWindowBetween,
+  type LostWindow,
+  type TimelineItem,
+  withGaps,
+} from "./sessions-model.ts";
 
 /** The element id of a request's row, which `at` scrolls to. */
 export function rowDomId(requestId: string): string {
@@ -30,9 +37,11 @@ type Props = {
   hasNext: boolean;
   loadingMore: boolean;
   onMore: () => void;
+  /** The loss windows of every gateway that cost decision records, for the quiet times to be checked. */
+  windows: readonly LostWindow[];
 };
 
-export function TimelineList({ label, rows, at, hasNext, loadingMore, onMore }: Props) {
+export function TimelineList({ label, rows, at, hasNext, loadingMore, onMore, windows }: Props) {
   const items = useMemo(() => withGaps(rows), [rows]);
   const maxLearned = rows.reduce((max, row) => Math.max(max, row.learned ?? 0), 1);
   const handled = useRef<string | null>(null);
@@ -59,9 +68,7 @@ export function TimelineList({ label, rows, at, hasNext, loadingMore, onMore }: 
     <ol className="sx-timeline" aria-label="会话里的请求">
       {items.map((item) =>
         item.kind === "gap" ? (
-          <li key={item.key} className="tl-gap">
-            ⋯ {fmtElapsed(item.ms / 1000)}无请求
-          </li>
+          <GapRow key={item.key} item={item} windows={windows} />
         ) : (
           <li key={item.key} className="sx-item">
             <TimelineLine
@@ -74,6 +81,33 @@ export function TimelineList({ label, rows, at, hasNext, loadingMore, onMore }: 
         ),
       )}
     </ol>
+  );
+}
+
+/**
+ * The quiet time between two requests. When a loss window that cost decision records covers part of it,
+ * the row names the window, as the prototype does (docs/06 6.4.7).
+ */
+function GapRow({
+  item,
+  windows,
+}: {
+  item: Extract<TimelineItem, { kind: "gap" }>;
+  windows: readonly LostWindow[];
+}) {
+  const lost = lostWindowBetween(windows, item.from, item.to);
+  return (
+    <li className="tl-gap">
+      ⋯ {fmtElapsed(item.ms / 1000)}无请求
+      {lost !== null ? (
+        <span className="gapnote">
+          <span aria-hidden="true" className="lvl-warn">
+            ▲
+          </span>{" "}
+          {`其中 ${hm(lost.from_ms)}–${hm(lost.to_ms)} ${lost.edge} 有 ${fmtInt(lost.dropped + lost.write_errors)} 条记录未写入（${lostReasons(lost)}），这段时间可能有请求查不到`}
+        </span>
+      ) : null}
+    </li>
   );
 }
 

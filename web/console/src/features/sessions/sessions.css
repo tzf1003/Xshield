@@ -112,6 +112,13 @@
   background: var(--sunken);
 }
 
+/* The note under a quiet time that a loss window covers: it takes its own line, in ink. */
+.sx-timeline .gapnote {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-2);
+}
+
 .sx-row {
   display: grid;
   grid-template-columns: 90px 54px minmax(120px, 1.5fr) 40px 118px 96px 112px minmax(110px, 1fr) 92px;

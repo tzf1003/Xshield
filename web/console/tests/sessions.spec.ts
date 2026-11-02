@@ -3,6 +3,7 @@
 
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
+import { sessionTimeline } from "./helpers/fixtures.ts";
 import {
   IDS,
   SESSION,
@@ -70,6 +71,41 @@ test("a session opens its timeline, with the gap between requests named", async 
 
   await page.keyboard.press("j");
   await expect(timelineRows(page).first()).toBeFocused();
+});
+
+/** The time of the request at 13:11:00 UTC, which lies inside edge-1's loss window (system.json). */
+const LOST_WINDOW_ROW_MS = 1793538660000;
+
+test("a quiet time that a window of lost records covers names the window, and the others do not", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  // Without the request at 13:11, the quiet time from about 13:08 to 13:15 covers edge-1's loss window
+  // (13:10–13:12, 31 records dropped under queue pressure). The other two quiet times do not reach it.
+  await page.route(
+    (url) => url.pathname === `/api/sessions/${SESSION}`,
+    async (route) => {
+      const body = {
+        ...sessionTimeline,
+        rows: sessionTimeline.rows.filter((row) => row.at_millis !== LOST_WINDOW_ROW_MS),
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+    },
+  );
+  await page.goto(`/sessions/${SESSION}`);
+  await expect(timelineRows(page)).toHaveCount(15);
+
+  const gaps = page.locator(".sx-timeline .tl-gap");
+  await expect(gaps).toHaveCount(3);
+  await expect(gaps.nth(0)).not.toContainText("其中");
+  await expect(gaps.nth(1)).not.toContainText("其中");
+  await expect(gaps.nth(2)).toContainText(
+    "其中 21:10–21:12 edge-1 有 31 条记录未写入（队列满），这段时间可能有请求查不到",
+  );
 });
 
 test("只看 narrows the timeline to the chosen requests, asking the server each time", async ({
