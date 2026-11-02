@@ -20,6 +20,8 @@ const KIND_LABEL: Record<ChangeKind, string> = {
   rollback: "回滚",
   delete: "删除",
   import: "导入",
+  auto_tighten: "自动收紧",
+  auto_pause: "自动暂停",
 };
 
 type Props = {

@@ -161,6 +161,8 @@ export const SUGGESTION_INFO: Record<SuggestionKind, string> = {
   raise_call_limit: "调大调用上限",
   secret_field_candidate: "追加脱敏词",
   hot_would_block: "本应拦截集中的路径",
+  object_proposals: "对象表待确认",
+  route_rule_candidate: "可能是统一网关",
 };
 
 export const IMPACT_INFO: Record<ImpactKind, string> = {
@@ -174,6 +176,11 @@ export const IMPACT_INFO: Record<ImpactKind, string> = {
   call_limit: "调用上限变化",
   cache: "放行缓存变化",
   secret_fields: "脱敏范围变化",
+  api_split: "按接口拆分",
+  entry_unreachable: "入口不再命中",
+  new_fast_allow: "新增快速放行",
+  back_to_jev: "改回 Jev",
+  cache_by_api: "缓存按接口区分",
 };
 
 export const WARNING_TEXT: Record<string, string> = {

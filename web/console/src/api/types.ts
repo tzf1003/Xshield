@@ -81,6 +81,23 @@ export interface JevSummary {
   failure: JevFailure | null;
 }
 
+// The interface name of a request (docs/console-design-objects-routes.md 4.1, 7; header-routes-design.md 2).
+/** Read by a route rule: the segments joined with `/`, and where each one came from. */
+export interface ApiName {
+  /** e.g. `bus.buriedPointService/saveBuriedPointList`. */
+  name: string;
+  /** One entry per segment, e.g. `header.X-Service-Id`, `path`. */
+  from: string[];
+}
+
+/** A route rule covered the path, but the name could not be read. Treated as an unknown interface. */
+export interface ApiUnknown {
+  /** Reason code from the gateway, e.g. `header_repeated`, `body_not_json` (mapped in vocab). */
+  unknown: string;
+}
+
+export type ApiInfo = ApiName | ApiUnknown;
+
 export interface RequestRow {
   /** Row number inside the log (cursor and live-mode ordering). */
   id: number;
@@ -91,6 +108,10 @@ export interface RequestRow {
   method: string;
   host: string;
   path: string;
+  /** The path the rules judge: `path` plus the interface name, or `path` itself without a rule. */
+  logical_path: string;
+  /** Interface name from the site's route rules; null when no rule covers the path. */
+  api: ApiInfo | null;
   /** Redacted query string, at most 2 KiB. */
   query: string | null;
   status: number | null;
@@ -138,6 +159,12 @@ export interface TraceSource {
   /** Null for values learned before the gateway restarted. */
   request_id: RequestId | null;
   at_millis: number | null;
+  /** Position key of the origin on the response side, e.g. `GET /api/appointments [].doc_id`. */
+  slot?: string;
+  /** Class of the origin value from the object map, e.g. `doctor`; absent when no confirmed entry applies. */
+  object?: string;
+  /** `map` when `object` comes from a confirmed object-map entry; absent when name inference was used. */
+  object_from?: "map";
 }
 
 export interface TraceValue {
@@ -156,6 +183,16 @@ export interface TraceValue {
   len?: number;
   /** The value was cut to 256 characters. */
   clipped?: boolean;
+  /** Position key on the request side, e.g. `GET /doctor/{id} path[1]`. */
+  slot?: string;
+  /** Class of the value from the object map, e.g. `doctor`; absent when name inference was used. */
+  object?: string;
+  /** `map` when `object` comes from a confirmed object-map entry; absent otherwise. */
+  object_from?: "map";
+  /** Composite value (a split value, e.g. `body.who#2` in `body.who`): the parts, each checked on its own. Later PR. */
+  parts?: TraceValue[];
+  /** How this value was split into parts, e.g. `按 # 拆成 3 段`. Later PR. */
+  format?: string;
 }
 
 export interface EntryPass {
@@ -208,6 +245,17 @@ export interface TraceResponse {
   entry_passed: boolean;
   /** The request was "would block" but forwarded, and its response was still learned (7.4.6). */
   after_would_block: boolean;
+  /**
+   * Response structure (field paths and types, never values). Present only when the route's
+   * structure is first seen or changes; the object map learns from it (object-map design 3).
+   */
+  shape?: ResponseShapeField[];
+}
+
+export interface ResponseShapeField {
+  /** e.g. `[].doc_id`. */
+  path: string;
+  type: "string" | "number" | "boolean" | "null";
 }
 
 /**
@@ -263,6 +311,8 @@ export interface JevRecord {
 export interface JevStateValue {
   at: string;
   kind?: ValueKind;
+  /** Class from the object map (`object`); a value shown only as another class is judged against it (object-map design 2). */
+  object?: string;
   value: string;
   seen_as: string[];
   verified?: boolean;
@@ -480,6 +530,43 @@ export interface Advanced {
   synonyms?: Array<[string, string]>;
 }
 
+/** Route rule (接口名规则, header-routes-design 2): the interface name sits outside the URL path. */
+export interface RouteRule {
+  /** Same pattern syntax as entries and bypass. */
+  path: string;
+  /** One group per segment of the name, joined with `/`. Every location in a group must agree (or the name is unknown). */
+  name_from: string[][];
+}
+
+/** Object map settings (object-map design 1, 3.5; the console's settings sheet). Shape to be confirmed by the backend. */
+export interface LearningSettings {
+  /** Off: only hand-declared and confirmed slots apply. */
+  auto_learn: boolean;
+  /** Tightening changes apply on their own; off sends them to the proposal queue too. */
+  auto_tighten: boolean;
+  /** Ask the agent about slots the rules cannot decide, with a daily cap. */
+  agent: { enabled: boolean; daily_limit: number };
+  /** A slot must reach `uses` requests from `sessions` sessions before it is learned. */
+  thresholds: { uses: number; sessions: number };
+  /** Confirmed slots that turn abnormal are paused automatically. */
+  auto_pause: boolean;
+}
+
+/** Hand declaration of a field's class (field-kinds design 3; the object map's manual entry). */
+export interface FieldKindDeclaration {
+  /** Field or parameter name; case and `_`, `-` are ignored when matching. */
+  field: string;
+  /** Class id, e.g. `doctor`. */
+  kind: string;
+  /** Path patterns the declaration is limited to; omitted means the whole site. */
+  in?: string[];
+}
+
+export interface ObjectsSpec {
+  learning?: LearningSettings;
+  field_kinds?: FieldKindDeclaration[];
+}
+
 export interface SiteSpec {
   name: string;
   hosts: string[];
@@ -490,6 +577,10 @@ export interface SiteSpec {
   mode?: SiteMode;
   on_jev_unavailable?: OnJevUnavailable;
   advanced?: Advanced;
+  /** Route rules, in order; the first matching rule names the request (header-routes-design 2). */
+  routes?: RouteRule[];
+  /** Object map settings and hand-declared field kinds (object-map design 1). */
+  objects?: ObjectsSpec;
 }
 
 export interface EdgeLoad {
@@ -537,7 +628,15 @@ export interface SiteDetail extends SiteSummary {
   created_at: string;
 }
 
-export type ChangeKind = "create" | "update" | "rollback" | "delete" | "import";
+/** `auto_tighten` and `auto_pause` are written by the learning task and can be undone (docs 5). */
+export type ChangeKind =
+  | "create"
+  | "update"
+  | "rollback"
+  | "delete"
+  | "import"
+  | "auto_tighten"
+  | "auto_pause";
 
 export interface SiteVersion {
   version: number;
@@ -580,7 +679,12 @@ export type ImpactKind =
   | "jev_timeout"
   | "call_limit"
   | "cache"
-  | "secret_fields";
+  | "secret_fields"
+  | "api_split"
+  | "entry_unreachable"
+  | "new_fast_allow"
+  | "back_to_jev"
+  | "cache_by_api";
 
 export interface ImpactChange {
   kind: ImpactKind;
@@ -619,7 +723,9 @@ export type SuggestionKind =
   | "raise_jev_timeout"
   | "raise_call_limit"
   | "secret_field_candidate"
-  | "hot_would_block";
+  | "hot_would_block"
+  | "object_proposals"
+  | "route_rule_candidate";
 
 /** A change to the configuration that applying a suggestion makes. */
 export interface SuggestionAction {
@@ -628,6 +734,8 @@ export interface SuggestionAction {
   add_entry?: string;
   add_bypass?: string;
   add_secret_field?: string;
+  /** Route rule to add (`route_rule_candidate`, docs 5). */
+  add_route?: RouteRule;
   set_advanced?: Advanced;
   /** Requests of the window this rule would match. */
   matches?: number;
@@ -799,7 +907,12 @@ export interface RequestFilters {
   decision_path?: string;
   method?: string;
   status?: string;
+  /** Matches the logical path (`path:` in the filter bar); without route rules it is the URL path. */
   path?: string;
+  /** Interface name: a name, or `unknown` for requests whose name could not be read (`api:`). */
+  api?: string;
+  /** Requests with a value of this object class (`object:`). */
+  object?: string;
   session?: string;
   client?: string;
   request_id?: string;
