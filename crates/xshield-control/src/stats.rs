@@ -12,12 +12,12 @@ use axum::{
     extract::{Query, State},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use xshield_postgres::decision_stats::{self, Bucket, Scope, Summary};
+use xshield_postgres::decision_stats::{self, Bucket, Scope, Spark, Summary};
 
 use crate::{
     ControlState,
     error::{ApiError, ApiResult},
+    jev::whole_ms,
     params::{DAY_MILLIS, Params, Window, now_millis},
 };
 
@@ -52,20 +52,66 @@ pub(crate) fn scope_from(params: &Params, now: i64) -> ApiResult<(Scope, Window)
     Ok((scope, window))
 }
 
-/// `GET /api/stats/summary`: the overview totals of a window, and the same totals
-/// for the window of equal length just before it when that is still retained
-/// (docs/07 section 7.9.2).
+/// The `GET /api/stats/summary` response: the overview totals of the window, the same
+/// figures for the window before it, and the mini trend (docs/07 section 7.9.2).
+/// `scanned` accompanies `complete: false` only (section 7.9.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SummaryBody {
+    pub since_millis: i64,
+    pub until_millis: i64,
+    pub judged: i64,
+    pub blocked: i64,
+    pub would_block: i64,
+    pub unjudged: i64,
+    pub jev_calls: i64,
+    pub jev_timeouts: i64,
+    pub jev_p95_ms: Option<i64>,
+    /// The figures of the window before; null when that window is not retained.
+    pub previous: Option<FiguresBody>,
+    pub spark: SparkBody,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<i64>,
+}
+
+/// The figures the console compares the window with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FiguresBody {
+    pub judged: i64,
+    pub blocked: i64,
+    pub would_block: i64,
+    pub unjudged: i64,
+    pub jev_calls: i64,
+    pub jev_p95_ms: Option<i64>,
+}
+
+/// The mini trend: twelve points per figure, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SparkBody {
+    pub judged: Vec<i64>,
+    pub blocked: Vec<i64>,
+    pub would_block: Vec<i64>,
+    pub unjudged: Vec<i64>,
+    pub jev_calls: Vec<i64>,
+    /// A slice with no Jev call reads as 0 ms.
+    pub jev_p95_ms: Vec<i64>,
+}
+
+/// `GET /api/stats/summary`: the overview totals of a window, the same totals for the
+/// window of equal length just before it when that is still retained, and the mini
+/// trend of the window (docs/07 section 7.9.2).
 ///
 /// # Errors
 /// As `scope_from`, and `INTERNAL` when the database cannot be read.
 pub async fn summary(
     State(state): State<Arc<ControlState>>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SummaryBody>> {
     let params = Params::from(query);
     let now = now_millis();
     let (scope, window) = scope_from(&params, now)?;
     let totals = decision_stats::summary(&state.pool, &scope).await?;
+    let trend = decision_stats::spark(&state.pool, &scope).await?;
     let earlier = previous_window(window, now).map(|earlier| Scope {
         site: scope.site.clone(),
         since_millis: earlier.since_millis,
@@ -75,16 +121,14 @@ pub async fn summary(
         Some(earlier) => Some(decision_stats::summary(&state.pool, &earlier).await?),
         None => None,
     };
-    Ok(Json(summary_json(window, &totals, previous.as_ref())))
+    Ok(Json(summary_body(
+        window,
+        &totals,
+        trend,
+        previous.as_ref(),
+    )))
 }
 
-/// `GET /api/stats/timeseries`: the judged requests of a window counted per bucket,
-/// each bucket by decision path (docs/07 section 7.9.2). Buckets with no requests
-/// are not sent.
-///
-/// # Errors
-/// As `scope_from`, `INVALID_FILTER` naming `bucket_millis` for a bucket under one
-/// minute, and `INTERNAL` when the database cannot be read.
 /// The `GET /api/stats/timeseries` response. `scanned` accompanies `complete: false` only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimeseriesBody {
@@ -104,6 +148,13 @@ pub struct BucketBody {
     pub counts: BTreeMap<String, i64>,
 }
 
+/// `GET /api/stats/timeseries`: the judged requests of a window counted per bucket,
+/// each bucket by decision path (docs/07 section 7.9.2). Buckets with no requests
+/// are not sent.
+///
+/// # Errors
+/// As `scope_from`, `INVALID_FILTER` naming `bucket_millis` for a bucket under one
+/// minute, and `INTERNAL` when the database cannot be read.
 pub async fn timeseries(
     State(state): State<Arc<ControlState>>,
     Query(query): Query<BTreeMap<String, String>>,
@@ -122,40 +173,58 @@ pub async fn timeseries(
     }))
 }
 
-/// The totals as the console reads them: the window, the figures, the figures of
-/// the window before it (null when that is not retained), and whether the window
-/// was read in full.
-fn summary_json(window: Window, totals: &Summary, previous: Option<&Summary>) -> Value {
-    let mut body = json!({
-        "since_millis": window.since_millis,
-        "until_millis": window.until_millis,
-        "judged": totals.judged,
-        "blocked": totals.blocked,
-        "would_block": totals.would_block,
-        "unjudged": totals.unjudged,
-        "jev_calls": totals.jev_calls,
-        "jev_timeouts": totals.jev_timeouts,
-        "jev_p95_ms": totals.jev_p95_ms,
-        "previous": previous.map(previous_json),
-        "complete": totals.complete,
-    });
-    // docs/07 section 7.9.1: `scanned` accompanies `complete: false` only.
-    if !totals.complete {
-        body["scanned"] = json!(totals.scanned);
+/// The overview totals as the console reads them: the window, the figures, the figures
+/// of the window before it (null when that is not retained), the mini trend, and
+/// whether the window was read in full.
+fn summary_body(
+    window: Window,
+    totals: &Summary,
+    trend: Spark,
+    previous: Option<&Summary>,
+) -> SummaryBody {
+    SummaryBody {
+        since_millis: window.since_millis,
+        until_millis: window.until_millis,
+        judged: totals.judged,
+        blocked: totals.blocked,
+        would_block: totals.would_block,
+        unjudged: totals.unjudged,
+        jev_calls: totals.jev_calls,
+        jev_timeouts: totals.jev_timeouts,
+        jev_p95_ms: whole_ms(totals.jev_p95_ms),
+        previous: previous.map(previous_body),
+        spark: spark_body(trend),
+        complete: totals.complete,
+        scanned: (!totals.complete).then_some(totals.scanned),
     }
-    body
 }
 
 /// The figures of the window before, the ones the console compares with.
-fn previous_json(totals: &Summary) -> Value {
-    json!({
-        "judged": totals.judged,
-        "blocked": totals.blocked,
-        "would_block": totals.would_block,
-        "unjudged": totals.unjudged,
-        "jev_calls": totals.jev_calls,
-        "jev_p95_ms": totals.jev_p95_ms,
-    })
+fn previous_body(totals: &Summary) -> FiguresBody {
+    FiguresBody {
+        judged: totals.judged,
+        blocked: totals.blocked,
+        would_block: totals.would_block,
+        unjudged: totals.unjudged,
+        jev_calls: totals.jev_calls,
+        jev_p95_ms: whole_ms(totals.jev_p95_ms),
+    }
+}
+
+/// The mini trend as the console draws it. A slice without a Jev call reads as 0 ms.
+fn spark_body(trend: Spark) -> SparkBody {
+    SparkBody {
+        judged: trend.judged,
+        blocked: trend.blocked,
+        would_block: trend.would_block,
+        unjudged: trend.unjudged,
+        jev_calls: trend.jev_calls,
+        jev_p95_ms: trend
+            .jev_p95_ms
+            .iter()
+            .map(|p95| whole_ms(*p95).unwrap_or(0))
+            .collect(),
+    }
 }
 
 fn bucket_body(bucket: &Bucket) -> BucketBody {
@@ -282,16 +351,43 @@ mod tests {
             scanned: 5,
             ..Summary::default()
         };
-        assert!(
-            summary_json(window, &complete, None)
-                .get("scanned")
-                .is_none()
+        assert_eq!(
+            summary_body(window, &complete, Spark::default(), None).scanned,
+            None
         );
         let partial = Summary {
             complete: false,
             scanned: 42,
             ..Summary::default()
         };
-        assert_eq!(summary_json(window, &partial, None)["scanned"], json!(42));
+        assert_eq!(
+            summary_body(window, &partial, Spark::default(), None).scanned,
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn scanned_is_absent_from_the_json_when_the_window_is_complete() {
+        let window = Window {
+            since_millis: 0,
+            until_millis: DAY_MILLIS,
+        };
+        let complete = Summary {
+            complete: true,
+            scanned: 5,
+            ..Summary::default()
+        };
+        let json = serde_json::to_value(summary_body(window, &complete, Spark::default(), None))
+            .expect("the body writes JSON");
+        assert!(json.get("scanned").is_none());
+    }
+
+    #[test]
+    fn a_slice_without_a_jev_call_reads_as_zero_milliseconds() {
+        let trend = Spark {
+            jev_p95_ms: vec![None, Some(910.4)],
+            ..Spark::default()
+        };
+        assert_eq!(spark_body(trend).jev_p95_ms, vec![0, 910]);
     }
 }

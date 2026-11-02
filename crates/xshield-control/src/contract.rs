@@ -9,12 +9,13 @@ use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 
 use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
 use crate::requests::{CountsBody, RequestRow};
-use crate::stats::TimeseriesBody;
+use crate::stats::{SummaryBody, TimeseriesBody};
 use crate::status::StatusBody;
 
 const REQUESTS: &str = include_str!("../../../web/console/tests/fixtures/requests.json");
 const LOOKUP: &str = include_str!("../../../web/console/tests/fixtures/lookup.json");
 const COUNTS: &str = include_str!("../../../web/console/tests/fixtures/counts.json");
+const SUMMARY: &str = include_str!("../../../web/console/tests/fixtures/summary.json");
 const TIMESERIES: &str = include_str!("../../../web/console/tests/fixtures/timeseries.json");
 const JEV_STATUS: &str = include_str!("../../../web/console/tests/fixtures/jev-status.json");
 const JEV_STATS: &str = include_str!("../../../web/console/tests/fixtures/jev-stats.json");
@@ -182,6 +183,18 @@ fn counts_round_trip_through_the_counts_type() {
 #[test]
 fn timeseries_round_trips_through_the_timeseries_type() {
     assert_round_trips::<TimeseriesBody>(&fixture(TIMESERIES), exactly);
+}
+
+#[test]
+fn summary_round_trips_through_the_summary_type() {
+    let summary = fixture(SUMMARY);
+    assert_round_trips::<SummaryBody>(&summary, exactly);
+
+    // `scanned` is written only when the window was not read in full (docs/07 section 7.9.1).
+    let mut partial = summary.clone();
+    partial["complete"] = json!(false);
+    partial["scanned"] = json!(18204);
+    assert_round_trips::<SummaryBody>(&partial, exactly);
 }
 
 #[test]

@@ -414,7 +414,7 @@ fn newest_all_failed(recent: &[Option<String>]) -> bool {
 /// A latency in whole milliseconds, rounded to the nearest.
 #[must_use]
 #[allow(clippy::cast_possible_truncation)] // a latency is far below the range of i64
-fn whole_ms(value: Option<f64>) -> Option<i64> {
+pub(crate) fn whole_ms(value: Option<f64>) -> Option<i64> {
     value.map(|ms| ms.round() as i64)
 }
 

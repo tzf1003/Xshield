@@ -603,6 +603,8 @@ CREATE TABLE jev_prompts (
 | `GET /api/status` | 顶栏状态灯和“配置生效”需要的轻量状态，每 15 秒轮询一次（7.9.13） |
 | `GET /api/system` | 网关实例、日志存储、运行参数（7.9.8）；只在系统页按需读取，不轮询 |
 
+`GET /api/stats/summary` 的 `spark` 是概览的小趋势线：把时间窗（两端都计入）均分为 12 段，按时间从早到晚排列。`judged`、`blocked`、`would_block`、`unjudged`、`jev_calls` 是每段的计数，12 段相加等于同名的总量。`jev_p95_ms` 是每段 Jev 往返的 95 分位，取整到毫秒；该段没有 Jev 调用时为 0。`spark` 与总量读自同一批行，超过 200 万行时都只计最新的 200 万行。
+
 ### 7.9.3 请求列表
 
 `GET /api/requests` 查询参数：`site`、`since_millis`、`until_millis`、`scope`、`outcome`（逗号分隔多选）、`decision_path`（多选）、`method`、`status`（`404` 或 `4xx`）、`path`（精确；以 `*` 结尾为前缀）、`session`、`client`、`request_id`、`jev_access`、`jev_attack`、`jev_failure`、`max_confidence`、`min_ms`、`site_version`、`entry`（`true`/`false`，读 `trace.entry`，没有索引，靠时间窗和其他条件缩小范围）、`cursor`、`limit`。

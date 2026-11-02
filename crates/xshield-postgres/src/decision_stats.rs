@@ -108,6 +108,87 @@ pub async fn summary(pool: &PgPool, scope: &Scope) -> Result<Summary, sqlx::Erro
     })
 }
 
+/// How many slices the overview's mini trend cuts its window into (docs/07 section 7.9.2).
+pub const SPARK_POINTS: usize = 12;
+
+/// The overview's mini trend: the window cut into [`SPARK_POINTS`] equal slices, oldest
+/// first. A count covers one slice, so the slices of a figure add up to its total in
+/// [`Summary`]. A slice with no Jev call has no latency.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Spark {
+    /// Judged requests per slice.
+    pub judged: Vec<i64>,
+    /// Refused requests per slice.
+    pub blocked: Vec<i64>,
+    /// Requests observe mode would have refused, per slice.
+    pub would_block: Vec<i64>,
+    /// Requests forwarded without a judgement, per slice.
+    pub unjudged: Vec<i64>,
+    /// Jev round trips per slice.
+    pub jev_calls: Vec<i64>,
+    /// 95th percentile of the Jev round trips in each slice, `None` when it has none.
+    pub jev_p95_ms: Vec<Option<f64>>,
+}
+
+/// The mini trend of the window of `scope`, read from the same rows as [`summary`].
+///
+/// # Errors
+/// Returns [`sqlx::Error`] when the query fails.
+pub async fn spark(pool: &PgPool, scope: &Scope) -> Result<Spark, sqlx::Error> {
+    // The window includes both of its bounds, so its span is one more than the
+    // difference. Slice `i` starts at `since + i * span / SPARK_POINTS`.
+    let span = scope
+        .until_millis
+        .saturating_sub(scope.since_millis)
+        .saturating_add(1)
+        .max(1);
+    let last = SPARK_POINTS - 1;
+    let mut query = QueryBuilder::<Postgres>::new(format!(
+        "SELECT slice,
+            count(*) FILTER (WHERE decision_path NOT IN ('bypass', 'unknown_site'))::bigint AS judged,
+            count(*) FILTER (WHERE outcome = 'blocked' AND decision_path NOT IN ('bypass', 'unknown_site'))::bigint AS blocked,
+            count(*) FILTER (WHERE outcome = 'would_block' AND decision_path NOT IN ('bypass', 'unknown_site'))::bigint AS would_block,
+            count(*) FILTER (WHERE outcome = 'unjudged' AND decision_path NOT IN ('bypass', 'unknown_site'))::bigint AS unjudged,
+            count(*) FILTER (WHERE jev_called)::bigint AS jev_calls,
+            percentile_cont(0.95) WITHIN GROUP (ORDER BY jev_ms)
+                FILTER (WHERE jev_called) AS jev_p95_ms
+         FROM (SELECT decision_path, outcome, jev_ms,
+                      ({JEV_CALLED_SQL}) AS jev_called,
+                      LEAST({last}, ((at_millis - "
+    ));
+    query
+        .push_bind(scope.since_millis)
+        .push(format!(") * {SPARK_POINTS}) / "))
+        .push_bind(span)
+        .push(")::bigint AS slice FROM decision_log");
+    push_scope(&mut query, scope);
+    query.push(format!(
+        " ORDER BY at_millis DESC LIMIT {SCAN_LIMIT}) AS window_rows GROUP BY slice ORDER BY slice"
+    ));
+    let rows = query.build().fetch_all(pool).await?;
+    let mut trend = Spark {
+        judged: vec![0; SPARK_POINTS],
+        blocked: vec![0; SPARK_POINTS],
+        would_block: vec![0; SPARK_POINTS],
+        unjudged: vec![0; SPARK_POINTS],
+        jev_calls: vec![0; SPARK_POINTS],
+        jev_p95_ms: vec![None; SPARK_POINTS],
+    };
+    for row in &rows {
+        let slice = usize::try_from(row.try_get::<i64, _>("slice")?).unwrap_or(usize::MAX);
+        if slice >= SPARK_POINTS {
+            continue;
+        }
+        trend.judged[slice] = row.try_get("judged")?;
+        trend.blocked[slice] = row.try_get("blocked")?;
+        trend.would_block[slice] = row.try_get("would_block")?;
+        trend.unjudged[slice] = row.try_get("unjudged")?;
+        trend.jev_calls[slice] = row.try_get("jev_calls")?;
+        trend.jev_p95_ms[slice] = row.try_get("jev_p95_ms")?;
+    }
+    Ok(trend)
+}
+
 /// One bucket of the request timeline: the judged requests of one time slice,
 /// counted by decision path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1085,7 +1166,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
-    async fn summary_counts_the_window_and_its_jev_calls() {
+    async fn summary_and_spark_agree_with_the_sample_window() {
         let pool = connect_test_pool().await;
         let scope = seed(&pool).await;
         let totals = summary(&pool, &scope).await.expect("summary");
@@ -1105,5 +1186,22 @@ mod tests {
         // Linear interpolation over 100, 110, ..., 210 and 2000 ms.
         let p95 = totals.jev_p95_ms.expect("a 95th percentile over the calls");
         assert!((p95 - 926.0).abs() < 1e-6, "{p95}");
+
+        // The slices of each figure add up to its total.
+        let trend = spark(&pool, &scope).await.expect("spark");
+        assert_eq!(trend.judged.len(), SPARK_POINTS);
+        assert_eq!(trend.judged.iter().sum::<i64>(), totals.judged);
+        assert_eq!(trend.blocked.iter().sum::<i64>(), totals.blocked);
+        assert_eq!(trend.would_block.iter().sum::<i64>(), totals.would_block);
+        assert_eq!(trend.unjudged.iter().sum::<i64>(), totals.unjudged);
+        assert_eq!(trend.jev_calls.iter().sum::<i64>(), totals.jev_calls);
+        // Slice 0 holds the allowed, the refused and the would-block request.
+        assert_eq!(trend.judged[0], 3);
+        // Slice 0 holds one call of 100 ms.
+        let first = trend.jev_p95_ms[0].expect("a call in slice 0");
+        assert!((first - 100.0).abs() < 1e-6, "{first}");
+        // Slice 9 holds two calls, of 190 ms and 2000 ms: 190 + 0.95 * (2000 - 190).
+        let ninth = trend.jev_p95_ms[9].expect("calls in slice 9");
+        assert!((ninth - 1909.5).abs() < 1e-6, "{ninth}");
     }
 }
