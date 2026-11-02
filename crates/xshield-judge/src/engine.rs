@@ -371,7 +371,7 @@ impl<J: JevPort> Judge<J> {
             // The state and the trace both take their sources from this one
             // ranking, so `seen_as[j]` and `sources[j]` always name the same origin.
             let ranked = seen
-                .map(|seen| seen.ranked(request.path, key, &tuning.synonyms))
+                .map(|seen| seen.ranked(&value.value, request.path, key, &tuning.synonyms))
                 .unwrap_or_default();
             let verified = !value.inert
                 && seen.is_some_and(|seen| {
@@ -1638,6 +1638,37 @@ mod tests {
             .await;
         assert!(!object.forward);
         assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_path_id_is_judged_by_the_route_word_before_it() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &shown(
+                "/api/doctors",
+                br#"[{"id":7,"name":"Dr A"},{"id":9,"name":"Dr B"}]"#,
+                "doctor-a",
+            ),
+        );
+        let verdict = judge
+            .judge(&site, &get("/api/doctors/9", None, Some("doctor-a"), 1_000))
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        // Under `files` the 9 is a file id, which no doctor list showed.
+        let verdict = judge
+            .judge(
+                &site,
+                &get("/api/doctors/7/files/9", None, Some("doctor-a"), 2_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(fake.calls(), 1);
     }
 
     #[tokio::test]
