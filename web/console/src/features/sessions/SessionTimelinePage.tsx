@@ -6,7 +6,7 @@
 import { Link, useParams, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useCallback, useEffect, useMemo } from "react";
 import { ApiError, qs } from "../../api/client.ts";
-import { useSite, useTimeline } from "../../api/queries.ts";
+import { useSite, useSystem, useTimeline } from "../../api/queries.ts";
 import type { SessionCredential, TimelineRow } from "../../api/types.ts";
 import { pushRecent } from "../../app/recent.ts";
 import { keepScope, useScope, useSetSearch } from "../../app/scope.ts";
@@ -14,7 +14,7 @@ import { fmtClock, fmtElapsed, fmtInt } from "../../lib/format.ts";
 import { isRequestId, isSessionLabel, shortRequestId } from "../../lib/ids.ts";
 import { Card, Empty, ErrorBar, Notice, PageHead } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
-import { TIMELINE_ONLY } from "./sessions-model.ts";
+import { lostWindows, TIMELINE_ONLY } from "./sessions-model.ts";
 import { TimelineList } from "./TimelineList.tsx";
 import { TimelineSpark } from "./TimelineSpark.tsx";
 import "./sessions.css";
@@ -70,6 +70,9 @@ function Timeline({ label }: { label: string }) {
   );
   const summary = timeline.data?.pages[0]?.summary;
   const site = useSite(summary?.site ?? null);
+  // The loss windows a quiet time is checked against. Read once for the page, as the request list reads them.
+  const system = useSystem();
+  const windows = useMemo(() => lostWindows(system.data?.edges ?? []), [system.data]);
   const loadMore = useCallback(() => void timeline.fetchNextPage(), [timeline.fetchNextPage]);
 
   const missing =
@@ -217,6 +220,7 @@ function Timeline({ label }: { label: string }) {
           <TimelineList
             label={label}
             rows={rows}
+            windows={windows}
             at={at}
             hasNext={timeline.hasNextPage}
             loadingMore={timeline.isFetchingNextPage}
