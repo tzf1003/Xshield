@@ -196,6 +196,12 @@ GET /api/patients ──响应里出现 id=7──┐
 }
 ```
 
+网关写出 trace 时省略下面这些键，读取方（控制台、导出）把缺省的键当作 null、false 或空列表处理。上面的示例为了看清结构把所有键都列了出来，所以和实际输出不完全一致。
+
+- 顶层 `entry`、`bypass`、`refused`、`cache_source`、`session`、`response`、`upstream_error` 为 null 时省略；`values_truncated`、`trimmed` 为 false 时省略；`values` 为空时省略。
+- `values[].len` 为空、`values[].clipped` 为 false 时省略；`response.skip` 为空时省略；`session.entries_passed`、`session.recent` 为空时省略。
+- 其余的 null 照常写出，例如 `values[].key`、`sources[].request_id`、`timing.origin_ms`、`response.content_type`。
+
 | 字段 | 说明 |
 |---|---|
 | `entry` / `bypass` | 命中的入口、绕过模式原文（不止是布尔值，界面要显示“命中 `/share/*`”） |
@@ -210,7 +216,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `timing` | `total_ms` 从收到请求头到响应写完；`judge_ms` 是判定耗时（含 Jev）；`origin_ms` 从发出上游请求到收到响应头 |
 | `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
 | `response.values` / `new_values` | 从响应里取出的值数、其中会话原先没有的值数 |
-| `response.fields` | 出现次数最多的 12 个字段名及次数；不存值本身 |
+| `response.fields` | 出现次数最多的 12 个字段名及次数，形如 `[{ "field": "id", "count": 3 }]`；不存值本身 |
 | `response.issued_session` | 响应下发了新凭证（登录）时，新会话的标签 |
 | `response.entry_passed` | 这个响应让会话第一次经过某个入口 |
 | `response.after_would_block` | 这次请求是“本应拦截”但在观察模式下被转发，它的响应仍被学进上下文（[7.4.6](#746-附带发现观察模式下本应拦截请求的响应仍进入上下文)） |
