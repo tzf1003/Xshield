@@ -56,11 +56,16 @@ export function onUnauthorized(listener: Listener): () => void {
   };
 }
 
+/**
+ * `answers` lists the statuses that are a normal reply to this call rather than a failure. Such a
+ * reply is returned as its body, and it does not open the sign-in dialog.
+ */
 async function call<T>(
   method: string,
   path: string,
   body?: string,
   contentType?: string,
+  answers: readonly number[] = [],
 ): Promise<T> {
   const headers: Record<string, string> = {};
   if (contentType) headers["Content-Type"] = contentType;
@@ -71,10 +76,11 @@ async function call<T>(
     credentials: "same-origin",
     cache: "no-store",
   });
-  if (response.status === 401) {
+  const answered = answers.includes(response.status);
+  if (response.status === 401 && !answered) {
     for (const listener of unauthorizedListeners) listener();
   }
-  if (!response.ok) {
+  if (!response.ok && !answered) {
     let parsed: { error?: string; field?: string; current_version?: number } = {};
     try {
       parsed = (await response.json()) as typeof parsed;
@@ -97,7 +103,9 @@ const del = <T>(path: string) => call<T>("DELETE", path);
 const name = (site: string) => encodeURIComponent(site);
 
 export const api = {
-  session: () => get<SessionState>("/session"),
+  // 401 with {"authenticated": false} is the answer for a visitor who is not signed in, not a failure:
+  // the root guard reads it and sends the visitor to the sign-in page.
+  session: () => call<SessionState>("GET", "/session", undefined, undefined, [401]),
   login: (password: string) => post<void>("/login", { password }),
   logout: () => post<void>("/logout"),
 

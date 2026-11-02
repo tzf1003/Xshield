@@ -36,6 +36,16 @@ test("a wrong password says 口令不正确, and the right one opens the page th
   expect(logins.map((call) => call.status)).toEqual([401, 204]);
 });
 
+test("a signed-out visitor who opens the console lands on the sign-in page, not an error", async ({
+  page,
+}) => {
+  await useFixtures(page, { signedIn: false, password: PASSWORD });
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/login\?next=/);
+  await expect(page.getByLabel("口令")).toBeVisible();
+  await expect(page.getByText("Something went wrong!")).toHaveCount(0);
+});
+
 test("too many attempts say 尝试次数过多, and the page stays on the login", async ({ page }) => {
   await useFixtures(page, {
     signedIn: false,
