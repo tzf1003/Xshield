@@ -274,3 +274,29 @@ export const RANGE_LABEL = {
   "24h": "24 小时",
   "7d": "7 天",
 } as const;
+
+// Words of the learning side of the site pages (docs/06 6.4.9, design 5 and 6): object classes in the history and
+// the impact of a save, who made a version, and the notes that say how far an estimate can be trusted.
+
+/** An object class in words, e.g. `doctor` is 医生. A class the console does not name is shown by its id. */
+export const OBJECT_KIND_LABEL: Record<string, string> = {
+  doctor: "医生",
+  patient: "患者",
+  document: "文档",
+};
+
+/** Who made a version: the learning task writes the automatic kinds, the one administrator the rest. */
+export const AUTHOR_LABEL = {
+  learning: "学习任务",
+  admin: "管理员",
+} as const;
+
+/** The notes of an impact that the history cannot estimate exactly. */
+export const IMPACT_NOTE = {
+  /** The interface name comes from a request header, which the history does not keep. */
+  afterSave: "保存后开始统计",
+  /** The window kept only the first few sources of each value. */
+  approximate: "来源只记录了前 3 个，结果是近似值",
+  /** A cache change is a warning only: it is not counted. */
+  notCounted: "只提示，不计数",
+} as const;
