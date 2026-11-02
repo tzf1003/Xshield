@@ -63,8 +63,8 @@ pub struct Vote {
     pub session: String,
     /// The UTC day of the use, counted from the epoch.
     pub day: u64,
-    /// The response position the value was shown at, when the record names one.
-    pub from: Option<String>,
+    /// The response positions the value was shown at, as the record names them.
+    pub from: Vec<String>,
 }
 
 /// One refusal by Jev of a request that used a position.
@@ -109,7 +109,8 @@ pub struct DecisionFacts {
 /// Reads one decision record. A request counts as a use when it went through
 /// (`allowed`, not an observe-mode `would_block`) and the origin answered 2xx.
 /// A value without a position, and a value the gateway did not judge, counts
-/// for nothing.
+/// for nothing. A use without a session casts no vote, since anonymous uses
+/// cannot be told apart.
 #[must_use]
 pub fn observe(record: &DecisionFacts) -> Observed {
     let day = record.at_millis / DAY_MILLIS;
@@ -130,9 +131,12 @@ pub fn observe(record: &DecisionFacts) -> Observed {
         let Some(slot) = &value.slot else {
             continue;
         };
-        if used {
-            // The trace lists the most useful source first.
-            let from = value.sources.iter().find_map(|source| source.slot.clone());
+        if used && !record.session.is_empty() {
+            let from = value
+                .sources
+                .iter()
+                .filter_map(|source| source.slot.clone())
+                .collect();
             observed.votes.push(Vote {
                 slot: slot.clone(),
                 session: record.session.clone(),
@@ -155,8 +159,8 @@ pub fn observe(record: &DecisionFacts) -> Observed {
 /// per session and day at most.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Evidence {
-    /// The first response position each (session, day) vote came from.
-    votes: BTreeMap<(String, u64), Option<String>>,
+    /// The response positions each (session, day) vote was shown at.
+    votes: BTreeMap<(String, u64), Vec<String>>,
     /// The (session, day) pairs that were refused.
     denials: BTreeSet<(String, u64)>,
 }
@@ -204,14 +208,26 @@ impl Evidence {
         saturating_count(self.denials.len())
     }
 
-    /// How many votes came from each response position.
+    /// How many votes each kind of object holds, by the kinds the map confirms for
+    /// their response positions. A vote counts toward a kind only when every one of
+    /// its positions the map names has that kind. A vote whose positions disagree,
+    /// or that no position of the map names, counts toward no kind (it still counts
+    /// in `votes`).
     #[must_use]
-    pub fn flows(&self) -> BTreeMap<&str, u32> {
-        let mut flows = BTreeMap::new();
-        for from in self.votes.values().flatten() {
-            *flows.entry(from.as_str()).or_insert(0) += 1;
+    pub fn kinds<'a>(&'a self, map: &'a ObjectMap) -> BTreeMap<&'a str, u32> {
+        let mut kinds = BTreeMap::new();
+        for positions in self.votes.values() {
+            let mut named = positions
+                .iter()
+                .filter_map(|position| map.class_of(position));
+            let Some(first) = named.next() else {
+                continue;
+            };
+            if named.all(|class| class == first) {
+                *kinds.entry(first).or_insert(0) += 1;
+            }
         }
-        flows
+        kinds
     }
 
     /// The most recent day with a vote, when there is one.
@@ -240,7 +256,8 @@ pub struct Proposal {
 /// kind, counted from the response positions the map confirms, must hold the
 /// share of votes. Votes whose response position the map does not confirm
 /// count toward the total but toward no kind. When no kind qualifies, the rules
-/// cannot tell and the position goes to the agent.
+/// cannot tell and the position goes to the agent. The evidence must be pruned
+/// to the window first (`Evidence::prune`): this function does not drop old votes.
 #[must_use]
 pub fn propose(evidence: &Evidence, map: &ObjectMap, thresholds: Thresholds) -> Option<Proposal> {
     let votes = evidence.votes();
@@ -250,13 +267,10 @@ pub fn propose(evidence: &Evidence, map: &ObjectMap, thresholds: Thresholds) -> 
     {
         return None;
     }
-    let mut by_class: BTreeMap<&str, u32> = BTreeMap::new();
-    for (from, count) in evidence.flows() {
-        if let Some(class) = map.class_of(from) {
-            *by_class.entry(class).or_insert(0) += count;
-        }
-    }
-    let (class, count) = by_class.into_iter().max_by_key(|(_, count)| *count)?;
+    let (class, count) = evidence
+        .kinds(map)
+        .into_iter()
+        .max_by_key(|(_, count)| *count)?;
     if !meets_share(count, votes, thresholds.share_per_mille) {
         return None;
     }
@@ -268,10 +282,11 @@ pub fn propose(evidence: &Evidence, map: &ObjectMap, thresholds: Thresholds) -> 
     })
 }
 
-/// Whether the evidence of a confirmed position points at another kind: its
-/// votes come from response positions of other kinds, enough of them to meet
-/// the share. A confirmed position that the rules no longer support should be
-/// suspended rather than trusted.
+/// Whether the evidence of a confirmed position points at another kind: one
+/// other kind holds the share of the votes on its own. Votes split across several
+/// other kinds do not add up to a conflict. A confirmed position that the rules no
+/// longer support should be suspended rather than trusted. The evidence must be
+/// pruned to the window first (`Evidence::prune`).
 #[must_use]
 pub fn contradicts(
     confirmed: &str,
@@ -283,13 +298,9 @@ pub fn contradicts(
     if votes < thresholds.votes || evidence.sessions() < thresholds.sessions {
         return false;
     }
-    let elsewhere: u32 = evidence
-        .flows()
-        .into_iter()
-        .filter(|(from, _)| map.class_of(from).is_some_and(|class| class != confirmed))
-        .map(|(_, count)| count)
-        .sum();
-    meets_share(elsewhere, votes, thresholds.share_per_mille)
+    evidence.kinds(map).into_iter().any(|(kind, count)| {
+        kind != confirmed && meets_share(count, votes, thresholds.share_per_mille)
+    })
 }
 
 /// Whether a position unseen since `last_day` is retired on `today`.
@@ -342,7 +353,7 @@ mod tests {
             slot: "GET /doctor/{id} path[1]".to_owned(),
             session: session.to_owned(),
             day,
-            from: from.map(str::to_owned),
+            from: from.map(str::to_owned).into_iter().collect(),
         }
     }
 
@@ -368,11 +379,8 @@ mod tests {
         evidence.add_vote(vote("b", 1, None));
         assert_eq!(evidence.votes(), 3);
         assert_eq!(evidence.sessions(), 2);
-        // The first vote of the day names its response position.
-        assert_eq!(
-            evidence.flows().get("GET /api/appointments [].doc_id"),
-            Some(&1)
-        );
+        // The first vote of the day keeps its response position.
+        assert_eq!(evidence.kinds(&map()).get("doctor"), Some(&1));
         assert_eq!(evidence.last_day(), Some(2));
     }
 
@@ -488,6 +496,98 @@ mod tests {
     }
 
     #[test]
+    fn a_split_flow_is_not_a_contradiction() {
+        let map = serde_json::from_str::<ObjectMap>(
+            r#"{
+                "classes": [{"id": "doctor", "name": "医生"}, {"id": "document", "name": "文档"}, {"id": "patient", "name": "患者"}],
+                "slots": [
+                    {"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "rule"},
+                    {"key": "GET /api/docs [].id", "class": "document", "source": "admin"},
+                    {"key": "GET /api/patients [].id", "class": "patient", "source": "admin"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        // Confirmed as a doctor. Half the votes come from documents and half from
+        // patients: neither other kind holds the share on its own.
+        let mut split = Evidence::default();
+        for index in 0..20_u32 {
+            let from = if index % 2 == 0 {
+                "GET /api/docs [].id"
+            } else {
+                "GET /api/patients [].id"
+            };
+            split.add_vote(vote(
+                &format!("s{}", index % 5),
+                u64::from(index),
+                Some(from),
+            ));
+        }
+        assert!(!contradicts("doctor", &split, &map, Thresholds::default()));
+
+        // Nine in ten from documents holds the share: that kind contradicts it.
+        let mut documents = Evidence::default();
+        for index in 0..20_u32 {
+            let from = if index < 18 {
+                "GET /api/docs [].id"
+            } else {
+                "GET /api/patients [].id"
+            };
+            documents.add_vote(vote(
+                &format!("s{}", index % 5),
+                u64::from(index),
+                Some(from),
+            ));
+        }
+        assert!(contradicts(
+            "doctor",
+            &documents,
+            &map,
+            Thresholds::default()
+        ));
+    }
+
+    #[test]
+    fn a_vote_counts_toward_a_kind_only_when_its_mapped_positions_agree() {
+        let map = map();
+        let mut evidence = Evidence::default();
+        // Shown at a document and at a doctor position: the positions disagree.
+        evidence.add_vote(Vote {
+            slot: "GET /doctor/{id} path[1]".to_owned(),
+            session: "a".to_owned(),
+            day: 1,
+            from: vec![
+                "GET /api/docs [].id".to_owned(),
+                "GET /api/appointments [].doc_id".to_owned(),
+            ],
+        });
+        assert_eq!(evidence.votes(), 1);
+        assert!(evidence.kinds(&map).is_empty());
+        // Shown at a doctor position and at one the map does not name: a doctor.
+        evidence.add_vote(Vote {
+            slot: "GET /doctor/{id} path[1]".to_owned(),
+            session: "b".to_owned(),
+            day: 2,
+            from: vec![
+                "GET /api/other [].id".to_owned(),
+                "GET /api/appointments [].doc_id".to_owned(),
+            ],
+        });
+        assert_eq!(evidence.kinds(&map).get("doctor"), Some(&1));
+    }
+
+    #[test]
+    fn an_anonymous_use_casts_no_vote_but_a_refusal_still_counts() {
+        let mut anonymous = record(DecisionPath::FastAllow, Outcome::Allowed, Some(200));
+        anonymous.session = String::new();
+        assert!(observe(&anonymous).votes.is_empty());
+
+        let mut refused = record(DecisionPath::JevDeny, Outcome::Blocked, Some(403));
+        refused.session = String::new();
+        assert_eq!(observe(&refused).denials.len(), 1);
+    }
+
+    #[test]
     fn a_position_unseen_for_thirty_days_is_retired() {
         assert!(!is_retired(100, 129));
         assert!(is_retired(100, 130));
@@ -502,8 +602,8 @@ mod tests {
         assert_eq!(observed.votes[0].session, "alice");
         assert_eq!(observed.votes[0].day, 3);
         assert_eq!(
-            observed.votes[0].from.as_deref(),
-            Some("GET /api/appointments [].doc_id")
+            observed.votes[0].from,
+            vec!["GET /api/appointments [].doc_id".to_owned()]
         );
         assert!(observed.denials.is_empty());
 
