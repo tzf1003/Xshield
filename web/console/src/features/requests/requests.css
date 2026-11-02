@@ -30,12 +30,14 @@
     display: none;
   }
 
+  /* The items break onto a further line rather than being cut: each item is one unit, so a value
+     that moves to the next line is still whole (docs/06 6.8.1: nothing is lost, only moved). */
   .rq-sub {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 2px 12px;
     min-width: 0;
-    overflow: hidden;
     font-family: var(--mono);
     font-size: 12px;
     line-height: 16px;
@@ -56,6 +58,14 @@
   .rq-c-method,
   .rq-c-status {
     display: none;
+  }
+
+  /* The time may take two lines: the date over the clock, which keeps the path wide enough to read.
+     The selector outranks `.tbl td` (nowrap), which it overrides. */
+  .tbl td.rq-c-time {
+    white-space: normal;
+    overflow-wrap: break-word;
+    padding-block: 4px;
   }
 
   /* The method moves in front of the path on the same line. */

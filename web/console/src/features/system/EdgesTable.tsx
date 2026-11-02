@@ -87,27 +87,27 @@ function EdgeRows({ edge, now }: { edge: EdgeStatus; now: number }) {
   return (
     <tbody>
       <tr>
-        <td>
+        <td className="keep">
           <span className="sys-name">{edge.edge}</span>
         </td>
-        <td>
+        <td className="keep">
           <span className={`dot ${edge.online ? "dot-ok" : "dot-down"}`} aria-hidden="true" />{" "}
           {edge.online ? "在线" : "离线"}
         </td>
         <td className="tnum" title="30 秒内有心跳为在线">
           {seen === null ? "—" : fmtAgo(seen, now)}
         </td>
-        <td className="tnum">{started === null ? "—" : fmtLocalDateTime(started)}</td>
-        <td className="mono small">{edge.build}</td>
-        <td className="mono small">{edge.listen}</td>
-        <td>{edge.tls ? "是" : "否"}</td>
+        <td className="tnum wrap">{started === null ? "—" : fmtLocalDateTime(started)}</td>
+        <td className="mono small wrap">{edge.build}</td>
+        <td className="mono small keep">{edge.listen}</td>
+        <td className="keep">{edge.tls ? "是" : "否"}</td>
         <td className="num tnum">{fmtInt(edge.sessions)}</td>
         <td className="num tnum">{fmtInt(edge.queue)}</td>
         <td className="num tnum">{fmtInt(edge.written)}</td>
         <td className="num tnum">{fmtInt(edge.dropped)}</td>
         <td className="num tnum">{fmtInt(edge.dropped_bypass)}</td>
         <td className="num tnum">{fmtInt(edge.write_errors)}</td>
-        <td>
+        <td className="keep">
           <button
             type="button"
             className="linkbtn"

@@ -64,7 +64,7 @@ export function StoragePanel({ system, now }: { system: SystemInfo; now: number 
               <tbody>
                 {rows.map((row) => (
                   <tr key={row.name}>
-                    <td className="mono small">{row.name}</td>
+                    <td className="mono small keep">{row.name}</td>
                     <td className="tnum small">
                       {row.day === null
                         ? "—"
