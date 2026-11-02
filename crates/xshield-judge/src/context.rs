@@ -274,8 +274,28 @@ fn kind_words(text: &str) -> Vec<String> {
 /// that lists it (`paymentId` selects a card of `/api/Cards`).
 const SYNONYMS: [(&str, &str); 1] = [("payment", "card")];
 
-/// Whether two words name the same kind of object: one contains the other,
-/// or they are a built-in or site synonym pair.
+/// Identifier endings a compound word may carry (`doctorid`, `patientno`).
+/// Longer endings come first so that `uuid` is not read as `id`.
+const ID_SUFFIXES: [&str; 6] = ["uuid", "code", "num", "ref", "id", "no"];
+
+/// The kind a word names: a compound with an identifier ending loses the ending
+/// (`doctorid` names a doctor); any other word is its own kind. Containment does
+/// not make two words one kind: `doc` is part of `doctor`, and `outpatient` of
+/// `patient`, so a document id must not unlock a doctor path.
+fn kind_of(word: &str) -> &str {
+    ID_SUFFIXES
+        .into_iter()
+        .find_map(|suffix| word.strip_suffix(suffix))
+        .filter(|rest| rest.len() >= 3)
+        .unwrap_or(word)
+}
+
+fn same_kind(left: &str, right: &str) -> bool {
+    kind_of(left) == kind_of(right)
+}
+
+/// Whether two words name the same kind of object, or are a built-in or site
+/// synonym pair.
 fn related(left: &str, right: &str, synonyms: &[(String, String)]) -> bool {
     let pairs = SYNONYMS
         .iter()
@@ -285,11 +305,10 @@ fn related(left: &str, right: &str, synonyms: &[(String, String)]) -> bool {
                 .iter()
                 .map(|(first, second)| (first.as_str(), second.as_str())),
         );
-    left.contains(right)
-        || right.contains(left)
+    same_kind(left, right)
         || pairs.into_iter().any(|(first, second)| {
-            (left.contains(first) && right.contains(second))
-                || (left.contains(second) && right.contains(first))
+            (same_kind(left, first) && same_kind(right, second))
+                || (same_kind(left, second) && same_kind(right, first))
         })
 }
 
@@ -649,6 +668,55 @@ mod tests {
         let seen = session.lookup(&key, "7").unwrap();
         assert!(seen.is_specific("7", "/rest/basket/22/checkout", Some("paymentId"), &[]));
         assert!(!seen.is_specific("7", "/rest/basket/22/checkout", Some("addressId"), &[]));
+    }
+
+    #[test]
+    fn a_kind_word_inside_another_word_is_a_different_kind() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(&key, &at("GET /api/docs"), &[response("doc_id", "2")]);
+        session.remember(
+            &key,
+            &at("GET /api/visits"),
+            &[response("outpatient_id", "3"), response("clinical_id", "4")],
+        );
+        let document = session.lookup(&key, "2").unwrap();
+        assert!(!document.is_specific("2", "/doctor/2", None, &[]));
+        assert!(document.is_specific("2", "/docs/2", None, &[]));
+        assert!(
+            !session
+                .lookup(&key, "3")
+                .unwrap()
+                .is_specific("3", "/patients/3", None, &[])
+        );
+        assert!(
+            !session
+                .lookup(&key, "4")
+                .unwrap()
+                .is_specific("4", "/clinic/4", None, &[])
+        );
+    }
+
+    #[test]
+    fn a_lower_case_id_compound_names_the_kind_before_its_ending() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(
+            &key,
+            &at("GET /api/home"),
+            &[response("doctorid", "1"), response("doctorno", "5")],
+        );
+        let doctor = session.lookup(&key, "1").unwrap();
+        assert!(doctor.is_specific("1", "/doctor/1", None, &[]));
+        assert!(doctor.is_specific("1", "/api/doctors/1", Some("doctorId"), &[]));
+        assert!(
+            session
+                .lookup(&key, "5")
+                .unwrap()
+                .is_specific("5", "/api/doctors/5", None, &[])
+        );
     }
 
     #[test]
