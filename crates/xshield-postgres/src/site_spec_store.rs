@@ -379,7 +379,8 @@ pub async fn update(
 }
 
 /// Deletes a site when it is still at `expected_version`. The delete is
-/// recorded as a history version with no configuration.
+/// recorded as a history version with no configuration, and the site's
+/// learning state is deleted with it.
 ///
 /// # Errors
 /// Returns [`SiteSpecStoreError`] on a database failure.
@@ -403,6 +404,9 @@ pub async fn delete(
         .bind(name)
         .execute(&mut *transaction)
         .await?;
+    // In this transaction, so a site created later under the same name starts with
+    // no evidence, positions or cursor.
+    crate::object_learning_store::forget_site(&mut transaction, name).await?;
     let version = current + 1;
     insert_history(
         &mut transaction,

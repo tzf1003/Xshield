@@ -16,7 +16,7 @@ use xshield_core::context::learning::{
     propose,
 };
 use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec};
-use xshield_postgres::object_learning_store::{self as store, Judgement, LearnedState};
+use xshield_postgres::object_learning_store::{self as store, Cursor, Judgement, LearnedState};
 use xshield_postgres::site_spec_store;
 
 use crate::params::DAY_MILLIS;
@@ -49,8 +49,8 @@ pub async fn learn_once(pool: &PgPool, now_millis: i64) {
 }
 
 /// Reads one site's decision log from its cursor up to the lag horizon, batch by
-/// batch, then prunes the evidence older than the window and retires the positions
-/// no vote has reached for the retirement period.
+/// batch, then prunes the evidence older than the window, judges the proposals again,
+/// and retires the positions no vote has reached for the retirement period.
 ///
 /// A batch is recorded before its cursor moves, and recording is idempotent: when a
 /// step fails, the next pass reads the same rows again and changes nothing twice.
@@ -66,22 +66,30 @@ async fn learn_site(
         return Ok(());
     }
     let horizon = now_millis - LAG_MILLIS;
+    // The cursor once a pass has read every row up to the horizon.
+    let end = Cursor {
+        at_millis: horizon,
+        id: i64::MAX,
+    };
     let today = day_of(u64::try_from(now_millis).unwrap_or(0));
     let oldest_day = today.saturating_sub(WINDOW_DAYS - 1);
     let window = i64::try_from(WINDOW_DAYS)
         .unwrap_or(0)
         .saturating_mul(DAY_MILLIS);
-    let window_start = horizon.saturating_sub(window);
+    let window_start = Cursor {
+        at_millis: horizon.saturating_sub(window),
+        id: 0,
+    };
     let mut after = store::cursor(pool, site)
         .await?
         .map_or(window_start, |cursor| cursor.max(window_start));
     for _ in 0..BATCHES_PER_PASS {
-        if after >= horizon {
+        if after >= end {
             break;
         }
         let batch = store::read_batch(pool, site, after, horizon, BATCH_ROWS).await?;
         let complete = batch.rows < usize::try_from(BATCH_ROWS).unwrap_or(usize::MAX);
-        let next = next_cursor(after, horizon, complete, batch.newest_millis);
+        let next = next_cursor(after, end, complete, batch.newest);
         let mut votes = Vec::new();
         let mut denials = Vec::new();
         for facts in &batch.facts {
@@ -112,11 +120,13 @@ async fn learn_site(
         }
     }
     store::prune_evidence(pool, site, oldest_day).await?;
+    rejudge_proposals(pool, spec, oldest_day, today, now_millis).await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
     Ok(())
 }
 
-/// Writes the state the rules give one position, when they give one.
+/// Writes the state the rules give one position. When the rules give it no proposal,
+/// an earlier proposal of the position is withdrawn.
 async fn judge(
     pool: &PgPool,
     spec: &SiteSpec,
@@ -126,7 +136,7 @@ async fn judge(
     now_millis: i64,
 ) -> Result<(), store::LearningStoreError> {
     let Some(decision) = decide(slot, evidence, spec.objects(), today) else {
-        return Ok(());
+        return store::withdraw_proposal(pool, spec.name(), slot).await;
     };
     let judgement = Judgement {
         slot,
@@ -138,6 +148,30 @@ async fn judge(
         last_day: decision.last_day,
     };
     store::put_judgement(pool, spec.name(), &judgement, now_millis).await
+}
+
+/// Judges every proposal of the site again. The window has moved on and refusals may
+/// have arrived since a proposal was made, so a proposal the rules no longer make is
+/// withdrawn, and one that still stands keeps its place with its current counts.
+async fn rejudge_proposals(
+    pool: &PgPool,
+    spec: &SiteSpec,
+    oldest_day: u64,
+    today: u64,
+    now_millis: i64,
+) -> Result<(), store::LearningStoreError> {
+    let site = spec.name();
+    let slots = store::proposed_slots(pool, site).await?;
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let evidence = store::load_evidence(pool, site, &slots, oldest_day).await?;
+    let empty = Evidence::default();
+    for slot in &slots {
+        let evidence = evidence.get(slot).unwrap_or(&empty);
+        judge(pool, spec, slot, evidence, today, now_millis).await?;
+    }
+    Ok(())
 }
 
 /// The state the rules give a position: a confirmed position is confirmed or
@@ -164,8 +198,10 @@ fn thresholds_of(learning: &LearningSettings) -> Thresholds {
 
 fn decide(slot: &str, evidence: &Evidence, map: &ObjectMap, today: u64) -> Option<Decision> {
     let thresholds = thresholds_of(map.learning());
-    let last_day = evidence.last_day().unwrap_or(today);
     if let Some(class) = map.class_of(slot) {
+        // A confirmed position is judged by its votes alone. Refusals without a vote in
+        // the window leave its state as it is, and its last vote ages toward retirement.
+        let last_day = evidence.last_day()?;
         let state = if contradicts(class, evidence, map, thresholds) {
             LearnedState::Suspended
         } else {
@@ -187,19 +223,18 @@ fn decide(slot: &str, evidence: &Evidence, map: &ObjectMap, today: u64) -> Optio
         votes: proposal.votes,
         sessions: proposal.sessions,
         share_per_mille: proposal.share_per_mille,
-        last_day,
+        last_day: evidence.last_day().unwrap_or(today),
     })
 }
 
-/// The cursor after a batch. A batch that reached the horizon moves the cursor to
-/// the horizon. A full batch moves it to one millisecond before its newest row, so
-/// rows that share that time and did not fit are read again. Reading a row twice
-/// changes nothing, and a full batch always moves the cursor forward.
-fn next_cursor(after: i64, horizon: i64, complete: bool, newest: Option<i64>) -> i64 {
+/// The cursor after a batch. A batch that read every row up to the horizon moves the
+/// cursor to `end`. A full batch moves it to its newest row, and the rows after that
+/// row, including those that share its time, are read by the next batch.
+fn next_cursor(after: Cursor, end: Cursor, complete: bool, newest: Option<Cursor>) -> Cursor {
     match (complete, newest) {
-        (true, _) | (false, None) => horizon,
-        (false, Some(newest)) if newest - 1 > after => newest - 1,
-        (false, Some(newest)) => newest,
+        (true, _) => end,
+        (false, Some(newest)) if newest > after => newest,
+        (false, _) => after,
     }
 }
 
@@ -273,15 +308,42 @@ mod tests {
     }
 
     #[test]
+    fn refusals_alone_leave_a_confirmed_position_alone() {
+        let mut refused = Evidence::default();
+        refused.add_denial(xshield_core::context::learning::Denial {
+            slot: SLOT.to_owned(),
+            session: "s0".to_owned(),
+            day: 5,
+        });
+        assert_eq!(decide(SLOT, &refused, &map(), 10), None);
+    }
+
+    fn cursor_at(at_millis: i64, id: i64) -> Cursor {
+        Cursor { at_millis, id }
+    }
+
+    #[test]
     fn the_cursor_reaches_the_horizon_only_when_a_batch_was_complete() {
-        // A short batch reached the horizon.
-        assert_eq!(next_cursor(0, 100, true, Some(40)), 100);
-        // A full batch stops one millisecond before its newest row.
-        assert_eq!(next_cursor(0, 100, false, Some(50)), 49);
-        // It always moves forward, even when the whole batch shares one time.
-        assert_eq!(next_cursor(10, 100, false, Some(11)), 11);
-        // An empty batch is complete.
-        assert_eq!(next_cursor(0, 100, false, None), 100);
+        let start = cursor_at(0, 0);
+        let end = cursor_at(100, i64::MAX);
+        // A short batch read every row up to the horizon.
+        assert_eq!(next_cursor(start, end, true, Some(cursor_at(40, 3))), end);
+        // A full batch stops at its newest row, and the rows after it are read next.
+        assert_eq!(
+            next_cursor(start, end, false, Some(cursor_at(50, 9))),
+            cursor_at(50, 9)
+        );
+        // Rows of one millisecond that did not fit are not skipped: the id resumes them.
+        assert_eq!(
+            next_cursor(cursor_at(50, 9), end, false, Some(cursor_at(50, 5_009))),
+            cursor_at(50, 5_009)
+        );
+        // A batch whose newest row is not past the cursor leaves the cursor where it was.
+        assert_eq!(
+            next_cursor(cursor_at(10, 2), end, false, Some(cursor_at(10, 2))),
+            cursor_at(10, 2)
+        );
+        assert_eq!(next_cursor(start, end, false, None), start);
     }
 
     #[test]
@@ -378,9 +440,16 @@ mod pass_tests {
         }
     }
 
-    /// One decision row of `GET /doctor/7`. Five sessions each make uses on their own
-    /// days, so `index` gives a distinct (session, day) pair for each of twenty uses.
-    async fn record(pool: &PgPool, index: i64, now: i64, path: &str, outcome: &str, status: i16) {
+    /// One decision row of `GET /doctor/7` at `at_millis`. Five sessions make uses in
+    /// turn, so `index` names the request and, modulo five, the session that made it.
+    async fn record_at(
+        pool: &PgPool,
+        index: i64,
+        at_millis: i64,
+        path: &str,
+        outcome: &str,
+        status: i16,
+    ) {
         let trace = serde_json::json!({
             "v": 1,
             "values_truncated": false,
@@ -406,7 +475,7 @@ mod pass_tests {
              VALUES ($1, $2, 'clinic', 'edge-1', 'clinic.example.com', '10.0.0.1', $3,
                 'GET', '/doctor/7', $4, $5, $6, $7)",
         )
-        .bind(now - (1 + index / 5) * DAY_MILLIS)
+        .bind(at_millis)
         .bind(format!("req_{index:032x}"))
         .bind(format!("s{}", index % 5))
         .bind(status)
@@ -416,6 +485,20 @@ mod pass_tests {
         .execute(pool)
         .await
         .expect("insert a decision row");
+    }
+
+    /// One decision row of `GET /doctor/7` made `1 + index / 5` days before `now`, so
+    /// twenty uses from five sessions fall on distinct days inside the window.
+    async fn record(pool: &PgPool, index: i64, now: i64, path: &str, outcome: &str, status: i16) {
+        record_at(
+            pool,
+            index,
+            now - (1 + index / 5) * DAY_MILLIS,
+            path,
+            outcome,
+            status,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -522,6 +605,139 @@ mod pass_tests {
             .await
             .expect("read the cursor");
         assert_eq!((evidence, positions, cursor), (0, 0, None));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    /// The positions of the clinic site that hold a proposal.
+    async fn proposed(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM object_positions WHERE site = 'clinic' AND state = 'proposed'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("count the proposals")
+    }
+
+    #[tokio::test]
+    async fn a_refusal_after_a_proposal_withdraws_it() {
+        let Some((admin, pool, name)) = scratch("withdrawn").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        assert_eq!(proposed(&pool).await, 1);
+        // Jev refuses the position after the proposal was made. The pass an hour later
+        // reads the refusal, which lies after the cursor the first pass left.
+        record_at(&pool, 20, now - 5 * 60_000, "jev_deny", "blocked", 403).await;
+        learn_once(&pool, now + 60 * 60_000).await;
+        assert_eq!(proposed(&pool).await, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_proposal_whose_evidence_ages_out_is_withdrawn() {
+        let Some((admin, pool, name)) = scratch("aged_out").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        assert_eq!(proposed(&pool).await, 1);
+        // Eight days later no vote is in the window, and no new row has arrived.
+        learn_once(&pool, now + 8 * DAY_MILLIS).await;
+        assert_eq!(proposed(&pool).await, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn deleting_a_site_forgets_what_it_learned() {
+        let Some((admin, pool, name)) = scratch("forget").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        let created = site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record(&pool, index, now, "fast_allow", "allowed", 200).await;
+        }
+        learn_once(&pool, now).await;
+        assert_eq!(proposed(&pool).await, 1);
+        let deleted = site_spec_store::delete(&pool, "clinic", created.version, None)
+            .await
+            .expect("delete the site");
+        assert!(matches!(
+            deleted,
+            site_spec_store::DeleteOutcome::Deleted { .. }
+        ));
+        // The same name again: the site starts with no proposal, evidence or cursor.
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site again");
+        let evidence: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM object_evidence WHERE site = 'clinic'")
+                .fetch_one(&pool)
+                .await
+                .expect("count the evidence");
+        let cursor = store::cursor(&pool, "clinic")
+            .await
+            .expect("read the cursor");
+        assert_eq!((evidence, proposed(&pool).await, cursor), (0, 0, None));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_millisecond_with_more_rows_than_a_batch_is_read_to_the_end() {
+        let Some((admin, pool, name)) = scratch("same_millisecond").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        // One more row than a batch holds, all at one millisecond inside the window.
+        let at = now - 2 * DAY_MILLIS - 60 * 60_000;
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace)
+             SELECT $1::bigint, 'req_' || lpad(to_hex(n), 32, '0'), 'clinic', 'edge-1',
+                'clinic.example.com', '10.0.0.1', 's' || (n % 5), 'GET', '/doctor/7', 200,
+                'fast_allow', 'allowed', $2::jsonb
+             FROM generate_series(1, $3::bigint) AS n",
+        )
+        .bind(at)
+        .bind(serde_json::json!({"v": 1}))
+        .bind(BATCH_ROWS + 1)
+        .execute(&pool)
+        .await
+        .expect("insert the rows of one millisecond");
+        learn_once(&pool, now).await;
+        // The pass read the log up to its horizon, past the first batch and into the next.
+        let cursor = store::cursor(&pool, "clinic")
+            .await
+            .expect("read the cursor");
+        assert_eq!(
+            cursor,
+            Some(Cursor {
+                at_millis: now - LAG_MILLIS,
+                id: i64::MAX,
+            })
+        );
         drop_scratch(admin, pool, name).await;
     }
 }

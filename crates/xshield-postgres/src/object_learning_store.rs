@@ -6,12 +6,17 @@
 //! Every write is idempotent. The evidence of a position, session and UTC day is
 //! counted once, and a judgement overwrites only the rows the rules own, so a pass
 //! that reads a batch twice, or stops half way, changes nothing it should not.
+//!
+//! A write for a site with no configuration is dropped. A site deleted while a pass
+//! runs keeps no state, and a site created later under its name starts with none: the
+//! deletion removes the rows (`forget_site`), and each write checks that the site row
+//! exists while it holds a share lock on that row.
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use xshield_core::context::learning::{DecisionFacts, Denial, Evidence, Vote};
 use xshield_core::context::log::{DecisionPath, Outcome};
 use xshield_core::context::trace::Trace;
@@ -83,19 +88,29 @@ pub struct Judgement<'a> {
     pub last_day: u64,
 }
 
-/// One batch of decision rows of a site, oldest first.
+/// A place in a site's decision log: the time of a row and its id. Rows are read in
+/// this order, so a cursor names the last row read even when many rows share a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Cursor {
+    /// The row's time, Unix milliseconds.
+    pub at_millis: i64,
+    /// The row's id, which orders the rows of one millisecond.
+    pub id: i64,
+}
+
+/// One batch of decision rows of a site, in (time, id) order.
 #[derive(Debug, Default)]
 pub struct DecisionBatch {
     /// The rows whose stored values this build reads.
     pub facts: Vec<DecisionFacts>,
     /// Every row read, including those left out of `facts`.
     pub rows: usize,
-    /// The newest time among the rows read, Unix milliseconds.
-    pub newest_millis: Option<i64>,
+    /// The last row read, when the batch has one.
+    pub newest: Option<Cursor>,
 }
 
-/// Reads up to `limit` decision rows of `site` judged after `after_millis` and at or
-/// before `through_millis`, oldest first. A row whose stored values this build does
+/// Reads up to `limit` decision rows of `site` after `after` and at or before
+/// `through_millis`, in (time, id) order. A row whose stored values this build does
 /// not read is counted in `rows` but left out of `facts`, so the cursor moves past it.
 ///
 /// # Errors
@@ -103,17 +118,18 @@ pub struct DecisionBatch {
 pub async fn read_batch(
     pool: &PgPool,
     site: &str,
-    after_millis: i64,
+    after: Cursor,
     through_millis: i64,
     limit: i64,
 ) -> Result<DecisionBatch, LearningStoreError> {
     let rows = sqlx::query(
-        "SELECT at_millis, session, status, decision_path, outcome, trace FROM decision_log
-         WHERE site = $1 AND at_millis > $2 AND at_millis <= $3
-         ORDER BY at_millis, id LIMIT $4",
+        "SELECT id, at_millis, session, status, decision_path, outcome, trace FROM decision_log
+         WHERE site = $1 AND (at_millis, id) > ($2, $3) AND at_millis <= $4
+         ORDER BY at_millis, id LIMIT $5",
     )
     .bind(site)
-    .bind(after_millis)
+    .bind(after.at_millis)
+    .bind(after.id)
     .bind(through_millis)
     .bind(limit)
     .fetch_all(pool)
@@ -123,13 +139,12 @@ pub async fn read_batch(
         ..DecisionBatch::default()
     };
     for row in &rows {
-        let at_millis: i64 = row.try_get("at_millis")?;
-        batch.newest_millis = Some(
-            batch
-                .newest_millis
-                .map_or(at_millis, |newest| newest.max(at_millis)),
-        );
-        if let Some(facts) = facts_of(row, at_millis)? {
+        let cursor = Cursor {
+            at_millis: row.try_get("at_millis")?,
+            id: row.try_get("id")?,
+        };
+        batch.newest = Some(batch.newest.map_or(cursor, |newest| newest.max(cursor)));
+        if let Some(facts) = facts_of(row, cursor.at_millis)? {
             batch.facts.push(facts);
         }
     }
@@ -192,20 +207,34 @@ pub async fn record_evidence(
         .collect();
     for chunk in rows.chunks(EVIDENCE_CHUNK) {
         // One row per tuple: a text[] column cannot be unnested row by row, and a
-        // vote's response positions are a list, not one value.
+        // vote's response positions are a list, not one value. The casts type each
+        // value, since a SELECT over VALUES does not take the column types as INSERT does.
         let mut builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO object_evidence (site, slot, session, day, kind, from_slots) ",
+            "INSERT INTO object_evidence (site, slot, session, day, kind, from_slots)
+             SELECT site, slot, session, day, kind, from_slots FROM (",
         );
         builder.push_values(chunk, |mut values, row| {
-            values
-                .push_bind(site)
-                .push_bind(row.slot)
-                .push_bind(row.session)
-                .push_bind(row.day)
-                .push_bind(row.kind)
-                .push_bind(row.from.clone());
+            values.push_bind(site);
+            values.push_unseparated("::text");
+            values.push_bind(row.slot);
+            values.push_unseparated("::text");
+            values.push_bind(row.session);
+            values.push_unseparated("::text");
+            values.push_bind(row.day);
+            values.push_unseparated("::bigint");
+            values.push_bind(row.kind);
+            values.push_unseparated("::text");
+            values.push_bind(row.from.clone());
+            values.push_unseparated("::text[]");
         });
-        builder.push(" ON CONFLICT DO NOTHING");
+        // The rows land only while the site has a configuration. The share lock holds
+        // the site row, so a deletion of the site waits for this statement.
+        builder.push(
+            ") AS v(site, slot, session, day, kind, from_slots)
+             WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = ",
+        );
+        builder.push_bind(site);
+        builder.push(" FOR SHARE) ON CONFLICT DO NOTHING");
         builder.build().execute(pool).await?;
     }
     Ok(())
@@ -294,7 +323,9 @@ pub async fn put_judgement(
     sqlx::query(
         "INSERT INTO object_positions
              (site, slot, state, class, votes, sessions, share_per_mille, last_day, updated_millis)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         SELECT $1::text, $2::text, $3::text, $4::text, $5::integer, $6::integer, $7::integer,
+             $8::bigint, $9::bigint
+         WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = $1 FOR SHARE)
          ON CONFLICT (site, slot) DO UPDATE SET
              state = EXCLUDED.state,
              class = EXCLUDED.class,
@@ -344,43 +375,111 @@ pub async fn retire_unseen(
     Ok(result.rows_affected())
 }
 
-/// The time up to which the pass has read the site's decision log, if it has started.
+/// The last decision row the pass has read for the site, if it has started.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
-pub async fn cursor(pool: &PgPool, site: &str) -> Result<Option<i64>, LearningStoreError> {
-    let row = sqlx::query("SELECT after_millis FROM object_learning_cursor WHERE site = $1")
-        .bind(site)
-        .fetch_optional(pool)
-        .await?;
+pub async fn cursor(pool: &PgPool, site: &str) -> Result<Option<Cursor>, LearningStoreError> {
+    let row =
+        sqlx::query("SELECT after_millis, after_id FROM object_learning_cursor WHERE site = $1")
+            .bind(site)
+            .fetch_optional(pool)
+            .await?;
     match row {
-        Some(row) => Ok(Some(row.try_get("after_millis")?)),
+        Some(row) => Ok(Some(Cursor {
+            at_millis: row.try_get("after_millis")?,
+            id: row.try_get("after_id")?,
+        })),
         None => Ok(None),
     }
 }
 
-/// Moves the site's cursor to `after_millis`.
+/// Moves the site's cursor to `after`. The cursor never moves back, and a site with
+/// no configuration keeps none.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
 pub async fn advance_cursor(
     pool: &PgPool,
     site: &str,
-    after_millis: i64,
+    after: Cursor,
     now_millis: i64,
 ) -> Result<(), LearningStoreError> {
     sqlx::query(
-        "INSERT INTO object_learning_cursor (site, after_millis, updated_millis)
-         VALUES ($1, $2, $3)
+        "INSERT INTO object_learning_cursor (site, after_millis, after_id, updated_millis)
+         SELECT $1::text, $2::bigint, $3::bigint, $4::bigint
+         WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = $1 FOR SHARE)
          ON CONFLICT (site) DO UPDATE SET
              after_millis = EXCLUDED.after_millis,
-             updated_millis = EXCLUDED.updated_millis",
+             after_id = EXCLUDED.after_id,
+             updated_millis = EXCLUDED.updated_millis
+         WHERE (object_learning_cursor.after_millis, object_learning_cursor.after_id)
+             <= (EXCLUDED.after_millis, EXCLUDED.after_id)",
     )
     .bind(site)
-    .bind(after_millis)
+    .bind(after.at_millis)
+    .bind(after.id)
     .bind(now_millis)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// The positions that hold a proposal, in order.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn proposed_slots(pool: &PgPool, site: &str) -> Result<Vec<String>, LearningStoreError> {
+    let slots = sqlx::query_scalar(
+        "SELECT slot FROM object_positions WHERE site = $1 AND state = 'proposed' ORDER BY slot",
+    )
+    .bind(site)
+    .fetch_all(pool)
+    .await?;
+    Ok(slots)
+}
+
+/// Withdraws the proposal of a position, when it is still a proposal. Confirmed,
+/// suspended, retired, dismissed and ambiguous positions are left alone.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn withdraw_proposal(
+    pool: &PgPool,
+    site: &str,
+    slot: &str,
+) -> Result<(), LearningStoreError> {
+    sqlx::query(
+        "DELETE FROM object_positions WHERE site = $1 AND slot = $2 AND state = 'proposed'",
+    )
+    .bind(site)
+    .bind(slot)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Deletes the learning state of a site inside the transaction that deletes the site,
+/// so a site created later under the same name starts with no evidence, positions or
+/// cursor. The deletion locks the site row until it commits, so a write still running
+/// waits, then finds no site and writes nothing.
+///
+/// # Errors
+/// Returns [`sqlx::Error`] on a database failure.
+pub async fn forget_site(
+    transaction: &mut Transaction<'_, Postgres>,
+    site: &str,
+) -> Result<(), sqlx::Error> {
+    for statement in [
+        "DELETE FROM object_evidence WHERE site = $1",
+        "DELETE FROM object_positions WHERE site = $1",
+        "DELETE FROM object_learning_cursor WHERE site = $1",
+    ] {
+        sqlx::query(statement)
+            .bind(site)
+            .execute(&mut **transaction)
+            .await?;
+    }
     Ok(())
 }
 
@@ -408,6 +507,45 @@ mod tests {
     async fn connect_test_pool() -> PgPool {
         let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
         PgPool::connect(&url).await.expect("connect")
+    }
+
+    /// The configuration row a learning write looks for: a site without one keeps no state.
+    async fn with_site(pool: &PgPool, site: &str) {
+        sqlx::query("INSERT INTO site_configs (name, spec, version) VALUES ($1, '{}'::jsonb, 1)")
+            .bind(site)
+            .execute(pool)
+            .await
+            .expect("create the site row");
+    }
+
+    fn cursor_at(at_millis: i64, id: i64) -> Cursor {
+        Cursor { at_millis, id }
+    }
+
+    /// A proposal of `SLOT` as a doctor, with enough evidence to be written.
+    fn proposal() -> Judgement<'static> {
+        Judgement {
+            slot: SLOT,
+            state: LearnedState::Proposed,
+            class: "doctor",
+            votes: 20,
+            sessions: 5,
+            share_per_mille: 950,
+            last_day: 3,
+        }
+    }
+
+    /// The learning rows the site keeps across the three tables.
+    async fn learning_rows(pool: &PgPool, site: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT (SELECT count(*) FROM object_evidence WHERE site = $1)
+                  + (SELECT count(*) FROM object_positions WHERE site = $1)
+                  + (SELECT count(*) FROM object_learning_cursor WHERE site = $1)",
+        )
+        .bind(site)
+        .fetch_one(pool)
+        .await
+        .expect("count the learning rows")
     }
 
     const SLOT: &str = "GET /doctor/{id} path[1]";
@@ -439,6 +577,7 @@ mod tests {
     async fn a_vote_is_counted_once_and_keeps_its_first_position() {
         let pool = connect_test_pool().await;
         let site = unique_site("evidence_once");
+        with_site(&pool, &site).await;
         let first = vec![vote("a", 3, &["GET /api/appointments [].doc_id"])];
         record_evidence(&pool, &site, &first, &[]).await.unwrap();
         // The same session and day again, from another position: changes nothing.
@@ -458,6 +597,7 @@ mod tests {
     async fn every_response_position_of_a_vote_is_kept() {
         let pool = connect_test_pool().await;
         let site = unique_site("evidence_from");
+        with_site(&pool, &site).await;
         // Both positions are doctors, so the first vote counts toward the doctor kind.
         let agree = vote(
             "a",
@@ -489,6 +629,7 @@ mod tests {
     async fn pruning_keeps_only_the_window() {
         let pool = connect_test_pool().await;
         let site = unique_site("evidence_window");
+        with_site(&pool, &site).await;
         let votes = vec![vote("a", 1, &[]), vote("b", 10, &[])];
         record_evidence(&pool, &site, &votes, &[]).await.unwrap();
         let deleted = prune_evidence(&pool, &site, 5).await.unwrap();
@@ -504,6 +645,7 @@ mod tests {
     async fn a_dismissed_position_is_not_proposed_again() {
         let pool = connect_test_pool().await;
         let site = unique_site("dismissed");
+        with_site(&pool, &site).await;
         let slot = "GET /doctor/{id} path[1]";
         let judgement = Judgement {
             slot,
@@ -535,9 +677,55 @@ mod tests {
     async fn the_cursor_starts_empty_and_moves_forward() {
         let pool = connect_test_pool().await;
         let site = unique_site("cursor");
+        with_site(&pool, &site).await;
         assert_eq!(cursor(&pool, &site).await.unwrap(), None);
-        advance_cursor(&pool, &site, 100, 1_000).await.unwrap();
-        advance_cursor(&pool, &site, 250, 2_000).await.unwrap();
-        assert_eq!(cursor(&pool, &site).await.unwrap(), Some(250));
+        advance_cursor(&pool, &site, cursor_at(100, 0), 1_000)
+            .await
+            .unwrap();
+        advance_cursor(&pool, &site, cursor_at(250, 4), 2_000)
+            .await
+            .unwrap();
+        // The cursor never moves back, not even within one millisecond.
+        advance_cursor(&pool, &site, cursor_at(250, 2), 3_000)
+            .await
+            .unwrap();
+        assert_eq!(cursor(&pool, &site).await.unwrap(), Some(cursor_at(250, 4)));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_site_without_a_configuration_keeps_no_learning_state() {
+        let pool = connect_test_pool().await;
+        // No configuration row: the site was deleted while a pass was running.
+        let site = unique_site("deleted");
+        record_evidence(&pool, &site, &[vote("a", 3, &[])], &[])
+            .await
+            .unwrap();
+        put_judgement(&pool, &site, &proposal(), 1).await.unwrap();
+        advance_cursor(&pool, &site, cursor_at(100, 0), 1)
+            .await
+            .unwrap();
+        assert_eq!(learning_rows(&pool, &site).await, 0);
+        assert_eq!(cursor(&pool, &site).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn forgetting_a_site_removes_its_learning_state() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("forget");
+        with_site(&pool, &site).await;
+        record_evidence(&pool, &site, &[vote("a", 3, &[])], &[])
+            .await
+            .unwrap();
+        put_judgement(&pool, &site, &proposal(), 1).await.unwrap();
+        advance_cursor(&pool, &site, cursor_at(100, 0), 1)
+            .await
+            .unwrap();
+        assert_eq!(learning_rows(&pool, &site).await, 3);
+        let mut transaction = pool.begin().await.unwrap();
+        forget_site(&mut transaction, &site).await.unwrap();
+        transaction.commit().await.unwrap();
+        assert_eq!(learning_rows(&pool, &site).await, 0);
     }
 }

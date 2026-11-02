@@ -9,6 +9,11 @@
 --                          was refused; only the seven-day window is kept
 --   object_positions       the state of each position the rules have judged
 --   object_learning_cursor how far the pass has read each site's decision log
+--
+-- A site's rows carry only the site's name. Deleting the site deletes them in the
+-- same transaction (site_spec_store::delete), and every learning write checks that
+-- the site still has a configuration, so a site created later under the same name
+-- starts with none of them.
 
 CREATE TABLE object_evidence (
     site       text NOT NULL,
@@ -45,7 +50,10 @@ CREATE INDEX object_positions_state_idx ON object_positions (site, state);
 
 CREATE TABLE object_learning_cursor (
     site            text PRIMARY KEY,
-    after_millis    bigint NOT NULL,            -- decision rows up to this time have been read
+    -- The last decision row read is (after_millis, after_id), in the decision log's
+    -- (at_millis, id) order, so a batch that ends inside one millisecond resumes exactly.
+    after_millis    bigint NOT NULL,
+    after_id        bigint NOT NULL,
     updated_millis  bigint NOT NULL,
-    CONSTRAINT object_learning_cursor_after_check CHECK (after_millis >= 0)
+    CONSTRAINT object_learning_cursor_after_check CHECK (after_millis >= 0 AND after_id >= 0)
 );
