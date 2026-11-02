@@ -197,3 +197,18 @@ for (const theme of ["light", "dark"] satisfies Theme[]) {
     await expectNoAxeViolations(page);
   });
 }
+
+test("a custom window names its bounds, and 清除 returns the range to 24 hours and drops them", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  const since = Date.UTC(2026, 10, 1, 13, 0, 0);
+  const until = Date.UTC(2026, 10, 1, 14, 0, 0);
+  await page.goto(`/requests?range=custom&since=${since}&until=${until}`);
+
+  await expect(page.getByText(/^时间窗 \d{2}:\d{2}–\d{2}:\d{2} ·/)).toBeVisible();
+  await page.getByRole("button", { name: "清除" }).click();
+  await expect(page).toHaveURL(/range=24h/);
+  await expect(page).not.toHaveURL(/since=|until=/);
+  await expect(page.getByText(/^时间窗/)).toHaveCount(0);
+});

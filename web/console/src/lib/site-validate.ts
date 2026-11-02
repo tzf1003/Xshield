@@ -130,8 +130,122 @@ function validateAdvanced(advanced: Advanced | undefined): FieldIssue[] {
   return issues;
 }
 
+const isMap = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** YAML reads `123` as a number, so a text field that holds one says how to quote it. */
+const quoteHint = (value: unknown): string =>
+  typeof value === "number" ? "，纯数字的值要加引号" : "";
+
+/** The advanced parameters that take a number. */
+const ADVANCED_NUMBERS = [
+  "jev_timeout_ms",
+  "session_calls_per_minute",
+  "address_calls_per_minute",
+  "allow_cache_minutes",
+] as const;
+
+/**
+ * The type of each field, checked before any rule judges a value (docs/06 6.4.9, docs/07 7.10.8). A key
+ * that is written with no value is an error, except under `advanced`, where an empty parameter means its
+ * default. Each message names the field, so a YAML or JSON text can point at it.
+ */
+export function shapeIssues(input: unknown): FieldIssue[] {
+  if (!isMap(input)) return [{ group: "basics", field: "name", message: "配置必须是一个对象" }];
+  const issues: FieldIssue[] = [];
+  const add = (group: FieldGroup, field: string, message: string): void => {
+    issues.push({ group, field, message });
+  };
+  // True when there is nothing to check: the key is absent, or it is written with no value.
+  const skip = (
+    group: FieldGroup,
+    key: string,
+    value: unknown,
+    required: boolean,
+    emptyOk = false,
+  ): boolean => {
+    if (value === undefined) {
+      if (required) add(group, key, `缺少必填字段 ${key}`);
+      return true;
+    }
+    if (value === null) {
+      if (!emptyOk) add(group, key, `${key} 写了键却没有值`);
+      return true;
+    }
+    return false;
+  };
+  const text = (
+    group: FieldGroup,
+    key: string,
+    value: unknown,
+    required: boolean,
+    emptyOk = false,
+  ): void => {
+    if (skip(group, key, value, required, emptyOk) || typeof value === "string") return;
+    add(group, key, `${key} 要写成文本${quoteHint(value)}`);
+  };
+  const textList = (
+    group: FieldGroup,
+    key: string,
+    value: unknown,
+    required: boolean,
+    emptyOk = false,
+  ): void => {
+    if (skip(group, key, value, required, emptyOk)) return;
+    if (!Array.isArray(value)) {
+      add(group, key, `${key} 要写成文本列表`);
+      return;
+    }
+    const index = value.findIndex((item) => typeof item !== "string");
+    if (index >= 0) add(group, key, `${key} 的每一项要写成文本${quoteHint(value[index])}`);
+  };
+  text("basics", "name", input.name, true);
+  text("basics", "origin", input.origin, true);
+  textList("basics", "hosts", input.hosts, true);
+  textList("entries", "entries", input.entries, true);
+  textList("bypass", "bypass", input.bypass, false);
+  text("mode", "mode", input.mode, false);
+  text("basics", "on_jev_unavailable", input.on_jev_unavailable, false);
+  const session = input.session;
+  if (!skip("session", "session", session, true)) {
+    if (!isMap(session)) add("session", "session", "session 要写成键值");
+    else {
+      text("session", "cookie", session.cookie, false);
+      text("session", "header", session.header, false);
+    }
+  }
+  const advanced = input.advanced;
+  if (!skip("advanced", "advanced", advanced, false, true)) {
+    if (!isMap(advanced)) add("advanced", "advanced", "advanced 要写成键值");
+    else {
+      for (const key of ADVANCED_NUMBERS) {
+        const value = advanced[key];
+        if (value !== undefined && value !== null && typeof value !== "number") {
+          add("advanced", key, `${key} 要写成数字`);
+        }
+      }
+      textList("advanced", "secret_fields", advanced.secret_fields, false, true);
+      const groups = advanced.synonyms;
+      const pairOk = (pair: unknown): boolean =>
+        Array.isArray(pair) && pair.length === 2 && pair.every((word) => typeof word === "string");
+      if (
+        groups !== undefined &&
+        groups !== null &&
+        (!Array.isArray(groups) || !groups.every(pairOk))
+      ) {
+        add("advanced", "synonyms", "synonyms 要写成两个词一组的列表");
+      }
+    }
+  }
+  return issues;
+}
+
 /** Errors block saving; warnings are shown beside the field and do not block. */
-export function validateSpec(spec: SiteSpec): { errors: FieldIssue[]; warnings: FieldIssue[] } {
+export function validateSpec(input: unknown): { errors: FieldIssue[]; warnings: FieldIssue[] } {
+  // A field of the wrong type is reported by its type alone. No rule below reads it, so nothing throws.
+  const shape = shapeIssues(input);
+  if (shape.length > 0) return { errors: shape, warnings: [] };
+  const spec = input as SiteSpec;
   const errors: FieldIssue[] = [];
   const warnings: FieldIssue[] = [];
   if (!isSiteName(spec.name)) {
