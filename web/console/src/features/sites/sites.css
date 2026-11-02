@@ -300,6 +300,67 @@
   gap: 6px;
 }
 
+/* The change history (docs/06 6.4.9). A version is one summary row; its full text opens in a row of its own under it,
+   across the whole table, so the YAML keeps its lines and scrolls sideways instead of wrapping in a narrow column.
+   The shared table rules fix every cell to one line and a set height, so this table turns those off for itself. */
+table.tbl.history-tbl {
+  table-layout: auto;
+}
+
+table.tbl.history-tbl th,
+table.tbl.history-tbl td {
+  max-width: none;
+}
+
+table.tbl.history-tbl td {
+  height: auto;
+  padding: 6px 10px;
+}
+
+table.tbl.history-tbl td.history-note {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The three actions keep their own columns, so the same action lines up down the table even when a version has no
+   rollback (the current one) or no full text (a deletion). */
+table.tbl.history-tbl .history-actions {
+  display: grid;
+  grid-template-columns: 4.5em 10em auto;
+  column-gap: 12px;
+  align-items: center;
+}
+
+table.tbl.history-tbl .history-act-full {
+  grid-column: 1;
+  justify-self: start;
+}
+
+table.tbl.history-tbl .history-act-rollback {
+  grid-column: 2;
+  justify-self: start;
+}
+
+table.tbl.history-tbl .history-act-request {
+  grid-column: 3;
+  justify-self: start;
+}
+
+table.tbl.history-tbl tr.history-full td {
+  height: auto;
+  padding: 6px 10px 12px;
+  white-space: normal;
+}
+
+table.tbl.history-tbl tbody tr.history-full:hover td {
+  background: transparent;
+}
+
+table.tbl.history-tbl .history-yaml {
+  max-height: 360px;
+  margin: 0;
+}
+
 /* Suggestion cards stack with a gap between them. */
 .sugg + .sugg {
   margin-top: 10px;

@@ -2,7 +2,7 @@
 // A rollback saves a new version whose content is the target's, so the history keeps every step.
 
 import { expect, type Page, test } from "@playwright/test";
-import { setTheme, type Theme } from "./helpers/axe.ts";
+import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
 import { mockApi } from "./helpers/mock-api.ts";
 import {
   callsTo,
@@ -59,13 +59,26 @@ test("the same version on both sides asks for two different versions", async ({ 
   await expect(page.getByText("选择两个不同的版本。")).toBeVisible();
 });
 
-test("a version can be read in full", async ({ page }) => {
+test("a version can be read in full, in a row across the table", async ({ page }) => {
   await openHistory(page, "/sites/emr?tab=history");
 
   const row = page.getByRole("row").filter({ hasText: "追加脱敏字段 ssn" });
   await row.getByRole("button", { name: "查看全文" }).click();
-  await expect(row).toContainText("mode: enforce");
   await expect(row.getByRole("button", { name: "收起全文" })).toBeVisible();
+
+  // The full text opens under the summary and keeps its lines: it fills the table's width and scrolls sideways.
+  const full = page.getByRole("region", { name: /全文$/ });
+  await expect(full).toContainText("mode: enforce");
+  const code = full.locator("pre");
+  await expect(code).toHaveCSS("white-space", "pre");
+  const [table, text] = await Promise.all([
+    page.getByRole("table", { name: "版本历史" }).boundingBox(),
+    code.boundingBox(),
+  ]);
+  expect(text?.width ?? 0).toBeGreaterThan((table?.width ?? 0) - 40);
+
+  await row.getByRole("button", { name: "收起全文" }).click();
+  await expect(full).toBeHidden();
 });
 
 test("rolling back to v10 shows the change and the impact, then saves v14 with the note", async ({
@@ -150,5 +163,20 @@ for (const theme of ["light", "dark"] satisfies Theme[]) {
       "脱敏范围变化",
     );
     await expectDialogNoAxeViolations(page);
+  });
+}
+
+for (const theme of ["light", "dark"] satisfies Theme[]) {
+  test(`a full text in the history passes axe in the ${theme} theme`, async ({ page }) => {
+    await setTheme(page, theme);
+    await openHistory(page, "/sites/emr?tab=history");
+    await page
+      .getByRole("row")
+      .filter({ hasText: "追加脱敏字段 ssn" })
+      .getByRole("button", { name: "查看全文" })
+      .click();
+
+    await expect(page.getByRole("region", { name: /全文$/ })).toContainText("mode: enforce");
+    await expectNoAxeViolations(page);
   });
 }
