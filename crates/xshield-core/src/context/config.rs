@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::advanced::{Advanced, AdvancedDto};
 use super::objects::{ObjectMap, ObjectMapDto};
+use super::route::{self, ROUTES_MAX, RequestView, Resolved, Route, overlaps};
 
 const NAME_MAX: usize = 64;
 const HOSTS_MAX: usize = 16;
@@ -35,6 +36,8 @@ pub enum ConfigError {
     Entries,
     /// `bypass` holds an invalid pattern.
     Bypass,
+    /// `routes` holds an invalid route, too many routes, or two routes that overlap.
+    Routes,
     /// `advanced` holds an out of range number, an invalid or too short word, a
     /// synonym group that is not two different words, or too many entries.
     Advanced,
@@ -53,6 +56,7 @@ impl std::fmt::Display for ConfigError {
             Self::Session => "SITE_CONFIG_SESSION_INVALID",
             Self::Entries => "SITE_CONFIG_ENTRIES_INVALID",
             Self::Bypass => "SITE_CONFIG_BYPASS_INVALID",
+            Self::Routes => "SITE_CONFIG_ROUTES_INVALID",
             Self::Advanced => "SITE_CONFIG_ADVANCED_INVALID",
             Self::Objects => "SITE_CONFIG_OBJECTS_INVALID",
         })
@@ -123,6 +127,18 @@ impl PathPattern {
         &self.0
     }
 
+    /// Whether the pattern is a prefix (ends in `*`).
+    #[must_use]
+    pub fn is_prefix(&self) -> bool {
+        self.0.ends_with('*')
+    }
+
+    /// The pattern without its trailing `*`: the whole path of an exact pattern.
+    #[must_use]
+    pub fn stem(&self) -> &str {
+        self.0.strip_suffix('*').unwrap_or(&self.0)
+    }
+
     /// Whether `path` (without query) is covered by this pattern.
     ///
     /// A path with dot segments, doubled slashes, a backslash, a path parameter
@@ -172,12 +188,21 @@ pub struct SiteSpec {
     session: SessionCredential,
     entries: Vec<PathPattern>,
     bypass: Vec<PathPattern>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    routes: Vec<Route>,
     mode: Mode,
     on_jev_unavailable: OnJevUnavailable,
     #[serde(skip_serializing_if = "Advanced::is_empty")]
     advanced: Advanced,
     #[serde(skip_serializing_if = "ObjectMap::is_empty")]
     objects: ObjectMap,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteDto {
+    path: String,
+    name_from: Vec<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +215,8 @@ struct SiteSpecDto {
     entries: Vec<String>,
     #[serde(default)]
     bypass: Vec<String>,
+    #[serde(default)]
+    routes: Vec<RouteDto>,
     #[serde(default)]
     mode: Mode,
     #[serde(default)]
@@ -234,6 +261,7 @@ impl TryFrom<SiteSpecDto> for SiteSpec {
         }
         let entries = parse_patterns(&dto.entries).ok_or(ConfigError::Entries)?;
         let bypass = parse_patterns(&dto.bypass).ok_or(ConfigError::Bypass)?;
+        let routes = parse_routes(&dto.routes)?;
         let advanced = match dto.advanced {
             None | Some(serde_json::Value::Null) => Advanced::default(),
             Some(section @ serde_json::Value::Object(_)) => {
@@ -265,6 +293,7 @@ impl TryFrom<SiteSpecDto> for SiteSpec {
             session: dto.session,
             entries,
             bypass,
+            routes,
             mode: dto.mode,
             on_jev_unavailable: dto.on_jev_unavailable,
             advanced,
@@ -373,6 +402,25 @@ impl SiteSpec {
         self.bypass.iter().any(|pattern| pattern.matches(path))
     }
 
+    /// The routes that name interfaces from the request, in configured order.
+    #[must_use]
+    pub fn routes(&self) -> &[Route] {
+        &self.routes
+    }
+
+    /// The logical path of a request and its interface name (docs/header-routes-design
+    /// section 2). A site without routes resolves every request to its URL path.
+    #[must_use]
+    pub fn resolve(&self, request: &RequestView<'_>) -> Resolved {
+        route::resolve(&self.routes, request)
+    }
+
+    /// Whether the route covering `path`, if any, needs the body to name the request.
+    #[must_use]
+    pub fn names_from_body(&self, path: &str) -> bool {
+        route::names_from_body(&self.routes, path)
+    }
+
     /// Whether `host` (any case, optional `:port`) belongs to this site.
     #[must_use]
     pub fn serves_host(&self, host: &str) -> bool {
@@ -392,6 +440,27 @@ fn parse_patterns(raw: &[String]) -> Option<Vec<PathPattern>> {
     raw.iter()
         .map(|pattern| PathPattern::parse(pattern))
         .collect()
+}
+
+/// Validates each route, then refuses any two that overlap: a request must
+/// belong to one route, and a logical path to one interface.
+fn parse_routes(raw: &[RouteDto]) -> Result<Vec<Route>, ConfigError> {
+    if raw.len() > ROUTES_MAX {
+        return Err(ConfigError::Routes);
+    }
+    let routes = raw
+        .iter()
+        .map(|route| Route::parse(&route.path, &route.name_from).ok_or(ConfigError::Routes))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, first) in routes.iter().enumerate() {
+        if routes[index + 1..]
+            .iter()
+            .any(|second| overlaps(first, second))
+        {
+            return Err(ConfigError::Routes);
+        }
+    }
+    Ok(routes)
 }
 
 fn valid_name(name: &str) -> bool {
@@ -607,5 +676,46 @@ mod tests {
                 "{objects}"
             );
         }
+    }
+
+    #[test]
+    fn routes_are_optional_validated_and_round_trip() {
+        let plain = SiteSpec::from_json(MINIMAL).unwrap();
+        assert!(plain.routes().is_empty());
+        assert!(!serde_json::to_string(&plain).unwrap().contains("routes"));
+
+        let text = MINIMAL.replace(
+            "\"entries\"",
+            "\"routes\": [{\"path\": \"/gw\", \"name_from\": [[\"header.X-Service-Id\"], [\"query.action\", \"body.action\"]]}], \"entries\"",
+        );
+        let site = SiteSpec::from_json(&text).unwrap();
+        assert_eq!(site.routes().len(), 1);
+        let again: SiteSpec = serde_json::from_str(&serde_json::to_string(&site).unwrap()).unwrap();
+        assert_eq!(site, again);
+
+        let overlapping = MINIMAL.replace(
+            "\"entries\"",
+            "\"routes\": [{\"path\": \"/gw\", \"name_from\": [[\"header.X\"]]}, {\"path\": \"/gw/x\", \"name_from\": [[\"header.X\"]]}], \"entries\"",
+        );
+        assert_eq!(
+            SiteSpec::from_json(&overlapping).unwrap_err(),
+            ConfigError::Routes
+        );
+        let path_is_no_source = MINIMAL.replace(
+            "\"entries\"",
+            "\"routes\": [{\"path\": \"/gw\", \"name_from\": [[\"path.1\"]]}], \"entries\"",
+        );
+        assert_eq!(
+            SiteSpec::from_json(&path_is_no_source).unwrap_err(),
+            ConfigError::Routes
+        );
+        let unknown_field = MINIMAL.replace(
+            "\"entries\"",
+            "\"routes\": [{\"path\": \"/gw\", \"name_from\": [[\"header.X\"]], \"x\": 1}], \"entries\"",
+        );
+        assert_eq!(
+            SiteSpec::from_json(&unknown_field).unwrap_err(),
+            ConfigError::Malformed
+        );
     }
 }

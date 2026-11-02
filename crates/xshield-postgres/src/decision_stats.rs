@@ -917,6 +917,7 @@ pub async fn full_rows_in_window(
                 summary: summary_from_row(row)?,
                 trace: row.try_get("trace")?,
                 jev: row.try_get("jev")?,
+                request_headers: row.try_get("request_headers")?,
             })
         })
         .collect()

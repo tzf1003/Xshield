@@ -16,9 +16,14 @@
 
 use super::context::advanced::{Advanced, FieldKind};
 
-/// Words that name no kind: route prefixes and generic field names.
-pub(crate) const GENERIC_WORDS: [&str; 8] =
-    ["api", "rest", "v1", "v2", "v3", "data", "value", "id"];
+/// Words that name no kind: route prefixes, generic field names, and the verbs and
+/// service words an interface name carries. `doctorService` and `getDoctorById`
+/// both name a doctor; `save`, `list` or `query` name nothing.
+pub(crate) const GENERIC_WORDS: [&str; 26] = [
+    "api", "rest", "v1", "v2", "v3", "data", "value", "id", "service", "get", "set", "save",
+    "query", "list", "update", "delete", "add", "create", "remove", "find", "search", "fetch",
+    "load", "put", "post", "submit",
+];
 
 /// Words for one kind of object that differ between a field and the endpoint
 /// that lists it (`paymentId` selects a card of `/api/Cards`).
