@@ -20,7 +20,7 @@ use axum::{
 };
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -308,8 +308,61 @@ fn shortest_decimal(value: f32) -> f64 {
         .unwrap_or_else(|_| f64::from(value))
 }
 
-fn row_json(row: &RequestSummary) -> Value {
-    serde_json::to_value(RequestRow::from(row)).unwrap_or(Value::Null)
+/// `GET /api/requests` (docs/07 section 7.9.3): one page of requests, newest first, and
+/// the cursor of the next page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestsPageBody {
+    pub rows: Vec<RequestRow>,
+    /// Null when the page is not full, so there is no next page.
+    pub next_cursor: Option<String>,
+}
+
+/// `POST /api/requests/lookup`: one row per requested id, in the order given.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LookupBody {
+    pub rows: Vec<LookupRowBody>,
+}
+
+/// One id of a lookup. `summary` is set only when `found` is true.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LookupRowBody {
+    pub request_id: String,
+    pub found: bool,
+    pub summary: Option<RequestRow>,
+}
+
+/// `GET /api/requests/{request_id}`: one request in full, with its session neighbours
+/// and the summaries of the requests its trace refers to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestDetailBody {
+    pub summary: RequestRow,
+    pub edge: String,
+    /// The stored trace (docs/07 section 7.4.3), kept as the gateway wrote it. The
+    /// `Trace` type reads it, and the contract tests check it against the fixtures.
+    pub trace: Value,
+    /// The stored Jev document (docs/07 section 7.5.1), null when Jev was not involved.
+    pub jev: Option<Value>,
+    pub neighbors: NeighborsBody,
+    /// The summaries of the requests the trace refers to, by request id. Ids past
+    /// retention are missing.
+    pub sources: BTreeMap<String, SourceBody>,
+}
+
+/// The requests before and after this one in its session, by request id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NeighborsBody {
+    pub prev: Option<String>,
+    pub next: Option<String>,
+}
+
+/// A request the trace of another refers to, summarized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceBody {
+    pub method: String,
+    pub path: String,
+    pub status: Option<i16>,
+    pub decision_path: String,
+    pub at_millis: i64,
 }
 
 /// `GET /api/requests`: one page of requests, newest first. Live mode asks
@@ -321,7 +374,7 @@ fn row_json(row: &RequestSummary) -> Value {
 pub async fn list(
     State(state): State<Arc<ControlState>>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<RequestsPageBody>> {
     let params = Params::from(query);
     let filter = filter_from(&params, now_millis())?;
     let limit = params.limit(DEFAULT_PAGE, MAX_PAGE)?;
@@ -332,18 +385,14 @@ pub async fn list(
         .last()
         .filter(|_| full_page)
         .map(|row| format_cursor(row.at_millis, row.id));
-    Ok(Json(json!({
-        "rows": rows.iter().map(row_json).collect::<Vec<_>>(),
-        "next_cursor": next_cursor,
-    })))
+    Ok(Json(RequestsPageBody {
+        rows: rows.iter().map(RequestRow::from).collect(),
+        next_cursor,
+    }))
 }
 
-/// `GET /api/requests/counts`: the quick-filter counts, from one scan of the
-/// window. The page and the outcome and path selections are not part of it.
-///
-/// # Errors
-/// The same as [`list`] for the filters it shares.
-/// `GET /api/requests/counts` (docs/07 section 7.9.1). `scanned` accompanies `complete: false` only.
+/// `GET /api/requests/counts` (docs/07 section 7.9.1): the quick-filter counts of the
+/// window. `scanned` is written only when `complete` is false.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CountsBody {
     pub judged: i64,
@@ -360,6 +409,12 @@ pub struct CountsBody {
     pub scanned: Option<i64>,
 }
 
+/// `GET /api/requests/counts`: the quick-filter counts, from one scan of the window.
+/// The page and the outcome and path selections are not part of it.
+///
+/// # Errors
+/// The same as [`list`] for the filters it shares, `INTERNAL` when the database
+/// cannot be read.
 pub async fn counts(
     State(state): State<Arc<ControlState>>,
     Query(query): Query<BTreeMap<String, String>>,
@@ -417,7 +472,10 @@ fn push_id(out: &mut BTreeSet<String>, value: Option<&Value>) {
 
 /// The summaries of the requests a detail refers to, keyed by request id. Ids
 /// past retention are missing from the result, which the console shows as such.
-async fn sources_for(pool: &PgPool, detail: &RequestDetail) -> ApiResult<Value> {
+async fn sources_for(
+    pool: &PgPool,
+    detail: &RequestDetail,
+) -> ApiResult<BTreeMap<String, SourceBody>> {
     let mut ids = BTreeSet::new();
     collect_trace_ids(&detail.trace, &mut ids);
     if !detail.summary.session.is_empty() {
@@ -436,24 +494,24 @@ async fn sources_for(pool: &PgPool, detail: &RequestDetail) -> ApiResult<Value> 
         .take(SOURCES_MAX)
         .collect();
     let Some((from, to)) = window_around(&times) else {
-        return Ok(Value::Object(Map::new()));
+        return Ok(BTreeMap::new());
     };
     let wanted: Vec<String> = ids.into_iter().take(SOURCES_MAX).collect();
     let found = decision_log_store::find_summaries(pool, &wanted, from, to).await?;
-    let mut sources = Map::new();
+    let mut sources = BTreeMap::new();
     for row in found {
         sources.insert(
             row.request_id.clone(),
-            json!({
-                "method": row.method,
-                "path": row.path,
-                "status": row.status,
-                "decision_path": row.decision_path,
-                "at_millis": row.at_millis,
-            }),
+            SourceBody {
+                method: row.method,
+                path: row.path,
+                status: row.status,
+                decision_path: row.decision_path,
+                at_millis: row.at_millis,
+            },
         );
     }
-    Ok(Value::Object(sources))
+    Ok(sources)
 }
 
 /// `GET /api/requests/{request_id}`: one request in full, with its session
@@ -464,7 +522,7 @@ async fn sources_for(pool: &PgPool, detail: &RequestDetail) -> ApiResult<Value> 
 pub async fn detail(
     State(state): State<Arc<ControlState>>,
     Path(request_id): Path<String>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<RequestDetailBody>> {
     let not_found = || ApiError::new(axum::http::StatusCode::NOT_FOUND, "REQUEST_NOT_FOUND");
     let at = request_time_millis(&request_id).ok_or_else(not_found)?;
     let found = decision_log_store::get_detail(&state.pool, &request_id, at)
@@ -482,14 +540,14 @@ pub async fn detail(
         .await?
     };
     let sources = sources_for(&state.pool, &found).await?;
-    Ok(Json(json!({
-        "summary": row_json(&found.summary),
-        "edge": found.summary.edge,
-        "trace": found.trace,
-        "jev": found.jev,
-        "neighbors": { "prev": prev, "next": next },
-        "sources": sources,
-    })))
+    Ok(Json(RequestDetailBody {
+        summary: RequestRow::from(&found.summary),
+        edge: found.summary.edge,
+        trace: found.trace,
+        jev: found.jev,
+        neighbors: NeighborsBody { prev, next },
+        sources,
+    }))
 }
 
 /// The request body of a batch lookup: `{"ids": [...]}`, deduplicated in order.
@@ -524,7 +582,7 @@ pub async fn lookup(
     State(state): State<Arc<ControlState>>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<LookupBody>> {
     let body: Value = json_body(&headers, &body)?;
     let ids = lookup_ids(&body)?;
     let readable: Vec<String> = ids
@@ -544,14 +602,22 @@ pub async fn lookup(
             .collect(),
         None => BTreeMap::new(),
     };
-    let rows: Vec<Value> = ids
+    let rows = ids
         .iter()
         .map(|id| match found.get(id) {
-            Some(row) => json!({ "request_id": id, "found": true, "summary": row_json(row) }),
-            None => json!({ "request_id": id, "found": false, "summary": null }),
+            Some(row) => LookupRowBody {
+                request_id: id.clone(),
+                found: true,
+                summary: Some(RequestRow::from(row)),
+            },
+            None => LookupRowBody {
+                request_id: id.clone(),
+                found: false,
+                summary: None,
+            },
         })
         .collect();
-    Ok(Json(json!({ "rows": rows })))
+    Ok(Json(LookupBody { rows }))
 }
 
 /// A decision-log row as the gateway's file mode writes it (docs/07 section 7.9.9).

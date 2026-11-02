@@ -11,7 +11,7 @@ use crate::auth::SessionStateBody;
 use crate::insights::{EvidenceBody, InsightsBody};
 use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
 use crate::preview::PreviewBody;
-use crate::requests::{CountsBody, RequestRow};
+use crate::requests::{CountsBody, LookupBody, RequestDetailBody, RequestRow, RequestsPageBody};
 use crate::sessions::{SessionDetailBody, SessionsBody};
 use crate::sites::{SiteDetailBody, SitesBody, VersionsBody};
 use crate::stats::{SummaryBody, TimeseriesBody};
@@ -112,6 +112,28 @@ fn list_rows_round_trip_through_the_row_type() {
     assert!(!rows.is_empty());
     for row in rows {
         assert_round_trips::<RequestRow>(row, exactly);
+    }
+}
+
+#[test]
+fn request_page_round_trips_through_the_page_type() {
+    assert_round_trips::<RequestsPageBody>(&fixture(REQUESTS), exactly);
+
+    // A full page carries the cursor of the next one. The console treats it as opaque.
+    let mut full = fixture(REQUESTS);
+    full["next_cursor"] = json!("opaque-cursor");
+    assert_round_trips::<RequestsPageBody>(&full, exactly);
+}
+
+#[test]
+fn lookup_round_trips_through_the_lookup_type() {
+    assert_round_trips::<LookupBody>(&fixture(LOOKUP), exactly);
+}
+
+#[test]
+fn request_details_round_trip_through_the_detail_type() {
+    for text in DETAILS {
+        assert_round_trips::<RequestDetailBody>(&fixture(text), exactly);
     }
 }
 
