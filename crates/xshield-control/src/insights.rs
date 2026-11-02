@@ -1754,7 +1754,7 @@ mod tests {
 
     #[test]
     fn a_route_that_overlaps_another_of_the_site_is_not_offered() {
-        // `/api` already names the interface of every path under it.
+        // An exact `/api` route covers the paths under it as unknown, so a rule on `/api/rpc` overlaps it.
         let spec = site_with_routes(r#"{"path": "/api", "name_from": [["header.x-id"]]}"#);
         let document = serde_json::to_value(&spec).expect("document");
         let fields = vec![field("header.x-service-method", 30)];

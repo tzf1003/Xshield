@@ -773,6 +773,7 @@ CREATE TABLE jev_prompts (
   - `raise_call_limit`：出现 `JEV_CALL_LIMIT`。推荐值为观察到的每分钟最高调用数加 20%，不超过 600；理由里提醒先看触发的是不是未登录页面的轮询，那种情况把接口登记为入口或绕过通常更合适（[04.5.2](04-deployment-testing.md#452-第二轮修复后重跑572-条记录)）。
   - `secret_field_candidate`：Jev 记录的 `state` 里出现未脱敏、字段名明显是敏感个人信息的输入值（含 `ssn`、`idcard`、`id_card`、`passport`、`cardnum`、`card_number`、`cvc`、`iban`、`bankaccount`），推荐加入 `secret_fields`，理由里说明被脱敏的值 Jev 无法判断越权。
   - `hot_would_block`：本应拦截最多的路径模板（数字、十六进制、UUID 段替换为 `{id}`），不给配置动作，只链接到筛选后的请求列表。
+  - `route_rule_candidate`：同一路径（没有路由、不是旁路、路径不含 `*`）有 20 个以上请求，且请求头名以 `-` 分隔的最后一个词，或正文字段路径的最后一个键（`body.<键路径>`），是方法词（`method`、`action`、`operation`、`op`、`cmd`、`command`、`rpc`、`func`、`function`、`service`、`api`，不分大小写）时，推荐动作为 `add_route`，即把该来源写成路由规则的 `name_from`。每条路径最多给 3 个来源，按请求数从多到少排序；每个来源都先按保存校验检查，网关会拒绝的不推荐。数字值的正文字段不算接口名。只读这些路径最近 2 万条请求，超过时 `complete` 为 false。入口路径也可能收到这条建议，应用前的影响预估会用 `entry_unreachable` 显示入口是否失效。
 - `readiness`：观察开始时间（最近一次切到观察或创建站点的版本时间）、时间窗内本应拦截按判定路径计数、未处理建议数、Jev 健康、7.4.6 的“由本应拦截请求学到的值被引用次数”。
 
 忽略某条建议只存在浏览器 `localStorage`（按建议 `id`），不进数据库。
