@@ -26,7 +26,7 @@ use xshield_core::context::{
     learning::{RETIRE_DAYS, WINDOW_DAYS, day_of},
 };
 use xshield_postgres::{
-    object_learning_store::{self as store, Flow, PositionRow},
+    object_learning_store::{self as store, Flow, JevFlow, PositionRow},
     site_spec_store::{self, SiteRecord},
 };
 
@@ -42,6 +42,10 @@ const BOOTSTRAP_WINDOW_HOURS: i64 = 24;
 const HEX: &[u8; 16] = b"0123456789abcdef";
 /// Bytes of a declared key's digest that its id keeps: 64 bits, far more than a site declares.
 const DIGEST_BYTES: usize = 8;
+/// Most flows a drawer lists for one position.
+const FLOWS_MAX: usize = 20;
+/// Most sample requests a drawer lists for one position.
+const EXAMPLES_MAX: i64 = 3;
 
 /// The learning state of a position, as the console names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -180,20 +184,22 @@ struct FlowBody {
     share: f64,
     uses: i64,
     sessions: i64,
-    /// Jev's decisions on the flow's requests. The evidence does not keep them yet, so 0.
+    /// Requests that reached this end and that Jev allowed, from the decision log's Jev calls.
     jev_allow: i64,
+    /// Requests that reached this end and that Jev refused, from the decision log's Jev calls.
     jev_deny: i64,
     method: String,
     route: String,
 }
 
-/// `GET /objects/slots/{id}`: `ObjectSlotDetail`. The examples, shape, history and impact
-/// are empty until their sources are read.
+/// `GET /objects/slots/{id}`: `ObjectSlotDetail`. The shape, history and impact are empty
+/// until their sources are read.
 #[derive(Debug, Serialize)]
 pub(crate) struct SlotBody {
     #[serde(flatten)]
     row: SlotRow,
     flows_in: Vec<FlowBody>,
+    /// Request ids of the newest uses of the position, at most three.
     examples: Vec<String>,
     shape: Vec<Value>,
     history: Vec<Value>,
@@ -277,7 +283,8 @@ pub async fn list(
     }))
 }
 
-/// `GET /api/sites/{name}/objects/slots/{id}`: one position with the flows of its values.
+/// `GET /api/sites/{name}/objects/slots/{id}`: one position with the flows of its values, the
+/// Jev decisions on each flow, and the newest requests that used the position.
 ///
 /// # Errors
 /// `SITE_NOT_FOUND` for an unknown site, `SLOT_NOT_FOUND` (404) for an id that names no
@@ -293,16 +300,25 @@ pub async fn slot(
         .find(|row| row.id == id)
         .ok_or_else(slot_not_found)?;
     let side = row.side;
-    let oldest = oldest_day(now_millis());
+    let now = now_millis();
+    let oldest = oldest_day(now);
+    let since = window_start_millis(now);
     let total = store::uses(&state.pool, &name, &row.key, side.as_str(), oldest).await?;
     let flows = store::flows(&state.pool, &name, &row.key, side.as_str(), oldest).await?;
+    let decisions = store::jev_flows(&state.pool, &name, &row.key, side.as_str(), since).await?;
+    let examples = store::examples(
+        &state.pool,
+        &name,
+        &row.key,
+        side.as_str(),
+        since,
+        EXAMPLES_MAX,
+    )
+    .await?;
     Ok(Json(SlotBody {
         row,
-        flows_in: flows
-            .into_iter()
-            .map(|flow| flow_body(flow, side.opposite(), total))
-            .collect(),
-        examples: Vec::new(),
+        flows_in: flow_bodies(side.opposite(), total, flows, &decisions),
+        examples,
         shape: Vec::new(),
         history: Vec::new(),
         impact: Vec::new(),
@@ -581,6 +597,37 @@ fn flow_body(flow: Flow, side: Side, total: i64) -> FlowBody {
     }
 }
 
+/// The other ends of a position's flows, each with Jev's decisions on its requests. A decision
+/// on an end the evidence has no vote for adds that end with no uses, so a refusal alone is
+/// listed. Most used first, at most [`FLOWS_MAX`].
+fn flow_bodies(side: Side, total: i64, flows: Vec<Flow>, decisions: &[JevFlow]) -> Vec<FlowBody> {
+    let mut by_end: BTreeMap<String, FlowBody> = flows
+        .into_iter()
+        .map(|flow| (flow.other.clone(), flow_body(flow, side, total)))
+        .collect();
+    for decision in decisions {
+        let body = by_end.entry(decision.other.clone()).or_insert_with(|| {
+            let flow = Flow {
+                other: decision.other.clone(),
+                uses: 0,
+                sessions: 0,
+            };
+            flow_body(flow, side, total)
+        });
+        body.jev_allow = decision.allow;
+        body.jev_deny = decision.deny;
+    }
+    let mut bodies: Vec<FlowBody> = by_end.into_values().collect();
+    bodies.sort_by(|left, right| {
+        right
+            .uses
+            .cmp(&left.uses)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    bodies.truncate(FLOWS_MAX);
+    bodies
+}
+
 /// A flow's share of the position's uses, from 0 to 1.
 #[allow(clippy::cast_precision_loss)] // Counts this size are exact in an f64.
 fn share_of(uses: i64, total: i64) -> f64 {
@@ -654,6 +701,14 @@ fn last_seen(last_day: i64) -> Option<String> {
 /// The first UTC day of the learning window at `now`, counted as the learning pass counts it.
 fn oldest_day(now: i64) -> u64 {
     day_of(u64::try_from(now).unwrap_or(0)).saturating_sub(WINDOW_DAYS - 1)
+}
+
+/// The first millisecond of the learning window at `now`: the start of its first UTC day,
+/// the lower bound of the decision rows the drawer reads.
+fn window_start_millis(now: i64) -> i64 {
+    i64::try_from(oldest_day(now))
+        .unwrap_or(0)
+        .saturating_mul(DAY_MILLIS)
 }
 
 #[cfg(test)]
@@ -856,6 +911,58 @@ mod tests {
         assert!((share_of(1, 4) - 0.25).abs() < f64::EPSILON);
         assert!(share_of(3, 0).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn a_flow_takes_the_jev_decisions_on_its_end_and_a_refusal_alone_is_listed() {
+        let flows = vec![
+            Flow {
+                other: "GET /api/appointments [].doc_id".to_owned(),
+                uses: 140,
+                sessions: 23,
+            },
+            Flow {
+                other: "GET /api/schedule query.doc".to_owned(),
+                uses: 18,
+                sessions: 6,
+            },
+        ];
+        let decisions = [
+            JevFlow {
+                other: "GET /api/appointments [].doc_id".to_owned(),
+                allow: 140,
+                deny: 0,
+            },
+            JevFlow {
+                other: "GET /api/records/{id} attachments[].doc_id".to_owned(),
+                allow: 0,
+                deny: 3,
+            },
+        ];
+        let bodies = flow_bodies(Side::Response, 158, flows, &decisions);
+        let keys: Vec<&str> = bodies.iter().map(|body| body.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "GET /api/appointments [].doc_id",
+                "GET /api/schedule query.doc",
+                // No votes reached it, so it has no uses and no share, and sorts last.
+                "GET /api/records/{id} attachments[].doc_id",
+            ]
+        );
+        assert_eq!((bodies[0].jev_allow, bodies[0].jev_deny), (140, 0));
+        assert_eq!((bodies[1].jev_allow, bodies[1].jev_deny), (0, 0));
+        assert_eq!((bodies[2].uses, bodies[2].jev_deny), (0, 3));
+        assert!(bodies[2].share.abs() < f64::EPSILON);
+        assert_eq!(bodies[2].method, "GET");
+        assert_eq!(bodies[2].route, "/api/records/{id}");
+    }
+
+    #[test]
+    fn the_learning_window_starts_at_the_first_millisecond_of_its_first_day() {
+        let now = 10 * DAY_MILLIS + 5 * 60_000;
+        let window = i64::try_from(WINDOW_DAYS).expect("a small window");
+        assert_eq!(window_start_millis(now), (10 - (window - 1)) * DAY_MILLIS);
+    }
 }
 
 /// Passes against a migrated PostgreSQL database, which they need `XSHIELD_DATABASE_URL` for.
@@ -865,7 +972,7 @@ mod live_tests {
     use std::collections::BTreeMap;
 
     use serde_json::json;
-    use sqlx::postgres::PgPoolOptions;
+    use sqlx::{PgPool, postgres::PgPoolOptions};
     use xshield_core::context::learning::{Vote, day_of};
     use xshield_postgres::{
         object_learning_store::{Judgement, LearnedState},
@@ -1102,5 +1209,162 @@ mod live_tests {
         .await
         .expect_err("an id that names no position");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A decision row of the gateway for a `GET /doctor/7` request of `session`, judged as
+    /// `decision_path` says. Jev judged the request when the path starts with `jev_`.
+    async fn decide(
+        pool: &PgPool,
+        site: &str,
+        at_millis: i64,
+        request_id: &str,
+        session: &str,
+        decision_path: &str,
+        values: Value,
+    ) {
+        let (outcome, status) = if decision_path == "jev_deny" {
+            ("blocked", 403_i16)
+        } else {
+            ("allowed", 200_i16)
+        };
+        let jev = decision_path.starts_with("jev_").then(|| json!({"v": 1}));
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace, jev)
+             VALUES ($1, $2, $3, 'edge-1', 'clinic.example.com', '10.0.0.1', $4,
+                'GET', '/doctor/7', $5, $6, $7, $8, $9)",
+        )
+        .bind(at_millis)
+        .bind(request_id)
+        .bind(site)
+        .bind(session)
+        .bind(status)
+        .bind(decision_path)
+        .bind(outcome)
+        .bind(json!({"v": 1, "values": values}))
+        .bind(jev)
+        .execute(pool)
+        .await
+        .expect("insert a decision row");
+    }
+
+    /// The value of a request at `slot` that the session saw in the response `source_request`
+    /// showed at `source`.
+    fn value(slot: &str, source: &str, source_request: &str) -> Value {
+        json!({
+            "at": "path[1]", "key": null, "value": "7", "kind": "reference",
+            "inert": false, "seen": true, "verified": false, "slot": slot,
+            "sources": [{
+                "field": "doc_id", "request": "GET /api/appointments",
+                "request_id": source_request, "at_millis": null, "slot": source
+            }]
+        })
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn the_drawer_names_the_newest_requests_and_the_jev_decisions_on_each_flow() {
+        let (state, name) = seeded_site("drawer").await;
+        let now = now_millis();
+        for days in 0..=2 {
+            let day = chrono::DateTime::from_timestamp_millis(now - days * DAY_MILLIS)
+                .expect("a day")
+                .date_naive();
+            xshield_postgres::partitions::ensure_partition(&state.pool, day)
+                .await
+                .expect("create the partition");
+        }
+        // Four uses of the doctor position: Jev allowed two and refused one, one was a fast
+        // allow, and the oldest is two days old. Each one's value was shown by a response.
+        let minutes_ago = |minutes: i64| now - minutes * 60_000;
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(3),
+            "req_consumer_1",
+            "a",
+            "jev_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_response_1")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(2),
+            "req_consumer_2",
+            "b",
+            "jev_deny",
+            json!([value(SLOT, APPOINTMENTS, "req_response_2")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(1),
+            "req_consumer_3",
+            "c",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_response_3")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            now - 2 * DAY_MILLIS,
+            "req_consumer_4",
+            "a",
+            "jev_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_response_4")]),
+        )
+        .await;
+
+        let listing = listed(&state, &name, &[]).await;
+        let doctor = slot(
+            State(Arc::clone(&state)),
+            Path((name.clone(), id_of(&listing, SLOT))),
+        )
+        .await
+        .expect("the doctor position")
+        .0;
+        let doctor = serde_json::to_value(doctor).expect("the detail as JSON");
+        // The request position: its newest three requests, and the Jev decisions on its flow.
+        assert_eq!(
+            doctor["examples"],
+            json!(["req_consumer_3", "req_consumer_2", "req_consumer_1"])
+        );
+        assert_eq!(doctor["flows_in"][0]["key"], APPOINTMENTS);
+        assert_eq!(doctor["flows_in"][0]["uses"], 1);
+        assert_eq!(doctor["flows_in"][0]["jev_allow"], 2);
+        assert_eq!(doctor["flows_in"][0]["jev_deny"], 1);
+
+        // The response position: the responses that showed its value, newest first, and the
+        // Jev decisions on the requests that used it.
+        let appointments = slot(
+            State(Arc::clone(&state)),
+            Path((name.clone(), declared_id(APPOINTMENTS))),
+        )
+        .await
+        .expect("the declared position")
+        .0;
+        let appointments = serde_json::to_value(appointments).expect("the detail as JSON");
+        assert_eq!(
+            appointments["examples"],
+            json!(["req_response_3", "req_response_2", "req_response_1"])
+        );
+        assert_eq!(appointments["flows_in"][0]["key"], SLOT);
+        assert_eq!(appointments["flows_in"][0]["jev_allow"], 2);
+        assert_eq!(appointments["flows_in"][0]["jev_deny"], 1);
+
+        // A position nothing used has no examples and no decisions.
+        let other = slot(
+            State(Arc::clone(&state)),
+            Path((name.clone(), id_of(&listing, OTHER))),
+        )
+        .await
+        .expect("the proposed position")
+        .0;
+        let other = serde_json::to_value(other).expect("the detail as JSON");
+        assert_eq!(other["examples"], json!([]));
+        assert_eq!(other["flows_in"], json!([]));
     }
 }

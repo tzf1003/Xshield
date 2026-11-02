@@ -34,6 +34,8 @@ const EVIDENCE_CHUNK: usize = 1_000;
 const DAY_MILLIS: i64 = 86_400_000;
 /// Other ends listed for one position's flows.
 const FLOW_LIMIT: i64 = 20;
+/// Decision rows read to find the responses a response position's examples come from.
+const EXAMPLE_ROWS_READ: i64 = 200;
 
 /// Failure of an object learning storage operation.
 #[derive(Debug)]
@@ -810,6 +812,154 @@ pub async fn uses(
     .fetch_one(pool)
     .await?;
     Ok(total)
+}
+
+/// Jev's decisions on the requests that reached one other end of a position's flows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JevFlow {
+    /// The position at the other end.
+    pub other: String,
+    /// Requests that reached it and that Jev allowed.
+    pub allow: i64,
+    /// Requests that reached it and that Jev refused.
+    pub deny: i64,
+}
+
+/// Up to `limit` request ids that used a position, newest first. A request position's
+/// examples are the requests whose values sat at it. A response position's are the
+/// responses that showed a value at it: the requests that used such a value name the
+/// response in their `sources`, and only the newest [`EXAMPLE_ROWS_READ`] of those requests
+/// are read. Only decision rows at or after `since_millis` count.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn examples(
+    pool: &PgPool,
+    site: &str,
+    slot: &str,
+    slot_side: &str,
+    since_millis: i64,
+    limit: i64,
+) -> Result<Vec<String>, LearningStoreError> {
+    let rows = if slot_side == "response" {
+        sqlx::query(
+            "WITH recent AS (
+                 SELECT d.trace, d.at_millis FROM decision_log d
+                 WHERE d.site = $1 AND d.at_millis >= $3
+                   AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+                       jsonb_build_object('sources', jsonb_build_array(
+                           jsonb_build_object('slot', $2::text)))))
+                 ORDER BY d.at_millis DESC
+                 LIMIT $5
+             )
+             SELECT s ->> 'request_id' AS request_id
+             FROM recent
+             CROSS JOIN LATERAL jsonb_array_elements(
+                 COALESCE(recent.trace -> 'values', '[]'::jsonb)) AS v
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
+             WHERE s ->> 'slot' = $2 AND s ->> 'request_id' IS NOT NULL
+             GROUP BY s ->> 'request_id'
+             ORDER BY max(recent.at_millis) DESC
+             LIMIT $4",
+        )
+        .bind(site)
+        .bind(slot)
+        .bind(since_millis)
+        .bind(limit)
+        .bind(EXAMPLE_ROWS_READ)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            "SELECT d.request_id FROM decision_log d
+             WHERE d.site = $1 AND d.at_millis >= $3
+               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+                   jsonb_build_object('slot', $2::text)))
+             ORDER BY d.at_millis DESC
+             LIMIT $4",
+        )
+        .bind(site)
+        .bind(slot)
+        .bind(since_millis)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+    rows.iter()
+        .map(|row| {
+            row.try_get::<String, _>("request_id")
+                .map_err(LearningStoreError::from)
+        })
+        .collect()
+}
+
+/// Jev's decisions on the requests of a position's flows since `since_millis`, most decided
+/// first, at most [`FLOW_LIMIT`] other ends. A request position's other ends are the response
+/// positions its values were shown at; a response position's are the request positions that
+/// used its values. Each request counts once per other end. Only calls to Jev are read, which
+/// the partial index on them covers.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn jev_flows(
+    pool: &PgPool,
+    site: &str,
+    slot: &str,
+    slot_side: &str,
+    since_millis: i64,
+) -> Result<Vec<JevFlow>, LearningStoreError> {
+    let sql: &'static str = if slot_side == "response" {
+        "WITH judged AS (
+             SELECT DISTINCT d.at_millis, d.id, d.decision_path, v ->> 'slot' AS other
+             FROM decision_log d
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.trace -> 'values', '[]'::jsonb)) AS v
+             WHERE d.site = $1 AND d.at_millis >= $3 AND d.jev IS NOT NULL
+               AND d.decision_path IN ('jev_allow', 'jev_deny')
+               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+                   jsonb_build_object('sources', jsonb_build_array(
+                       jsonb_build_object('slot', $2::text)))))
+               AND v ->> 'slot' IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
+                   WHERE s ->> 'slot' = $2)
+         )
+         SELECT other,
+                count(*) FILTER (WHERE decision_path = 'jev_allow') AS allow,
+                count(*) FILTER (WHERE decision_path = 'jev_deny') AS deny
+         FROM judged GROUP BY other ORDER BY count(*) DESC, other LIMIT $4"
+    } else {
+        "WITH judged AS (
+             SELECT DISTINCT d.at_millis, d.id, d.decision_path, s ->> 'slot' AS other
+             FROM decision_log d
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.trace -> 'values', '[]'::jsonb)) AS v
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
+             WHERE d.site = $1 AND d.at_millis >= $3 AND d.jev IS NOT NULL
+               AND d.decision_path IN ('jev_allow', 'jev_deny')
+               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+                   jsonb_build_object('slot', $2::text)))
+               AND v ->> 'slot' = $2 AND s ->> 'slot' IS NOT NULL
+         )
+         SELECT other,
+                count(*) FILTER (WHERE decision_path = 'jev_allow') AS allow,
+                count(*) FILTER (WHERE decision_path = 'jev_deny') AS deny
+         FROM judged GROUP BY other ORDER BY count(*) DESC, other LIMIT $4"
+    };
+    let rows = sqlx::query(sql)
+        .bind(site)
+        .bind(slot)
+        .bind(since_millis)
+        .bind(FLOW_LIMIT)
+        .fetch_all(pool)
+        .await?;
+    rows.iter()
+        .map(|row| -> Result<JevFlow, LearningStoreError> {
+            Ok(JevFlow {
+                other: row.try_get("other")?,
+                allow: row.try_get("allow")?,
+                deny: row.try_get("deny")?,
+            })
+        })
+        .collect()
 }
 
 /// Dismisses the proposal of a request position, or the position while it is pending: the
