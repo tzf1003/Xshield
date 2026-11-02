@@ -547,7 +547,7 @@ export interface Advanced {
 
 /** Route rule (接口名规则, header-routes-design 2): the interface name sits outside the URL path. */
 export interface RouteRule {
-  /** Same pattern syntax as entries and bypass. */
+  /** Exact path, or a prefix ending in `*` (the same syntax as entries and bypass); never ends with `/`. */
   path: string;
   /** One group per segment of the name, joined with `/`. Every location in a group must agree (or the name is unknown). */
   name_from: string[][];
