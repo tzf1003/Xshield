@@ -4,11 +4,12 @@
 //! is `down` with no online instance, `warn` with any problem, and `ok`
 //! otherwise. Each problem carries exactly the fields the console types.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{Json, extract::State};
 use chrono::{DateTime, Days, NaiveDate, Utc};
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use xshield_postgres::{
     edge_status_store::{self, EdgeStatus},
     partitions::{self, PartitionInfo},
@@ -30,12 +31,76 @@ const DEFAULT_QUEUE_CAPACITY: i64 = 10_000;
 /// The future days with a partition that the console expects.
 const FUTURE_DAYS_NEEDED: i64 = 2;
 
+/// The `GET /api/status` response: the gateway light and the Jev health.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusBody {
+    pub gateway: GatewayStatus,
+    pub jev: jev::JevStatusFields,
+}
+
+/// The gateway light, the instance counts, and the problems behind the light.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayStatus {
+    pub light: String,
+    pub edges: EdgeCounts,
+    pub problems: Vec<Problem>,
+}
+
+/// How many instances are online, and how many sent a heartbeat within a day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeCounts {
+    pub online: usize,
+    pub total: usize,
+}
+
+/// One problem behind the light, tagged by `kind`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Problem {
+    SiteLoadFailed {
+        edge: String,
+        site: String,
+        error: Value,
+    },
+    VersionBehind {
+        edge: String,
+        site: String,
+        expected: i64,
+        loaded: i64,
+        saved_at_millis: i64,
+    },
+    EdgeOffline {
+        edge: String,
+        last_seen_ms: i64,
+        loaded: BTreeMap<String, i64>,
+    },
+    LogGap {
+        edge: String,
+        from_ms: Option<Value>,
+        to_ms: i64,
+        dropped: Option<Value>,
+        dropped_bypass: Option<Value>,
+        write_errors: Option<Value>,
+    },
+    QueuePressure {
+        edge: String,
+        queue: i64,
+        capacity: i64,
+    },
+    PartitionMissing {
+        days_ahead: i64,
+    },
+    HeartbeatLate {
+        edge: String,
+    },
+}
+
 /// `GET /api/status`: the gateway light, the problems behind it, and the Jev
 /// health. Polled every 15 seconds, so it reads only what the light needs.
 ///
 /// # Errors
 /// `INTERNAL` when the database cannot be read.
-pub async fn status(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Value>> {
+pub async fn status(State(state): State<Arc<ControlState>>) -> ApiResult<Json<StatusBody>> {
     let now = Utc::now();
     let now_ms = now.timestamp_millis();
     let edges = edge_status_store::list(&state.pool).await?;
@@ -48,14 +113,14 @@ pub async fn status(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Va
         .iter()
         .filter(|edge| heard_within_a_day(edge, now_ms))
         .count();
-    Ok(Json(json!({
-        "gateway": {
-            "light": light(online, problems.len()),
-            "edges": { "online": online, "total": total },
-            "problems": problems,
+    Ok(Json(StatusBody {
+        gateway: GatewayStatus {
+            light: light(online, problems.len()).to_owned(),
+            edges: EdgeCounts { online, total },
+            problems,
         },
-        "jev": jev_health.fields(),
-    })))
+        jev: jev_health.fields(),
+    }))
 }
 
 /// The light: `down` with no online instance, `warn` with any problem, `ok`
@@ -78,7 +143,7 @@ fn collect_problems(
     sites: &[SiteRecord],
     daily: &[PartitionInfo],
     now: DateTime<Utc>,
-) -> Vec<Value> {
+) -> Vec<Problem> {
     let now_ms = now.timestamp_millis();
     let online: Vec<&EdgeStatus> = edges.iter().filter(|edge| edge.is_online(now)).collect();
     let mut found = site_load_failures(&online);
@@ -93,7 +158,7 @@ fn collect_problems(
 
 /// Sites that an online instance failed to load, with the error code it reports.
 #[must_use]
-fn site_load_failures(online: &[&EdgeStatus]) -> Vec<Value> {
+fn site_load_failures(online: &[&EdgeStatus]) -> Vec<Problem> {
     let mut found = Vec::new();
     for edge in online {
         let Some(sites) = edge.sites.as_object() else {
@@ -103,12 +168,11 @@ fn site_load_failures(online: &[&EdgeStatus]) -> Vec<Value> {
             let Some(error) = entry.get("error").filter(|error| !error.is_null()) else {
                 continue;
             };
-            found.push(json!({
-                "kind": "site_load_failed",
-                "edge": edge.edge,
-                "site": site,
-                "error": error,
-            }));
+            found.push(Problem::SiteLoadFailed {
+                edge: edge.edge.clone(),
+                site: site.clone(),
+                error: error.clone(),
+            });
         }
     }
     found
@@ -117,7 +181,7 @@ fn site_load_failures(online: &[&EdgeStatus]) -> Vec<Value> {
 /// Sites whose newest version was saved more than 30 seconds ago, and that an
 /// online instance still reports at an older version.
 #[must_use]
-fn versions_behind(online: &[&EdgeStatus], sites: &[SiteRecord], now_ms: i64) -> Vec<Value> {
+fn versions_behind(online: &[&EdgeStatus], sites: &[SiteRecord], now_ms: i64) -> Vec<Problem> {
     let mut found = Vec::new();
     for record in sites {
         let saved_at = record.updated_at.timestamp_millis();
@@ -141,14 +205,13 @@ fn versions_behind(online: &[&EdgeStatus], sites: &[SiteRecord], now_ms: i64) ->
                 continue;
             };
             if loaded < record.version {
-                found.push(json!({
-                    "kind": "version_behind",
-                    "edge": edge.edge,
-                    "site": site,
-                    "expected": record.version,
-                    "loaded": loaded,
-                    "saved_at_millis": saved_at,
-                }));
+                found.push(Problem::VersionBehind {
+                    edge: edge.edge.clone(),
+                    site: site.to_owned(),
+                    expected: record.version,
+                    loaded,
+                    saved_at_millis: saved_at,
+                });
             }
         }
     }
@@ -165,18 +228,15 @@ fn heard_within_a_day(edge: &EdgeStatus, now_ms: i64) -> bool {
 /// seconds, with the version of each site they stopped at. They are left out of
 /// `version_behind`, so one fault is reported once.
 #[must_use]
-fn offline_edges(edges: &[EdgeStatus], now: DateTime<Utc>) -> Vec<Value> {
+fn offline_edges(edges: &[EdgeStatus], now: DateTime<Utc>) -> Vec<Problem> {
     let now_ms = now.timestamp_millis();
     edges
         .iter()
         .filter(|edge| !edge.is_online(now) && heard_within_a_day(edge, now_ms))
-        .map(|edge| {
-            json!({
-                "kind": "edge_offline",
-                "edge": edge.edge,
-                "last_seen_ms": edge.seen_at.timestamp_millis(),
-                "loaded": loaded_versions(edge),
-            })
+        .map(|edge| Problem::EdgeOffline {
+            edge: edge.edge.clone(),
+            last_seen_ms: edge.seen_at.timestamp_millis(),
+            loaded: loaded_versions(edge),
         })
         .collect()
 }
@@ -184,23 +244,21 @@ fn offline_edges(edges: &[EdgeStatus], now: DateTime<Utc>) -> Vec<Value> {
 /// The version each site an instance reports has loaded, by site name. A site with
 /// no version, such as one that never loaded, is left out.
 #[must_use]
-fn loaded_versions(edge: &EdgeStatus) -> Value {
-    let loaded: Map<String, Value> = edge
-        .sites
+fn loaded_versions(edge: &EdgeStatus) -> BTreeMap<String, i64> {
+    edge.sites
         .as_object()
         .into_iter()
         .flatten()
         .filter_map(|(site, entry)| {
             let version = entry.get("version").and_then(Value::as_i64)?;
-            Some((site.clone(), json!(version)))
+            Some((site.clone(), version))
         })
-        .collect();
-    Value::Object(loaded)
+        .collect()
 }
 
 /// Log gaps that ended within the last 15 minutes, from each instance's history.
 #[must_use]
-fn log_gaps(edges: &[EdgeStatus], now_ms: i64) -> Vec<Value> {
+fn log_gaps(edges: &[EdgeStatus], now_ms: i64) -> Vec<Problem> {
     let since = now_ms.saturating_sub(GAP_WINDOW_MILLIS);
     let mut found = Vec::new();
     for edge in edges {
@@ -214,15 +272,14 @@ fn log_gaps(edges: &[EdgeStatus], now_ms: i64) -> Vec<Value> {
             if to_ms < since {
                 continue;
             }
-            found.push(json!({
-                "kind": "log_gap",
-                "edge": edge.edge,
-                "from_ms": gap.get("from_ms"),
-                "to_ms": to_ms,
-                "dropped": gap.get("dropped"),
-                "dropped_bypass": gap.get("dropped_bypass"),
-                "write_errors": gap.get("write_errors"),
-            }));
+            found.push(Problem::LogGap {
+                edge: edge.edge.clone(),
+                from_ms: gap.get("from_ms").cloned(),
+                to_ms,
+                dropped: gap.get("dropped").cloned(),
+                dropped_bypass: gap.get("dropped_bypass").cloned(),
+                write_errors: gap.get("write_errors").cloned(),
+            });
         }
     }
     found
@@ -230,18 +287,17 @@ fn log_gaps(edges: &[EdgeStatus], now_ms: i64) -> Vec<Value> {
 
 /// Online instances whose send queue is above 80 % of its capacity.
 #[must_use]
-fn queue_pressure(online: &[&EdgeStatus]) -> Vec<Value> {
+fn queue_pressure(online: &[&EdgeStatus]) -> Vec<Problem> {
     let mut found = Vec::new();
     for edge in online {
         let capacity = queue_capacity(edge);
         let queue = i64::from(edge.queue);
         if queue.saturating_mul(100) > capacity.saturating_mul(QUEUE_PRESSURE_PERCENT) {
-            found.push(json!({
-                "kind": "queue_pressure",
-                "edge": edge.edge,
-                "queue": queue,
-                "capacity": capacity,
-            }));
+            found.push(Problem::QueuePressure {
+                edge: edge.edge.clone(),
+                queue,
+                capacity,
+            });
         }
     }
     found
@@ -260,13 +316,13 @@ fn queue_capacity(edge: &EdgeStatus) -> i64 {
 /// The partition problem: today has no partition, or fewer than two future days
 /// in a row have one. `days_ahead` counts the future days in a row that have one.
 #[must_use]
-fn partition_missing(daily: &[PartitionInfo], now: DateTime<Utc>) -> Vec<Value> {
+fn partition_missing(daily: &[PartitionInfo], now: DateTime<Utc>) -> Vec<Problem> {
     let today = now.date_naive();
     let ahead = days_ahead(daily, today);
     if has_partition(daily, today) && ahead >= FUTURE_DAYS_NEEDED {
         return Vec::new();
     }
-    vec![json!({ "kind": "partition_missing", "days_ahead": ahead })]
+    vec![Problem::PartitionMissing { days_ahead: ahead }]
 }
 
 /// Whether a daily partition holds `day`.
@@ -292,11 +348,13 @@ fn days_ahead(daily: &[PartitionInfo], today: NaiveDate) -> i64 {
 
 /// Online instances whose last heartbeat is more than 15 seconds old.
 #[must_use]
-fn late_heartbeats(online: &[&EdgeStatus], now_ms: i64) -> Vec<Value> {
+fn late_heartbeats(online: &[&EdgeStatus], now_ms: i64) -> Vec<Problem> {
     let mut found = Vec::new();
     for edge in online {
         if now_ms.saturating_sub(edge.seen_at.timestamp_millis()) > HEARTBEAT_LATE_MILLIS {
-            found.push(json!({ "kind": "heartbeat_late", "edge": edge.edge }));
+            found.push(Problem::HeartbeatLate {
+                edge: edge.edge.clone(),
+            });
         }
     }
     found
@@ -306,6 +364,7 @@ fn late_heartbeats(online: &[&EdgeStatus], now_ms: i64) -> Vec<Value> {
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+    use serde_json::json;
 
     fn partition(day: NaiveDate) -> PartitionInfo {
         PartitionInfo {
@@ -379,10 +438,13 @@ mod tests {
             json!({"emr": {"version": 1, "error": null}}),
         );
         let found = offline_edges(&[fresh, silent, gone], now);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0]["kind"], json!("edge_offline"));
-        assert_eq!(found[0]["edge"], json!("edge-2"));
-        assert_eq!(found[0]["last_seen_ms"], json!(1_793_537_940_000_i64));
-        assert_eq!(found[0]["loaded"], json!({"emr": 11, "juice": 7}));
+        assert_eq!(
+            found,
+            vec![Problem::EdgeOffline {
+                edge: "edge-2".to_owned(),
+                last_seen_ms: 1_793_537_940_000,
+                loaded: BTreeMap::from([("emr".to_owned(), 11), ("juice".to_owned(), 7)]),
+            }]
+        );
     }
 }
