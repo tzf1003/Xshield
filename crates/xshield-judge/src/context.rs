@@ -3,15 +3,21 @@
 //! Values are stored only as keyed hashes. The store lives in gateway memory;
 //! a restart empties it and users re-enter through an entry.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
+
+use xshield_core::kind::{Rules, Shown, Used, affinity, declares};
 
 use crate::values::{ResponseValue, is_id_like};
 
 /// Most values remembered per session.
 pub const SEEN_MAX: usize = 5_000;
+/// Most values a session may have sent that the origin had not shown it. Past
+/// it the session stops learning from responses: evicting one of them would let
+/// its echo be learned later.
+pub const SENT_MAX: usize = SEEN_MAX;
 /// Most origins of one value kept.
 pub const SOURCES_MAX: usize = 6;
 /// Most recent requests kept per session.
@@ -126,6 +132,8 @@ pub struct Source<'a> {
 pub struct Origin {
     /// Field name it appeared under.
     pub field: String,
+    /// The position in the response (see [`ResponseValue::at`]); empty when unknown.
+    pub at: String,
     /// The request that returned it, for example `GET /api/patients`.
     pub request: String,
     /// That request's id as a number; 0 for values learned before a restart.
@@ -141,52 +149,77 @@ pub struct Seen {
     pub origins: Vec<Origin>,
 }
 
+/// What an origin shows a value as, for the kind rules.
+fn as_shown(origin: &Origin) -> Shown<'_> {
+    Shown {
+        field: &origin.field,
+        request: &origin.request,
+    }
+}
+
 impl Seen {
-    /// Adds an origin. The same field from the same request is one origin: the
-    /// first sighting is kept and a repeat changes nothing (docs/07 section
-    /// 7.7.1). Only `(field, request)` decides a repeat, so the state's
-    /// `seen_as` stays the same however often a list is fetched.
+    /// Adds an origin. The same field at the same position of the same request
+    /// is one origin: the first sighting is kept and a repeat changes nothing
+    /// (docs/07 section 7.7.1). `(field, position, request)` decides a repeat,
+    /// so the state's `seen_as` stays the same however often a list is fetched,
+    /// while one field name at two positions of a response is two origins.
     fn note(&mut self, origin: Origin) {
-        if self
-            .origins
-            .iter()
-            .any(|known| known.field == origin.field && known.request == origin.request)
-        {
+        if self.origins.iter().any(|known| {
+            known.field == origin.field && known.at == origin.at && known.request == origin.request
+        }) {
             return;
         }
-        if self.origins.len() == SOURCES_MAX {
-            // Small numbers repeat everywhere; keep the id-field origins that
-            // really identify an object and drop the noise (a stock count, an
-            // ETA) first.
-            let drop = self
-                .origins
-                .iter()
-                .position(|o| !is_id_like(&o.field))
-                .unwrap_or(0);
+        if self.origins.len() >= SOURCES_MAX {
+            let drop = self.eviction_index();
             self.origins.remove(drop);
         }
         self.origins.push(origin);
     }
 
-    /// Whether the value is safe to fast-allow for a request to `path` under
-    /// the field `key`: long, or seen under an id field of the same kind of
-    /// object. Short values collide across unrelated objects (basket 1,
-    /// product 1), so they only count when the origin field or the request
-    /// that showed them names the same kind of object as the path or key.
-    /// `synonyms` are the site's extra pairs (see [`site_synonym`]).
-    #[must_use]
-    pub fn is_specific(
-        &self,
-        value: &str,
-        path: &str,
-        key: Option<&str>,
-        synonyms: &[(String, String)],
-    ) -> bool {
-        value.chars().count() >= LONG_VALUE_CHARS
-            || self
+    /// The origin that makes room when all [`SOURCES_MAX`] are kept. Small
+    /// numbers repeat everywhere, so noise (a field that is not id-like, such
+    /// as a stock count or an ETA) goes first, and id-like origins stay while
+    /// any noise remains. Among the candidates, the oldest origin of the request
+    /// that holds the most origins goes. One response that repeats an id at
+    /// many positions therefore makes room from its own origins, and another
+    /// response's origin goes only once no response holds more.
+    fn eviction_index(&self) -> usize {
+        let noise_exists = self.origins.iter().any(|origin| !is_id_like(&origin.field));
+        let mut chosen: Option<(usize, usize)> = None;
+        for (index, origin) in self.origins.iter().enumerate() {
+            if noise_exists && is_id_like(&origin.field) {
+                continue;
+            }
+            let held = self
                 .origins
                 .iter()
-                .any(|origin| is_id_like(&origin.field) && affinity(origin, path, key, synonyms))
+                .filter(|other| other.request == origin.request)
+                .count();
+            // Only a strictly larger share replaces the candidate, so on a tie
+            // the older origin, met first, stays chosen.
+            if chosen.is_none_or(|(_, best)| held > best) {
+                chosen = Some((index, held));
+            }
+        }
+        chosen.map_or(0, |(index, _)| index)
+    }
+
+    /// Whether the value is safe to fast-allow for the request that uses it.
+    /// Only an id-like field shows an object reference, or a field the site
+    /// declares an identifier: a value seen only under a name, a text or a note
+    /// field never counts, so an echoed search query or a comment does not. A
+    /// long value (at least [`LONG_VALUE_CHARS`]) then counts whatever kind of
+    /// object its field names. A short value collides across unrelated objects
+    /// (basket 1, product 1), so it also needs the origin to show it as the kind
+    /// the request names for it (see `xshield_core::kind`).
+    #[must_use]
+    pub fn is_specific(&self, used: Used<'_>, rules: &Rules) -> bool {
+        let long = used.value.chars().count() >= LONG_VALUE_CHARS;
+        self.origins.iter().any(|origin| {
+            let shown = as_shown(origin);
+            (is_id_like(&origin.field) || declares(shown, rules))
+                && (long || affinity(shown, used, rules))
+        })
     }
 
     /// The origins ordered for the model, most useful last: ones of the same
@@ -194,122 +227,15 @@ impl Seen {
     /// model sees only the last few, so a recent unrelated match (a stock
     /// count) must not push out the product list that really showed the id.
     #[must_use]
-    pub fn ranked(
-        &self,
-        path: &str,
-        key: Option<&str>,
-        synonyms: &[(String, String)],
-    ) -> Vec<&Origin> {
+    pub fn ranked(&self, used: Used<'_>, rules: &Rules) -> Vec<&Origin> {
         let mut origins: Vec<&Origin> = self.origins.iter().collect();
         origins.sort_by_key(|origin| {
-            u8::from(is_id_like(&origin.field))
-                + 2 * u8::from(affinity(origin, path, key, synonyms))
+            let shown = as_shown(origin);
+            u8::from(is_id_like(&origin.field) || declares(shown, rules))
+                + 2 * u8::from(affinity(shown, used, rules))
         });
         origins
     }
-}
-
-/// A site's synonym pair as the context compares it: the same reduction
-/// `kind_words` applies to field and path names (lower case, trailing `s`
-/// removed), so `address` matches the `addre` that `/api/Addresss` yields.
-/// A pair with a word shorter than three letters after that is dropped: an
-/// empty word would match every field.
-#[must_use]
-pub fn site_synonym(first: &str, second: &str) -> Option<(String, String)> {
-    let first = first.to_ascii_lowercase();
-    let second = second.to_ascii_lowercase();
-    let (first, second) = (first.trim_end_matches('s'), second.trim_end_matches('s'));
-    (first.len() >= 3 && second.len() >= 3).then(|| (first.to_owned(), second.to_owned()))
-}
-
-fn affinity(origin: &Origin, path: &str, key: Option<&str>, synonyms: &[(String, String)]) -> bool {
-    // A field name says what kind of object the value selects; only without
-    // one (a path segment, a bare `id` field) does the path decide.
-    let by_key = key.map(kind_words).unwrap_or_default();
-    let wanted = if by_key.is_empty() {
-        kind_words(path)
-    } else {
-        by_key
-    };
-    // The field's own name says what it identifies (`ProductId` is a
-    // product, whatever object carried it); a bare `id` takes the kind of its
-    // parent (`Products.id`), and a bare top-level `id` the kind of the
-    // request that returned it.
-    let (parent, last) = origin.field.rsplit_once('.').unwrap_or(("", &origin.field));
-    let mut shown = kind_words(last);
-    if shown.is_empty() {
-        shown = kind_words(parent);
-    }
-    if shown.is_empty() {
-        shown = kind_words(origin.request.split_once(' ').map_or("", |(_, path)| path));
-    }
-    wanted
-        .iter()
-        .any(|word| shown.iter().any(|other| related(word, other, synonyms)))
-}
-
-const GENERIC_WORDS: [&str; 8] = ["api", "rest", "v1", "v2", "v3", "data", "value", "id"];
-
-/// Lower-cased words of a path or field name, camel case split, plural
-/// endings and generic route prefixes removed: `/api/Addresss/7` gives
-/// `address`, `ProductId` gives `product`.
-fn kind_words(text: &str) -> Vec<String> {
-    let mut spaced = String::with_capacity(text.len() + 8);
-    let mut previous_lower = false;
-    for c in text.chars() {
-        if c.is_ascii_uppercase() && previous_lower {
-            spaced.push(' ');
-        }
-        previous_lower = c.is_ascii_lowercase();
-        spaced.push(c);
-    }
-    spaced
-        .split(|c: char| !c.is_ascii_alphabetic())
-        .map(|word| word.to_ascii_lowercase().trim_end_matches('s').to_owned())
-        .filter(|word| word.len() >= 3 && !GENERIC_WORDS.contains(&word.as_str()))
-        .collect()
-}
-
-/// Words for one kind of object that differ between a field and the endpoint
-/// that lists it (`paymentId` selects a card of `/api/Cards`).
-const SYNONYMS: [(&str, &str); 1] = [("payment", "card")];
-
-/// Identifier endings a compound word may carry (`doctorid`, `patientno`).
-/// Longer endings come first so that `uuid` is not read as `id`.
-const ID_SUFFIXES: [&str; 6] = ["uuid", "code", "num", "ref", "id", "no"];
-
-/// The kind a word names: a compound with an identifier ending loses the ending
-/// (`doctorid` names a doctor); any other word is its own kind. Containment does
-/// not make two words one kind: `doc` is part of `doctor`, and `outpatient` of
-/// `patient`, so a document id must not unlock a doctor path.
-fn kind_of(word: &str) -> &str {
-    ID_SUFFIXES
-        .into_iter()
-        .find_map(|suffix| word.strip_suffix(suffix))
-        .filter(|rest| rest.len() >= 3)
-        .unwrap_or(word)
-}
-
-fn same_kind(left: &str, right: &str) -> bool {
-    kind_of(left) == kind_of(right)
-}
-
-/// Whether two words name the same kind of object, or are a built-in or site
-/// synonym pair.
-fn related(left: &str, right: &str, synonyms: &[(String, String)]) -> bool {
-    let pairs = SYNONYMS
-        .iter()
-        .map(|(first, second)| (*first, *second))
-        .chain(
-            synonyms
-                .iter()
-                .map(|(first, second)| (first.as_str(), second.as_str())),
-        );
-    same_kind(left, right)
-        || pairs.into_iter().any(|(first, second)| {
-            (same_kind(left, first) && same_kind(right, second))
-                || (same_kind(left, second) && same_kind(right, first))
-        })
 }
 
 /// One remembered request.
@@ -346,6 +272,14 @@ struct CachedAllow {
     source: u128,
 }
 
+/// The values a session sent, copied into a session that a response issues a
+/// credential to, so that an echo in that response is not learned either.
+#[derive(Debug, Clone, Default)]
+pub struct SentRecord {
+    overflow: bool,
+    digests: HashSet<Digest16>,
+}
+
 /// Everything remembered about one session.
 #[derive(Debug)]
 pub struct SessionContext {
@@ -356,6 +290,10 @@ pub struct SessionContext {
     recent: VecDeque<Recent>,
     entries: Vec<EntryPass>,
     cache: HashMap<Digest16, CachedAllow>,
+    /// Values the session sent that the origin had not shown it.
+    sent: HashSet<Digest16>,
+    /// The session stopped learning from responses (see [`SENT_MAX`]).
+    sent_overflow: bool,
 }
 
 impl SessionContext {
@@ -368,6 +306,8 @@ impl SessionContext {
             recent: VecDeque::new(),
             entries: Vec::new(),
             cache: HashMap::new(),
+            sent: HashSet::new(),
+            sent_overflow: false,
         }
     }
 
@@ -384,18 +324,27 @@ impl SessionContext {
     }
 
     /// Records the values of a successful response and returns how many of
-    /// them the session had not seen before.
+    /// them the session had not seen before. A value the session sent is not
+    /// recorded: its echo shows nothing the origin showed (see
+    /// [`SessionContext::note_sent`]).
     pub fn remember(
         &mut self,
         key: &ContextKey,
         source: &Source<'_>,
         values: &[ResponseValue],
     ) -> usize {
+        if self.sent_overflow {
+            return 0;
+        }
         let mut new = 0;
         for value in values {
             let digest = key.mac("value", value.value.as_bytes());
+            if self.sent.contains(&digest) {
+                continue;
+            }
             let origin = Origin {
                 field: value.field.clone(),
+                at: value.at.clone(),
                 request: source.request.to_owned(),
                 request_id: source.request_id,
                 at_ms: source.at_ms,
@@ -419,6 +368,56 @@ impl SessionContext {
             new += 1;
         }
         new
+    }
+
+    /// Notes values this session sent in a request the origin answered. Later
+    /// responses do not teach the session these values, whichever field echoes
+    /// them. The record never evicts: an evicted value could be echoed back, so a
+    /// session that overflows [`SENT_MAX`] stops learning from responses.
+    pub fn note_sent(&mut self, digests: &[Digest16]) {
+        for digest in digests {
+            self.note(*digest);
+        }
+    }
+
+    fn note(&mut self, digest: Digest16) {
+        if self.sent_overflow || self.sent.contains(&digest) {
+            return;
+        }
+        if self.sent.len() >= SENT_MAX {
+            self.stop_learning();
+            return;
+        }
+        self.sent.insert(digest);
+    }
+
+    /// Stops learning from responses. Used when a request's values could not all
+    /// be read, so an echo of one of them cannot be told apart from what the
+    /// origin shows. What was learned before stays.
+    pub fn stop_learning(&mut self) {
+        self.sent_overflow = true;
+        self.sent.clear();
+    }
+
+    /// What the session sent, for a session that a response is about to issue a
+    /// credential to.
+    #[must_use]
+    pub fn sent_record(&self) -> SentRecord {
+        SentRecord {
+            overflow: self.sent_overflow,
+            digests: self.sent.clone(),
+        }
+    }
+
+    /// Takes over what another session sent. A credential a response issues
+    /// starts with what the request sent, so the response cannot teach it an echo.
+    pub fn inherit_sent(&mut self, record: &SentRecord) {
+        if record.overflow {
+            self.stop_learning();
+        }
+        for digest in &record.digests {
+            self.note(*digest);
+        }
     }
 
     /// Appends one request to the recent list.
@@ -546,6 +545,15 @@ impl ContextStore {
             .is_some_and(|session| now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS)
     }
 
+    /// What the session sent, for a session a response is about to issue a
+    /// credential to. Creates nothing.
+    #[must_use]
+    pub fn sent_record(&self, id: &Digest16) -> SentRecord {
+        self.sessions
+            .get(id)
+            .map_or_else(SentRecord::default, SessionContext::sent_record)
+    }
+
     /// Number of sessions held.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -561,6 +569,22 @@ impl ContextStore {
 
 #[cfg(test)]
 mod tests {
+    /// The use of a value as the engine makes it: a path value carries the index
+    /// of its segment.
+    fn used<'a>(value: &'a str, path: &'a str, key: Option<&'a str>) -> Used<'a> {
+        let segment = key.is_none().then(|| {
+            path.split('/')
+                .filter(|part| !part.is_empty())
+                .position(|part| part == value)
+        });
+        Used {
+            value,
+            path,
+            key,
+            segment: segment.flatten(),
+        }
+    }
+
     use super::*;
 
     fn key() -> ContextKey {
@@ -577,6 +601,7 @@ mod tests {
 
     fn response(field: &str, value: &str) -> ResponseValue {
         ResponseValue {
+            at: field.to_owned(),
             field: field.to_owned(),
             value: value.to_owned(),
         }
@@ -619,12 +644,12 @@ mod tests {
         );
         let seen = session.lookup(&key, "7").unwrap();
         assert_eq!(seen.origins[0].field, "id");
-        assert!(seen.is_specific("7", "/api/patients/7", None, &[]));
+        assert!(seen.is_specific(used("7", "/api/patients/7", None), &Rules::default()));
         assert!(
             !session
                 .lookup(&key, "8")
                 .unwrap()
-                .is_specific("8", "/api/patients/8", None, &[])
+                .is_specific(used("8", "/api/patients/8", None), &Rules::default())
         );
         assert!(session.lookup(&key, "9").is_none());
     }
@@ -647,14 +672,21 @@ mod tests {
         );
         let seen = session.lookup(&key, "1").unwrap();
         assert!(seen.is_specific(
-            "1",
-            "/rest/basket/22/checkout",
-            Some("deliveryMethodId"),
-            &[]
+            used("1", "/rest/basket/22/checkout", Some("deliveryMethodId")),
+            &Rules::default()
         ));
-        assert!(!seen.is_specific("1", "/rest/basket/22/checkout", Some("couponId"), &[]));
-        assert!(seen.is_specific("1", "/api/BasketItems/", Some("ProductId"), &[]));
-        let ranked = seen.ranked("/api/BasketItems/", Some("ProductId"), &[]);
+        assert!(!seen.is_specific(
+            used("1", "/rest/basket/22/checkout", Some("couponId")),
+            &Rules::default()
+        ));
+        assert!(seen.is_specific(
+            used("1", "/api/BasketItems/", Some("ProductId")),
+            &Rules::default()
+        ));
+        let ranked = seen.ranked(
+            used("1", "/api/BasketItems/", Some("ProductId")),
+            &Rules::default(),
+        );
         assert_eq!(ranked.last().unwrap().request, "GET /rest/products/search");
         assert_eq!(ranked[0].field, "quantity");
     }
@@ -666,8 +698,14 @@ mod tests {
         let session = store.session(key.mac("session", b"cookie"), 0);
         session.remember(&key, &at("GET /api/Cards"), &[response("id", "7")]);
         let seen = session.lookup(&key, "7").unwrap();
-        assert!(seen.is_specific("7", "/rest/basket/22/checkout", Some("paymentId"), &[]));
-        assert!(!seen.is_specific("7", "/rest/basket/22/checkout", Some("addressId"), &[]));
+        assert!(seen.is_specific(
+            used("7", "/rest/basket/22/checkout", Some("paymentId")),
+            &Rules::default()
+        ));
+        assert!(!seen.is_specific(
+            used("7", "/rest/basket/22/checkout", Some("addressId")),
+            &Rules::default()
+        ));
     }
 
     #[test]
@@ -682,19 +720,19 @@ mod tests {
             &[response("outpatient_id", "3"), response("clinical_id", "4")],
         );
         let document = session.lookup(&key, "2").unwrap();
-        assert!(!document.is_specific("2", "/doctor/2", None, &[]));
-        assert!(document.is_specific("2", "/docs/2", None, &[]));
+        assert!(!document.is_specific(used("2", "/doctor/2", None), &Rules::default()));
+        assert!(document.is_specific(used("2", "/docs/2", None), &Rules::default()));
         assert!(
             !session
                 .lookup(&key, "3")
                 .unwrap()
-                .is_specific("3", "/patients/3", None, &[])
+                .is_specific(used("3", "/patients/3", None), &Rules::default())
         );
         assert!(
             !session
                 .lookup(&key, "4")
                 .unwrap()
-                .is_specific("4", "/clinic/4", None, &[])
+                .is_specific(used("4", "/clinic/4", None), &Rules::default())
         );
     }
 
@@ -709,28 +747,36 @@ mod tests {
             &[response("doctorid", "1"), response("doctorno", "5")],
         );
         let doctor = session.lookup(&key, "1").unwrap();
-        assert!(doctor.is_specific("1", "/doctor/1", None, &[]));
-        assert!(doctor.is_specific("1", "/api/doctors/1", Some("doctorId"), &[]));
+        assert!(doctor.is_specific(used("1", "/doctor/1", None), &Rules::default()));
+        assert!(doctor.is_specific(
+            used("1", "/api/doctors/1", Some("doctorId")),
+            &Rules::default()
+        ));
         assert!(
             session
                 .lookup(&key, "5")
                 .unwrap()
-                .is_specific("5", "/api/doctors/5", None, &[])
+                .is_specific(used("5", "/api/doctors/5", None), &Rules::default())
         );
     }
 
     #[test]
-    fn long_values_are_specific_whatever_their_field() {
-        let seen = Seen {
+    fn long_values_need_an_id_field_to_show_them() {
+        let shown_as = |field: &str| Seen {
             origins: vec![Origin {
-                field: "name".into(),
+                field: field.into(),
+                at: String::new(),
                 request: "GET /x".into(),
                 request_id: 0,
                 at_ms: 0,
             }],
         };
-        assert!(seen.is_specific("P-0000042", "/x", None, &[]));
-        assert!(!seen.is_specific("alice", "/x", None, &[]));
+        assert!(
+            shown_as("patient_id").is_specific(used("P-0000042", "/x", None), &Rules::default())
+        );
+        assert!(!shown_as("name").is_specific(used("P-0000042", "/x", None), &Rules::default()));
+        assert!(!shown_as("query").is_specific(used("P-0000042", "/x", None), &Rules::default()));
+        assert!(!shown_as("name").is_specific(used("alice", "/x", None), &Rules::default()));
     }
 
     #[test]
@@ -745,24 +791,77 @@ mod tests {
             &[response("BasketItem.id", "9"), response("BasketId", "22")],
         );
         let delivery = session.lookup(&key, "1").unwrap();
-        assert!(delivery.is_specific("1", "/api/Deliverys/1", None, &[]));
-        assert!(!delivery.is_specific("1", "/rest/basket/1", None, &[]));
+        assert!(delivery.is_specific(used("1", "/api/Deliverys/1", None), &Rules::default()));
+        assert!(!delivery.is_specific(used("1", "/rest/basket/1", None), &Rules::default()));
         session.remember(
             &key,
             &at("GET /rest/basket/22"),
             &[response("Products.id", "1")],
         );
         let both = session.lookup(&key, "1").unwrap();
-        assert!(!both.is_specific("1", "/rest/basket/1", None, &[]));
-        assert!(both.is_specific("1", "/api/Products/1", None, &[]));
+        assert!(!both.is_specific(used("1", "/rest/basket/1", None), &Rules::default()));
+        assert!(both.is_specific(used("1", "/api/Products/1", None), &Rules::default()));
         let item = session.lookup(&key, "9").unwrap();
-        assert!(item.is_specific("9", "/api/BasketItems/9", None, &[]));
+        assert!(item.is_specific(used("9", "/api/BasketItems/9", None), &Rules::default()));
         assert!(session.lookup(&key, "22").unwrap().is_specific(
-            "22",
-            "/rest/basket/22/checkout",
-            None,
-            &[]
+            used("22", "/rest/basket/22/checkout", None),
+            &Rules::default()
         ));
+    }
+
+    #[test]
+    fn a_path_value_takes_the_route_word_right_before_it() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(
+            &key,
+            &at("GET /api/doctors"),
+            &[response("id", "7"), response("id", "9")],
+        );
+        let doctor_7 = session.lookup(&key, "7").unwrap();
+        let doctor_9 = session.lookup(&key, "9").unwrap();
+        let rules = Rules::default();
+        let segment = |value, path, segment| Used {
+            value,
+            path,
+            key: None,
+            segment: Some(segment),
+        };
+        // `9` is a doctor in `/api/doctors/9`, but a file in the next path.
+        assert!(doctor_9.is_specific(segment("9", "/api/doctors/9", 2), &rules));
+        assert!(!doctor_9.is_specific(segment("9", "/api/doctors/7/files/9", 4), &rules));
+        assert!(doctor_7.is_specific(segment("7", "/api/doctors/7/files/9", 2), &rules));
+        // An id segment between a route word and the value does not hide the word.
+        assert!(doctor_9.is_specific(segment("9", "/api/doctors/7/9", 3), &rules));
+        // The engine decodes a segment before it is compared: `%39` is the 9 at
+        // segment 4, and its route word is `files`.
+        assert!(!doctor_9.is_specific(segment("9", "/api/doctors/7/files/%39", 4), &rules));
+        // A value in two segments must name its kind in both of them.
+        assert!(doctor_7.is_specific(segment("7", "/api/doctors/7/doctors/7", 4), &rules));
+        assert!(!doctor_7.is_specific(segment("7", "/api/doctors/7/files/7", 4), &rules));
+        // A segment with no route word before it takes the whole path.
+        assert!(doctor_7.is_specific(segment("7", "/7/doctors", 0), &rules));
+        // A named parameter still decides by its name.
+        assert!(doctor_9.is_specific(used("9", "/api/files", Some("doctorId")), &rules));
+    }
+
+    #[test]
+    fn a_declared_name_that_looks_like_no_id_is_an_identifier() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(&key, &at("GET /api/home"), &[response("doc", "2")]);
+        let seen = session.lookup(&key, "2").unwrap();
+        let spec = xshield_core::context::SiteSpec::from_json(
+            r#"{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{"cookie":"SID"},
+               "entries":["/login"],"advanced":{"field_kinds":[{"field":"doc","kind":"doctor"}]}}"#,
+        )
+        .unwrap();
+        let declared = Rules::of(spec.advanced());
+        assert!(!is_id_like("doc"));
+        assert!(!seen.is_specific(used("2", "/doctor/2", None), &Rules::default()));
+        assert!(seen.is_specific(used("2", "/doctor/2", None), &declared));
     }
 
     #[test]
@@ -794,6 +893,27 @@ mod tests {
         let seen = session.lookup(&key, "1").unwrap();
         assert_eq!(seen.origins.len(), SOURCES_MAX);
         assert_eq!(seen.origins[0].request, "GET /api/Products");
+    }
+
+    #[test]
+    fn one_response_repeating_an_id_does_not_push_out_another_responses_origin() {
+        let key = key();
+        let mut session = SessionContext::new(0);
+        session.remember(&key, &at("GET /api/Products"), &[response("id", "1")]);
+        // The same id at many positions of one response, as nested baskets
+        // repeat a product id.
+        let repeats: Vec<ResponseValue> = (0..SOURCES_MAX + 2)
+            .map(|index| ResponseValue {
+                at: format!("items[{index}].product.id"),
+                field: "id".to_owned(),
+                value: "1".to_owned(),
+            })
+            .collect();
+        session.remember(&key, &at("GET /api/Baskets"), &repeats);
+        let seen = session.lookup(&key, "1").unwrap();
+        assert_eq!(seen.origins.len(), SOURCES_MAX);
+        assert_eq!(seen.origins[0].request, "GET /api/Products");
+        assert_eq!(seen.origins.last().unwrap().request, "GET /api/Baskets");
     }
 
     #[test]
@@ -901,7 +1021,77 @@ mod tests {
     }
 
     #[test]
+    fn a_value_the_session_sent_is_not_learned_from_an_echo() {
+        let key = key();
+        let mut session = SessionContext::new(0);
+        session.note_sent(&[key.mac("value", b"P-0000099")]);
+        session.remember(
+            &key,
+            &at("GET /api/search"),
+            &[
+                response("patientId", "P-0000099"),
+                response("patientId", "P-0000042"),
+            ],
+        );
+        assert!(session.lookup(&key, "P-0000099").is_none());
+        assert!(session.lookup(&key, "P-0000042").is_some());
+    }
+
+    #[test]
+    fn a_new_credential_starts_with_what_the_request_sent() {
+        let key = key();
+        let mut old = SessionContext::new(0);
+        old.note_sent(&[key.mac("value", b"P-0000099")]);
+        let mut fresh = SessionContext::new(0);
+        fresh.inherit_sent(&old.sent_record());
+        fresh.remember(
+            &key,
+            &at("GET /api/history"),
+            &[response("patientId", "P-0000099")],
+        );
+        assert!(fresh.lookup(&key, "P-0000099").is_none());
+    }
+
+    #[test]
+    fn a_full_sent_record_stops_learning_rather_than_forgetting() {
+        let key = key();
+        let mut session = SessionContext::new(0);
+        session.remember(&key, &at("GET /x"), &[response("id", "before")]);
+        let sent: Vec<Digest16> = (0..=SENT_MAX)
+            .map(|index| key.mac("value", format!("s{index}").as_bytes()))
+            .collect();
+        session.note_sent(&sent);
+        assert_eq!(
+            session.remember(&key, &at("GET /y"), &[response("id", "later")]),
+            0
+        );
+        assert!(session.lookup(&key, "later").is_none());
+        assert!(session.lookup(&key, "before").is_some());
+    }
+
+    #[test]
     fn labels_never_expose_more_than_eight_bytes() {
         assert_eq!(label(&[0xab; 16]), "abababababababab");
+    }
+
+    #[test]
+    fn one_field_at_two_positions_is_two_origins_and_a_repeat_is_not_one_more() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        let response = |position: &str| ResponseValue {
+            field: "doc_id".into(),
+            value: "5".into(),
+            at: position.into(),
+        };
+        session.remember(&key, &at("GET /api/records/7"), &[response("doc_id")]);
+        session.remember(
+            &key,
+            &at("GET /api/records/7"),
+            &[response("attachments[].doc_id")],
+        );
+        assert_eq!(session.lookup(&key, "5").unwrap().origins.len(), 2);
+        session.remember(&key, &at("GET /api/records/7"), &[response("doc_id")]);
+        assert_eq!(session.lookup(&key, "5").unwrap().origins.len(), 2);
     }
 }

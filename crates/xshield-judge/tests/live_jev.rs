@@ -87,6 +87,7 @@ async fn live_business_traffic_and_evasions() {
     judge.observe(
         &site,
         &Observation {
+            route: None,
             request_id: RID,
             unread: None,
             would_block: false,
@@ -99,6 +100,7 @@ async fn live_business_traffic_and_evasions() {
             content_type: Some("application/json"),
             body: br#"{"patients":[{"id":"7f3a91c2","name":"Zhang Wei","age":54}]}"#,
             now_ms: 1_000,
+            sent: &[],
         },
     );
     let cases = [
@@ -245,6 +247,7 @@ async fn live_acceptance_scenarios() {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -257,6 +260,7 @@ async fn live_acceptance_scenarios() {
                 content_type: Some("application/json"),
                 body: list,
                 now_ms: 1_000,
+                sent: &[],
             },
         );
     }
@@ -264,6 +268,7 @@ async fn live_acceptance_scenarios() {
     judge.observe(
         &site,
         &Observation {
+            route: None,
             request_id: RID,
             unread: None,
             would_block: false,
@@ -276,6 +281,7 @@ async fn live_acceptance_scenarios() {
             content_type: Some("application/json"),
             body: br#"{"patient":{"id":"a91be0d4","name":"Wang Fang"}}"#,
             now_ms: 1_100,
+            sent: &[],
         },
     );
 
@@ -392,6 +398,8 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
             .judge(
                 site,
                 &RequestFacts {
+                    route: None,
+                    request_headers: &[],
                     request_id: &request_id,
                     method: case.method,
                     path: case.path,
@@ -458,6 +466,7 @@ async fn live_juice_shop_checkout_flow() {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -470,6 +479,7 @@ async fn live_juice_shop_checkout_flow() {
                 content_type: Some("application/json"),
                 body,
                 now_ms,
+                sent: &[],
             },
         );
     };
@@ -661,7 +671,7 @@ async fn live_juice_shop_sign_up_flow() {
     ] {
         judge.observe(
             &site,
-            &Observation { request_id: RID, unread: None, would_block: false,
+            &Observation { route: None, request_id: RID, unread: None, would_block: false,
                 credential: None,
                 client: "10.0.0.1",
                 issued_credential: None,
@@ -671,6 +681,7 @@ async fn live_juice_shop_sign_up_flow() {
                 content_type: Some("application/json"),
                 body,
                 now_ms,
+                sent: &[],
             },
         );
     }

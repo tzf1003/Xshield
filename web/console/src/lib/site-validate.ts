@@ -409,7 +409,15 @@ function validateRoutes(routes: RouteRule[]): FieldIssue[] {
     const at = `routes[${index}]`;
     const parsed = parsedAll[index];
     if (parsed && !parsed.ok) add(`${at}.path`, parsed.reason);
-    else if (rule.path.endsWith("/")) add(`${at}.path`, "路径不能以 / 结尾");
+    else if (parsed?.ok && parsed.value.literal.endsWith("/")) {
+      // The gateway refuses a route whose path, before a trailing `*`, ends in `/` (Route::parse).
+      add(
+        `${at}.path`,
+        rule.path.endsWith("*")
+          ? "前缀路径的 * 前面不能是 /，去掉这个 /（例如 /api* 而不是 /api/*）"
+          : "路径不能以 / 结尾",
+      );
+    }
     if (rule.name_from.length === 0) add(`${at}.name_from`, "接口名至少一段");
     if (rule.name_from.length > 4) add(`${at}.name_from`, "接口名最多 4 段");
     rule.name_from.forEach((group, position) => {

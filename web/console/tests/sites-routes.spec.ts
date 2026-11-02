@@ -29,7 +29,7 @@ const RECENT = {
     },
     {
       path: GATEWAY,
-      logical_path: "unknown-api",
+      logical_path: GATEWAY,
       api: { unknown: "missing", source: "header.X-Service-Method" },
     },
   ],

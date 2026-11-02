@@ -26,7 +26,7 @@ function withRoutes(routes: RouteRule[]): SiteSpec {
 }
 
 function withKinds(fieldKinds: FieldKindDeclaration[]): SiteSpec {
-  return { ...base, objects: { field_kinds: fieldKinds } };
+  return { ...base, advanced: { field_kinds: fieldKinds } };
 }
 
 const learning: LearningSettings = {

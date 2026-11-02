@@ -34,8 +34,8 @@ const MINUTE_MS: u64 = 60_000;
 
 const INSERT_HEAD: &str = "INSERT INTO decision_log \
     (at_millis, request_id, site, site_version, edge, host, client, session, context, \
-     method, path, query, status, decision_path, outcome, total_ms, jev_ms, jev_access, \
-     jev_attack, jev_confidence, jev_failure, trace, jev) ";
+     method, path, logical_path, api, request_headers, query, status, decision_path, outcome, \
+     total_ms, jev_ms, jev_access, jev_attack, jev_confidence, jev_failure, trace, jev) ";
 
 /// The current Unix time in milliseconds.
 #[must_use]
@@ -383,6 +383,9 @@ async fn insert(pool: &PgPool, rows: &[Row<'_>]) -> Result<(), sqlx::Error> {
             .push_bind(row.context.as_deref())
             .push_bind(row.method)
             .push_bind(row.path)
+            .push_bind(row.logical_path)
+            .push_bind(row.api.as_ref())
+            .push_bind(row.request_headers.clone())
             .push_bind(row.query)
             .push_bind(row.status)
             .push_bind(row.decision_path.as_str())
@@ -412,6 +415,9 @@ struct Row<'a> {
     context: Option<String>,
     method: &'a str,
     path: &'a str,
+    logical_path: &'a str,
+    api: Option<serde_json::Value>,
+    request_headers: Vec<&'a str>,
     query: Option<&'a str>,
     status: Option<i16>,
     decision_path: String,
@@ -441,6 +447,14 @@ impl<'a> Row<'a> {
             context: record.context.map(|kind| variant_name(&kind)).transpose()?,
             method: &record.method,
             path: &record.path,
+            logical_path: &record.logical_path,
+            api: record
+                .api
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(encode)?,
+            request_headers: record.request_headers.iter().map(String::as_str).collect(),
             query: record.query.as_deref(),
             status: record.status.and_then(|status| i16::try_from(status).ok()),
             decision_path: variant_name(&record.decision_path)?,
@@ -506,6 +520,9 @@ mod tests {
             context: None,
             method: "GET".to_owned(),
             path: "/".to_owned(),
+            logical_path: "/".to_owned(),
+            api: None,
+            request_headers: Vec::new(),
             query: None,
             status: Some(200),
             decision_path: path,

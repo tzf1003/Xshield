@@ -182,16 +182,16 @@ export function declarationKey(item: FieldKindDeclaration): string {
 }
 
 /**
- * The lines the save dialog lists for the object map: declarations added or removed, a declaration whose class
- * changed, and the learning settings that differ (console design 6: a change reads as what it does to which positions).
+ * The lines the save dialog lists for the field kinds a person declared (`advanced.field_kinds`): a declaration added
+ * or removed, and a declaration whose class changed (console design 6: a change reads as what it does to which positions).
  */
-export function objectChanges(
-  before: ObjectsSpec | undefined,
-  after: ObjectsSpec | undefined,
+export function declarationChanges(
+  before: readonly FieldKindDeclaration[] | undefined,
+  after: readonly FieldKindDeclaration[] | undefined,
 ): string[] {
   const changes: string[] = [];
-  const old = before?.field_kinds ?? [];
-  const next = after?.field_kinds ?? [];
+  const old = before ?? [];
+  const next = after ?? [];
   // A declaration is matched by its field and its scope: the same place with another class is a change of class.
   const placeKey = (item: FieldKindDeclaration) =>
     `${fieldKey(item.field)}|${(item.in ?? []).join(",")}`;
@@ -212,6 +212,15 @@ export function objectChanges(
   for (const item of old) {
     if (!nextByPlace.has(placeKey(item))) changes.push(`对象表 －1：${declarationLabel(item)}`);
   }
+  return changes;
+}
+
+/** The lines the save dialog lists for the learning settings that differ (console design 6). */
+export function objectChanges(
+  before: ObjectsSpec | undefined,
+  after: ObjectsSpec | undefined,
+): string[] {
+  const changes: string[] = [];
   const was = effectiveLearning(before?.learning);
   const now = effectiveLearning(after?.learning);
   const on = (flag: boolean) => (flag ? LEARNING_TEXT.on : LEARNING_TEXT.off);
@@ -301,8 +310,26 @@ function declarationOf(
 }
 
 /**
- * Reads the `objects` section of a configuration (YAML or JSON) into the typed value. Missing means no section;
- * a wrong shape is refused with the message to show, and the form is never given a value it cannot use.
+ * Reads the `advanced.field_kinds` list of a configuration: each declaration is checked the way the form checks one,
+ * and a wrong item is refused with the message to show.
+ */
+export function declarationsOf(
+  value: unknown,
+): { ok: true; value: FieldKindDeclaration[] } | { ok: false; message: string } {
+  if (!Array.isArray(value)) return { ok: false, message: DECLARE_TEXT.shape("field_kinds") };
+  const list: FieldKindDeclaration[] = [];
+  for (const [index, item] of value.entries()) {
+    const parsed = declarationOf(item, index);
+    if (!parsed.ok) return parsed;
+    list.push(parsed.value);
+  }
+  return { ok: true, value: list };
+}
+
+/**
+ * Reads the `objects` section of a configuration (YAML or JSON) into the typed value. Missing means no section. The
+ * learning settings are read strictly; the gateway's `classes` and `slots` are kept exactly as they are. A wrong shape
+ * is refused with the message to show, and the form is never given a value it cannot use.
  */
 export function parseObjects(
   value: unknown,
@@ -310,7 +337,7 @@ export function parseObjects(
   if (value === undefined || value === null) return { ok: true, value: undefined };
   if (!isRecord(value)) return { ok: false, message: DECLARE_TEXT.shape("objects") };
   for (const key of Object.keys(value)) {
-    if (key !== "learning" && key !== "field_kinds")
+    if (key !== "learning" && key !== "classes" && key !== "slots")
       return { ok: false, message: DECLARE_TEXT.unknownKey(key) };
   }
   const out: ObjectsSpec = {};
@@ -319,16 +346,7 @@ export function parseObjects(
     if (!learning.ok) return learning;
     out.learning = learning.value;
   }
-  if (value.field_kinds !== undefined && value.field_kinds !== null) {
-    if (!Array.isArray(value.field_kinds))
-      return { ok: false, message: DECLARE_TEXT.shape("field_kinds") };
-    const list: FieldKindDeclaration[] = [];
-    for (const [index, item] of value.field_kinds.entries()) {
-      const parsed = declarationOf(item, index);
-      if (!parsed.ok) return parsed;
-      list.push(parsed.value);
-    }
-    out.field_kinds = list;
-  }
+  if (value.classes !== undefined) out.classes = value.classes;
+  if (value.slots !== undefined) out.slots = value.slots;
   return { ok: true, value: out };
 }

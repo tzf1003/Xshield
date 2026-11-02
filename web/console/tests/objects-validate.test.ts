@@ -22,7 +22,9 @@ import {
   checkField,
   checkKind,
   checkScope,
+  declarationChanges,
   declarationProblem,
+  declarationsOf,
   fieldKey,
   inScope,
   kindKey,
@@ -131,7 +133,6 @@ test("a whole list is checked: each entry, then the clashes between entries", ()
 test("the save dialog reads declarations and learning changes in words", () => {
   const before: SiteSpec["objects"] = undefined;
   const after: SiteSpec["objects"] = {
-    field_kinds: [decl("doc_id", "doctor", ["/api/appointments*"])],
     learning: {
       auto_learn: true,
       auto_tighten: false,
@@ -140,44 +141,50 @@ test("the save dialog reads declarations and learning changes in words", () => {
       auto_pause: true,
     },
   };
-  assert.deepEqual(objectChanges(before, after), [
-    "对象表 ＋ 字段 doc_id 归为医生（仅 /api/appointments*）",
-    "学习设置 自动收紧 开 → 关",
-  ]);
-  assert.deepEqual(objectChanges(after, before), [
-    "对象表 －1：字段 doc_id 归为医生（仅 /api/appointments*）",
-    "学习设置 自动收紧 关 → 开",
-  ]);
+  assert.deepEqual(objectChanges(before, after), ["学习设置 自动收紧 开 → 关"]);
+  assert.deepEqual(objectChanges(after, before), ["学习设置 自动收紧 关 → 开"]);
   assert.deepEqual(objectChanges(undefined, undefined), []);
   assert.deepEqual(objectChanges({}, { learning: undefined }), []);
-  assert.deepEqual(objectChanges(undefined, { field_kinds: [decl("doc", "doctor")] }), [
+
+  const declared = [decl("doc_id", "doctor", ["/api/appointments*"])];
+  assert.deepEqual(declarationChanges(undefined, declared), [
+    "对象表 ＋ 字段 doc_id 归为医生（仅 /api/appointments*）",
+  ]);
+  assert.deepEqual(declarationChanges(declared, undefined), [
+    "对象表 －1：字段 doc_id 归为医生（仅 /api/appointments*）",
+  ]);
+  assert.deepEqual(declarationChanges(undefined, [decl("doc", "doctor")]), [
     "对象表 ＋ 字段 doc 归为医生（全站）",
   ]);
   // The same field under the same scope with another class is a change of class, read as the move.
-  const moved = { field_kinds: [decl("doc_id", "doctor", ["/api/appointments*"])] };
-  const changed = { field_kinds: [decl("doc_id", "document", ["/api/appointments*"])] };
-  assert.deepEqual(objectChanges(moved, changed), [
+  const changed = [decl("doc_id", "document", ["/api/appointments*"])];
+  assert.deepEqual(declarationChanges(declared, changed), [
     "响应 /api/appointments* doc_id 从医生改为文档",
   ]);
 });
 
 test("the objects section of a configuration is read strictly", () => {
   assert.deepEqual(parseObjects(undefined), { ok: true, value: undefined });
-  const good = parseObjects({
-    field_kinds: [{ field: "doc_id", kind: "doctor", in: ["/api/appointments*"] }],
-  });
-  assert.deepEqual(good, {
-    ok: true,
-    value: { field_kinds: [{ field: "doc_id", kind: "doctor", in: ["/api/appointments*"] }] },
-  });
   assert.equal(parseObjects("x").ok, false);
-  assert.equal(parseObjects({ slots: [] }).ok, false);
-  assert.equal(parseObjects({ field_kinds: "doc_id" }).ok, false);
-  assert.equal(parseObjects({ field_kinds: [{ field: "doc_id" }] }).ok, false);
-  assert.equal(
-    parseObjects({ field_kinds: [{ field: "doc_id", kind: "doctor", in: [1] }] }).ok,
-    false,
+  assert.equal(parseObjects({ learnng: {} }).ok, false);
+  // Field kinds belong to the advanced section, so the objects section refuses them.
+  assert.equal(parseObjects({ field_kinds: [] }).ok, false);
+  // The gateway's classes and slots come through exactly as they are.
+  assert.deepEqual(parseObjects({ classes: [{ id: "doctor", name: "医生" }], slots: [] }), {
+    ok: true,
+    value: { classes: [{ id: "doctor", name: "医生" }], slots: [] },
+  });
+  // Field kinds are read item by item, the way the form reads one.
+  assert.deepEqual(
+    declarationsOf([{ field: "doc_id", kind: "doctor", in: ["/api/appointments*"] }]),
+    {
+      ok: true,
+      value: [{ field: "doc_id", kind: "doctor", in: ["/api/appointments*"] }],
+    },
   );
+  assert.equal(declarationsOf("doc_id").ok, false);
+  assert.equal(declarationsOf([{ field: "doc_id" }]).ok, false);
+  assert.equal(declarationsOf([{ field: "doc_id", kind: "doctor", in: [1] }]).ok, false);
   const learning = parseObjects({
     learning: {
       auto_learn: true,
@@ -252,14 +259,14 @@ test("declarations are added once, and a migrated synonym group leaves the synon
   };
   const once = withDeclarations(spec, [decl("doc_id", "doctor", ["/api/appointments*"])]);
   const twice = withDeclarations(once, [decl("docId", "doctor", ["/api/appointments*"])]);
-  assert.equal(twice.objects?.field_kinds?.length, 1);
+  assert.equal(twice.advanced?.field_kinds?.length, 1);
   const migrated = migrateSynonyms(
     spec,
     [["doc", "doctor"]],
     [decl("doc_id", "doctor", ["/api/a*"])],
   );
   assert.deepEqual(migrated.advanced?.synonyms, [["payment", "card"]]);
-  assert.deepEqual(migrated.objects?.field_kinds, [decl("doc_id", "doctor", ["/api/a*"])]);
+  assert.deepEqual(migrated.advanced?.field_kinds, [decl("doc_id", "doctor", ["/api/a*"])]);
   assert.deepEqual(spec.advanced?.synonyms, [
     ["doc", "doctor"],
     ["payment", "card"],

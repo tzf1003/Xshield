@@ -230,6 +230,7 @@
     "millis": 512,
     "failure": null
   },
+  "request_headers": [],
   "neighbors": {
     "prev": "req_01a1973698607cce885df41a7ec7609b",
     "next": "req_01a19739e4207e4f8519322900fd8643"

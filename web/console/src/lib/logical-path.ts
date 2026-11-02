@@ -1,13 +1,10 @@
 // The interface name of a request and its logical path (header-routes-design 2 and 3). A route rule names
 // the request from a header, a query parameter or a body field; the gateway joins the names to the URL path.
-// Pure functions: no React and no network. The same cases (tests/fixtures/logical-path-cases.json) are run
-// against the gateway's implementation, so a change here needs a case there.
+// Pure functions: no React and no network. The shared cases (tests/fixtures/logical-path-cases.json) are run against
+// the gateway's implementation as well, so a change here needs a case there; the console's own cases sit beside them.
 
 import type { ApiInfo, ApiUnknown, RouteRule, UnknownApiReason } from "../api/types.ts";
 import { matchesPattern, parsePattern } from "./patterns.ts";
-
-/** The logical path of a request whose name could not be read. Rule paths start with `/`, so no rule matches it. */
-export const UNKNOWN_LOGICAL_PATH = "unknown-api";
 
 /** The most body bytes read to name a request (REQUEST_BODY_MAX, crates/xshield-edge/src/proxy.rs). */
 export const BODY_PARSE_LIMIT = 48 * 1024;
@@ -69,10 +66,14 @@ export function ruleFor(routes: readonly RouteRule[], path: string): RouteRule |
 /** Computes the logical path of a request under the route rules. Without a covering rule it is the URL path. */
 export function logicalPath(routes: readonly RouteRule[], request: LogicalRequest): LogicalResult {
   const rule = ruleFor(routes, request.path);
-  if (rule === null) return { logical_path: request.path, api: null };
-  // A prefix rule's sub-path that ends in `/` would join to `//` with the name, which is not one logical path.
-  if (request.path.endsWith("/")) return unknown({ unknown: "route_subpath" });
-  if (rule.name_from.length === 0) return unknown({ unknown: "missing" });
+  if (rule === null) {
+    // An exact rule covers the sub-paths under it without naming them: they are unknown interfaces.
+    if (routes.some((item) => coversSubpath(item.path, request.path))) {
+      return unknown({ unknown: "route_subpath" }, request.path);
+    }
+    return { logical_path: request.path, api: null };
+  }
+  if (rule.name_from.length === 0) return unknown({ unknown: "missing" }, request.path);
 
   const context = contextOf(request);
   const names: string[] = [];
@@ -84,47 +85,59 @@ export function logicalPath(routes: readonly RouteRule[], request: LogicalReques
         segment.source === undefined
           ? { unknown: segment.reason }
           : { unknown: segment.reason, source: segment.source },
+        request.path,
       );
     }
     names.push(segment.value);
-    from.push(segment.from);
+    from.push(...segment.from);
   }
   const name = names.join("/");
-  return { logical_path: `${request.path}/${name}`, api: { name, from } };
+  // A trailing slash is not part of the logical path: `/api/` under the prefix rule `/api*` names `/api/list`.
+  return { logical_path: `${request.path.replace(/\/+$/, "")}/${name}`, api: { name, from } };
 }
 
-function unknown(api: ApiUnknown): LogicalResult {
-  return { logical_path: UNKNOWN_LOGICAL_PATH, api };
+/** Whether an exact rule covers `path` as a sub-path: under its path at a segment boundary, or with a trailing slash. */
+function coversSubpath(rulePath: string, path: string): boolean {
+  if (rulePath.endsWith("*")) return false;
+  return (
+    path.length > rulePath.length && path.startsWith(rulePath) && path[rulePath.length] === "/"
+  );
+}
+
+/** An unknown interface keeps the URL path as its logical path, and never enters an entry or a bypass. */
+function unknown(api: ApiUnknown, path: string): LogicalResult {
+  return { logical_path: path, api };
 }
 
 type Segment =
-  | { ok: true; value: string; from: string }
+  | { ok: true; value: string; from: string[] }
   | { ok: false; reason: UnknownApiReason; source?: string };
 
 /**
- * One segment of the name. Every location of the group is read in order; a location that fails (repeated, or a
- * body that cannot be read) decides the reason. Then the segment needs exactly one value: none is `missing`,
- * different values are a `conflict`, and a value outside the name set is `invalid_name`.
+ * One part of the name, read the way the gateway reads it. The locations of the group are read in order: a location
+ * that fails (a repeated name, a body that cannot be read) decides the reason at once; a value that is not a plain
+ * name is `invalid_name`; a value that differs from the first is a `conflict`, named by the group's first location.
+ * With no value at all the part is `missing`, named by the first location.
  */
 function readSegment(group: readonly string[], context: Context): Segment {
-  if (group.length === 0) return { ok: false, reason: "missing" };
-  const values: Array<{ source: string; text: string }> = [];
-  let other: string | null = null;
+  const first = group[0];
+  if (first === undefined) return { ok: false, reason: "missing" };
+  let value: string | null = null;
+  const from: string[] = [];
   for (const source of group) {
     const read = readLocation(source, context);
     if (read.state === "fail") return { ok: false, reason: read.reason, source };
-    if (read.state === "one") values.push({ source, text: read.text });
-    if (read.state === "other" && other === null) other = source;
+    if (read.state === "none") continue;
+    if (read.state === "other" || !NAME_VALUE.test(read.text) || /^\.+$/.test(read.text)) {
+      return { ok: false, reason: "invalid_name", source };
+    }
+    if (value !== null && read.text !== value)
+      return { ok: false, reason: "conflict", source: first };
+    value ??= read.text;
+    from.push(source);
   }
-  if (other !== null) return { ok: false, reason: "invalid_name", source: other };
-  const first = values[0];
-  if (first === undefined) return { ok: false, reason: "missing", source: group[0] };
-  const differing = values.find((item) => item.text !== first.text);
-  if (differing !== undefined) return { ok: false, reason: "conflict", source: differing.source };
-  if (!NAME_VALUE.test(first.text) || first.text === "." || first.text === "..") {
-    return { ok: false, reason: "invalid_name", source: first.source };
-  }
-  return { ok: true, value: first.text, from: first.source };
+  if (value === null) return { ok: false, reason: "missing", source: first };
+  return { ok: true, value, from };
 }
 
 type Context = {
@@ -199,18 +212,21 @@ function mediaType(contentType: string | null): string {
   return (contentType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
 }
 
-/** Whether the body can be read for names, and how. A body that is absent or empty has no fields. */
+/**
+ * Whether the body can be read for names, and how. A body that is absent or empty has no fields. A body over the parse
+ * limit is one the gateway did not read, so it is too large whatever its type; otherwise the type decides.
+ */
 function readBody(body: string | null, contentType: string | null): BodyInfo {
   if (body === null || body.length === 0) return { kind: "none" };
-  const media = mediaType(contentType);
-  if (media !== "application/json" && media !== "application/x-www-form-urlencoded") {
-    return { kind: "fail", reason: "body_unsupported" };
-  }
   if (new TextEncoder().encode(body).length > BODY_PARSE_LIMIT) {
     return { kind: "fail", reason: "body_too_large" };
   }
+  const media = mediaType(contentType);
   if (media === "application/x-www-form-urlencoded")
     return { kind: "form", pairs: parseForm(body) };
+  if (media !== "application/json" && !media.endsWith("+json")) {
+    return { kind: "fail", reason: "body_unsupported" };
+  }
   // JSON.parse is the reference for what counts as JSON; the tree keeps duplicate keys, which it does not.
   try {
     JSON.parse(body);
@@ -251,28 +267,50 @@ type JsonNode =
   | { kind: "array" }
   | { kind: "object"; entries: Array<[string, JsonNode]> };
 
-/** Reads a field path (`a.b.c`) through objects. A duplicate key, an array on the path and a missing key are read
- * as the rules say: duplicates and arrays are not names, a missing key is no value. */
-function jsonRead(root: JsonNode, name: string): Read {
-  let node: JsonNode = root;
-  for (const key of name.split(".")) {
-    if (node.kind === "array") return { state: "fail", reason: "body_unsupported" };
-    if (node.kind !== "object") return NONE;
-    const hits = node.entries.filter(([entry]) => entry === key);
-    if (hits.length > 1) return { state: "fail", reason: "repeated" };
-    const hit = hits[0];
-    if (hit === undefined) return NONE;
-    node = hit[1];
+/** What a walk through a JSON document found at a field path. */
+type Hit =
+  | { kind: "absent" }
+  | { kind: "text"; text: string }
+  | { kind: "other" }
+  | { kind: "many" };
+
+/** Two hits at one path: a lone hit stands, two that both hit are a repeat. */
+function mergeHits(first: Hit, second: Hit): Hit {
+  if (first.kind === "absent") return second;
+  if (second.kind === "absent") return first;
+  return { kind: "many" };
+}
+
+/**
+ * Walks a field path (`a.b.c`) through objects. An array or a scalar on the way holds no name, so it is absent; a key
+ * that repeats on the path is a repeat, and a repeated key off the path does not matter. A value at the end that is not
+ * a string is other (not a name), and a null is other too.
+ */
+function walk(node: JsonNode, keys: readonly string[]): Hit {
+  const [head, ...rest] = keys;
+  if (head === undefined || node.kind !== "object") return { kind: "absent" };
+  let hit: Hit = { kind: "absent" };
+  for (const [key, child] of node.entries) {
+    if (key !== head) continue;
+    let found: Hit;
+    if (rest.length > 0) found = walk(child, rest);
+    else found = child.kind === "string" ? { kind: "text", text: child.value } : { kind: "other" };
+    hit = mergeHits(hit, found);
   }
-  switch (node.kind) {
-    case "string":
-      return { state: "one", text: node.value };
-    case "null":
+  return hit;
+}
+
+function jsonRead(root: JsonNode, name: string): Read {
+  const hit = walk(root, name.split("."));
+  switch (hit.kind) {
+    case "absent":
       return NONE;
-    case "array":
-      return { state: "fail", reason: "body_unsupported" };
-    default:
+    case "text":
+      return { state: "one", text: hit.text };
+    case "other":
       return { state: "other" };
+    case "many":
+      return { state: "fail", reason: "repeated" };
   }
 }
 

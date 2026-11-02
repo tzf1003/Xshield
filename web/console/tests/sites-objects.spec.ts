@@ -183,7 +183,7 @@ test("confirming the candidates puts their declarations in the save dialog", asy
   await expect(changes).toContainText("对象表 ＋ 字段 id 归为患者（仅 /api/patients*）");
 });
 
-test("the learning settings change the configuration, and the change goes through the save dialog", async ({
+test("the learning settings show their values and stay read-only until the gateway accepts them", async ({
   page,
 }) => {
   await openMap(page, "/sites/emr?tab=objects");
@@ -192,13 +192,9 @@ test("the learning settings change the configuration, and the change goes throug
   const drawer = page.getByRole("dialog", { name: "学习设置" });
   await expect(drawer.getByRole("switch", { name: "agent" })).toBeDisabled();
   await expect(drawer).toContainText("没有配置模型，agent 暂不可用。");
-  await drawer.getByRole("switch", { name: "自动收紧" }).click();
-  await drawer.getByRole("button", { name: "保存…" }).click();
-
-  const save = page.getByRole("dialog", { name: "保存 emr 的配置" });
-  await expect(save.getByRole("list", { name: "改动摘要" })).toContainText(
-    "学习设置 自动收紧 开 → 关",
-  );
+  await expect(drawer).toContainText("网关接受对象表的学习设置之后，这里的开关才能保存。");
+  await expect(drawer.getByRole("switch", { name: "自动收紧" })).toBeDisabled();
+  await expect(drawer.getByRole("button", { name: "保存…" })).toBeDisabled();
 });
 
 test("the synonym migration turns a group into declarations, and the save removes the group", async ({

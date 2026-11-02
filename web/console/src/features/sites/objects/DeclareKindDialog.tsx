@@ -64,7 +64,7 @@ export function DeclareKindDialog({
   const kind = kindChoice === NEW_KIND ? newKind.trim().toLowerCase() : kindChoice;
   const declaration: FieldKindDeclaration =
     mode === "only" ? { field: name, kind, in: patterns } : { field: name, kind };
-  const list = working.objects?.field_kinds ?? [];
+  const list = working.advanced?.field_kinds ?? [];
 
   // The problems, the first of which is shown once the dialog has been touched and blocks both buttons.
   const problems: string[] = [];

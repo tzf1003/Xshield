@@ -14,6 +14,7 @@ import type {
 } from "../../api/types.ts";
 import {
   declarationKey,
+  declarationsOf,
   learningText,
   parseLearning,
   parseObjects,
@@ -241,6 +242,11 @@ function advancedOf(value: unknown): Check<Advanced | undefined> {
     }
     out.synonyms = pairs;
   }
+  if (value.field_kinds !== undefined && value.field_kinds !== null) {
+    const declarations = declarationsOf(value.field_kinds);
+    if (!declarations.ok) return declarations;
+    out.field_kinds = declarations.value;
+  }
   return { ok: true, value: out };
 }
 
@@ -397,17 +403,32 @@ export function rebaseSpec(
     latest.objects?.learning,
   );
   const declarations = mergeList(
-    base.objects?.field_kinds ?? [],
-    mine.objects?.field_kinds ?? [],
-    latest.objects?.field_kinds ?? [],
+    base.advanced?.field_kinds ?? [],
+    mine.advanced?.field_kinds ?? [],
+    latest.advanced?.field_kinds ?? [],
     declarationKey,
   );
+  if (declarations.length > 0) advanced.field_kinds = declarations;
+  // The gateway's sections: a draft never edits them, so they come from the newer version unless it changed them.
+  const classes = pick<unknown>(
+    "objects.classes",
+    base.objects?.classes,
+    mine.objects?.classes,
+    latest.objects?.classes,
+  );
+  const slots = pick<unknown>(
+    "objects.slots",
+    base.objects?.slots,
+    mine.objects?.slots,
+    latest.objects?.slots,
+  );
   const objects: ObjectsSpec | undefined =
-    learning === undefined && declarations.length === 0
+    learning === undefined && classes === undefined && slots === undefined
       ? undefined
       : {
           ...(learning === undefined ? {} : { learning }),
-          ...(declarations.length === 0 ? {} : { field_kinds: declarations }),
+          ...(classes === undefined ? {} : { classes }),
+          ...(slots === undefined ? {} : { slots }),
         };
   const spec: SiteSpec = {
     name: latest.name,

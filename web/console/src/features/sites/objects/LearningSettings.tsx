@@ -19,6 +19,12 @@ type Props = {
 
 const text = OBJECT_TEXT.learning;
 
+/**
+ * Whether the drawer can save a change. The gateway refuses `objects.learning` until its object map accepts the key,
+ * so until then the values are shown but cannot be changed. Set to true once the gateway takes the key.
+ */
+export const LEARNING_SAVE_READY = false;
+
 function sameLearning(a: Learning, b: Learning): boolean {
   return (
     a.auto_learn === b.auto_learn &&
@@ -61,6 +67,7 @@ function NumberField({
 export function LearningSettings({ working, agentConfigured, onClose, onApply }: Props) {
   const saved = effectiveLearning(working.objects?.learning);
   const [value, setValue] = useState<Learning>(saved);
+  const editable = LEARNING_SAVE_READY;
   const changed = !sameLearning(value, saved);
   const countsOk =
     Number.isInteger(value.thresholds.uses) &&
@@ -69,19 +76,21 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
     value.thresholds.sessions >= 1 &&
     Number.isInteger(value.agent.daily_limit) &&
     value.agent.daily_limit >= 0;
-  const canSave = changed && countsOk;
+  const canSave = editable && changed && countsOk;
   const agentOn = agentConfigured && value.agent.enabled;
 
   return (
     <Drawer open placement="right" size={460} onClose={onClose} title={text.title}>
       <div className="stack">
         <div className="small muted">{text.intro}</div>
+        {editable ? null : <div className="small muted">{text.pending}</div>}
 
         <div className="obj-learning-row">
           <span>{text.autoLearn.name}</span>
           <Switch
             aria-label={text.autoLearn.name}
             checked={value.auto_learn}
+            disabled={!editable}
             checkedChildren={text.on}
             unCheckedChildren={text.off}
             onChange={(checked) => setValue({ ...value, auto_learn: checked })}
@@ -94,6 +103,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
           <Switch
             aria-label={text.autoTighten.name}
             checked={value.auto_tighten}
+            disabled={!editable}
             checkedChildren={text.on}
             unCheckedChildren={text.off}
             onChange={(checked) => setValue({ ...value, auto_tighten: checked })}
@@ -106,7 +116,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
           <Switch
             aria-label={text.agent.name}
             checked={agentOn}
-            disabled={!agentConfigured}
+            disabled={!agentConfigured || !editable}
             checkedChildren={text.on}
             unCheckedChildren={text.off}
             onChange={(checked) =>
@@ -122,7 +132,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
             label={text.agent.daily}
             value={value.agent.daily_limit}
             min={0}
-            disabled={!agentOn}
+            disabled={!agentOn || !editable}
             onChange={(daily) =>
               setValue({ ...value, agent: { ...value.agent, daily_limit: daily } })
             }
@@ -137,6 +147,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
               label={text.thresholds.usesLabel}
               value={value.thresholds.uses}
               min={1}
+              disabled={!editable}
               onChange={(uses) => setValue({ ...value, thresholds: { ...value.thresholds, uses } })}
             />
             <span>{text.thresholds.uses}</span>
@@ -144,6 +155,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
               label={text.thresholds.sessionsLabel}
               value={value.thresholds.sessions}
               min={1}
+              disabled={!editable}
               onChange={(sessions) =>
                 setValue({ ...value, thresholds: { ...value.thresholds, sessions } })
               }
@@ -158,6 +170,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
           <Switch
             aria-label={text.autoPause.name}
             checked={value.auto_pause}
+            disabled={!editable}
             checkedChildren={text.on}
             unCheckedChildren={text.off}
             onChange={(checked) => setValue({ ...value, auto_pause: checked })}

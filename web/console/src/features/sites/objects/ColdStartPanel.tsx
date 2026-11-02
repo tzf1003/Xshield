@@ -29,7 +29,7 @@ export function ColdStartPanel({ site, working, onApply, onLater }: Props) {
     picked[item.kind] ?? (item.note === null && usable(item));
   const chosen = candidates.filter((item) => isChecked(item) && usable(item));
 
-  const existing = working.objects?.field_kinds ?? [];
+  const existing = working.advanced?.field_kinds ?? [];
   const known = new Set(existing.map(declarationKey));
   const declared: FieldKindDeclaration[] = chosen.flatMap(candidateDeclarations);
   const fresh = [...new Map(declared.map((item) => [declarationKey(item), item])).values()].filter(

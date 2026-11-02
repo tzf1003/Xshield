@@ -1,19 +1,23 @@
 {
+  "description": "Shared cases for the logical path and interface name (docs/header-routes-design section 2). The gateway (crates/xshield-core, context/route.rs) and the console (web/console/src/lib/logical-path.ts) must both produce `expect` for `request` under `routes`. `headers` is a list of [name, value] pairs and may repeat a name; `body` is the raw body text (null for an empty body); `body_unread` true means the gateway did not read the body; `query` is the raw query string without `?`.",
   "cases": [
     {
-      "name": "没有规则：逻辑路径就是 URL 路径",
+      "name": "no route keeps the URL path",
       "routes": [],
       "request": {
-        "path": "/rest/basket/6",
+        "path": "/api/patients/8",
         "query": null,
         "content_type": null,
         "headers": [],
         "body": null
       },
-      "expect": { "logical_path": "/rest/basket/6", "api": null }
+      "expect": {
+        "logical_path": "/api/patients/8",
+        "api": null
+      }
     },
     {
-      "name": "请求头来源：两段都取到，请求头名不区分大小写，正文不参与",
+      "name": "a header names the interface",
       "routes": [
         {
           "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
@@ -25,10 +29,10 @@
         "query": null,
         "content_type": "application/json",
         "headers": [
-          ["x-service-id", "bus.buriedPointService"],
-          ["X-SERVICE-METHOD", "saveBuriedPointList"]
+          ["X-Service-Id", "bus.buriedPointService"],
+          ["X-Service-Method", "saveBuriedPointList"]
         ],
-        "body": "[[{\"a\":1}]]"
+        "body": "[[{\"list\":[]}]]"
       },
       "expect": {
         "logical_path": "/weixin/wx/mp/wx361163d21a65f679/gateway/bus.buriedPointService/saveBuriedPointList",
@@ -39,413 +43,330 @@
       }
     },
     {
-      "name": "查询参数来源：源站在查询参数和正文都认，两处一致",
-      "routes": [{ "path": "/index.php", "name_from": [["query.action", "body.action"]] }],
+      "name": "header names match without regard to case",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
       "request": {
-        "path": "/index.php",
-        "query": "action=doctorList&page=2",
-        "content_type": "application/x-www-form-urlencoded",
-        "headers": [],
-        "body": "action=doctorList"
+        "path": "/gw",
+        "query": null,
+        "content_type": null,
+        "headers": [["x-service-method", "getDoctorById"]],
+        "body": null
       },
       "expect": {
-        "logical_path": "/index.php/doctorList",
-        "api": { "name": "doctorList", "from": ["query.action"] }
+        "logical_path": "/gw/getDoctorById",
+        "api": {"name": "getDoctorById", "from": ["header.X-Service-Method"]}
       }
     },
     {
-      "name": "正文 JSON 字段：读取顶层字段，参数带 charset",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
+      "name": "a repeated header is an unknown interface",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/gw",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-Service-Method", "a"], ["X-Service-Method", "a"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/gw",
+        "api": {"unknown": "repeated", "source": "header.X-Service-Method"}
+      }
+    },
+    {
+      "name": "a missing source is an unknown interface",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/gw",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-Service-Method", "save"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/gw",
+        "api": {"unknown": "missing", "source": "header.X-Service-Id"}
+      }
+    },
+    {
+      "name": "a value outside the plain name charset is invalid",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/gw",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-Service-Method", "save/list"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/gw",
+        "api": {"unknown": "invalid_name", "source": "header.X-Service-Method"}
+      }
+    },
+    {
+      "name": "a query parameter names the interface when the body does not",
+      "routes": [
+        {"path": "/index.php", "name_from": [["query.action", "body.action"]]}
+      ],
+      "request": {
+        "path": "/index.php",
+        "query": "action=list",
+        "content_type": "application/x-www-form-urlencoded",
+        "headers": [],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/index.php/list",
+        "api": {"name": "list", "from": ["query.action"]}
+      }
+    },
+    {
+      "name": "query and body that agree name the interface once",
+      "routes": [
+        {"path": "/index.php", "name_from": [["query.action", "body.action"]]}
+      ],
+      "request": {
+        "path": "/index.php",
+        "query": "action=list",
+        "content_type": "application/json",
+        "headers": [],
+        "body": "{\"action\": \"list\"}"
+      },
+      "expect": {
+        "logical_path": "/index.php/list",
+        "api": {"name": "list", "from": ["query.action", "body.action"]}
+      }
+    },
+    {
+      "name": "query and body that disagree are a conflict",
+      "routes": [
+        {"path": "/index.php", "name_from": [["query.action", "body.action"]]}
+      ],
+      "request": {
+        "path": "/index.php",
+        "query": "action=get",
+        "content_type": "application/json",
+        "headers": [],
+        "body": "{\"action\": \"list\"}"
+      },
+      "expect": {
+        "logical_path": "/index.php",
+        "api": {"unknown": "conflict", "source": "query.action"}
+      }
+    },
+    {
+      "name": "a JSON body field names the interface",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
       "request": {
         "path": "/api/rpc",
         "query": null,
         "content_type": "application/json; charset=utf-8",
         "headers": [],
-        "body": "{\"method\":\"user.get\",\"id\":5}"
+        "body": "{\"id\": 1, \"method\": \"getDoctorById\"}"
       },
       "expect": {
-        "logical_path": "/api/rpc/user.get",
-        "api": { "name": "user.get", "from": ["body.method"] }
+        "logical_path": "/api/rpc/getDoctorById",
+        "api": {"name": "getDoctorById", "from": ["body.method"]}
       }
     },
     {
-      "name": "正文 JSON 字段：a.b.c 逐层读取嵌套字段",
-      "routes": [{ "path": "/api/call", "name_from": [["body.op.name"]] }],
-      "request": {
-        "path": "/api/call",
-        "query": null,
-        "content_type": "application/json",
-        "headers": [],
-        "body": "{\"op\":{\"name\":\"list.items\"},\"args\":[1,2]}"
-      },
-      "expect": {
-        "logical_path": "/api/call/list.items",
-        "api": { "name": "list.items", "from": ["body.op.name"] }
-      }
-    },
-    {
-      "name": "表单正文：按字段名取值",
-      "routes": [{ "path": "/form/submit", "name_from": [["body.action"]] }],
-      "request": {
-        "path": "/form/submit",
-        "query": null,
-        "content_type": "application/x-www-form-urlencoded",
-        "headers": [],
-        "body": "module=doctor&action=getById&id=7"
-      },
-      "expect": {
-        "logical_path": "/form/submit/getById",
-        "api": { "name": "getById", "from": ["body.action"] }
-      }
-    },
-    {
-      "name": "缺失：第二段的请求头没有出现",
+      "name": "a nested JSON field names the interface by its path",
       "routes": [
-        {
-          "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-          "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]
-        }
+        {"path": "/api/rpc", "name_from": [["body.call.name"]]}
       ],
-      "request": {
-        "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-        "query": null,
-        "content_type": "application/json",
-        "headers": [["X-Service-Id", "bus.buriedPointService"]],
-        "body": null
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "missing", "source": "header.X-Service-Method" }
-      }
-    },
-    {
-      "name": "重复：同一个请求头出现两次",
-      "routes": [
-        {
-          "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-          "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]
-        }
-      ],
-      "request": {
-        "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-        "query": null,
-        "content_type": null,
-        "headers": [
-          ["X-Service-Id", "bus.a"],
-          ["X-Service-Method", "save"],
-          ["X-Service-Method", "delete"]
-        ],
-        "body": null
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "repeated", "source": "header.X-Service-Method" }
-      }
-    },
-    {
-      "name": "冲突：源站两处都认的接口名，两处取值不同",
-      "routes": [{ "path": "/index.php", "name_from": [["query.action", "body.action"]] }],
-      "request": {
-        "path": "/index.php",
-        "query": "action=getDoctor",
-        "content_type": "application/x-www-form-urlencoded",
-        "headers": [],
-        "body": "action=deleteDoctor"
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "conflict", "source": "body.action" }
-      }
-    },
-    {
-      "name": "非法字符：名称含斜杠",
-      "routes": [
-        {
-          "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-          "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]
-        }
-      ],
-      "request": {
-        "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-        "query": null,
-        "content_type": null,
-        "headers": [
-          ["X-Service-Id", "bus.a"],
-          ["X-Service-Method", "save/list"]
-        ],
-        "body": null
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "invalid_name", "source": "header.X-Service-Method" }
-      }
-    },
-    {
-      "name": "非法字符：名称超过 64 个字符",
-      "routes": [
-        {
-          "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-          "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]
-        }
-      ],
-      "request": {
-        "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-        "query": null,
-        "content_type": null,
-        "headers": [
-          ["X-Service-Id", "bus.a"],
-          ["X-Service-Method", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
-        ],
-        "body": null
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "invalid_name", "source": "header.X-Service-Method" }
-      }
-    },
-    {
-      "name": "非法字符：名称为 .. 不作为接口名",
-      "routes": [
-        {
-          "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-          "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]
-        }
-      ],
-      "request": {
-        "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
-        "query": null,
-        "content_type": null,
-        "headers": [
-          ["X-Service-Id", "bus.a"],
-          ["X-Service-Method", ".."]
-        ],
-        "body": null
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "invalid_name", "source": "header.X-Service-Method" }
-      }
-    },
-    {
-      "name": "JSON 重复键：字段路径上同一个键出现两次",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
       "request": {
         "path": "/api/rpc",
         "query": null,
         "content_type": "application/json",
         "headers": [],
-        "body": "{\"method\":\"user.get\",\"method\":\"user.delete\"}"
+        "body": "{\"call\": {\"name\": \"listDoctors\", \"args\": []}}"
       },
       "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "repeated", "source": "body.method" }
+        "logical_path": "/api/rpc/listDoctors",
+        "api": {"name": "listDoctors", "from": ["body.call.name"]}
       }
     },
     {
-      "name": "JSON 重复键：不在字段路径上的重复键不影响取值",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
+      "name": "a duplicate JSON key on the path is refused",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
       "request": {
         "path": "/api/rpc",
         "query": null,
         "content_type": "application/json",
         "headers": [],
-        "body": "{\"meta\":{\"a\":1,\"a\":2},\"method\":\"user.get\"}"
+        "body": "{\"method\": \"a\", \"method\": \"b\"}"
       },
       "expect": {
-        "logical_path": "/api/rpc/user.get",
-        "api": { "name": "user.get", "from": ["body.method"] }
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "repeated", "source": "body.method"}
       }
     },
     {
-      "name": "正文是数组（批量调用）：字段路径上遇到数组",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
+      "name": "an array on the path is a batch call and is not taken",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
       "request": {
         "path": "/api/rpc",
         "query": null,
         "content_type": "application/json",
         "headers": [],
-        "body": "[{\"method\":\"user.get\"},{\"method\":\"user.delete\"}]"
+        "body": "[{\"method\": \"a\"}, {\"method\": \"b\"}]"
       },
       "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "body_unsupported", "source": "body.method" }
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "missing", "source": "body.method"}
       }
     },
     {
-      "name": "正文不能解析为 JSON（包括加密的正文）",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
+      "name": "a JSON body that does not parse is refused",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
       "request": {
         "path": "/api/rpc",
         "query": null,
         "content_type": "application/json",
         "headers": [],
-        "body": "U2FsdGVkX1+7Rc8s2dX0wQ=="
+        "body": "{\"method\": \"a\""
       },
       "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "body_not_json", "source": "body.method" }
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "body_not_json", "source": "body.method"}
       }
     },
     {
-      "name": "正文类型不是 JSON 或表单",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
+      "name": "a body that is neither JSON nor a form is unsupported",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
       "request": {
         "path": "/api/rpc",
         "query": null,
         "content_type": "text/plain",
         "headers": [],
-        "body": "method=user.get"
+        "body": "method=a"
       },
       "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "body_unsupported", "source": "body.method" }
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "body_unsupported", "source": "body.method"}
       }
     },
     {
-      "name": "正文超过解析上限 [body-too-large]",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
+      "name": "a body that was not read is too large",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
       "request": {
         "path": "/api/rpc",
         "query": null,
         "content_type": "application/json",
         "headers": [],
-        "body": null
+        "body": null,
+        "body_unread": true
       },
       "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "body_too_large", "source": "body.method" }
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "body_too_large", "source": "body.method"}
       }
     },
     {
-      "name": "没有正文：正文字段缺失",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
+      "name": "a form field is matched by its whole dotted name",
+      "routes": [
+        {"path": "/f", "name_from": [["body.a.b"]]}
+      ],
       "request": {
-        "path": "/api/rpc",
+        "path": "/f",
         "query": null,
-        "content_type": null,
-        "headers": [],
-        "body": null
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "missing", "source": "body.method" }
-      }
-    },
-    {
-      "name": "正文字段的值是数字：不作为接口名",
-      "routes": [{ "path": "/api/rpc", "name_from": [["body.method"]] }],
-      "request": {
-        "path": "/api/rpc",
-        "query": null,
-        "content_type": "application/json",
-        "headers": [],
-        "body": "{\"method\":5}"
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "invalid_name", "source": "body.method" }
-      }
-    },
-    {
-      "name": "查询参数：没有查询串时缺失",
-      "routes": [{ "path": "/index.php", "name_from": [["query.action"]] }],
-      "request": {
-        "path": "/index.php",
-        "query": null,
-        "content_type": null,
-        "headers": [],
-        "body": null
-      },
-      "expect": {
-        "logical_path": "unknown-api",
-        "api": { "unknown": "missing", "source": "query.action" }
-      }
-    },
-    {
-      "name": "源站两处都认：正文里没有这个字段时，以查询参数为准",
-      "routes": [{ "path": "/index.php", "name_from": [["query.action", "body.action"]] }],
-      "request": {
-        "path": "/index.php",
-        "query": "action=getDoctor",
         "content_type": "application/x-www-form-urlencoded",
         "headers": [],
-        "body": "module=doctor"
+        "body": "a.b=doctor&c=1"
       },
       "expect": {
-        "logical_path": "/index.php/getDoctor",
-        "api": { "name": "getDoctor", "from": ["query.action"] }
+        "logical_path": "/f/doctor",
+        "api": {"name": "doctor", "from": ["body.a.b"]}
       }
     },
     {
-      "name": "路径以 / 结尾：子路径无法接在接口名前面",
-      "routes": [{ "path": "/gw/*", "name_from": [["header.X-Op"]] }],
+      "name": "a path under an exact route is never named by its spelling",
+      "routes": [
+        {
+          "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
+          "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]
+        }
+      ],
+      "request": {
+        "path": "/weixin/wx/mp/wx361163d21a65f679/gateway/bus.buriedPointService/saveBuriedPointList",
+        "query": null,
+        "content_type": null,
+        "headers": [],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/weixin/wx/mp/wx361163d21a65f679/gateway/bus.buriedPointService/saveBuriedPointList",
+        "api": {"unknown": "route_subpath"}
+      }
+    },
+    {
+      "name": "a trailing slash on an exact route is not the route",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
       "request": {
         "path": "/gw/",
         "query": null,
         "content_type": null,
-        "headers": [["X-Op", "getItem"]],
-        "body": null
-      },
-      "expect": { "logical_path": "unknown-api", "api": { "unknown": "route_subpath" } }
-    },
-    {
-      "name": "前缀规则 /x/*：子路径上的请求取得接口名",
-      "routes": [{ "path": "/rest/api/*", "name_from": [["header.X-Op"]] }],
-      "request": {
-        "path": "/rest/api/items/7",
-        "query": null,
-        "content_type": null,
-        "headers": [["X-Op", "getItem"]],
+        "headers": [["X-Service-Method", "save"]],
         "body": null
       },
       "expect": {
-        "logical_path": "/rest/api/items/7/getItem",
-        "api": { "name": "getItem", "from": ["header.X-Op"] }
+        "logical_path": "/gw/",
+        "api": {"unknown": "route_subpath"}
       }
     },
     {
-      "name": "前缀规则 /x/*：不覆盖父路径本身",
-      "routes": [{ "path": "/rest/api/*", "name_from": [["header.X-Op"]] }],
-      "request": {
-        "path": "/rest/api",
-        "query": null,
-        "content_type": null,
-        "headers": [["X-Op", "getItem"]],
-        "body": null
-      },
-      "expect": { "logical_path": "/rest/api", "api": null }
-    },
-    {
-      "name": "精确规则：不覆盖它的子路径",
-      "routes": [{ "path": "/rest/api", "name_from": [["header.X-Op"]] }],
-      "request": {
-        "path": "/rest/api/items",
-        "query": null,
-        "content_type": null,
-        "headers": [["X-Op", "getItem"]],
-        "body": null
-      },
-      "expect": { "logical_path": "/rest/api/items", "api": null }
-    },
-    {
-      "name": "第一条匹配的规则生效",
+      "name": "a path outside every route keeps its URL path",
       "routes": [
-        { "path": "/a/b", "name_from": [["header.X-One"]] },
-        { "path": "/a/*", "name_from": [["header.X-Two"]] }
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
       ],
       "request": {
-        "path": "/a/b",
+        "path": "/other",
         "query": null,
         "content_type": null,
-        "headers": [
-          ["X-One", "first"],
-          ["X-Two", "second"]
-        ],
+        "headers": [["X-Service-Method", "save"]],
         "body": null
       },
       "expect": {
-        "logical_path": "/a/b/first",
-        "api": { "name": "first", "from": ["header.X-One"] }
+        "logical_path": "/other",
+        "api": null
+      }
+    },
+    {
+      "name": "a prefix route fixes only its own segments and drops a trailing slash",
+      "routes": [
+        {"path": "/api*", "name_from": [["header.X-M"]]}
+      ],
+      "request": {
+        "path": "/api/",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-M", "list"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/api/list",
+        "api": {"name": "list", "from": ["header.X-M"]}
       }
     }
   ]

@@ -2,7 +2,14 @@
 // is the JSON object, and comments are not kept.
 
 import { parseDocument, stringify } from "yaml";
-import type { Advanced, ObjectsSpec, SiteSpec } from "../api/types.ts";
+import type {
+  Advanced,
+  FieldKindDeclaration,
+  LearningSettings,
+  ObjectsSpec,
+  SiteSpec,
+} from "../api/types.ts";
+import { DEFAULT_LEARNING } from "./objects-validate.ts";
 import { shapeIssues } from "./site-validate.ts";
 
 const TOP_KEYS = [
@@ -26,6 +33,7 @@ const ADVANCED_KEYS = [
   "allow_cache_minutes",
   "secret_fields",
   "synonyms",
+  "field_kinds",
 ] as const;
 
 /** Keys in the order a person reads them, with empty optional parts left out. */
@@ -46,7 +54,8 @@ export function orderSpec(spec: SiteSpec): SiteSpec {
       const value = spec.advanced[key];
       if (value === undefined) continue;
       if (Array.isArray(value) && value.length === 0) continue;
-      advanced[key] = value;
+      advanced[key] =
+        key === "field_kinds" ? orderDeclarations(value as FieldKindDeclaration[]) : value;
     }
     if (Object.keys(advanced).length > 0) out.advanced = advanced;
   }
@@ -55,22 +64,42 @@ export function orderSpec(spec: SiteSpec): SiteSpec {
   return out as unknown as SiteSpec;
 }
 
-/** The object map section with its learning settings in a fixed key order, so the same settings always compare equal. */
+/** Declarations in the order a person reads them: field, kind, then the scope when there is one. */
+function orderDeclarations(list: FieldKindDeclaration[]): unknown[] {
+  return list.map((item) =>
+    item.in === undefined
+      ? { field: item.field, kind: item.kind }
+      : { field: item.field, kind: item.kind, in: item.in },
+  );
+}
+
+/**
+ * The object map section in a fixed key order, so the same settings always compare equal. Learning settings at their
+ * defaults are left out: the gateway refuses the key until it accepts learning settings, so a save that does not change
+ * them must not carry it. The gateway's `classes` and `slots` are passed on exactly as they are.
+ */
 function orderObjects(objects: ObjectsSpec | undefined): ObjectsSpec | undefined {
   if (!objects) return undefined;
   const out: ObjectsSpec = {};
-  const learning = objects.learning;
-  if (learning) {
-    out.learning = {
-      auto_learn: learning.auto_learn,
-      auto_tighten: learning.auto_tighten,
-      agent: { enabled: learning.agent.enabled, daily_limit: learning.agent.daily_limit },
-      thresholds: { uses: learning.thresholds.uses, sessions: learning.thresholds.sessions },
-      auto_pause: learning.auto_pause,
-    };
+  if (objects.learning) {
+    const learning = orderLearning(objects.learning);
+    if (JSON.stringify(learning) !== JSON.stringify(orderLearning(DEFAULT_LEARNING))) {
+      out.learning = learning;
+    }
   }
-  if (objects.field_kinds && objects.field_kinds.length > 0) out.field_kinds = objects.field_kinds;
+  if (objects.classes !== undefined) out.classes = objects.classes;
+  if (objects.slots !== undefined) out.slots = objects.slots;
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function orderLearning(learning: LearningSettings): LearningSettings {
+  return {
+    auto_learn: learning.auto_learn,
+    auto_tighten: learning.auto_tighten,
+    agent: { enabled: learning.agent.enabled, daily_limit: learning.agent.daily_limit },
+    thresholds: { uses: learning.thresholds.uses, sessions: learning.thresholds.sessions },
+    auto_pause: learning.auto_pause,
+  };
 }
 
 export function specToYaml(spec: SiteSpec): string {

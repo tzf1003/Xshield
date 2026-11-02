@@ -543,6 +543,8 @@ export interface Advanced {
   allow_cache_minutes?: number;
   secret_fields?: string[];
   synonyms?: Array<[string, string]>;
+  /** Field kinds declared by hand: the kind of object a field or parameter holds (field-kinds design 3). */
+  field_kinds?: FieldKindDeclaration[];
 }
 
 /** Route rule (接口名规则, header-routes-design 2): the interface name sits outside the URL path. */
@@ -577,9 +579,14 @@ export interface FieldKindDeclaration {
   in?: string[];
 }
 
+/**
+ * The object map section (object-map design 1). The learning settings are edited in the console; `classes` and `slots`
+ * belong to the gateway and are kept exactly as they are, so that a save never changes them.
+ */
 export interface ObjectsSpec {
   learning?: LearningSettings;
-  field_kinds?: FieldKindDeclaration[];
+  classes?: unknown;
+  slots?: unknown;
 }
 
 export interface SiteSpec {
@@ -594,7 +601,7 @@ export interface SiteSpec {
   advanced?: Advanced;
   /** Route rules, in order; the first matching rule names the request (header-routes-design 2). */
   routes?: RouteRule[];
-  /** Object map settings and hand-declared field kinds (object-map design 1). */
+  /** Object map settings (object-map design 1). Hand-declared field kinds are in `advanced.field_kinds`. */
   objects?: ObjectsSpec;
 }
 

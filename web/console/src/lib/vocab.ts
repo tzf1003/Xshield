@@ -543,6 +543,7 @@ export const OBJECT_TEXT = {
   learning: {
     title: "学习设置",
     intro: "学习设置属于站点配置：改动走保存对话框，保存后产生新版本。",
+    pending: "网关接受对象表的学习设置之后，这里的开关才能保存。现在只能查看当前的值。",
     autoLearn: { name: "自动学习", help: "关闭后只用手工声明，已确认的位置照常生效" },
     autoTighten: {
       name: "自动收紧",

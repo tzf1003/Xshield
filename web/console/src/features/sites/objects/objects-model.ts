@@ -80,7 +80,7 @@ export function candidateDeclarations(candidate: BootstrapCandidate): FieldKindD
 
 /** The configuration with these declarations added to its field kinds; ones already present are not repeated. */
 export function withDeclarations(spec: SiteSpec, list: readonly FieldKindDeclaration[]): SiteSpec {
-  const current = spec.objects?.field_kinds ?? [];
+  const current = spec.advanced?.field_kinds ?? [];
   const keys = new Set(current.map(declarationKey));
   const added = list.filter((item) => {
     const id = declarationKey(item);
@@ -88,7 +88,7 @@ export function withDeclarations(spec: SiteSpec, list: readonly FieldKindDeclara
     keys.add(id);
     return true;
   });
-  return { ...spec, objects: { ...spec.objects, field_kinds: [...current, ...added] } };
+  return { ...spec, advanced: { ...spec.advanced, field_kinds: [...current, ...added] } };
 }
 
 /** The configuration with its learning settings replaced. */

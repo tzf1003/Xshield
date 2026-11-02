@@ -75,10 +75,21 @@ test("两条接口名规则的路径重叠时，后一条报错", () => {
 
 test("前缀规则覆盖的精确路径，与它重叠", () => {
   const spec = withRoutes([
-    { path: "/gw/*", name_from: [["header.X-Service-Id"]] },
+    { path: "/gw*", name_from: [["header.X-Service-Id"]] },
     { path: "/gw/x", name_from: [["header.X-Service-Id"]] },
   ]);
   assert.ok(errorMessages(spec).includes("与第 1 条规则的路径重叠"));
+});
+
+test("路径在 * 之前以 / 结尾时报错，网关不接受这样的接口名规则", () => {
+  const prefix = withRoutes([{ path: "/gw/*", name_from: [["header.X-Service-Id"]] }]);
+  assert.ok(
+    errorMessages(prefix).includes(
+      "前缀路径的 * 前面不能是 /，去掉这个 /（例如 /api* 而不是 /api/*）",
+    ),
+  );
+  const exact = withRoutes([{ path: "/gw/", name_from: [["header.X-Service-Id"]] }]);
+  assert.ok(errorMessages(exact).includes("路径不能以 / 结尾"));
 });
 
 test("位置只能是请求头、查询参数或正文字段，各自的名称也有规则", () => {

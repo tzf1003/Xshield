@@ -190,9 +190,13 @@ const PAUSE_REASON = "连续 3 次判定异常，已暂停这个字段的学习�
 
 /** Juice with one field class in its object map: the learning task is the one that moves it. */
 function juiceSpec(kind: string): SiteSpec {
+  const spec = structuredClone(siteJuice.spec);
   return {
-    ...structuredClone(siteJuice.spec),
-    objects: { field_kinds: [{ field: "attachments[].doc_id", kind, in: ["/api/records/{id}"] }] },
+    ...spec,
+    advanced: {
+      ...spec.advanced,
+      field_kinds: [{ field: "attachments[].doc_id", kind, in: ["/api/records/{id}"] }],
+    },
   };
 }
 

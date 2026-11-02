@@ -19,9 +19,11 @@ import {
   unknownCount,
 } from "../src/lib/logical-path.ts";
 import cases from "./fixtures/logical-path-cases.json" with { type: "json" };
+import consoleCases from "./fixtures/logical-path-console-cases.json" with { type: "json" };
 
-// The shared cases: the same file is run against the gateway's implementation. A case whose name carries
-// [body-too-large] has its body omitted from the file; the run sends a body over the parse limit instead.
+// The shared cases (logical-path-cases.json): the same file is run against the gateway's implementation. The console's
+// own cases (logical-path-console-cases.json) are the ones the rule tester shows, and only the console runs them. A case
+// whose name carries [body-too-large] has its body omitted from the file; the run sends a body over the parse limit.
 const TOO_LARGE_FLAG = "[body-too-large]";
 
 function bigBody(): string {
@@ -34,17 +36,34 @@ function header(pair: readonly string[]): [string, string] {
   return [name, value];
 }
 
-for (const item of cases.cases) {
-  test(`shared case: ${item.name}`, () => {
-    const body = item.name.includes(TOO_LARGE_FLAG) ? bigBody() : item.request.body;
-    const request: LogicalRequest = {
-      ...item.request,
-      headers: item.request.headers.map(header),
-      body,
-    };
-    assert.deepEqual(logicalPath(item.routes, request), item.expect);
-  });
+type CaseFile = {
+  name: string;
+  routes: RouteRule[];
+  request: {
+    path: string;
+    query: string | null;
+    content_type: string | null;
+    headers: string[][];
+    body: string | null;
+    /** The gateway did not read this body (it was over the parse limit): the run sends one that is. */
+    body_unread?: boolean;
+  };
+  expect: unknown;
+};
+
+function runCase(item: CaseFile): void {
+  const { body_unread: unread, body: text, ...rest } = item.request;
+  const body = unread === true || item.name.includes(TOO_LARGE_FLAG) ? bigBody() : text;
+  const request: LogicalRequest = {
+    ...rest,
+    headers: rest.headers.map(header),
+    body,
+  };
+  assert.deepEqual(logicalPath(item.routes, request), item.expect);
 }
+
+for (const item of cases.cases) test(`shared case: ${item.name}`, () => runCase(item));
+for (const item of consoleCases.cases) test(`console case: ${item.name}`, () => runCase(item));
 
 const GATEWAY: RouteRule = {
   path: "/weixin/wx/mp/wx361163d21a65f679/gateway",
@@ -92,7 +111,7 @@ test("同一段里的多个位置都要读，任一位置的正文不能读时�
     body: "op=list",
   });
   assert.deepEqual(logicalPath(routes, request), {
-    logical_path: "unknown-api",
+    logical_path: "/index.php",
     api: { unknown: "body_unsupported", source: "body.op" },
   });
 });
@@ -108,7 +127,7 @@ test("请求头名在规则里怎么写，来源就怎么写；请求头值的�
 test("查询参数按名字精确匹配，大小写不同不算同一个参数", () => {
   const routes: RouteRule[] = [{ path: "/index.php", name_from: [["query.action"]] }];
   assert.deepEqual(logicalPath(routes, requestAt("/index.php", { query: "Action=get" })), {
-    logical_path: "unknown-api",
+    logical_path: "/index.php",
     api: { unknown: "missing", source: "query.action" },
   });
 });
@@ -116,11 +135,11 @@ test("查询参数按名字精确匹配，大小写不同不算同一个参数",
 test("表单和查询串里的加号是空格，百分号转义按原样解码", () => {
   const routes: RouteRule[] = [{ path: "/index.php", name_from: [["query.action"]] }];
   assert.deepEqual(logicalPath(routes, requestAt("/index.php", { query: "action=get+list" })), {
-    logical_path: "unknown-api",
+    logical_path: "/index.php",
     api: { unknown: "invalid_name", source: "query.action" },
   });
   assert.deepEqual(logicalPath(routes, requestAt("/index.php", { query: "action=a%2Fb" })), {
-    logical_path: "unknown-api",
+    logical_path: "/index.php",
     api: { unknown: "invalid_name", source: "query.action" },
   });
 });
@@ -147,7 +166,7 @@ test("JSON 文本不合法时即使字段存在也按正文不能解析处理", 
   ]) {
     assert.deepEqual(
       logicalPath(routes, requestAt("/api/rpc", { content_type: "application/json", body })),
-      { logical_path: "unknown-api", api: { unknown: "body_not_json", source: "body.method" } },
+      { logical_path: "/api/rpc", api: { unknown: "body_not_json", source: "body.method" } },
       body,
     );
   }
@@ -291,7 +310,7 @@ test("近期记录按逻辑路径分组，只计入规则覆盖的、取得了�
     named(`${site}/bus.b/y`),
     {
       path: site,
-      logical_path: "unknown-api",
+      logical_path: site,
       api: { unknown: "missing", source: "header.X-Service-Method" },
     },
     { path: "/elsewhere", logical_path: "/elsewhere/a/x", api: null },

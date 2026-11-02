@@ -126,6 +126,18 @@ pub struct TraceValue {
     pub verified: bool,
     /// Where the session saw it, most useful first, at most three.
     pub sources: Vec<TraceSource>,
+    /// The position the value sits at: method, route template and location,
+    /// for example `GET /doctor/{id} path[1]`. Absent in rows written before
+    /// positions were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    /// The kind of object the object map gives this position, for example
+    /// `doctor`. Absent when no map entry applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// Where `object` came from. Only `map` (a confirmed map entry) is recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_from: Option<ObjectFrom>,
 }
 
 /// A response that showed a value to the session.
@@ -139,7 +151,39 @@ pub struct TraceSource {
     pub request_id: Option<String>,
     /// When the response was observed, Unix milliseconds.
     pub at_millis: Option<u64>,
+    /// The response position the value came from: method, route template and
+    /// the field path, for example `GET /api/appointments [].doc_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<String>,
+    /// The kind of object the object map gives that response position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// Where `object` came from; see [`TraceValue::object_from`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_from: Option<ObjectFrom>,
 }
+
+/// Where a recorded object kind came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectFrom {
+    /// A confirmed entry of the site's object map.
+    Map,
+}
+
+/// One field of a response's structure: where it sits and what it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShapeField {
+    /// The field path: `[].doc_id`, `attachments[].doc_id`, or `$` for a bare
+    /// scalar. Array items are `[]`.
+    pub path: String,
+    /// `string`, `number`, `boolean` or `null`.
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+/// Most fields a response structure records; the first in path order are kept.
+pub const SHAPE_FIELDS_MAX: usize = 64;
 
 /// The session context a decision was made against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,6 +263,11 @@ pub struct ObservationSummary {
     pub entry_passed: bool,
     /// The request would have been refused but was forwarded (observe mode).
     pub after_would_block: bool,
+    /// The response's structure, reported only when this route's structure is
+    /// new or differs from the last one reported. Field paths and types, never
+    /// values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<Vec<ShapeField>>,
 }
 
 impl ObservationSummary {
@@ -236,6 +285,7 @@ impl ObservationSummary {
             issued_session: None,
             entry_passed: false,
             after_would_block: false,
+            shape: None,
         }
     }
 }
@@ -308,8 +358,14 @@ mod tests {
                     request: "GET /api/x".to_owned(),
                     request_id: Some("req_0".to_owned()),
                     at_millis: Some(1),
+                    slot: None,
+                    object: None,
+                    object_from: None,
                 })
                 .collect(),
+            slot: None,
+            object: None,
+            object_from: None,
         }
     }
 
@@ -383,5 +439,33 @@ mod tests {
         assert_eq!(record.trace.v, 0);
         assert_eq!(record.site.as_deref(), Some("s"));
         assert!(record.context.is_none());
+    }
+
+    #[test]
+    fn positions_stay_out_of_rows_that_do_not_have_them() {
+        let mut row = value("path[1]", "5", false, 0);
+        let plain = serde_json::to_string(&row).unwrap();
+        assert!(!plain.contains("slot") && !plain.contains("object"));
+        row.slot = Some("GET /doctor/{id} path[1]".to_owned());
+        row.object = Some("doctor".to_owned());
+        row.object_from = Some(ObjectFrom::Map);
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains(r#""object_from":"map""#));
+        let back: TraceValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
+        let old: TraceValue = serde_json::from_str(&plain).unwrap();
+        assert_eq!(old.slot, None);
+    }
+
+    #[test]
+    fn a_shape_field_serializes_its_type_under_type() {
+        let field = ShapeField {
+            path: "[].doc_id".to_owned(),
+            kind: "number".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&field).unwrap(),
+            r#"{"path":"[].doc_id","type":"number"}"#
+        );
     }
 }

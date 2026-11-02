@@ -86,7 +86,7 @@ export function SynonymMigrateDialog({ site, working, onClose, onApply }: Props)
       );
     }
   }
-  const existing = working.objects?.field_kinds ?? [];
+  const existing = working.advanced?.field_kinds ?? [];
   const known = new Set(existing.map(declarationKey));
   const fresh = [
     ...new Map(declarations.map((item) => [declarationKey(item), item])).values(),

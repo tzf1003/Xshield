@@ -20,6 +20,7 @@ pub mod edge_descriptors;
 pub mod grant;
 pub mod identity;
 pub mod investigation;
+pub mod kind;
 pub mod model_evaluation_admission;
 pub mod path_shape;
 pub mod path_template;

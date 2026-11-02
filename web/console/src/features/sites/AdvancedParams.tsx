@@ -338,7 +338,15 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
             className="linkbtn"
             onClick={() => {
               setEpoch((value) => value + 1);
-              onChange(withAdvanced(spec, undefined));
+              // The declared field kinds are kept: they are the object map's, not a judging parameter.
+              onChange(
+                withAdvanced(
+                  spec,
+                  advanced?.field_kinds === undefined
+                    ? undefined
+                    : { field_kinds: advanced.field_kinds },
+                ),
+              );
             }}
           >
             全部恢复默认
