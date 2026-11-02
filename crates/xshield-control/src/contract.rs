@@ -9,6 +9,7 @@ use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 
 use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
 use crate::requests::{CountsBody, RequestRow};
+use crate::sessions::{SessionDetailBody, SessionsBody};
 use crate::stats::{SummaryBody, TimeseriesBody};
 use crate::status::StatusBody;
 use crate::system::SystemBody;
@@ -24,6 +25,9 @@ const PROMPT: &str = include_str!("../../../web/console/tests/fixtures/prompt.js
 const STATUS: &str = include_str!("../../../web/console/tests/fixtures/status.json");
 const STATUS_DOWN: &str = include_str!("../../../web/console/tests/fixtures/status-down.json");
 const SYSTEM: &str = include_str!("../../../web/console/tests/fixtures/system.json");
+const SESSIONS: &str = include_str!("../../../web/console/tests/fixtures/sessions.json");
+const SESSION_TIMELINE: &str =
+    include_str!("../../../web/console/tests/fixtures/session-timeline.json");
 const DETAILS: [&str; 3] = [
     include_str!(
         "../../../web/console/tests/fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json"
@@ -223,4 +227,14 @@ fn status_fixtures_round_trip_through_the_status_type() {
 #[test]
 fn system_round_trips_through_the_system_type() {
     assert_round_trips::<SystemBody>(&fixture(SYSTEM), exactly);
+}
+
+#[test]
+fn sessions_round_trip_through_the_sessions_type() {
+    assert_round_trips::<SessionsBody>(&fixture(SESSIONS), exactly);
+}
+
+#[test]
+fn session_timeline_round_trips_through_the_detail_type() {
+    assert_round_trips::<SessionDetailBody>(&fixture(SESSION_TIMELINE), exactly);
 }
