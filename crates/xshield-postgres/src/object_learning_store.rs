@@ -561,6 +561,28 @@ pub async fn retire_unseen(
     Ok(result.rows_affected())
 }
 
+/// Forgets the retired positions whose last use is on or before `last_day_at_most`, so a
+/// position keeps its row for the retention period after its last use. Like the retirement
+/// it needs no generation: it acts only on rows the window has aged out. Returns how many
+/// rows were forgotten.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn prune_retired(
+    pool: &PgPool,
+    site: &str,
+    last_day_at_most: u64,
+) -> Result<u64, LearningStoreError> {
+    let result = sqlx::query(
+        "DELETE FROM object_positions WHERE site = $1 AND state = 'retired' AND last_day <= $2",
+    )
+    .bind(site)
+    .bind(day_i64(last_day_at_most))
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// The last decision row the pass has read for the site, if it has started.
 ///
 /// # Errors
@@ -827,9 +849,10 @@ pub struct JevFlow {
 
 /// Up to `limit` request ids that used a position, newest first. A request position's
 /// examples are the requests whose values sat at it. A response position's are the
-/// responses that showed a value at it: the requests that used such a value name the
-/// response in their `sources`, and only the newest [`EXAMPLE_ROWS_READ`] of those requests
-/// are read. Only decision rows at or after `since_millis` count.
+/// responses that showed a value at it, newest observed first: the requests that used such
+/// a value name the response in their `sources`, and only the newest [`EXAMPLE_ROWS_READ`]
+/// of those requests are read. A source without its observation time is placed by the
+/// request that used it. Only decision rows at or after `since_millis` count.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -859,7 +882,7 @@ pub async fn examples(
              CROSS JOIN LATERAL jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
              WHERE s ->> 'slot' = $2 AND s ->> 'request_id' IS NOT NULL
              GROUP BY s ->> 'request_id'
-             ORDER BY max(recent.at_millis) DESC
+             ORDER BY max(COALESCE((s ->> 'at_millis')::bigint, recent.at_millis)) DESC
              LIMIT $4",
         )
         .bind(site)
@@ -894,10 +917,12 @@ pub async fn examples(
 }
 
 /// Jev's decisions on the requests of a position's flows since `since_millis`, most decided
-/// first, at most [`FLOW_LIMIT`] other ends. A request position's other ends are the response
-/// positions its values were shown at; a response position's are the request positions that
-/// used its values. Each request counts once per other end. Only calls to Jev are read, which
-/// the partial index on them covers.
+/// first. A request position's other ends are the response positions its values were shown
+/// at; a response position's are the request positions that used its values. Each request
+/// counts once per other end. There is one row per other end Jev decided on, whether or not
+/// the votes reached it, so the drawer's flows always carry their decisions. The rows are
+/// bounded by the positions the values reached, so no limit is applied. Only calls to Jev
+/// are read, which the partial index on them covers.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -926,7 +951,7 @@ pub async fn jev_flows(
          SELECT other,
                 count(*) FILTER (WHERE decision_path = 'jev_allow') AS allow,
                 count(*) FILTER (WHERE decision_path = 'jev_deny') AS deny
-         FROM judged GROUP BY other ORDER BY count(*) DESC, other LIMIT $4"
+         FROM judged GROUP BY other ORDER BY count(*) DESC, other"
     } else {
         "WITH judged AS (
              SELECT DISTINCT d.at_millis, d.id, d.decision_path, s ->> 'slot' AS other
@@ -942,13 +967,12 @@ pub async fn jev_flows(
          SELECT other,
                 count(*) FILTER (WHERE decision_path = 'jev_allow') AS allow,
                 count(*) FILTER (WHERE decision_path = 'jev_deny') AS deny
-         FROM judged GROUP BY other ORDER BY count(*) DESC, other LIMIT $4"
+         FROM judged GROUP BY other ORDER BY count(*) DESC, other"
     };
     let rows = sqlx::query(sql)
         .bind(site)
         .bind(slot)
         .bind(since_millis)
-        .bind(FLOW_LIMIT)
         .fetch_all(pool)
         .await?;
     rows.iter()
@@ -1245,6 +1269,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded["GET /doctor/{id} path[1]"].votes(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_retired_position_is_forgotten_once_its_retention_period_ends() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("retention");
+        let generation = with_site(&pool, &site).await;
+        // One position last used on day 10, and one used on day 50.
+        let old = Judgement {
+            last_day: 10,
+            ..proposal()
+        };
+        let recent = Judgement {
+            slot: "GET /other/{id} path[1]",
+            last_day: 50,
+            ..proposal()
+        };
+        put_judgement(&pool, &site, generation, &old, 1)
+            .await
+            .unwrap();
+        put_judgement(&pool, &site, generation, &recent, 1)
+            .await
+            .unwrap();
+        // Unused for the retirement period, only the old position is retired.
+        assert_eq!(retire_unseen(&pool, &site, 10, 2).await.unwrap(), 1);
+        // It is kept until its retention period has passed, and then forgotten.
+        assert_eq!(prune_retired(&pool, &site, 9).await.unwrap(), 0);
+        assert_eq!(prune_retired(&pool, &site, 10).await.unwrap(), 1);
+        let kept: Vec<String> = positions(&pool, &site)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.slot)
+            .collect();
+        assert_eq!(kept, vec!["GET /other/{id} path[1]".to_owned()]);
     }
 
     #[tokio::test]

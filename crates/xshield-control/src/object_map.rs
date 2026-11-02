@@ -302,7 +302,7 @@ pub async fn slot(
     let side = row.side;
     let now = now_millis();
     let oldest = oldest_day(now);
-    let since = window_start_millis(now);
+    let since = drawer_since(now, record.created_at.timestamp_millis());
     let total = store::uses(&state.pool, &name, &row.key, side.as_str(), oldest).await?;
     let flows = store::flows(&state.pool, &name, &row.key, side.as_str(), oldest).await?;
     let decisions = store::jev_flows(&state.pool, &name, &row.key, side.as_str(), since).await?;
@@ -597,25 +597,31 @@ fn flow_body(flow: Flow, side: Side, total: i64) -> FlowBody {
     }
 }
 
-/// The other ends of a position's flows, each with Jev's decisions on its requests. A decision
-/// on an end the evidence has no vote for adds that end with no uses, so a refusal alone is
-/// listed. Most used first, at most [`FLOWS_MAX`].
+/// The other ends of a position's flows, each with Jev's decisions on its requests. The flows
+/// the votes reached come first, most used first. An end the votes never reached follows them
+/// with no uses, so a refusal alone is listed. Each group is capped at [`FLOWS_MAX`], so the
+/// decisions on an end are never cut off by the flows that have uses.
 fn flow_bodies(side: Side, total: i64, flows: Vec<Flow>, decisions: &[JevFlow]) -> Vec<FlowBody> {
     let mut by_end: BTreeMap<String, FlowBody> = flows
         .into_iter()
         .map(|flow| (flow.other.clone(), flow_body(flow, side, total)))
         .collect();
+    let mut decided_alone = Vec::new();
     for decision in decisions {
-        let body = by_end.entry(decision.other.clone()).or_insert_with(|| {
+        if let Some(body) = by_end.get_mut(&decision.other) {
+            body.jev_allow = decision.allow;
+            body.jev_deny = decision.deny;
+        } else {
             let flow = Flow {
                 other: decision.other.clone(),
                 uses: 0,
                 sessions: 0,
             };
-            flow_body(flow, side, total)
-        });
-        body.jev_allow = decision.allow;
-        body.jev_deny = decision.deny;
+            let mut body = flow_body(flow, side, total);
+            body.jev_allow = decision.allow;
+            body.jev_deny = decision.deny;
+            decided_alone.push(body);
+        }
     }
     let mut bodies: Vec<FlowBody> = by_end.into_values().collect();
     bodies.sort_by(|left, right| {
@@ -625,6 +631,13 @@ fn flow_bodies(side: Side, total: i64, flows: Vec<Flow>, decisions: &[JevFlow]) 
             .then_with(|| left.key.cmp(&right.key))
     });
     bodies.truncate(FLOWS_MAX);
+    decided_alone.sort_by(|left, right| {
+        (right.jev_allow + right.jev_deny)
+            .cmp(&(left.jev_allow + left.jev_deny))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    decided_alone.truncate(FLOWS_MAX);
+    bodies.extend(decided_alone);
     bodies
 }
 
@@ -709,6 +722,13 @@ fn window_start_millis(now: i64) -> i64 {
     i64::try_from(oldest_day(now))
         .unwrap_or(0)
         .saturating_mul(DAY_MILLIS)
+}
+
+/// The first millisecond of the decision rows the drawer reads: the start of the learning
+/// window, or the site's creation when that is later. The decision log outlives a site, so a
+/// site created again under the same name must not show the rows of the one before it.
+fn drawer_since(now: i64, created_millis: i64) -> i64 {
+    window_start_millis(now).max(created_millis)
 }
 
 #[cfg(test)]
@@ -945,7 +965,7 @@ mod tests {
             [
                 "GET /api/appointments [].doc_id",
                 "GET /api/schedule query.doc",
-                // No votes reached it, so it has no uses and no share, and sorts last.
+                // No votes reached it, so it has no uses and no share, and follows the flows.
                 "GET /api/records/{id} attachments[].doc_id",
             ]
         );
@@ -955,6 +975,45 @@ mod tests {
         assert!(bodies[2].share.abs() < f64::EPSILON);
         assert_eq!(bodies[2].method, "GET");
         assert_eq!(bodies[2].route, "/api/records/{id}");
+    }
+
+    #[test]
+    fn a_refusal_on_an_end_no_vote_reached_is_listed_past_a_full_list_of_flows() {
+        let flows: Vec<Flow> = (0..FLOWS_MAX)
+            .map(|index| Flow {
+                other: format!("GET /api/votes/{index} query.doc"),
+                uses: 1,
+                sessions: 1,
+            })
+            .collect();
+        // Twenty-five ends with refusals and no votes: the first refused once, the last 25 times.
+        let refused: Vec<JevFlow> = (1..=25_i64)
+            .map(|deny| JevFlow {
+                other: format!("GET /api/refused/{deny} query.doc"),
+                allow: 0,
+                deny,
+            })
+            .collect();
+        let bodies = flow_bodies(Side::Response, 20, flows, &refused);
+        // Each group is capped at twenty: the flows with votes, then the refusals with the most.
+        assert_eq!(bodies.len(), 2 * FLOWS_MAX);
+        assert!(bodies[..FLOWS_MAX].iter().all(|body| body.uses == 1));
+        assert_eq!(
+            (bodies[FLOWS_MAX].uses, bodies[FLOWS_MAX].jev_deny),
+            (0, 25)
+        );
+        assert_eq!(bodies[2 * FLOWS_MAX - 1].jev_deny, 6);
+    }
+
+    #[test]
+    fn the_drawer_reads_no_decision_from_before_the_site_was_created() {
+        // The learning window of day 100 starts on day 94.
+        let now = 100 * DAY_MILLIS + 5_000;
+        let window_start = 94 * DAY_MILLIS;
+        // A site created before the window reads all of it. One created inside it reads only
+        // from its creation on.
+        assert_eq!(drawer_since(now, 10 * DAY_MILLIS), window_start);
+        assert_eq!(drawer_since(now, 96 * DAY_MILLIS + 1), 96 * DAY_MILLIS + 1);
     }
 
     #[test]
@@ -1022,6 +1081,17 @@ mod live_tests {
         site_spec_store::create(&state.pool, &site_spec(&name), None)
             .await
             .expect("create the site");
+        // Created three days ago, so the decisions the tests place in the last days come
+        // after its creation, as they would on a site that has been up for a while.
+        sqlx::query("UPDATE site_configs SET created_at = $2 WHERE name = $1")
+            .bind(&name)
+            .bind(
+                chrono::DateTime::from_timestamp_millis(now_millis() - 3 * DAY_MILLIS)
+                    .expect("a time"),
+            )
+            .execute(&state.pool)
+            .await
+            .expect("backdate the site");
         let generation = site_spec_store::get(&state.pool, &name)
             .await
             .expect("read the site")
@@ -1249,14 +1319,24 @@ mod live_tests {
     }
 
     /// The value of a request at `slot` that the session saw in the response `source_request`
-    /// showed at `source`.
+    /// showed at `source`, with no time of observation.
     fn value(slot: &str, source: &str, source_request: &str) -> Value {
+        seen_value(slot, source, source_request, None)
+    }
+
+    /// [`value`] for a response observed at `observed_millis`, Unix milliseconds if known.
+    fn seen_value(
+        slot: &str,
+        source: &str,
+        source_request: &str,
+        observed_millis: Option<i64>,
+    ) -> Value {
         json!({
             "at": "path[1]", "key": null, "value": "7", "kind": "reference",
             "inert": false, "seen": true, "verified": false, "slot": slot,
             "sources": [{
                 "field": "doc_id", "request": "GET /api/appointments",
-                "request_id": source_request, "at_millis": null, "slot": source
+                "request_id": source_request, "at_millis": observed_millis, "slot": source
             }]
         })
     }
@@ -1266,14 +1346,11 @@ mod live_tests {
     async fn the_drawer_names_the_newest_requests_and_the_jev_decisions_on_each_flow() {
         let (state, name) = seeded_site("drawer").await;
         let now = now_millis();
-        for days in 0..=2 {
-            let day = chrono::DateTime::from_timestamp_millis(now - days * DAY_MILLIS)
-                .expect("a day")
-                .date_naive();
-            xshield_postgres::partitions::ensure_partition(&state.pool, day)
-                .await
-                .expect("create the partition");
-        }
+        crate::test_support::ensure_days(
+            &state.pool,
+            &[now, now - DAY_MILLIS, now - 2 * DAY_MILLIS],
+        )
+        .await;
         // Four uses of the doctor position: Jev allowed two and refused one, one was a fast
         // allow, and the oldest is two days old. Each one's value was shown by a response.
         let minutes_ago = |minutes: i64| now - minutes * 60_000;
@@ -1366,5 +1443,98 @@ mod live_tests {
         let other = serde_json::to_value(other).expect("the detail as JSON");
         assert_eq!(other["examples"], json!([]));
         assert_eq!(other["flows_in"], json!([]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_response_lists_the_responses_it_showed_newest_observed_first() {
+        let (state, name) = seeded_site("observed").await;
+        let now = now_millis();
+        crate::test_support::ensure_days(&state.pool, &[now - 4 * DAY_MILLIS, now]).await;
+        let minutes_ago = |minutes: i64| now - minutes * 60_000;
+        // The response observed ten minutes ago is reused first, and the one observed thirty
+        // minutes ago is reused last, so the reuse order is the reverse of the observation order.
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(5),
+            "req_reuses_late",
+            "a",
+            "jev_allow",
+            json!([seen_value(
+                SLOT,
+                APPOINTMENTS,
+                "resp_late",
+                Some(minutes_ago(10))
+            )]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(1),
+            "req_reuses_early",
+            "b",
+            "jev_allow",
+            json!([seen_value(
+                SLOT,
+                APPOINTMENTS,
+                "resp_early",
+                Some(minutes_ago(30))
+            )]),
+        )
+        .await;
+        let appointments = slot(
+            State(Arc::clone(&state)),
+            Path((name.clone(), declared_id(APPOINTMENTS))),
+        )
+        .await
+        .expect("the declared position")
+        .0;
+        let appointments = serde_json::to_value(appointments).expect("the detail as JSON");
+        assert_eq!(appointments["examples"], json!(["resp_late", "resp_early"]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_site_created_again_under_its_name_reads_none_of_the_decisions_before_it() {
+        let (state, name) = seeded_site("recreated").await;
+        let now = now_millis();
+        crate::test_support::ensure_days(&state.pool, &[now - 4 * DAY_MILLIS, now]).await;
+        // The decision log keeps the rows of a deleted site. The one from four days ago is
+        // inside the learning window but before the site was created three days ago.
+        decide(
+            &state.pool,
+            &name,
+            now - 4 * DAY_MILLIS,
+            "req_before",
+            "a",
+            "jev_deny",
+            json!([value(SLOT, APPOINTMENTS, "resp_before")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            now - 60_000,
+            "req_after",
+            "b",
+            "jev_allow",
+            json!([value(SLOT, APPOINTMENTS, "resp_after")]),
+        )
+        .await;
+        let listing = listed(&state, &name, &[]).await;
+        let doctor = slot(
+            State(Arc::clone(&state)),
+            Path((name.clone(), id_of(&listing, SLOT))),
+        )
+        .await
+        .expect("the doctor position")
+        .0;
+        let doctor = serde_json::to_value(doctor).expect("the detail as JSON");
+        assert_eq!(doctor["examples"], json!(["req_after"]));
+        assert_eq!(doctor["flows_in"][0]["key"], APPOINTMENTS);
+        assert_eq!(doctor["flows_in"][0]["jev_allow"], 1);
+        assert_eq!(doctor["flows_in"][0]["jev_deny"], 0);
     }
 }

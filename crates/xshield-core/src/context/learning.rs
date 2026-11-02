@@ -22,6 +22,8 @@ use super::trace::Trace;
 pub const WINDOW_DAYS: u64 = 7;
 /// Days a position may go unseen before it is retired.
 pub const RETIRE_DAYS: u64 = 30;
+/// Days a retired position is kept after its last use before the learning pass forgets it.
+pub const KEEP_RETIRED_DAYS: u64 = 90;
 /// Votes a position needs before the rules may propose a kind for it.
 pub const VOTES_MIN: u32 = 20;
 /// Sessions a position needs before the rules may propose a kind for it.
