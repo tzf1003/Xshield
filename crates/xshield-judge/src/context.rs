@@ -169,18 +169,39 @@ impl Seen {
         }) {
             return;
         }
-        if self.origins.len() == SOURCES_MAX {
-            // Small numbers repeat everywhere; keep the id-field origins that
-            // really identify an object and drop the noise (a stock count, an
-            // ETA) first.
-            let drop = self
-                .origins
-                .iter()
-                .position(|o| !is_id_like(&o.field))
-                .unwrap_or(0);
+        if self.origins.len() >= SOURCES_MAX {
+            let drop = self.eviction_index();
             self.origins.remove(drop);
         }
         self.origins.push(origin);
+    }
+
+    /// The origin that makes room when all [`SOURCES_MAX`] are kept. Small
+    /// numbers repeat everywhere, so noise (a field that is not id-like, such
+    /// as a stock count or an ETA) goes first, and id-like origins stay while
+    /// any noise remains. Among the candidates, the oldest origin of the request
+    /// that holds the most origins goes. One response that repeats an id at
+    /// many positions therefore makes room from its own origins, and another
+    /// response's origin goes only once no response holds more.
+    fn eviction_index(&self) -> usize {
+        let noise_exists = self.origins.iter().any(|origin| !is_id_like(&origin.field));
+        let mut chosen: Option<(usize, usize)> = None;
+        for (index, origin) in self.origins.iter().enumerate() {
+            if noise_exists && is_id_like(&origin.field) {
+                continue;
+            }
+            let held = self
+                .origins
+                .iter()
+                .filter(|other| other.request == origin.request)
+                .count();
+            // Only a strictly larger share replaces the candidate, so on a tie
+            // the older origin, met first, stays chosen.
+            if chosen.is_none_or(|(_, best)| held > best) {
+                chosen = Some((index, held));
+            }
+        }
+        chosen.map_or(0, |(index, _)| index)
     }
 
     /// Whether the value is safe to fast-allow for the request that uses it.
@@ -872,6 +893,27 @@ mod tests {
         let seen = session.lookup(&key, "1").unwrap();
         assert_eq!(seen.origins.len(), SOURCES_MAX);
         assert_eq!(seen.origins[0].request, "GET /api/Products");
+    }
+
+    #[test]
+    fn one_response_repeating_an_id_does_not_push_out_another_responses_origin() {
+        let key = key();
+        let mut session = SessionContext::new(0);
+        session.remember(&key, &at("GET /api/Products"), &[response("id", "1")]);
+        // The same id at many positions of one response, as nested baskets
+        // repeat a product id.
+        let repeats: Vec<ResponseValue> = (0..SOURCES_MAX + 2)
+            .map(|index| ResponseValue {
+                at: format!("items[{index}].product.id"),
+                field: "id".to_owned(),
+                value: "1".to_owned(),
+            })
+            .collect();
+        session.remember(&key, &at("GET /api/Baskets"), &repeats);
+        let seen = session.lookup(&key, "1").unwrap();
+        assert_eq!(seen.origins.len(), SOURCES_MAX);
+        assert_eq!(seen.origins[0].request, "GET /api/Products");
+        assert_eq!(seen.origins.last().unwrap().request, "GET /api/Baskets");
     }
 
     #[test]

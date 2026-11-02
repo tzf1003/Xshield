@@ -620,7 +620,7 @@ impl<J: JevPort> Judge<J> {
         let (values, shape) = if success {
             read_body(&mut summary, observation)
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), None)
         };
         summary.values = values.len();
         summary.fields = field_counts(&values);
@@ -641,10 +641,11 @@ impl<J: JevPort> Judge<J> {
             None
         };
         let mut inner = self.lock();
-        if success && matches!(summary.observed, Observed::Json) {
+        if let Some(shape) = shape {
             summary.shape = shape_if_new(
                 &mut inner.shapes,
                 &self.key,
+                site.name(),
                 observation.method,
                 observation.path,
                 shape,
@@ -892,12 +893,12 @@ fn response_kind(content_type: Option<&str>) -> Option<Observed> {
     }
 }
 
-/// Reads the body of a successful response: its values and, for JSON, its
-/// structure. Says in `summary` why a body was not read.
+/// Reads the body of a successful response: its values and, for a JSON document
+/// that parsed, its structure. Says in `summary` why a body was not read.
 fn read_body(
     summary: &mut ObservationSummary,
     observation: &Observation<'_>,
-) -> (Vec<ResponseValue>, Vec<ShapeField>) {
+) -> (Vec<ResponseValue>, Option<Vec<ShapeField>>) {
     match (observation.unread, response_kind(observation.content_type)) {
         (Some(reason), _) => summary.skip = Some(reason),
         (None, Some(kind)) => {
@@ -907,21 +908,23 @@ fn read_body(
         }
         (None, None) => summary.skip = Some(Skip::ContentType),
     }
-    (Vec::new(), Vec::new())
+    (Vec::new(), None)
 }
 
-/// The structure to report for a route: `Some` when it is new or differs from
-/// the one last reported, `None` when it repeats. Only digests are kept.
+/// The structure to report for a route of a site: `Some` when it is new or
+/// differs from the one last reported, `None` when it repeats. Only digests are
+/// kept. One judge serves every site, so the site is part of the route.
 fn shape_if_new(
     shapes: &mut HashMap<Digest16, Digest16>,
     key: &ContextKey,
+    site: &str,
     method: &str,
     path: &str,
     shape: Vec<ShapeField>,
 ) -> Option<Vec<ShapeField>> {
     let route = key.mac(
         "shape-route",
-        format!("{method} {}", route_template(path)).as_bytes(),
+        format!("{site}\0{method} {}", route_template(path)).as_bytes(),
     );
     let mut text = String::new();
     for field in &shape {
@@ -2762,6 +2765,57 @@ mod tests {
             ..list_response("alice", 3)
         };
         assert!(judge.observe(&site, &changed).shape.is_some());
+    }
+
+    #[test]
+    fn each_site_reports_a_route_structure_once() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let emr = site(r#","mode":"enforce""#);
+        let billing = SiteSpec::from_json(
+            r#"{"name":"billing","hosts":["billing.test"],"origin":"http://o:2","session":{"cookie":"SID"},"entries":["/login"],"mode":"enforce"}"#,
+        )
+        .unwrap();
+        assert!(
+            judge
+                .observe(&emr, &list_response("alice", 0))
+                .shape
+                .is_some()
+        );
+        // The same route of another site has not reported its structure yet.
+        assert!(
+            judge
+                .observe(&billing, &list_response("alice", 1))
+                .shape
+                .is_some()
+        );
+        assert!(
+            judge
+                .observe(&billing, &list_response("alice", 2))
+                .shape
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_json_body_that_does_not_parse_reports_no_structure() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let broken = Observation {
+            body: b"{bad",
+            ..list_response("alice", 0)
+        };
+        let summary = judge.observe(&site, &broken);
+        assert_eq!(summary.observed, Observed::Json);
+        assert!(summary.shape.is_none());
+        // The first well-formed response of the route is the first structure.
+        assert!(
+            judge
+                .observe(&site, &list_response("alice", 1))
+                .shape
+                .is_some()
+        );
     }
 
     #[tokio::test]

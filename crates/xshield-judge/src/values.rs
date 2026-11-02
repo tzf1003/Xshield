@@ -66,14 +66,15 @@ pub struct ResponseFacts {
     /// Scalars in the order the JSON parser yields them (object keys sorted).
     pub values: Vec<ResponseValue>,
     /// Field paths and types, sorted by path, at most [`SHAPE_FIELDS_MAX`].
-    /// Empty for HTML and for bodies that were not read.
-    pub shape: Vec<ShapeField>,
+    /// `Some` only for a JSON document that parsed, where an empty document
+    /// has an empty structure. `None` for HTML, for a body that was not read,
+    /// and for JSON that did not parse, so a broken body is never reported as
+    /// a structure.
+    pub shape: Option<Vec<ShapeField>>,
 }
 
 /// The longest response position kept, in bytes.
 const AT_MAX: usize = 128;
-/// Distinct response field paths gathered for one structure; the rest are dropped.
-const SHAPE_COLLECT_MAX: usize = 4_096;
 
 /// Whether a field name reads like an object identifier.
 #[must_use]
@@ -457,14 +458,15 @@ pub fn extract_response_facts(content_type: Option<&str>, body: &[u8]) -> Respon
             if let Ok(json) = serde_json::from_slice::<Value>(body) {
                 let mut shape = BTreeSet::new();
                 walk_response(&mut facts.values, &mut shape, &json, "", "value", "", 0);
-                facts.shape = shape
-                    .into_iter()
-                    .take(SHAPE_FIELDS_MAX)
-                    .map(|(path, kind)| ShapeField {
-                        path,
-                        kind: kind.to_owned(),
-                    })
-                    .collect();
+                facts.shape = Some(
+                    shape
+                        .into_iter()
+                        .map(|(path, kind)| ShapeField {
+                            path,
+                            kind: kind.to_owned(),
+                        })
+                        .collect(),
+                );
             }
         }
         "text/html" | "application/xhtml+xml" => {
@@ -509,11 +511,24 @@ fn add(out: &mut Vec<ResponseValue>, field: &str, value: String) {
     add_at(out, field, field, value);
 }
 
-/// Records one structure entry. Positions too long to keep are left out, as
-/// they are for values.
+/// Records one structure entry, keeping the [`SHAPE_FIELDS_MAX`] smallest paths
+/// seen so far, since that is what the structure reports. Positions too long to
+/// keep are left out, as they are for values. A path that sorts after all the
+/// kept ones is dropped, so a field late in a long list still shows when it
+/// sorts early.
 fn note_shape(shape: &mut BTreeSet<(String, &'static str)>, at: &str, kind: &'static str) {
-    if shape.len() < SHAPE_COLLECT_MAX && at.len() <= AT_MAX {
-        shape.insert((position(at), kind));
+    if at.len() > AT_MAX {
+        return;
+    }
+    let entry = (position(at), kind);
+    if shape.contains(&entry) {
+        return;
+    }
+    if shape.len() < SHAPE_FIELDS_MAX {
+        shape.insert(entry);
+    } else if shape.last().is_some_and(|last| entry < *last) {
+        shape.pop_last();
+        shape.insert(entry);
     }
 }
 
@@ -881,7 +896,7 @@ mod tests {
         assert!(
             extract_response_facts(Some("application/json"), body.as_bytes())
                 .shape
-                .is_empty()
+                .is_some_and(|shape| shape.is_empty())
         );
     }
 
@@ -892,6 +907,7 @@ mod tests {
         let shape: Vec<(&str, &str)> = facts
             .shape
             .iter()
+            .flatten()
             .map(|field| (field.path.as_str(), field.kind.as_str()))
             .collect();
         assert_eq!(
@@ -907,7 +923,36 @@ mod tests {
         assert!(
             extract_response_facts(Some("text/html"), b"<a href='/x/1'>")
                 .shape
-                .is_empty()
+                .is_none()
         );
+    }
+
+    #[test]
+    fn a_body_that_does_not_parse_has_no_structure() {
+        let facts = extract_response_facts(Some("application/json"), b"{bad");
+        assert!(facts.values.is_empty());
+        assert_eq!(facts.shape, None);
+        // An empty document is a structure with no fields, not a failure.
+        assert_eq!(
+            extract_response_facts(Some("application/json"), b"[]").shape,
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_long_list_keeps_the_first_paths_whatever_comes_after_them() {
+        let mut items: Vec<String> = (0..5_000)
+            .map(|index| format!(r#"{{"z{index:04}":1}}"#))
+            .collect();
+        items.push(r#"{"a":1}"#.to_owned());
+        let body = format!("[{}]", items.join(","));
+        let shape = extract_response_facts(Some("application/json"), body.as_bytes())
+            .shape
+            .expect("a parsed document has a structure");
+        assert_eq!(shape.len(), SHAPE_FIELDS_MAX);
+        // `[].a` sorts before all 5,000 of the `[].z...` paths that came first.
+        assert_eq!(shape[0].path, "[].a");
+        assert_eq!(shape[0].kind, "number");
+        assert!(shape.windows(2).all(|pair| pair[0].path <= pair[1].path));
     }
 }
