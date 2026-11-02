@@ -149,15 +149,15 @@ export function HistoryTab({ site, diff, onRollback }: Props) {
                       {item.version === site.version ? <span className="pill"> 当前</span> : null}
                     </td>
                     <td className="tnum">{fmtLocalDateTime(Date.parse(item.changed_at))}</td>
-                    <td>
+                    <td className="keep">
                       {KIND_LABEL[item.change]}
                       {item.rollback_of !== null ? `（回到 v${item.rollback_of}）` : ""}
                     </td>
-                    <td className="history-note">
+                    <td className="history-note wrap">
                       {item.note ? <div>{item.note}</div> : null}
                       <div className="small muted">{summaryOf(item, before)}</div>
                     </td>
-                    <td>
+                    <td className="keep">
                       <div className="history-actions">
                         {item.spec !== null ? (
                           <button
