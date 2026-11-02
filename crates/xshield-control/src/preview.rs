@@ -19,7 +19,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
-use xshield_core::context::{Mode, SiteSpec};
+use xshield_core::context::{Mode, Route as RouteRule, SiteSpec};
 use xshield_postgres::{
     decision_stats::{self, Breakdown, PathGroup, Scope},
     site_spec_store,
@@ -51,6 +51,12 @@ const SESSION_CHANGED: &str = "SESSION_CHANGED";
 const HOSTS_CHANGED: &str = "HOSTS_CHANGED";
 const SYNONYMS_CHANGED: &str = "SYNONYMS_CHANGED";
 const CACHE_RAISED: &str = "CACHE_RAISED";
+const API_SPLIT: &str = "api_split";
+const ENTRY_UNREACHABLE: &str = "entry_unreachable";
+const CACHE_BY_API: &str = "cache_by_api";
+/// Stands in for the interface name of a request. The history does not hold the
+/// name, and a route name is never `~`, so no pattern matches it by accident.
+const NAME_PLACEHOLDER: &str = "~";
 
 /// The route a request takes under one configuration, in the gateway's order:
 /// bypass first, then the entry rule for requests without a session.
@@ -76,6 +82,55 @@ fn route(spec: &SiteSpec, path: &str, has_session: bool) -> Route {
     } else {
         Route::NoSession
     }
+}
+
+/// The route that names the interface of `path`: the one whose pattern covers the path,
+/// or whose exact path the path lies under. Routes do not overlap, so there is at most
+/// one.
+fn covering_route<'a>(spec: &'a SiteSpec, path: &str) -> Option<&'a RouteRule> {
+    spec.routes()
+        .iter()
+        .find(|route| route.path().matches(path) || covers_subpath(route, path))
+}
+
+/// Whether `path` lies under the exact path of `route`. The gateway cannot name the
+/// interface of such a request, so it is unknown.
+fn covers_subpath(route: &RouteRule, path: &str) -> bool {
+    let pattern = route.path();
+    let stem = pattern.stem();
+    !pattern.is_prefix()
+        && path.len() > stem.len()
+        && path.starts_with(stem)
+        && path.as_bytes().get(stem.len()) == Some(&b'/')
+}
+
+/// The path a group's requests are judged by under `spec`, as the gateway matches it.
+/// A path a route names gets an interface name the history does not hold, so the
+/// placeholder stands in for it: an exact entry or bypass pattern stops matching it,
+/// a prefix pattern still does. `None` when the interface is unknown, which is never an
+/// entry and never bypassed.
+fn judged_path(spec: &SiteSpec, path: &str) -> Option<String> {
+    match covering_route(spec, path) {
+        None => Some(path.to_owned()),
+        Some(route) if route.path().matches(path) => Some(format!("{path}/{NAME_PLACEHOLDER}")),
+        Some(_) => None,
+    }
+}
+
+/// The route a group takes under `spec`, judged by its logical path.
+fn logical_route(spec: &SiteSpec, path: &str, has_session: bool) -> Route {
+    match judged_path(spec, path) {
+        Some(logical) => route(spec, &logical, has_session),
+        None if has_session => Route::Judged,
+        None => Route::NoSession,
+    }
+}
+
+/// Whether the proposed routes name the interface of `path` differently from the
+/// current ones: a route is new, or its name sources differ.
+fn naming_changed(current: &SiteSpec, proposed: &SiteSpec, path: &str) -> bool {
+    let next = covering_route(proposed, path);
+    next.is_some() && next != covering_route(current, path)
 }
 
 /// The change kind of a route that moves; `None` when it stays where it was.
@@ -230,7 +285,8 @@ impl Tally {
     }
 }
 
-/// The route and mode changes of every path group, and the paths they move.
+/// The route and mode changes of every path group, the paths they move, and the
+/// requests that a proposed route starts to name by interface.
 #[derive(Default)]
 struct PathChanges {
     changed: BTreeMap<&'static str, Tally>,
@@ -238,24 +294,46 @@ struct PathChanges {
     entries: BTreeMap<String, i64>,
     /// Bypass patterns the proposed configuration adds, with their requests.
     bypass: BTreeMap<String, i64>,
+    /// Requests on paths that a proposed route newly names by interface.
+    split: Tally,
+    /// Cached allows on such paths: their cache key gains the interface name.
+    cached_split: Tally,
 }
 
-/// Routes every group under both configurations and counts what moves. A group
-/// whose route moves is counted once, under its route change; a mode switch
-/// counts the groups whose route stays and that are not bypassed afterwards.
+/// Routes every group under both configurations, judged by its logical path, and counts
+/// what moves. A group whose route moves is counted once, under its route change; a
+/// mode switch counts the groups whose route stays and that are not bypassed
+/// afterwards. A group on a path that a proposed route newly names is also counted
+/// under `api_split`, and a cached one under `cache_by_api`.
 fn path_changes(current: &SiteSpec, proposed: &SiteSpec, groups: &[PathGroup]) -> PathChanges {
     let mut changes = PathChanges::default();
     let mode = mode_change(current.mode(), proposed.mode());
+    let cache_on = Effective::of(proposed).cache_minutes > 0;
     for group in groups {
-        let before = route(current, &group.path, group.has_session);
-        let after = route(proposed, &group.path, group.has_session);
+        let split = naming_changed(current, proposed, &group.path);
+        if split {
+            changes.split.add(group);
+            if cache_on && group.decision_path == CACHED_ALLOW {
+                changes.cached_split.add(group);
+            }
+        }
+        let before = logical_route(current, &group.path, group.has_session);
+        let after = logical_route(proposed, &group.path, group.has_session);
         if let Some(kind) = route_change(before, after) {
+            // The entry is still registered at this path, so the interface name is
+            // what made its requests miss it.
+            let kind = if split && kind == ENTRY_TO_NO_SESSION && proposed.is_entry(&group.path) {
+                ENTRY_UNREACHABLE
+            } else {
+                kind
+            };
             changes.changed.entry(kind).or_default().add(group);
-            if kind == NO_SESSION_TO_ENTRY {
+            if kind == NO_SESSION_TO_ENTRY && !split {
                 *changes.entries.entry(group.path.clone()).or_insert(0) += group.count;
             }
             if kind == JUDGED_TO_BYPASS
-                && let Some(pattern) = proposed.matching_bypass(&group.path)
+                && let Some(logical) = judged_path(proposed, &group.path)
+                && let Some(pattern) = proposed.matching_bypass(&logical)
             {
                 *changes.bypass.entry(pattern.to_owned()).or_insert(0) += group.count;
             }
@@ -500,7 +578,11 @@ pub async fn preview(
     let next = Effective::of(&proposed);
 
     let mut changes: Vec<ChangeBody> = Vec::new();
+    if paths.split.count > 0 {
+        changes.push(paths.split.change(API_SPLIT, paths.split.count));
+    }
     for kind in [
+        ENTRY_UNREACHABLE,
         NO_SESSION_TO_ENTRY,
         ENTRY_TO_NO_SESSION,
         JUDGED_TO_BYPASS,
@@ -523,6 +605,13 @@ pub async fn preview(
     );
     changes.extend(call_limit_changes(&state.pool, &scope, &rows, current, next).await?);
     changes.extend(cache_change(&rows, &groups, current, next));
+    if paths.cached_split.count > 0 {
+        changes.push(
+            paths
+                .cached_split
+                .change(CACHE_BY_API, paths.cached_split.count),
+        );
+    }
     changes.extend(secret_change(&state.pool, &scope, &record.spec, &proposed).await?);
 
     let total: i64 = groups.iter().map(|group| group.count).sum();
@@ -641,5 +730,100 @@ mod tests {
             Some((WOULD_BLOCK_TO_BLOCKED, WOULD_BLOCK))
         );
         assert_eq!(mode_change(Mode::Enforce, Mode::Enforce), None);
+    }
+
+    fn routed(entries: &str, routes: &str) -> SiteSpec {
+        let text = format!(
+            r#"{{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{{"cookie":"SID"}},"entries":{entries},"bypass":["/assets/*"],"routes":{routes}}}"#
+        );
+        SiteSpec::from_json(&text).expect("valid routed test site")
+    }
+
+    const RPC: &str = r#"[{"path":"/api/rpc","name_from":[["body.method"]]}]"#;
+
+    #[test]
+    fn a_route_that_names_a_path_splits_its_requests_by_api() {
+        let current = routed(r#"["/login"]"#, "[]");
+        let proposed = routed(r#"["/login"]"#, RPC);
+        let groups = [
+            group("/api/rpc", true, "jev_allow", "allowed", 4),
+            group("/api/records", true, "jev_allow", "allowed", 9),
+        ];
+        let changes = path_changes(&current, &proposed, &groups);
+        assert_eq!(changes.split.count, 4);
+        assert!(changes.changed.is_empty());
+        assert_eq!(
+            judged_path(&proposed, "/api/rpc"),
+            Some("/api/rpc/~".to_owned())
+        );
+        assert_eq!(
+            judged_path(&proposed, "/api/records"),
+            Some("/api/records".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_unchanged_route_splits_nothing() {
+        let spec = routed(r#"["/login"]"#, RPC);
+        let groups = [group("/api/rpc", true, "jev_allow", "allowed", 4)];
+        let changes = path_changes(&spec, &spec, &groups);
+        assert_eq!(changes.split.count, 0);
+        assert!(changes.changed.is_empty());
+    }
+
+    #[test]
+    fn an_entry_on_a_split_path_stops_matching_and_is_unreachable() {
+        let current = routed(r#"["/api/rpc"]"#, "[]");
+        let proposed = routed(r#"["/api/rpc"]"#, RPC);
+        let groups = [group("/api/rpc", false, "no_session", "blocked", 3)];
+        let changes = path_changes(&current, &proposed, &groups);
+        assert_eq!(
+            changes
+                .changed
+                .get(ENTRY_UNREACHABLE)
+                .map(|tally| tally.count),
+            Some(3)
+        );
+        assert!(!changes.changed.contains_key(ENTRY_TO_NO_SESSION));
+        assert_eq!(changes.split.count, 3);
+    }
+
+    #[test]
+    fn a_prefix_entry_still_covers_the_named_requests() {
+        let current = routed(r#"["/api/*"]"#, "[]");
+        let proposed = routed(r#"["/api/*"]"#, RPC);
+        let groups = [group("/api/rpc", false, "no_session", "blocked", 3)];
+        let changes = path_changes(&current, &proposed, &groups);
+        assert!(changes.changed.is_empty());
+        assert_eq!(changes.split.count, 3);
+    }
+
+    #[test]
+    fn a_sub_path_of_an_exact_route_is_unknown_and_never_an_entry() {
+        let current = routed(r#"["/api/rpc/list"]"#, "[]");
+        let proposed = routed(r#"["/api/rpc/list"]"#, RPC);
+        let groups = [group("/api/rpc/list", false, "no_session", "blocked", 2)];
+        let changes = path_changes(&current, &proposed, &groups);
+        assert_eq!(judged_path(&proposed, "/api/rpc/list"), None);
+        assert_eq!(
+            changes
+                .changed
+                .get(ENTRY_UNREACHABLE)
+                .map(|tally| tally.count),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_cached_allow_on_a_newly_named_path_is_counted_by_api() {
+        let current = routed(r#"["/login"]"#, "[]");
+        let proposed = routed(r#"["/login"]"#, RPC);
+        let groups = [
+            group("/api/rpc", true, CACHED_ALLOW, "allowed", 5),
+            group("/api/rpc", true, "jev_allow", "allowed", 7),
+        ];
+        let changes = path_changes(&current, &proposed, &groups);
+        assert_eq!(changes.cached_split.count, 5);
+        assert_eq!(changes.split.count, 12);
     }
 }
