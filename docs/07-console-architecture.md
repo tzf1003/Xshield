@@ -759,6 +759,8 @@ CREATE TABLE jev_prompts (
 | `entry_unreachable` | 入口仍登记在 URL 路径上，但请求的逻辑路径多了接口名，入口不再命中的请求数 | 草稿路由覆盖的路径按 `URL/~` 重新匹配入口（`~` 是占位名）：精确入口不再命中，前缀入口仍命中；子路径的接口名未知，不作入口 |
 | `cache_by_api` | 放行缓存的键加上接口名后，原来命中缓存放行的请求数 | 被草稿路由按接口区分的路径上，原为 `cached_allow` 的行数；缓存时长为 0 时不计 |
 
+`api_split`、`entry_unreachable` 和 `cache_by_api` 三类总是估算，它们的 `detail` 为 `{ "approximate": true }`，控制台据此说明估算的原因。草稿路由覆盖了有请求的路径（即 `api_split` 有计数）时，`warnings` 还包含 `INTERFACE_UNVERIFIED`：这些请求的接口名历史记录里没有，前缀入口下的无会话请求可能漏报，路由影响都只是估计。
+
 会话凭证、Host 或同义词改变时只给警告（`SESSION_CHANGED`、`HOSTS_CHANGED`、`SYNONYMS_CHANGED`）：会话凭证换了以后现有会话上下文全部作废，Host 换了以后流量路由改变，同义词改变核验结果，都无法从历史记录可靠预估。
 
 ### 7.9.11 调优建议与就绪检查
