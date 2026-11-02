@@ -14,8 +14,8 @@ import { hms } from "./clock.ts";
 const LEVEL: Record<Level, { glyph: string; word: string; cls: string }> = {
   serious: { glyph: "■", word: "严重", cls: "lvl-serious" },
   warn: { glyph: "▲", word: "警告", cls: "lvl-warn" },
-  // docs/06 6.5.3 reserves the filled dot for "正常", so a hint takes a neutral mark.
-  info: { glyph: "›", word: "提示", cls: "lvl-info" },
+  // docs/06 6.5.3 reserves the filled dot for "正常"; the prototype marks a hint with a ringed i.
+  info: { glyph: "i", word: "提示", cls: "lvl-info ov-mark-ring" },
 };
 
 function ActionLink({ action }: { action: Action }) {
