@@ -51,6 +51,7 @@ const SESSION_CHANGED: &str = "SESSION_CHANGED";
 const HOSTS_CHANGED: &str = "HOSTS_CHANGED";
 const SYNONYMS_CHANGED: &str = "SYNONYMS_CHANGED";
 const CACHE_RAISED: &str = "CACHE_RAISED";
+const INTERFACE_UNVERIFIED: &str = "INTERFACE_UNVERIFIED";
 const API_SPLIT: &str = "api_split";
 const ENTRY_UNREACHABLE: &str = "entry_unreachable";
 const CACHE_BY_API: &str = "cache_by_api";
@@ -131,6 +132,13 @@ fn logical_route(spec: &SiteSpec, path: &str, has_session: bool) -> Route {
 fn naming_changed(current: &SiteSpec, proposed: &SiteSpec, path: &str) -> bool {
     let next = covering_route(proposed, path);
     next.is_some() && next != covering_route(current, path)
+}
+
+/// Whether a change kind is an estimate: its requests are counted under the placeholder
+/// name, since the history holds no interface names.
+#[must_use]
+fn is_estimate(kind: &str) -> bool {
+    matches!(kind, API_SPLIT | ENTRY_UNREACHABLE | CACHE_BY_API)
 }
 
 /// The change kind of a route that moves; `None` when it stays where it was.
@@ -225,6 +233,9 @@ pub enum ChangeDetailBody {
         values: i64,
         fields: Vec<(String, i64)>,
     },
+    /// A count the history cannot settle, because it names requests by an interface the
+    /// history does not hold: `api_split`, `entry_unreachable` and `cache_by_api`.
+    Approximate { approximate: bool },
 }
 
 /// The entries and bypass patterns the proposed configuration adds, with the requests
@@ -280,7 +291,8 @@ impl Tally {
             top: Some(top),
             would_block: (self.would_block > 0).then_some(self.would_block),
             sample: self.sample.as_ref().map(|(_, sample)| sample.clone()),
-            detail: None,
+            detail: is_estimate(kind)
+                .then_some(ChangeDetailBody::Approximate { approximate: true }),
         }
     }
 }
@@ -515,8 +527,13 @@ fn synonyms_of(spec: &SiteSpec) -> BTreeSet<&(String, String)> {
 }
 
 /// The warnings for what history cannot estimate: a new session credential, new
-/// hosts, changed synonyms, or a longer allow cache.
-fn warning_codes(current: &SiteSpec, proposed: &SiteSpec) -> Vec<&'static str> {
+/// hosts, changed synonyms, a longer allow cache, or a route that names requests of the
+/// window by interface (`interface_unverified`), whose names the history does not hold.
+fn warning_codes(
+    current: &SiteSpec,
+    proposed: &SiteSpec,
+    interface_unverified: bool,
+) -> Vec<&'static str> {
     let mut codes = Vec::new();
     if current.session() != proposed.session() {
         codes.push(SESSION_CHANGED);
@@ -529,6 +546,9 @@ fn warning_codes(current: &SiteSpec, proposed: &SiteSpec) -> Vec<&'static str> {
     }
     if Effective::of(proposed).cache_minutes > Effective::of(current).cache_minutes {
         codes.push(CACHE_RAISED);
+    }
+    if interface_unverified {
+        codes.push(INTERFACE_UNVERIFIED);
     }
     codes
 }
@@ -625,7 +645,7 @@ pub async fn preview(
             entries: paths.entries,
             bypass: paths.bypass,
         },
-        warnings: warning_codes(&record.spec, &proposed)
+        warnings: warning_codes(&record.spec, &proposed, paths.split.count > 0)
             .into_iter()
             .map(str::to_owned)
             .collect(),
@@ -825,5 +845,42 @@ mod tests {
         let changes = path_changes(&current, &proposed, &groups);
         assert_eq!(changes.cached_split.count, 5);
         assert_eq!(changes.split.count, 12);
+    }
+
+    #[test]
+    fn the_route_estimates_are_marked_approximate() {
+        let current = routed(r#"["/login"]"#, "[]");
+        let proposed = routed(r#"["/login"]"#, RPC);
+        let groups = [group("/api/rpc", true, CACHED_ALLOW, "allowed", 5)];
+        let changes = path_changes(&current, &proposed, &groups);
+        let split = changes.split.change(API_SPLIT, changes.split.count);
+        let cached = changes
+            .cached_split
+            .change(CACHE_BY_API, changes.cached_split.count);
+        let marked = Some(ChangeDetailBody::Approximate { approximate: true });
+        assert_eq!(split.detail, marked);
+        assert_eq!(cached.detail, marked);
+        let json = serde_json::to_value(&split).expect("json");
+        assert_eq!(json["detail"], serde_json::json!({"approximate": true}));
+        // The other kinds are counted from the history as it is, and carry no mark.
+        assert_eq!(Tally::default().change("cache", 1).detail, None);
+    }
+
+    #[test]
+    fn a_route_that_names_requests_raises_the_interface_warning() {
+        let current = routed(r#"["/login"]"#, "[]");
+        let proposed = routed(r#"["/login"]"#, RPC);
+        let named = [group("/api/rpc", true, "jev_allow", "allowed", 4)];
+        let split = path_changes(&current, &proposed, &named).split.count > 0;
+        assert!(warning_codes(&current, &proposed, split).contains(&INTERFACE_UNVERIFIED));
+        // A prefix entry still covers the named requests, so no entry change shows them.
+        let current = routed(r#"["/api/*"]"#, "[]");
+        let proposed = routed(r#"["/api/*"]"#, RPC);
+        let split = path_changes(&current, &proposed, &named).split.count > 0;
+        assert!(warning_codes(&current, &proposed, split).contains(&INTERFACE_UNVERIFIED));
+        // A route that names no request of the window raises nothing.
+        let other = [group("/api/records", true, "jev_allow", "allowed", 9)];
+        let split = path_changes(&current, &proposed, &other).split.count > 0;
+        assert!(!warning_codes(&current, &proposed, split).contains(&INTERFACE_UNVERIFIED));
     }
 }
