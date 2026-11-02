@@ -28,6 +28,7 @@ import type {
   TimelineRow,
   ValidateResult,
 } from "../../src/api/types.ts";
+import { bootstrapAnswer, learnAnswer, objectSlotAnswer, objectsAnswer } from "./mock-objects.ts";
 import {
   DAY_MS,
   evidence,
@@ -275,6 +276,35 @@ const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     (m, _c, s) => siteOr(s, m, (site) => ok(insightsFor(site))),
   ],
   ["GET", /^\/api\/sites\/([^/]+)\/evidence$/, (m, _c, s) => siteOr(s, m, () => ok(evidence))],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects$/,
+    (m, c, s) => siteOr(s, m, (site) => objectsAnswer(site.name, c.params, s)),
+  ],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects\/bootstrap$/,
+    (m, _c, s) => siteOr(s, m, (site) => bootstrapAnswer(site.name)),
+  ],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects\/slots\/([^/]+)$/,
+    (m, _c, s) =>
+      siteOr(s, m, (site) => objectSlotAnswer(site.name, decodeURIComponent(m[2] ?? ""), s)),
+  ],
+  [
+    "POST",
+    /^\/api\/sites\/([^/]+)\/objects\/slots\/([^/]+)\/(dismiss|ambiguous)$/,
+    (m, _c, s) =>
+      siteOr(s, m, (site) =>
+        learnAnswer(
+          site.name,
+          decodeURIComponent(m[2] ?? ""),
+          m[3] === "dismiss" ? "dismiss" : "ambiguous",
+          s,
+        ),
+      ),
+  ],
   ["GET", /^\/api\/status$/, () => ok(status)],
   ["GET", /^\/api\/system$/, () => ok(system)],
 ];

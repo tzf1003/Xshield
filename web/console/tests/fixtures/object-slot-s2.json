@@ -1,0 +1,56 @@
+{
+  "id": "s2",
+  "side": "response",
+  "key": "GET /api/appointments [].doc_id",
+  "class": "doctor",
+  "state": "proposed",
+  "source": "rule",
+  "basis": "流向 87% · 23 会话 · 0 拒绝",
+  "last_seen": "2026-11-01T13:15:00Z",
+  "flows_in": [
+    {
+      "key": "GET /doctor/{id} path[1]",
+      "side": "request",
+      "share": 0.87,
+      "uses": 140,
+      "sessions": 23,
+      "jev_allow": 140,
+      "jev_deny": 0,
+      "method": "GET",
+      "route": "/doctor/{id}"
+    },
+    {
+      "key": "GET /api/schedule query.doc",
+      "side": "request",
+      "share": 0.11,
+      "uses": 18,
+      "sessions": 6,
+      "jev_allow": 18,
+      "jev_deny": 0,
+      "method": "GET",
+      "route": "/api/schedule"
+    }
+  ],
+  "examples": [
+    "req_01a1971a07e079639a823d4257b43172",
+    "req_01a1973940107ebea1af2c54ce635f38"
+  ],
+  "shape": [
+    { "path": "[].id", "type": "number" },
+    { "path": "[].doc_id", "type": "number" },
+    { "path": "[].doc_name", "type": "string" },
+    { "path": "[].slot", "type": "string" }
+  ],
+  "history": [
+    { "at": "2026-10-31T09:12:00Z", "text": "规则提议" },
+    { "at": "2026-11-01T13:15:00Z", "text": "证据更新" }
+  ],
+  "impact": [
+    {
+      "kind": "new_fast_allow",
+      "count": 158,
+      "sample": "req_01a1973ed5c0732b8f29804d7fc746d3"
+    },
+    { "kind": "back_to_jev", "count": 14 }
+  ]
+}

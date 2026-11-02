@@ -1,0 +1,14 @@
+{
+  "counts": {
+    "classes": 0,
+    "pending": 0,
+    "proposed": 0,
+    "confirmed": 0,
+    "ambiguous": 0,
+    "suspended": 0
+  },
+  "agent_configured": false,
+  "classes": [],
+  "slots": [],
+  "events": []
+}

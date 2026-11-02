@@ -1,0 +1,29 @@
+{
+  "window_hours": 24,
+  "candidates": [
+    {
+      "kind": "doctor",
+      "name": "医生",
+      "slots": ["GET /api/doctors [].id", "GET /doctor/{id} path[1]"],
+      "note": null
+    },
+    {
+      "kind": "patient",
+      "name": "患者",
+      "slots": ["GET /api/patients [].id", "GET /api/patients/{id} path[2]"],
+      "note": null
+    },
+    {
+      "kind": "doc",
+      "name": "文档",
+      "slots": ["GET /api/docs [].id"],
+      "note": "名字是缩写，建议改名为“文档 document”"
+    },
+    {
+      "kind": "record",
+      "name": "记录",
+      "slots": ["GET /api/records/{id} path[1]"],
+      "note": null
+    }
+  ]
+}

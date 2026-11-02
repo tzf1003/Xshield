@@ -23,6 +23,7 @@ const PAGES: [string, string][] = [
   ["parameter table", "/system?tab=params"],
   ["overview", "/"],
   ["site history, version table", "/sites/emr?tab=history"],
+  ["site object map, by class", "/sites/emr?tab=objects"],
 ];
 
 /** Runs in the page: one line for each cell whose content spills out of it or is cut where it must not be. */
