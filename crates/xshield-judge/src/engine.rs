@@ -282,8 +282,8 @@ impl<J: JevPort> Judge<J> {
             request.content_type,
             request.body,
         );
-        let cache_key = self.cache_key(request, &extracted.values);
         let tuning = Tuning::new(site, self.jev.default_timeout());
+        let cache_key = self.cache_key(request, &extracted.values, tuning.objects);
         record.session = session_id.map(|id| label(&id)).unwrap_or_default();
         record.context = match (session_id, entry) {
             (Some(_), _) => Some(ContextKind::Session),
@@ -591,10 +591,14 @@ impl<J: JevPort> Judge<J> {
         })
     }
 
+    /// The key of the allow a request may reuse. It names the site's object map:
+    /// a map change can turn the same request into a different judgement, so an
+    /// allow made under the old map must not be reused under the new one.
     fn cache_key(
         &self,
         request: &RequestFacts<'_>,
         values: &[crate::values::RequestValue],
+        objects: &ObjectMap,
     ) -> Digest16 {
         let mut parts: Vec<String> = values
             .iter()
@@ -602,7 +606,10 @@ impl<J: JevPort> Judge<J> {
             .collect();
         parts.sort_unstable();
         let text = format!("{}\0{}\0{}", request.method, request.path, parts.join("\0"));
-        self.key.mac("cache", text.as_bytes())
+        let map = serde_json::to_string(objects).unwrap_or_default();
+        let map = self.key.mac("objects", map.as_bytes());
+        self.key
+            .mac("cache", &[map.as_slice(), text.as_bytes()].concat())
     }
 
     /// Remembers what the origin returned (docs/01 section 1.4 step 8) and
@@ -2022,6 +2029,30 @@ mod tests {
             .await;
         assert!(!verdict.forward);
         assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+    }
+
+    #[tokio::test]
+    async fn an_allow_made_under_the_old_object_map_is_not_reused_under_a_new_one() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let query = Some("q=%E6%82%A3%E8%80%85");
+        let first = judge
+            .judge(
+                &site(r#","mode":"enforce""#),
+                &get("/api/search", query, Some("alice"), 0),
+            )
+            .await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        let mapped = site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"doctor","name":"医生"}],
+                "slots":[{"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"}]}"#,
+        );
+        let second = judge
+            .judge(&mapped, &get("/api/search", query, Some("alice"), 1_000))
+            .await;
+        assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
     }
 
     #[tokio::test]
