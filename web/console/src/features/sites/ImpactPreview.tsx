@@ -63,14 +63,14 @@ function sentenceOf(change: ImpactChange): { text: string; notes: string[] } | n
       }
       const apis = numberOf(change, "apis");
       const split = apis === undefined ? "按接口分别判定" : `按 ${fmtInt(apis)} 个接口分别判定`;
-      return { text: `这条路径下 ${n} 个请求将${split}`, notes: [] };
+      return { text: `这条路径下 ${n} 个请求将${split}`, notes: approximate };
     }
     case "entry_unreachable": {
       const entry = textOf(change, "entry") ?? change.top?.[0]?.[1];
       const head = entry === undefined ? "这个入口" : `入口 ${entry}`;
       return {
         text: `${head} 将不再命中任何请求（${n} 个原本放行的无会话请求将需要会话）`,
-        notes: [],
+        notes: approximate,
       };
     }
     case "new_fast_allow":
@@ -87,7 +87,7 @@ function sentenceOf(change: ImpactChange): { text: string; notes: string[] } | n
     case "cache_by_api":
       return {
         text: "同一会话里参数相同的不同接口不再共用放行结论",
-        notes: [IMPACT_NOTE.notCounted],
+        notes: [IMPACT_NOTE.notCounted, ...approximate],
       };
     default:
       return null;

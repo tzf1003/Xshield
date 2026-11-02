@@ -59,7 +59,8 @@
       "state": "confirmed",
       "source": "rule",
       "basis": "名字明确 · 31 会话 · 0 拒绝",
-      "last_seen": "2026-11-01T13:16:00Z"
+      "last_seen": "2026-11-01T13:16:00Z",
+      "dismissed": false
     },
     {
       "id": "s2",
@@ -69,7 +70,8 @@
       "state": "proposed",
       "source": "rule",
       "basis": "流向 87% · 23 会话 · 0 拒绝",
-      "last_seen": "2026-11-01T13:15:00Z"
+      "last_seen": "2026-11-01T13:15:00Z",
+      "dismissed": false
     },
     {
       "id": "s3",
@@ -79,7 +81,8 @@
       "state": "suspended",
       "source": "admin",
       "basis": "快速放行后源站 404 比例 18%",
-      "last_seen": "2026-11-01T13:10:00Z"
+      "last_seen": "2026-11-01T13:10:00Z",
+      "dismissed": false
     },
     {
       "id": "s4",
@@ -89,7 +92,8 @@
       "state": "confirmed",
       "source": "rule",
       "basis": "名字明确 · 44 会话 · 0 拒绝",
-      "last_seen": "2026-11-01T13:12:00Z"
+      "last_seen": "2026-11-01T13:12:00Z",
+      "dismissed": false
     },
     {
       "id": "s5",
@@ -99,7 +103,8 @@
       "state": "confirmed",
       "source": "rule",
       "basis": "路径参数 · 38 会话 · 0 拒绝",
-      "last_seen": "2026-11-01T13:05:00Z"
+      "last_seen": "2026-11-01T13:05:00Z",
+      "dismissed": false
     },
     {
       "id": "s6",
@@ -109,7 +114,8 @@
       "state": "pending",
       "source": "rule",
       "basis": "学习中 · 6 次 · 2 会话",
-      "last_seen": "2026-11-01T12:40:00Z"
+      "last_seen": "2026-11-01T12:40:00Z",
+      "dismissed": false
     },
     {
       "id": "s7",
@@ -119,7 +125,8 @@
       "state": "proposed",
       "source": "rule",
       "basis": "名字是缩写 · 12 会话 · 0 拒绝",
-      "last_seen": "2026-11-01T13:00:00Z"
+      "last_seen": "2026-11-01T13:00:00Z",
+      "dismissed": false
     },
     {
       "id": "s8",
@@ -129,7 +136,8 @@
       "state": "ambiguous",
       "source": "agent",
       "basis": "有歧义，交给 Jev",
-      "last_seen": "2026-11-01T11:00:00Z"
+      "last_seen": "2026-11-01T11:00:00Z",
+      "dismissed": false
     },
     {
       "id": "s9",
@@ -139,7 +147,8 @@
       "state": "confirmed",
       "source": "admin",
       "basis": "管理员声明 · 9 会话 · 0 拒绝",
-      "last_seen": null
+      "last_seen": null,
+      "dismissed": false
     },
     {
       "id": "s10",
@@ -149,7 +158,8 @@
       "state": "proposed",
       "source": "rule",
       "basis": "流向 92% · 6 会话 · 0 拒绝",
-      "last_seen": "2026-10-31T20:30:00Z"
+      "last_seen": "2026-10-31T20:30:00Z",
+      "dismissed": false
     }
   ],
   "events": [

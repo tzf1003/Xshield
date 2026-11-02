@@ -183,7 +183,7 @@ test("confirming the candidates puts their declarations in the save dialog", asy
   await expect(changes).toContainText("对象表 ＋ 字段 id 归为患者（仅 /api/patients*）");
 });
 
-test("the learning settings show their values and stay read-only until the gateway accepts them", async ({
+test("the learning settings save through the save dialog, and the agent stays off", async ({
   page,
 }) => {
   await openMap(page, "/sites/emr?tab=objects");
@@ -192,9 +192,25 @@ test("the learning settings show their values and stay read-only until the gatew
   const drawer = page.getByRole("dialog", { name: "学习设置" });
   await expect(drawer.getByRole("switch", { name: "agent" })).toBeDisabled();
   await expect(drawer).toContainText("没有配置模型，agent 暂不可用。");
-  await expect(drawer).toContainText("网关接受对象表的学习设置之后，这里的开关才能保存。");
-  await expect(drawer.getByRole("switch", { name: "自动收紧" })).toBeDisabled();
-  await expect(drawer.getByRole("button", { name: "保存…" })).toBeDisabled();
+  await expect(drawer).not.toContainText("网关接受对象表的学习设置之后");
+  const save = drawer.getByRole("button", { name: "保存…" });
+  await expect(save).toBeDisabled();
+
+  await drawer.getByRole("switch", { name: "自动收紧" }).click();
+  await expect(save).toBeEnabled();
+
+  const uses = drawer.getByRole("spinbutton", { name: "至少使用次数" });
+  await uses.fill("10001");
+  await expect(save).toBeDisabled();
+  await uses.fill("20");
+  await expect(save).toBeEnabled();
+
+  await save.click();
+  await page.keyboard.press("Control+s");
+  const dialog = page.getByRole("dialog", { name: "保存 emr 的配置" });
+  await expect(dialog.getByRole("list", { name: "改动摘要" })).toContainText(
+    "学习设置 自动收紧 开 → 关",
+  );
 });
 
 test("the synonym migration turns a group into declarations, and the save removes the group", async ({
