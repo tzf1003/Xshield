@@ -1,7 +1,8 @@
 // Differences between two site configurations: a line diff for the YAML text, and a list of
 // human-readable changes for the version history and the save dialog (docs/06 6.4.9).
 
-import type { SiteSpec } from "../api/types.ts";
+import type { FieldKindDeclaration, LearningSettings, RouteRule, SiteSpec } from "../api/types.ts";
+import { OBJECT_KIND_LABEL } from "./vocab.ts";
 import { orderSpec, specToYaml } from "./yaml.ts";
 
 export type LineOp = { op: "eq" | "add" | "del"; text: string };
@@ -78,6 +79,92 @@ function setDiff(before: string[], after: string[]): { added: string[]; removed:
   };
 }
 
+const onOff = (value: boolean): string => (value ? "开" : "关");
+
+/** The learning settings in words, in the order the settings sheet lists them (docs/06 6.4.9). */
+const LEARNING_TEXT: Array<[label: string, read: (settings: LearningSettings) => string]> = [
+  ["自动学习", (settings) => onOff(settings.auto_learn)],
+  ["自动收紧", (settings) => onOff(settings.auto_tighten)],
+  ["自动暂停", (settings) => onOff(settings.auto_pause)],
+  ["agent", (settings) => onOff(settings.agent.enabled)],
+  ["agent 每日上限", (settings) => `${settings.agent.daily_limit} 次`],
+  [
+    "学习阈值",
+    (settings) => `${settings.thresholds.uses} 次 / ${settings.thresholds.sessions} 个会话`,
+  ],
+];
+
+/** Route rules by path: a rule added or removed, or one whose interface-name sources changed. */
+function routeChanges(before: RouteRule[], after: RouteRule[]): string[] {
+  const left = new Map(before.map((rule): [string, RouteRule] => [rule.path, rule]));
+  const right = new Map(after.map((rule): [string, RouteRule] => [rule.path, rule]));
+  const changes: string[] = [];
+  for (const rule of after) {
+    if (!left.has(rule.path)) changes.push(`接口名规则 ＋1：${rule.path}`);
+  }
+  for (const rule of before) {
+    if (!right.has(rule.path)) changes.push(`接口名规则 －1：${rule.path}`);
+  }
+  for (const rule of after) {
+    const old = left.get(rule.path);
+    if (old && JSON.stringify(old.name_from) !== JSON.stringify(rule.name_from)) {
+      changes.push(`接口名规则 改动：${rule.path}`);
+    }
+  }
+  return changes;
+}
+
+/** The scope of a field-kind declaration in words, e.g. `/api/appointments*`; empty for the whole site. */
+function scopeOf(declaration: FieldKindDeclaration): string {
+  return declaration.in && declaration.in.length > 0 ? declaration.in.join("、") : "";
+}
+
+/**
+ * Field-kind declarations by field and scope: one added or removed, or one whose class changed. A changed class
+ * reads as the position and the move, e.g. `响应 /api/appointments* [].doc_id 从医生改为文档`.
+ */
+function fieldKindChanges(before: FieldKindDeclaration[], after: FieldKindDeclaration[]): string[] {
+  const keyOf = (item: FieldKindDeclaration): string => JSON.stringify([item.field, item.in ?? []]);
+  const left = new Map(before.map((item): [string, FieldKindDeclaration] => [keyOf(item), item]));
+  const right = new Map(after.map((item): [string, FieldKindDeclaration] => [keyOf(item), item]));
+  const changes: string[] = [];
+  for (const item of after) {
+    const old = left.get(keyOf(item));
+    const scope = scopeOf(item);
+    if (old === undefined) {
+      const where = scope ? `（仅 ${scope}）` : "";
+      changes.push(`字段归类 ＋1：${item.field} 归为${classOf(item.kind)}${where}`);
+    } else if (old.kind !== item.kind) {
+      const where = scope ? `响应 ${scope} ${item.field}` : `字段 ${item.field}`;
+      changes.push(`${where} 从${classOf(old.kind)}改为${classOf(item.kind)}`);
+    }
+  }
+  for (const item of before) {
+    if (right.has(keyOf(item))) continue;
+    const scope = scopeOf(item);
+    changes.push(`字段归类 －1：${item.field}${scope ? `（仅 ${scope}）` : ""}`);
+  }
+  return changes;
+}
+
+function classOf(kind: string): string {
+  return OBJECT_KIND_LABEL[kind] ?? kind;
+}
+
+/** Each learning setting that moved; a configuration with no learning settings reads as the defaults. */
+function learningChanges(
+  before: LearningSettings | undefined,
+  after: LearningSettings | undefined,
+): string[] {
+  const changes: string[] = [];
+  for (const [label, read] of LEARNING_TEXT) {
+    const old = before === undefined ? "默认" : read(before);
+    const next = after === undefined ? "默认" : read(after);
+    if (old !== next) changes.push(`学习 ${label} ${old} → ${next}`);
+  }
+  return changes;
+}
+
 /** Human-readable changes, e.g. `入口 ＋1：/rest/admin/application-configuration`. */
 export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null): string[] {
   if (!before && after) return ["创建站点"];
@@ -136,6 +223,11 @@ export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null)
   );
   for (const pair of synDiff.added) changes.push(`同义词 ＋${pair}`);
   for (const pair of synDiff.removed) changes.push(`同义词 －${pair}`);
+  changes.push(...routeChanges(before.routes ?? [], after.routes ?? []));
+  const oldObjects = before.objects ?? {};
+  const newObjects = after.objects ?? {};
+  changes.push(...fieldKindChanges(oldObjects.field_kinds ?? [], newObjects.field_kinds ?? []));
+  changes.push(...learningChanges(oldObjects.learning, newObjects.learning));
   return changes;
 }
 

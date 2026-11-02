@@ -1,7 +1,9 @@
-// The change history of a site (docs/06 6.4.9): every version with its kind, its note and what it changed against
-// the version before. Two versions can be compared (the address keeps the pair as `diff=a..b`); a version can be
+// The change history of a site (docs/06 6.4.9): every version with its kind, who made it, its note and what it changed
+// against the version before. Two versions can be compared (the address keeps the pair as `diff=a..b`); a version can be
 // read in full, rolled back to, or used to find the requests it judged. The full text of a version opens in a row of
-// its own under its summary, across the whole table, so its lines are kept and it scrolls sideways instead.
+// its own under its summary, across the whole table, so its lines are kept and it scrolls sideways instead. An automatic
+// version (written by the learning task) can be undone: the rollback goes back to the version before it, and its note
+// is the reason the rollback starts from.
 
 import { Link } from "@tanstack/react-router";
 import { Fragment, useState } from "react";
@@ -10,9 +12,11 @@ import type { ChangeKind, SiteDetail, SiteSpec, SiteVersion } from "../../api/ty
 import { useSetSearch } from "../../app/scope.ts";
 import { semanticChanges, yamlDiff } from "../../lib/diff.ts";
 import { fmtInt, fmtLocalDateTime } from "../../lib/format.ts";
+import { AUTHOR_LABEL } from "../../lib/vocab.ts";
 import { specToYaml } from "../../lib/yaml.ts";
 import { ErrorBar, Loading } from "../../ui/Page.tsx";
 import { DiffView } from "./DiffView.tsx";
+import type { RollbackTarget } from "./RollbackDialog.tsx";
 
 const KIND_LABEL: Record<ChangeKind, string> = {
   create: "创建",
@@ -37,14 +41,39 @@ function parsePair(text: string | undefined): [number, number] | null {
   return [Number(match[1]), Number(match[2])];
 }
 
-/** What a version changed against the one before it, in a few words for the table. */
-function summaryOf(item: SiteVersion, before: SiteSpec | null): string {
-  if (item.spec === null) return "删除站点";
-  if (before === null) return item.change === "create" ? "新建站点" : "首个版本";
-  const changes = semanticChanges(before, item.spec);
-  if (changes.length === 0) return "内容没有变化";
+function isAutomatic(change: ChangeKind): boolean {
+  return change === "auto_tighten" || change === "auto_pause";
+}
+
+/** The first three changes, then how many there are in all. */
+function listed(changes: string[]): string {
   const head = changes.slice(0, 3).join("、");
   return changes.length > 3 ? `${head} 等 ${fmtInt(changes.length)} 项` : head;
+}
+
+type Summary = {
+  text: string;
+  /** The summary is the note itself, so the note is not written a second time above it. */
+  noteIsSummary: boolean;
+};
+
+/**
+ * What a version changed against the one before it, in a few words for the table. An automatic version names its change
+ * in the form of design 5 ("自动收紧：响应 … 从医生改为文档"); when the routes and objects show nothing, its note stands in.
+ */
+function summaryOf(item: SiteVersion, before: SiteSpec | null): Summary {
+  if (item.spec === null) return { text: "删除站点", noteIsSummary: false };
+  if (before === null) {
+    return { text: item.change === "create" ? "新建站点" : "首个版本", noteIsSummary: false };
+  }
+  const changes = semanticChanges(before, item.spec);
+  if (isAutomatic(item.change)) {
+    if (changes.length > 0) {
+      return { text: `${KIND_LABEL[item.change]}：${listed(changes)}`, noteIsSummary: false };
+    }
+    return { text: item.note ?? "内容没有变化", noteIsSummary: item.note !== null };
+  }
+  return { text: changes.length === 0 ? "内容没有变化" : listed(changes), noteIsSummary: false };
 }
 
 export function HistoryTab({ site, diff, onRollback }: Props) {
@@ -57,6 +86,7 @@ export function HistoryTab({ site, diff, onRollback }: Props) {
     return <ErrorBar error={versions.error} onRetry={() => void versions.refetch()} />;
 
   const list = [...(versions.data?.versions ?? [])].sort((a, b) => b.version - a.version);
+  const byVersion = new Map(list.map((item): [number, SiteVersion] => [item.version, item]));
   const specs = new Map(list.map((item): [number, SiteSpec | null] => [item.version, item.spec]));
   const specOf = (version: number): SiteSpec | null => specs.get(version) ?? null;
   const [newest, previous] = list;
@@ -132,6 +162,7 @@ export function HistoryTab({ site, diff, onRollback }: Props) {
               <th scope="col">版本</th>
               <th scope="col">时间</th>
               <th scope="col">类型</th>
+              <th scope="col">作者</th>
               <th scope="col">备注与改动</th>
               <th scope="col">
                 <span className="sr-only">操作</span>
@@ -143,6 +174,14 @@ export function HistoryTab({ site, diff, onRollback }: Props) {
               const before = specOf(item.version - 1);
               const expanded = open === item.version && item.spec !== null;
               const fullId = `history-full-${item.version}`;
+              const summary = summaryOf(item, before);
+              const automatic = isAutomatic(item.change);
+              // Undoing an automatic version goes back to the one before it. A deletion has no content to go back to.
+              const earlier = byVersion.get(item.version - 1);
+              const undo: RollbackTarget | null =
+                automatic && earlier !== undefined && earlier.spec !== null
+                  ? { ...earlier, undoes: item }
+                  : null;
               return (
                 <Fragment key={item.version}>
                   <tr>
@@ -150,16 +189,19 @@ export function HistoryTab({ site, diff, onRollback }: Props) {
                       v{item.version}
                       {item.version === site.version ? <span className="pill"> 当前</span> : null}
                     </td>
-                    <td className="tnum">{fmtLocalDateTime(Date.parse(item.changed_at))}</td>
-                    <td className="keep">
+                    <td className="tnum wrap">{fmtLocalDateTime(Date.parse(item.changed_at))}</td>
+                    <td className="wrap">
                       {KIND_LABEL[item.change]}
                       {item.rollback_of !== null ? `（回到 v${item.rollback_of}）` : ""}
                     </td>
-                    <td className="history-note wrap">
-                      {item.note ? <div>{item.note}</div> : null}
-                      <div className="small muted">{summaryOf(item, before)}</div>
-                    </td>
                     <td className="keep">
+                      {automatic ? AUTHOR_LABEL.learning : AUTHOR_LABEL.admin}
+                    </td>
+                    <td className="history-note wrap">
+                      {item.note && !summary.noteIsSummary ? <div>{item.note}</div> : null}
+                      <div className="small muted">{summary.text}</div>
+                    </td>
+                    <td className="wrap">
                       <div className="history-actions">
                         {item.spec !== null ? (
                           <button
@@ -188,12 +230,22 @@ export function HistoryTab({ site, diff, onRollback }: Props) {
                         >
                           查看用此版本判定的请求
                         </Link>
+                        {/* Last in the row: the grid puts it under the rollback column, on a line of its own. */}
+                        {undo !== null ? (
+                          <button
+                            type="button"
+                            className="linkbtn history-act-rollback"
+                            onClick={() => onRollback(undo)}
+                          >
+                            撤销…
+                          </button>
+                        ) : null}
                       </div>
                     </td>
                   </tr>
                   {expanded && item.spec !== null ? (
                     <tr className="history-full">
-                      <td colSpan={5}>
+                      <td colSpan={6}>
                         <section id={fullId} aria-label={`v${item.version} 全文`}>
                           {/* biome-ignore lint/a11y/noNoninteractiveTabindex: a block that scrolls must be reachable by keyboard */}
                           <pre className="codeblock nowrap history-yaml" tabIndex={0}>

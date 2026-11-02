@@ -767,6 +767,11 @@ export interface Suggestion {
   /** One or more alternatives; empty for `hot_would_block`. */
   actions: SuggestionAction[];
   reason: string;
+  /**
+   * Figures the card of `object_proposals` and `route_rule_candidate` can show (the console falls back to the
+   * count alone when they are absent). Same shape as `ImpactChange.detail`.
+   */
+  detail?: Record<string, unknown>;
 }
 
 export interface Readiness {
