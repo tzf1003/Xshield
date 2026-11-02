@@ -18,6 +18,9 @@ fn main() {
     let console = manifest_dir.join("../../web/console/dist");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", console.display());
+    // The migrations are embedded by `sqlx::migrate!`, which tracks the files it found, not a new one.
+    let migrations = manifest_dir.join("../../migrations");
+    println!("cargo:rerun-if-changed={}", migrations.display());
 
     let mut files = Vec::new();
     collect_files(&console, &console, &mut files);

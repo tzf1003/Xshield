@@ -8,11 +8,25 @@
 
 ## 4.2 上线步骤
 
-1. 部署网关、控制台和 PostgreSQL，设置 [03.3](03-admin-config-audit.md#33-部署级环境变量) 列出的环境变量。
+1. 部署网关、控制台和 PostgreSQL，设置 [03.3](03-admin-config-audit.md#33-部署级环境变量) 列出的环境变量。控制台启动时先执行 `migrations/` 里尚未记录的迁移，迁移编译进二进制，记录在 `_sqlx_migrations` 表中，然后才开始服务。不需要手动执行 SQL，也不要把迁移挂到 PostgreSQL 的 `docker-entrypoint-initdb.d`。迁移失败时控制台打印失败的版本并退出，由 Compose 的重启策略重试。
 2. 在控制台新建站点，填写源站、会话凭证位置、入口和静态资源路径。站点默认处于观察模式。
 3. 把流量切到网关，正常使用一段时间。
 4. 在判定日志里查看"本应拦截"的记录：确认是真正的越权或攻击，还是漏登记的入口、Jev 误判。漏登记的入口补到 `entries`。
 5. 误判可以接受之后，切到拦截模式。
+
+### 已有数据库的一次性处理
+
+产品未上线前，有些库是用 `initdb` 挂载或手动 `psql` 建好基线表的，它们没有迁移记录。新版控制台会在 `0001` 处报 `already exists` 并退出，事务回滚，库里的内容不变。两种处理方式：
+
+- 库里没有要保留的数据：删除数据卷（`docker compose down -v` 会删除卷里的全部数据），让新版控制台重建。
+- 要保留数据：确认库结构是由 `migrations/0001_v4_baseline.sql` 建出的，然后补记这一条迁移，再启动控制台。先启动一次新版控制台，让它创建 `_sqlx_migrations` 并在 `0001` 处失败（这是预期的），然后执行：
+
+```sh
+checksum=$(sha384sum migrations/0001_v4_baseline.sql | cut -d' ' -f1)  # macOS: shasum -a 384 ...
+psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (1, 'v4 baseline', true, decode('$checksum', 'hex'), 0)"
+```
+
+之后再启动控制台，它只会检查已记录的迁移，不会再执行基线。
 
 ## 4.3 验收场景
 

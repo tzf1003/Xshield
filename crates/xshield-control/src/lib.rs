@@ -18,6 +18,7 @@ mod error;
 mod insights;
 mod jev;
 mod maintenance;
+mod migrations;
 mod params;
 mod preview;
 mod requests;
@@ -52,6 +53,7 @@ use crate::error::ApiError;
 
 pub use auth::{hash_password, is_password_hash};
 pub use maintenance::run as run_maintenance;
+pub use migrations::{MIGRATOR, run as run_migrations};
 
 /// The largest body an ordinary API request may send: 64 KiB (section 7.9.12).
 pub const BODY_LIMIT_BYTES: usize = 64 * 1024;
