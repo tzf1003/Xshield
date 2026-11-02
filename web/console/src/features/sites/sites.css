@@ -322,6 +322,32 @@
   max-height: 60vh;
 }
 
+/* The four steps of the new-site wizard (docs/06 6.4.8). The current step is the one named by aria-current. */
+.wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wizard-step {
+  padding: 4px 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--ink-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.wizard-step[aria-current="step"] {
+  color: var(--ink);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
 /* Built-in redaction words and synonyms: a dashed frame and no remove control (docs/06 6.4.9). */
 .tag-chip.builtin-chip {
   border-style: dashed;

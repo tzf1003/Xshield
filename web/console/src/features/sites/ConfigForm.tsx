@@ -317,12 +317,27 @@ function ModeGroup({
         label="模式"
         help={
           mode === "create"
-            ? "表单创建的站点从观察模式开始：照常转发，只记录本应拦截的请求。拦截模式在站点创建后，到站点页用“切换到拦截模式…”设置。"
+            ? current === "enforce"
+              ? "这份 YAML 指定了拦截模式。新站点没有观察期，入口和绕过设错会直接拦截正常请求；创建时不阻止，也可以改为观察模式。"
+              : "表单创建的站点从观察模式开始：照常转发，只记录本应拦截的请求。拦截模式可以在粘贴的 YAML 里指定，或在站点创建后到站点页用“切换到拦截模式…”设置。"
             : "切换模式会生成新版本，并需要先看就绪检查。"
         }
       >
         {mode === "create" ? (
-          <span>观察模式</span>
+          current === "enforce" ? (
+            <div className="row">
+              <span>拦截模式（来自粘贴的 YAML）</span>
+              <button
+                type="button"
+                className="linkbtn"
+                onClick={() => onChange({ ...spec, mode: "observe" })}
+              >
+                改为观察模式
+              </button>
+            </div>
+          ) : (
+            <span>观察模式</span>
+          )
         ) : (
           <div className="row">
             <span>
