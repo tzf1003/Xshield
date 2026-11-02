@@ -169,8 +169,18 @@ export function validateJev(raw: Record<string, unknown>): JevSearch {
   };
 }
 
-export const SITE_TABS = ["overview", "config", "insights", "history"] as const;
+export const SITE_TABS = ["overview", "config", "objects", "insights", "history"] as const;
 export type SiteTab = (typeof SITE_TABS)[number];
+
+/** The learning states the object map's counters and links name (console design 3.1, 9). */
+export const OBJECT_STATES = [
+  "pending",
+  "proposed",
+  "confirmed",
+  "ambiguous",
+  "suspended",
+  "retired",
+] as const;
 
 export type SiteSearch = GlobalSearch & {
   tab?: SiteTab;
@@ -180,6 +190,15 @@ export type SiteSearch = GlobalSearch & {
   diff?: string;
   /** A path for a new interface-name rule in the configuration tab (`route=/gw/path`). */
   route?: string;
+  /** The object map: the counter's state, the class, the search text, the table view and the open position. */
+  state?: (typeof OBJECT_STATES)[number];
+  class?: string;
+  q?: string;
+  view?: "slot";
+  slot?: string;
+  /** The declaration dialog, opened with this field and scope (console design 3.3). */
+  declare?: string;
+  in?: string;
 };
 
 export function validateSite(raw: Record<string, unknown>): SiteSearch {
@@ -190,6 +209,13 @@ export function validateSite(raw: Record<string, unknown>): SiteSearch {
     group: str(raw.group),
     diff: str(raw.diff),
     route: str(raw.route),
+    state: oneOf(raw.state, OBJECT_STATES),
+    class: str(raw.class),
+    q: str(raw.q),
+    view: oneOf(raw.view, ["slot"] as const),
+    slot: str(raw.slot),
+    declare: str(raw.declare),
+    in: str(raw.in),
   };
 }
 

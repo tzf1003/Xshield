@@ -2,7 +2,7 @@
 // is the JSON object, and comments are not kept.
 
 import { parseDocument, stringify } from "yaml";
-import type { Advanced, SiteSpec } from "../api/types.ts";
+import type { Advanced, ObjectsSpec, SiteSpec } from "../api/types.ts";
 import { shapeIssues } from "./site-validate.ts";
 
 const TOP_KEYS = [
@@ -16,6 +16,7 @@ const TOP_KEYS = [
   "mode",
   "on_jev_unavailable",
   "advanced",
+  "objects",
 ] as const;
 
 const ADVANCED_KEYS = [
@@ -49,7 +50,27 @@ export function orderSpec(spec: SiteSpec): SiteSpec {
     }
     if (Object.keys(advanced).length > 0) out.advanced = advanced;
   }
+  const objects = orderObjects(spec.objects);
+  if (objects) out.objects = objects;
   return out as unknown as SiteSpec;
+}
+
+/** The object map section with its learning settings in a fixed key order, so the same settings always compare equal. */
+function orderObjects(objects: ObjectsSpec | undefined): ObjectsSpec | undefined {
+  if (!objects) return undefined;
+  const out: ObjectsSpec = {};
+  const learning = objects.learning;
+  if (learning) {
+    out.learning = {
+      auto_learn: learning.auto_learn,
+      auto_tighten: learning.auto_tighten,
+      agent: { enabled: learning.agent.enabled, daily_limit: learning.agent.daily_limit },
+      thresholds: { uses: learning.thresholds.uses, sessions: learning.thresholds.sessions },
+      auto_pause: learning.auto_pause,
+    };
+  }
+  if (objects.field_kinds && objects.field_kinds.length > 0) out.field_kinds = objects.field_kinds;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function specToYaml(spec: SiteSpec): string {
