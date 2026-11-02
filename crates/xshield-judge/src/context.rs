@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
-use crate::values::{ResponseValue, is_id_like};
+use crate::values::{ResponseValue, is_id_like, percent_decode};
 
 /// Most values remembered per session.
 pub const SEEN_MAX: usize = 5_000;
@@ -191,7 +191,7 @@ impl Seen {
     ) -> bool {
         let long = value.chars().count() >= LONG_VALUE_CHARS;
         self.origins.iter().any(|origin| {
-            is_id_like(&origin.field) && (long || affinity(origin, path, key, synonyms))
+            is_id_like(&origin.field) && (long || affinity(origin, value, path, key, synonyms))
         })
     }
 
@@ -202,6 +202,7 @@ impl Seen {
     #[must_use]
     pub fn ranked(
         &self,
+        value: &str,
         path: &str,
         key: Option<&str>,
         synonyms: &[(String, String)],
@@ -209,7 +210,7 @@ impl Seen {
         let mut origins: Vec<&Origin> = self.origins.iter().collect();
         origins.sort_by_key(|origin| {
             u8::from(is_id_like(&origin.field))
-                + 2 * u8::from(affinity(origin, path, key, synonyms))
+                + 2 * u8::from(affinity(origin, value, path, key, synonyms))
         });
         origins
     }
@@ -228,19 +229,30 @@ pub fn site_synonym(first: &str, second: &str) -> Option<(String, String)> {
     (first.len() >= 3 && second.len() >= 3).then(|| (first.to_owned(), second.to_owned()))
 }
 
-fn affinity(origin: &Origin, path: &str, key: Option<&str>, synonyms: &[(String, String)]) -> bool {
-    // A field name says what kind of object the value selects; only without
-    // one (a path segment, a bare `id` field) does the path decide.
-    let by_key = key.map(kind_words).unwrap_or_default();
-    let wanted = if by_key.is_empty() {
-        kind_words(path)
-    } else {
-        by_key
-    };
-    // The field's own name says what it identifies (`ProductId` is a
-    // product, whatever object carried it); a bare `id` takes the kind of its
-    // parent (`Products.id`), and a bare top-level `id` the kind of the
-    // request that returned it.
+/// Whether the origin shows the value as the kind of object every use of it in
+/// the request names (see [`wanted_kinds`]).
+fn affinity(
+    origin: &Origin,
+    value: &str,
+    path: &str,
+    key: Option<&str>,
+    synonyms: &[(String, String)],
+) -> bool {
+    let shown = shown_kinds(origin);
+    let wanted = wanted_kinds(value, path, key);
+    !wanted.is_empty()
+        && wanted.iter().all(|words| {
+            words
+                .iter()
+                .any(|word| shown.iter().any(|other| related(word, other, synonyms)))
+        })
+}
+
+/// The kinds an origin shows a value as. The field's own name says what it
+/// identifies (`ProductId` is a product, whatever object carried it); a bare
+/// `id` takes the kind of its parent (`Products.id`), and a bare top-level `id`
+/// the kind of the request that returned it.
+fn shown_kinds(origin: &Origin) -> Vec<String> {
     let (parent, last) = origin.field.rsplit_once('.').unwrap_or(("", &origin.field));
     let mut shown = kind_words(last);
     if shown.is_empty() {
@@ -249,9 +261,42 @@ fn affinity(origin: &Origin, path: &str, key: Option<&str>, synonyms: &[(String,
     if shown.is_empty() {
         shown = kind_words(origin.request.split_once(' ').map_or("", |(_, path)| path));
     }
-    wanted
+    shown
+}
+
+/// The kinds each use of the value in the request names, one list per use.
+///
+/// A query, form or body value takes the kind its key names, or the whole
+/// path's kinds when the key names none (a bare `id`). A path segment has no
+/// key: it takes the route word nearest before it, so in
+/// `/api/doctors/7/files/9` the 9 is a file whatever else the path names, and
+/// only a segment with no route word before it takes the whole path. A value
+/// that occurs in several segments names its kind in each of them. Segments
+/// are compared decoded, as the values were extracted.
+fn wanted_kinds(value: &str, path: &str, key: Option<&str>) -> Vec<Vec<String>> {
+    let by_key = key.map(kind_words).unwrap_or_default();
+    if !by_key.is_empty() {
+        return vec![by_key];
+    }
+    let whole = kind_words(path);
+    if key.is_some() {
+        return vec![whole];
+    }
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let uses: Vec<Vec<String>> = segments
         .iter()
-        .any(|word| shown.iter().any(|other| related(word, other, synonyms)))
+        .enumerate()
+        .filter(|&(_, segment)| percent_decode(segment, false) == value)
+        .map(|(index, _)| {
+            segments[..index]
+                .iter()
+                .rev()
+                .map(|segment| kind_words(segment))
+                .find(|words| !words.is_empty())
+                .unwrap_or_else(|| whole.clone())
+        })
+        .collect();
+    if uses.is_empty() { vec![whole] } else { uses }
 }
 
 const GENERIC_WORDS: [&str; 8] = ["api", "rest", "v1", "v2", "v3", "data", "value", "id"];
@@ -741,7 +786,7 @@ mod tests {
         ));
         assert!(!seen.is_specific("1", "/rest/basket/22/checkout", Some("couponId"), &[]));
         assert!(seen.is_specific("1", "/api/BasketItems/", Some("ProductId"), &[]));
-        let ranked = seen.ranked("/api/BasketItems/", Some("ProductId"), &[]);
+        let ranked = seen.ranked("1", "/api/BasketItems/", Some("ProductId"), &[]);
         assert_eq!(ranked.last().unwrap().request, "GET /rest/products/search");
         assert_eq!(ranked[0].field, "quantity");
     }
@@ -852,6 +897,35 @@ mod tests {
             None,
             &[]
         ));
+    }
+
+    #[test]
+    fn a_path_value_takes_the_route_word_right_before_it() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        session.remember(
+            &key,
+            &at("GET /api/doctors"),
+            &[response("id", "7"), response("id", "9")],
+        );
+        let doctor_7 = session.lookup(&key, "7").unwrap();
+        let doctor_9 = session.lookup(&key, "9").unwrap();
+        // `9` is a doctor in `/api/doctors/9`, but a file in the next path.
+        assert!(doctor_9.is_specific("9", "/api/doctors/9", None, &[]));
+        assert!(!doctor_9.is_specific("9", "/api/doctors/7/files/9", None, &[]));
+        assert!(doctor_7.is_specific("7", "/api/doctors/7/files/9", None, &[]));
+        // An id segment between a route word and the value does not hide the word.
+        assert!(doctor_9.is_specific("9", "/api/doctors/7/9", None, &[]));
+        // The same segment, percent-encoded, is the same value.
+        assert!(!doctor_9.is_specific("9", "/api/doctors/7/files/%39", None, &[]));
+        // A value in two segments must name its kind in both of them.
+        assert!(!doctor_7.is_specific("7", "/api/doctors/7/files/7", None, &[]));
+        assert!(doctor_7.is_specific("7", "/api/doctors/7/doctors/7", None, &[]));
+        // A segment with no route word before it takes the whole path.
+        assert!(doctor_7.is_specific("7", "/7/doctors", None, &[]));
+        // A named parameter still decides by its name.
+        assert!(doctor_9.is_specific("9", "/api/files", Some("doctorId"), &[]));
     }
 
     #[test]
