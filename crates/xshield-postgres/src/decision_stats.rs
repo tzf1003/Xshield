@@ -73,17 +73,21 @@ pub struct Summary {
 /// # Errors
 /// Returns [`sqlx::Error`] when the query fails.
 pub async fn summary(pool: &PgPool, scope: &Scope) -> Result<Summary, sqlx::Error> {
+    // The Jev predicate is computed in the inner select. The outer select reads only
+    // the columns that select lists, so it cannot test `jev` itself.
     let mut query = QueryBuilder::<Postgres>::new(format!(
         "SELECT count(*)::bigint AS scanned,
             count(*) FILTER (WHERE decision_path NOT IN ('bypass', 'unknown_site'))::bigint AS judged,
             count(*) FILTER (WHERE outcome = 'blocked' AND decision_path NOT IN ('bypass', 'unknown_site'))::bigint AS blocked,
             count(*) FILTER (WHERE outcome = 'would_block' AND decision_path NOT IN ('bypass', 'unknown_site'))::bigint AS would_block,
             count(*) FILTER (WHERE outcome = 'unjudged' AND decision_path NOT IN ('bypass', 'unknown_site'))::bigint AS unjudged,
-            count(*) FILTER (WHERE {JEV_CALLED_SQL})::bigint AS jev_calls,
+            count(*) FILTER (WHERE jev_called)::bigint AS jev_calls,
             count(*) FILTER (WHERE jev_failure = 'JEV_TIMEOUT')::bigint AS jev_timeouts,
             percentile_cont(0.95) WITHIN GROUP (ORDER BY jev_ms)
-                FILTER (WHERE {JEV_CALLED_SQL}) AS jev_p95_ms
-         FROM (SELECT decision_path, outcome, jev_ms, jev_failure FROM decision_log"
+                FILTER (WHERE jev_called) AS jev_p95_ms
+         FROM (SELECT decision_path, outcome, jev_ms, jev_failure,
+                      ({JEV_CALLED_SQL}) AS jev_called
+               FROM decision_log"
     ));
     push_scope(&mut query, scope);
     query.push(format!(
@@ -965,4 +969,141 @@ pub async fn jev_outcomes(
             ))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+
+    use super::*;
+    use crate::partitions::{day_bounds_millis, ensure_partition};
+
+    /// The site of the rows these tests write, so a scope on it sees only them.
+    const TEST_SITE: &str = "stats-test";
+
+    async fn connect_test_pool() -> PgPool {
+        let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
+        PgPool::connect(&url).await.expect("connect")
+    }
+
+    /// Writes one decision row of [`TEST_SITE`].
+    async fn insert(
+        pool: &PgPool,
+        at_millis: i64,
+        decision_path: &str,
+        outcome: &str,
+        jev: Option<&str>,
+        jev_ms: Option<i32>,
+        jev_failure: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, method, path,
+                decision_path, outcome, jev_ms, jev_failure, trace, jev)
+             VALUES ($1, $2, $3, 'edge-test', 'host', 'client', 'GET', '/', $4, $5, $6, $7,
+                '{}'::jsonb, $8::jsonb)",
+        )
+        .bind(at_millis)
+        .bind(format!("{TEST_SITE}-{at_millis}"))
+        .bind(TEST_SITE)
+        .bind(decision_path)
+        .bind(outcome)
+        .bind(jev_ms)
+        .bind(jev_failure)
+        .bind(jev)
+        .execute(pool)
+        .await
+        .expect("insert");
+    }
+
+    /// Writes the sample window of these tests: twelve one-minute slices of
+    /// [`TEST_SITE`], starting one second into 2098-03-04 UTC, a day no other test
+    /// uses. Returns the scope of that window.
+    async fn seed(pool: &PgPool) -> Scope {
+        let day = NaiveDate::from_ymd_opt(2098, 3, 4).expect("date");
+        ensure_partition(pool, day).await.expect("partition");
+        sqlx::query("DELETE FROM decision_log WHERE site = $1")
+            .bind(TEST_SITE)
+            .execute(pool)
+            .await
+            .expect("clear the test site");
+        let (day_start, _) = day_bounds_millis(day).expect("bounds");
+        let since = day_start + 1_000;
+        // Slice `k` starts `k` minutes after `since`; `offset` keeps the rows apart.
+        let at = |k: i32, offset: i64| since + i64::from(k) * 60_000 + offset;
+        // One allowed request with a Jev call in each slice, the call taking 100 + 10 k ms.
+        for k in 0..12 {
+            insert(
+                pool,
+                at(k, 5),
+                "allow",
+                "allowed",
+                Some(r#"{"state":"x"}"#),
+                Some(100 + 10 * k),
+                None,
+            )
+            .await;
+        }
+        // A refusal in every second slice.
+        for k in (0..=10).step_by(2) {
+            insert(pool, at(k, 6), "deny", "blocked", None, None, None).await;
+        }
+        // Observe mode would have refused in slices 0, 3, 6 and 9.
+        for k in [0, 3, 6, 9] {
+            insert(pool, at(k, 7), "allow", "would_block", None, None, None).await;
+        }
+        insert(pool, at(3, 8), "allow", "unjudged", None, None, None).await;
+        // Bypassed and unknown-site requests are not judged.
+        insert(pool, at(5, 9), "bypass", "allowed", None, None, None).await;
+        insert(pool, at(7, 9), "unknown_site", "unjudged", None, None, None).await;
+        // A call the limit refused is not a Jev call; a timed-out call is, at 2000 ms.
+        insert(
+            pool,
+            at(2, 10),
+            "allow",
+            "allowed",
+            Some(r#"{"state":"y"}"#),
+            Some(5),
+            Some("JEV_CALL_LIMIT"),
+        )
+        .await;
+        insert(
+            pool,
+            at(9, 10),
+            "allow",
+            "allowed",
+            Some(r#"{"state":"z"}"#),
+            Some(2000),
+            Some("JEV_TIMEOUT"),
+        )
+        .await;
+        Scope {
+            site: Some(TEST_SITE.to_owned()),
+            since_millis: since,
+            until_millis: since + 12 * 60_000 - 1,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn summary_counts_the_window_and_its_jev_calls() {
+        let pool = connect_test_pool().await;
+        let scope = seed(&pool).await;
+        let totals = summary(&pool, &scope).await.expect("summary");
+        // Twelve allowed requests with a Jev call, six refusals, four would-blocks, one
+        // unjudged request, one bypass, one unknown-site request, one limited call and
+        // one timeout.
+        assert_eq!(totals.scanned, 27);
+        assert!(totals.complete);
+        // Bypassed and unknown-site requests are not judged.
+        assert_eq!(totals.judged, 25);
+        assert_eq!(totals.blocked, 6);
+        assert_eq!(totals.would_block, 4);
+        assert_eq!(totals.unjudged, 1);
+        // The limited call is not a Jev call; the timed-out one is.
+        assert_eq!(totals.jev_calls, 13);
+        assert_eq!(totals.jev_timeouts, 1);
+        // Linear interpolation over 100, 110, ..., 210 and 2000 ms.
+        let p95 = totals.jev_p95_ms.expect("a 95th percentile over the calls");
+        assert!((p95 - 926.0).abs() < 1e-6, "{p95}");
+    }
 }
