@@ -3,7 +3,9 @@
 // every tab in both themes.
 
 import { expect, type Page, test } from "@playwright/test";
+import type { RequestDetail } from "../src/api/types.ts";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
+import { requestDetails } from "./helpers/fixtures.ts";
 import { IDS, requestIdAt, useFixtures } from "./helpers/trace.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -16,6 +18,30 @@ function heading(page: Page, path: string) {
 async function openBasket(page: Page, search = ""): Promise<void> {
   await page.goto(`/requests/${IDS.basket}${search}`);
   await expect(heading(page, "/rest/basket/6")).toBeVisible();
+}
+
+/**
+ * Answers the basket's detail with a copy of its fixture, changed by `change`. Each test states the one
+ * record shape it covers; the fixture itself stays as it is for the other specs.
+ */
+async function serveBasketDetail(
+  page: Page,
+  change: (detail: RequestDetail) => void,
+): Promise<void> {
+  const fixture = requestDetails.find((detail) => detail.summary.request_id === IDS.basket);
+  if (fixture === undefined) throw new Error("the basket fixture is missing");
+  await page.route(
+    (url) => url.pathname === `/api/requests/${IDS.basket}`,
+    async (route) => {
+      const detail = structuredClone(fixture);
+      change(detail);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(detail),
+      });
+    },
+  );
 }
 
 /** A choice of the Jev view control. antd hides its radio, so the visible label is what gets clicked. */
@@ -191,6 +217,54 @@ test("a redacted value says so with its length, on a hatched ground", async ({ p
   const redacted = page.locator(".rd-redacted").first();
   await expect(redacted).toHaveText(/^已脱敏 · \d+ 字符$/);
   await expect(redacted).toHaveCSS("background-image", /repeating-linear-gradient/);
+});
+
+test("a request that made no Jev call shows its session without the lists only Jev keeps", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await serveBasketDetail(page, (detail) => {
+    // A fast allow: the session was already known, so the judge never called Jev and kept no lists.
+    detail.summary.decision_path = "fast_allow";
+    detail.summary.outcome = "allowed";
+    detail.summary.jev = null;
+    detail.jev = null;
+    detail.trace.session = { age_seconds: 48, known_values: 3 };
+  });
+  await page.goto(`/requests/${IDS.basket}?tab=session`);
+  await expect(heading(page, "/rest/basket/6")).toBeVisible();
+  const panel = page.getByRole("tabpanel");
+  await expect(panel.getByText("已存在")).toBeVisible();
+  await expect(panel.getByText("经过的入口只在调用 Jev 的记录里保存")).toBeVisible();
+  await expect(panel.getByText("最近访问只在调用 Jev 的记录里保存")).toBeVisible();
+  await expect(page.getByText("Something went wrong!")).toHaveCount(0);
+});
+
+test("a request with no session context says so on its session tab", async ({ page }) => {
+  await useFixtures(page);
+  await serveBasketDetail(page, (detail) => {
+    detail.summary.context = null;
+    detail.summary.session = "";
+    delete detail.trace.session;
+  });
+  await page.goto(`/requests/${IDS.basket}?tab=session`);
+  await expect(page.getByText("这条记录没有会话上下文")).toBeVisible();
+  await expect(page.getByText("Something went wrong!")).toHaveCount(0);
+});
+
+test("a page that cannot render shows its own error page, with a retry and a way back", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await serveBasketDetail(page, (detail) => {
+    // The head reads the neighbours on every tab, so a record without them fails the whole page.
+    detail.neighbors = null as unknown as RequestDetail["neighbors"];
+  });
+  await page.goto(`/requests/${IDS.basket}`);
+  await expect(page.getByRole("heading", { name: "这个页面出错了" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重试" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回请求追溯" })).toBeVisible();
+  await expect(page.getByText("Something went wrong!")).toHaveCount(0);
 });
 
 for (const theme of ["light", "dark"] satisfies Theme[]) {

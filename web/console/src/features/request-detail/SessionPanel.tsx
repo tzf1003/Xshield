@@ -8,13 +8,9 @@ import { fmtElapsed, fmtInt, fmtLocalDateTime } from "../../lib/format.ts";
 import { isSessionLabel, shortSession } from "../../lib/ids.ts";
 import { Card, Empty } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
+import { sessionLists } from "./detail-model.ts";
 import { timelineSearch } from "./DetailHead.tsx";
 import { keyed, LinkedRequest } from "./parts.tsx";
-
-/** Recent accesses newest first; the gateway keeps them in the order it saw them. */
-export function newestFirst(items: RecentAccess[]): RecentAccess[] {
-  return [...items].sort((a, b) => (b.at_millis ?? 0) - (a.at_millis ?? 0));
-}
 
 export function SessionTab({ detail, requestId }: { detail: RequestDetail; requestId: string }) {
   const { summary, trace } = detail;
@@ -26,12 +22,13 @@ export function SessionTab({ detail, requestId }: { detail: RequestDetail; reque
       </Card>
     );
   }
+  const lists = sessionLists(session);
   return (
     <Card title="会话上下文">
       <SessionSummary
         trace={trace}
-        entries={session.entries_passed}
-        recent={newestFirst(session.recent)}
+        entries={lists.entries}
+        recent={lists.recent}
         sessionLabel={summary.session}
         requestId={requestId}
         timeline
@@ -49,8 +46,10 @@ export function SessionSummary({
   timeline = false,
 }: {
   trace: Trace;
-  entries: EntryPass[];
-  recent: RecentAccess[];
+  /** The entries the session passed; null when the record made no Jev call, so none were kept. */
+  entries: EntryPass[] | null;
+  /** The recent accesses, newest first; null when the record made no Jev call. */
+  recent: RecentAccess[] | null;
   sessionLabel: string;
   requestId: string;
   timeline?: boolean;
@@ -75,7 +74,11 @@ export function SessionSummary({
 
       <div>
         <div className="field-label">经过的入口</div>
-        {entries.length === 0 ? (
+        {entries === null ? (
+          <div className="small dim">
+            经过的入口只在调用 Jev 的记录里保存；完整顺序见会话时间线。
+          </div>
+        ) : entries.length === 0 ? (
           <div className="small dim">没有记录经过的入口</div>
         ) : (
           <ul className="rd-list">
@@ -96,9 +99,13 @@ export function SessionSummary({
       </div>
 
       <div>
-        <div className="field-label">最近访问 {fmtInt(recent.length)} 条（新 → 旧）</div>
-        {recent.length === 0 ? (
+        <div className="field-label">
+          {recent === null ? "最近访问" : `最近访问 ${fmtInt(recent.length)} 条（新 → 旧）`}
+        </div>
+        {recent === null ? (
           <div className="small dim">最近访问只在调用 Jev 的记录里保存；完整顺序见会话时间线。</div>
+        ) : recent.length === 0 ? (
+          <div className="small dim">没有最近访问</div>
         ) : (
           <ul className="rd-list">
             {keyed(

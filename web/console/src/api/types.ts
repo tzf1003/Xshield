@@ -175,10 +175,16 @@ export interface RecentAccess {
 export interface TraceSession {
   age_seconds: number;
   known_values: number;
-  /** Up to 16, written for Jev records only (aligned with `state.session.entries_passed`). */
-  entries_passed: EntryPass[];
-  /** Up to 10, written for Jev records only (aligned with the tail of `state.recent`). */
-  recent: RecentAccess[];
+  /**
+   * Up to 16, written for Jev records only (aligned with `state.session.entries_passed`). Absent on a
+   * record that made no Jev call, such as a fast or cached allow (trace.rs `TraceSession`).
+   */
+  entries_passed?: EntryPass[];
+  /**
+   * Up to 10, written for Jev records only (aligned with the tail of `state.recent`). Absent on a record
+   * that made no Jev call.
+   */
+  recent?: RecentAccess[];
 }
 
 export interface TraceTiming {
