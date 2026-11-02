@@ -99,6 +99,7 @@ async fn live_business_traffic_and_evasions() {
             content_type: Some("application/json"),
             body: br#"{"patients":[{"id":"7f3a91c2","name":"Zhang Wei","age":54}]}"#,
             now_ms: 1_000,
+            sent: &[],
         },
     );
     let cases = [
@@ -257,6 +258,7 @@ async fn live_acceptance_scenarios() {
                 content_type: Some("application/json"),
                 body: list,
                 now_ms: 1_000,
+                sent: &[],
             },
         );
     }
@@ -276,6 +278,7 @@ async fn live_acceptance_scenarios() {
             content_type: Some("application/json"),
             body: br#"{"patient":{"id":"a91be0d4","name":"Wang Fang"}}"#,
             now_ms: 1_100,
+            sent: &[],
         },
     );
 
@@ -470,6 +473,7 @@ async fn live_juice_shop_checkout_flow() {
                 content_type: Some("application/json"),
                 body,
                 now_ms,
+                sent: &[],
             },
         );
     };
@@ -671,6 +675,7 @@ async fn live_juice_shop_sign_up_flow() {
                 content_type: Some("application/json"),
                 body,
                 now_ms,
+                sent: &[],
             },
         );
     }
