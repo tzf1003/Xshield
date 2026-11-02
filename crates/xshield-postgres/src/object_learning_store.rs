@@ -8,9 +8,10 @@
 //! that reads a batch twice, or stops half way, changes nothing it should not.
 //!
 //! A write for a site with no configuration is dropped. A site deleted while a pass
-//! runs keeps no state, and a site created later under its name starts with none: the
-//! deletion removes the rows (`forget_site`), and each write checks that the site row
-//! exists while it holds a share lock on that row.
+//! runs keeps no state, and a site created later under its name never learns from the
+//! traffic the old site logged: the deletion removes the evidence and the positions and
+//! moves the cursor to the deletion time (`forget_site`). Each write checks that the
+//! site row exists while it holds a share lock on that row.
 
 use std::collections::HashMap;
 
@@ -459,27 +460,42 @@ pub async fn withdraw_proposal(
     Ok(())
 }
 
-/// Deletes the learning state of a site inside the transaction that deletes the site,
-/// so a site created later under the same name starts with no evidence, positions or
-/// cursor. The deletion locks the site row until it commits, so a write still running
-/// waits, then finds no site and writes nothing.
+/// Forgets the learning state of a site inside the transaction that deletes the site.
+/// The evidence and the positions go. The cursor stays, moved to `deleted_millis`, so
+/// the decision rows the old site logged before the deletion are never learned from,
+/// not even by a site created again under the same name. The deletion locks the site
+/// row until it commits, so a write still running waits, then finds no site and writes
+/// nothing.
 ///
 /// # Errors
 /// Returns [`sqlx::Error`] on a database failure.
 pub async fn forget_site(
     transaction: &mut Transaction<'_, Postgres>,
     site: &str,
+    deleted_millis: i64,
 ) -> Result<(), sqlx::Error> {
     for statement in [
         "DELETE FROM object_evidence WHERE site = $1",
         "DELETE FROM object_positions WHERE site = $1",
-        "DELETE FROM object_learning_cursor WHERE site = $1",
     ] {
         sqlx::query(statement)
             .bind(site)
             .execute(&mut **transaction)
             .await?;
     }
+    sqlx::query(
+        "INSERT INTO object_learning_cursor (site, after_millis, after_id, updated_millis)
+         VALUES ($1, $2, $3, $2)
+         ON CONFLICT (site) DO UPDATE SET
+             after_millis = EXCLUDED.after_millis,
+             after_id = EXCLUDED.after_id,
+             updated_millis = EXCLUDED.updated_millis",
+    )
+    .bind(site)
+    .bind(deleted_millis)
+    .bind(i64::MAX)
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
@@ -711,7 +727,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
-    async fn forgetting_a_site_removes_its_learning_state() {
+    async fn forgetting_a_site_removes_its_evidence_and_moves_its_cursor() {
         let pool = connect_test_pool().await;
         let site = unique_site("forget");
         with_site(&pool, &site).await;
@@ -724,8 +740,13 @@ mod tests {
             .unwrap();
         assert_eq!(learning_rows(&pool, &site).await, 3);
         let mut transaction = pool.begin().await.unwrap();
-        forget_site(&mut transaction, &site).await.unwrap();
+        forget_site(&mut transaction, &site, 500).await.unwrap();
         transaction.commit().await.unwrap();
-        assert_eq!(learning_rows(&pool, &site).await, 0);
+        // Only the cursor remains, moved to the deletion time.
+        assert_eq!(learning_rows(&pool, &site).await, 1);
+        assert_eq!(
+            cursor(&pool, &site).await.unwrap(),
+            Some(cursor_at(500, i64::MAX))
+        );
     }
 }

@@ -404,9 +404,14 @@ pub async fn delete(
         .bind(name)
         .execute(&mut *transaction)
         .await?;
-    // In this transaction, so a site created later under the same name starts with
-    // no evidence, positions or cursor.
-    crate::object_learning_store::forget_site(&mut transaction, name).await?;
+    // In this transaction, so the learning state goes with the site, and a site
+    // created later under the same name never learns from the old site's traffic.
+    crate::object_learning_store::forget_site(
+        &mut transaction,
+        name,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await?;
     let version = current + 1;
     insert_history(
         &mut transaction,

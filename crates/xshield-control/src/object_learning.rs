@@ -684,19 +684,19 @@ mod pass_tests {
             deleted,
             site_spec_store::DeleteOutcome::Deleted { .. }
         ));
-        // The same name again: the site starts with no proposal, evidence or cursor.
+        // The same name again. The traffic the old site logged before the deletion is
+        // never learned from, even once the passes have run past it.
         site_spec_store::create(&pool, &clinic(), None)
             .await
             .expect("create the site again");
+        learn_once(&pool, now).await;
+        learn_once(&pool, now + 60 * 60_000).await;
         let evidence: i64 =
             sqlx::query_scalar("SELECT count(*) FROM object_evidence WHERE site = 'clinic'")
                 .fetch_one(&pool)
                 .await
                 .expect("count the evidence");
-        let cursor = store::cursor(&pool, "clinic")
-            .await
-            .expect("read the cursor");
-        assert_eq!((evidence, proposed(&pool).await, cursor), (0, 0, None));
+        assert_eq!((evidence, proposed(&pool).await), (0, 0));
         drop_scratch(admin, pool, name).await;
     }
 

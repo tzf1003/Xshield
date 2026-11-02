@@ -10,10 +10,11 @@
 --   object_positions       the state of each position the rules have judged
 --   object_learning_cursor how far the pass has read each site's decision log
 --
--- A site's rows carry only the site's name. Deleting the site deletes them in the
--- same transaction (site_spec_store::delete), and every learning write checks that
--- the site still has a configuration, so a site created later under the same name
--- starts with none of them.
+-- A site's rows carry only the site's name. Deleting the site removes its evidence and
+-- positions in the same transaction (site_spec_store::delete) and moves its cursor to
+-- the deletion time, so a site created later under the same name never learns from the
+-- decision rows the old site logged. Every learning write checks that the site still
+-- has a configuration.
 
 CREATE TABLE object_evidence (
     site       text NOT NULL,
