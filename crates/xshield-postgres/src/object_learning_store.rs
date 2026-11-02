@@ -32,8 +32,6 @@ use xshield_core::context::trace::Trace;
 const EVIDENCE_CHUNK: usize = 1_000;
 /// Milliseconds in a UTC day.
 const DAY_MILLIS: i64 = 86_400_000;
-/// Other ends listed for one position's flows.
-const FLOW_LIMIT: i64 = 20;
 /// Decision rows read to find the responses a response position's examples come from.
 const EXAMPLE_ROWS_READ: i64 = 200;
 
@@ -764,7 +762,9 @@ pub struct Flow {
 
 /// The other ends of a position's votes on or after `oldest_day`, most used first. A
 /// request position's other ends are the response positions its votes were shown at; a
-/// response position's are the request positions that showed a value at it.
+/// response position's are the request positions that showed a value at it. Every end the
+/// votes reached is listed, so the rows are bounded by the positions the votes reached. The
+/// drawer caps what it shows after it merges them with the decisions.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -779,18 +779,17 @@ pub async fn flows(
         "SELECT e.slot AS other, count(*) AS uses, count(DISTINCT e.session) AS sessions
          FROM object_evidence e
          WHERE e.site = $1 AND e.kind = 'vote' AND e.day >= $3 AND $2 = ANY(e.from_slots)
-         GROUP BY e.slot ORDER BY uses DESC, other LIMIT $4"
+         GROUP BY e.slot ORDER BY uses DESC, other"
     } else {
         "SELECT f.other, count(*) AS uses, count(DISTINCT e.session) AS sessions
          FROM object_evidence e CROSS JOIN LATERAL unnest(e.from_slots) AS f(other)
          WHERE e.site = $1 AND e.slot = $2 AND e.kind = 'vote' AND e.day >= $3
-         GROUP BY f.other ORDER BY uses DESC, other LIMIT $4"
+         GROUP BY f.other ORDER BY uses DESC, other"
     };
     let rows = sqlx::query(sql)
         .bind(site)
         .bind(slot)
         .bind(day_i64(oldest_day))
-        .bind(FLOW_LIMIT)
         .fetch_all(pool)
         .await?;
     rows.iter()
@@ -1711,6 +1710,35 @@ mod tests {
             2
         );
         assert_eq!(uses(&pool, &site, records, "response", 0).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn the_flows_of_a_position_list_every_end_its_votes_reached() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("flows_all");
+        let generation = with_site(&pool, &site).await;
+        // Twenty-one response positions, each reached by one vote from its own session.
+        let ends: Vec<String> = (0..21)
+            .map(|index| format!("GET /api/source{index} [].id"))
+            .collect();
+        let votes: Vec<Vote> = ends
+            .iter()
+            .enumerate()
+            .map(|(index, end)| vote(&format!("s{index}"), 3, &[end.as_str()]))
+            .collect();
+        record_evidence(&pool, &site, generation, &votes, &[])
+            .await
+            .unwrap();
+        // The store lists all of them, so the drawer can take the flows it shows only after
+        // it merges them with the decisions. A cap here would show zero uses for a flow past it.
+        let reached = flows(&pool, &site, SLOT, "request", 0).await.unwrap();
+        assert_eq!(reached.len(), 21);
+        assert!(
+            reached
+                .iter()
+                .all(|flow| flow.uses == 1 && flow.sessions == 1)
+        );
     }
 
     #[tokio::test]
