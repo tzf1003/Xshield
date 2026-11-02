@@ -26,11 +26,12 @@ pub async fn run(pool: PgPool) {
     }
 }
 
-/// Runs one maintenance pass at `now_millis`, in three independent steps: it creates
+/// Runs one maintenance pass at `now_millis`, in four independent steps: it creates
 /// the decision log partitions from the start of the retention period to seven days
-/// ahead, drops the partitions that ended before the retention period, and deletes
-/// the edge status rows that have not been refreshed for a day. A step that fails is
-/// logged, and the next step still runs.
+/// ahead, drops the partitions that ended before the retention period, deletes the
+/// edge status rows that have not been refreshed for a day, and runs the object map
+/// learning over the decision log (`object_learning`). A step that fails is logged,
+/// and the next step still runs.
 pub async fn maintain_once(pool: &PgPool, now_millis: i64) {
     match utc_day(now_millis) {
         Some(today) => ensure_partitions(pool, today).await,
@@ -40,6 +41,7 @@ pub async fn maintain_once(pool: &PgPool, now_millis: i64) {
     }
     drop_expired_partitions(pool, now_millis).await;
     purge_stale_edges(pool, now_millis).await;
+    crate::object_learning::learn_once(pool, now_millis).await;
 }
 
 /// The UTC day of `now_millis`, or `None` when the time is outside the calendar.
