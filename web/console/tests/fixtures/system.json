@@ -33,6 +33,11 @@
         "juice": {
           "version": 7,
           "loaded_at_millis": 1793536802000
+        },
+        "bank": {
+          "version": 4,
+          "loaded_at_millis": 1793536800000,
+          "error": "SITE_CONFIG_ORIGIN_INVALID"
         }
       },
       "jev": {

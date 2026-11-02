@@ -4,7 +4,7 @@
 
 import { useState } from "react";
 import type { EdgeStatus } from "../../api/types.ts";
-import { fmtAgo, fmtInt, fmtLocalDateTime, fmtMs } from "../../lib/format.ts";
+import { fmtAgo, fmtInt, fmtLocalDateTime, fmtMs, fmtUtc } from "../../lib/format.ts";
 import { errorText, ROUTE_LABEL } from "../../lib/vocab.ts";
 import { Empty } from "../../ui/Page.tsx";
 import { hm, parseTime, shortDateTime } from "./clock.ts";
@@ -14,10 +14,15 @@ const COLUMNS = 14;
 
 type SiteState = { version?: number; error?: string; loaded_at_millis?: number };
 
-/** "已加载 v13", with the time the instance loaded that version when it reports one. */
-function loadedText({ version, loaded_at_millis }: SiteState): string {
+/** "已加载 v13", with when the instance loaded that version: local time, UTC on hover (docs/06 6.6.6). */
+function LoadedVersion({ version, loaded_at_millis }: SiteState) {
   const text = `已加载 v${fmtInt(version)}`;
-  return loaded_at_millis === undefined ? text : `${text}（${shortDateTime(loaded_at_millis)}）`;
+  if (loaded_at_millis === undefined) {
+    return <>{text}</>;
+  }
+  return (
+    <span title={fmtUtc(loaded_at_millis)}>{`${text}（${shortDateTime(loaded_at_millis)}）`}</span>
+  );
 }
 
 export function EdgesTable({ edges, now }: { edges: EdgeStatus[]; now: number }) {
@@ -145,14 +150,21 @@ function EdgeDetail({ edge, sites }: { edge: EdgeStatus; sites: Array<[string, S
                     <td className="mono">{name}</td>
                     <td>
                       {state.error ? (
-                        <span className="hint-bad">
-                          {errorText(state.error)}{" "}
-                          <span className="mono small dim">{state.error}</span>
-                        </span>
+                        <>
+                          <span className="hint-bad">
+                            {errorText(state.error)}{" "}
+                            <span className="mono small dim">{state.error}</span>
+                          </span>
+                          {state.version === undefined ? null : (
+                            <div className="small dim">
+                              <LoadedVersion {...state} />
+                            </div>
+                          )}
+                        </>
                       ) : state.version === undefined ? (
                         "未加载"
                       ) : (
-                        loadedText(state)
+                        <LoadedVersion {...state} />
                       )}
                     </td>
                   </tr>
