@@ -356,7 +356,8 @@ export interface StatsSummary {
     jev_p95_ms: number[];
   };
   complete: boolean;
-  scanned: number;
+  /** Rows the scan read. Served only when `complete` is false (docs/07 section 7.9.1). */
+  scanned?: number;
 }
 
 export interface TimeseriesBucket {
@@ -371,7 +372,8 @@ export interface Timeseries {
   until_millis: number;
   buckets: TimeseriesBucket[];
   complete: boolean;
-  scanned: number;
+  /** Rows the scan read. Served only when `complete` is false (docs/07 section 7.9.1). */
+  scanned?: number;
 }
 
 // ------------------------------------------------------------------ sessions (7.9.6)
