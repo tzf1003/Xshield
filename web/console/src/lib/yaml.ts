@@ -10,6 +10,7 @@ const TOP_KEYS = [
   "hosts",
   "origin",
   "session",
+  "routes",
   "entries",
   "bypass",
   "mode",
@@ -33,6 +34,7 @@ export function orderSpec(spec: SiteSpec): SiteSpec {
   out.hosts = spec.hosts;
   out.origin = spec.origin;
   out.session = spec.session;
+  if (spec.routes && spec.routes.length > 0) out.routes = spec.routes;
   out.entries = spec.entries;
   if (spec.bypass && spec.bypass.length > 0) out.bypass = spec.bypass;
   if (spec.mode) out.mode = spec.mode;

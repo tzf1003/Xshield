@@ -14,9 +14,11 @@ import type {
   RefusedReason,
   ResponseSkip,
   SuggestionKind,
+  UnknownApiReason,
   UpstreamError,
   ValueKind,
 } from "../api/types.ts";
+import type { ParseFailure } from "./logical-path.ts";
 
 export type Tone = "blocked" | "would" | "unjudged" | "ok" | "neutral";
 
@@ -274,3 +276,57 @@ export const RANGE_LABEL = {
   "24h": "24 小时",
   "7d": "7 天",
 } as const;
+
+// ------------------------------------------------------------------ interface-name rules (header-routes-design 2, 3)
+
+/** The place a location of a rule reads its value from. */
+export const ROUTE_SOURCE_LABEL: Record<"header" | "query" | "body", string> = {
+  header: "请求头",
+  query: "查询参数",
+  body: "正文字段",
+};
+
+/** Why a request's interface name could not be read, in words. */
+export const UNKNOWN_REASON_TEXT: Record<UnknownApiReason, string> = {
+  missing: "这个位置没有值",
+  repeated: "这个位置出现了多次，无法确定用哪一个",
+  conflict: "同一段的几个位置取到的值不一致",
+  invalid_name: "取到的值不是规整的名字（只允许字母、数字、. _ -，最长 64 个字符）",
+  body_unsupported: "正文不是 JSON 或表单，或字段路径上是数组（批量调用）",
+  body_not_json: "正文不是合法的 JSON（加密的正文也是这种情况）",
+  body_too_large: "正文超过解析上限（48 KiB），读不到名字",
+  route_subpath: "路径以 / 结尾，后面没有接口名",
+};
+
+export const UNKNOWN_API_LABEL = "未知接口";
+
+export const ROUTE_HELP =
+  "默认用 URL 路径作为接口名。只有接口名放在请求头、查询参数或正文字段里的路径才需要规则。";
+export const ROUTE_SOURCE_HELP =
+  "请求头名不分大小写。正文字段写成 a.b.c，不支持数组下标；正文是其他格式或加密时取不到，按未知接口处理。";
+export const ROUTE_LOCATION_HELP = "同一段里的位置都出现时，值必须一致，不一致按未知接口处理。";
+export const ROUTE_SINGLE_HINT =
+  "每一段都只写了一个位置。如果源站在别处也接受接口名，请一并写上，否则网关和源站可能认成两个接口。";
+export const ROUTE_ACK_LABEL = "我确认源站只认这里";
+export const ROUTE_HEADER_NOTE = "过去的判定记录没有保存请求头，保存后才开始按接口统计。";
+export const ROUTE_ADD_LOCATION = "＋ 源站也认的位置";
+export const ROUTE_ADD_SEGMENT = "＋ 添加一段";
+export const ROUTE_DELETE_SEGMENT = "删除这一段";
+export const ROUTE_ADD_RULE = "＋ 添加规则";
+export const ROUTE_DELETE_RULE = "删除规则";
+export const ROUTE_CANDIDATE_TITLE = "按最近记录补全";
+export const ROUTE_REWRITE_HINT = "改写为逻辑路径，例如：";
+export const ROUTE_RECORD_WINDOW = "最近 500 条记录";
+export const ROUTE_UNKNOWN_LINK = "查看这些请求";
+
+export const ROUTE_TESTER_HELP =
+  "粘贴一个完整的 HTTP 请求，或只输入一个路径。只在浏览器里解析，不会上传，也不会存进草稿。";
+export const ROUTE_TESTER_NO_CREDENTIAL = "没有需要隐藏的凭证值";
+export const ROUTE_TESTER_UNKNOWN_JUDGE = "不算入口，不走绕过，交给 Jev";
+
+/** What the tester says when a pasted request cannot be read. */
+export const ROUTE_TEST_FAILURE: Record<ParseFailure, string> = {
+  request_line: "没有读到请求行：应写成「方法 路径」，例如 GET /api/x，或只输入一个以 / 开头的路径",
+  target: "请求地址要以 / 开头，或是完整的 http:// 或 https:// 地址",
+  header_line: "有一行请求头没有冒号，请检查粘贴的内容",
+};
