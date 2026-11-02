@@ -6,19 +6,21 @@
 import { Link, useBlocker, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { Modal, Tabs } from "antd";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { useDeleteSite, useSite } from "../../api/queries.ts";
+import { useDeleteSite, useSite, useSiteObjects } from "../../api/queries.ts";
 import type { SiteDetail, SiteSpec, SiteVersion } from "../../api/types.ts";
 import { useKeys } from "../../app/keys.ts";
 import { useNowBucket, useSetSearch } from "../../app/scope.ts";
 import { canonical, semanticChanges } from "../../lib/diff.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { validateSpec } from "../../lib/site-validate.ts";
+import { OBJECT_TEXT } from "../../lib/vocab.ts";
 import { ErrorBar, Loading, Notice, PageHead } from "../../ui/Page.tsx";
 import { ConfigTab, isConfigGroup } from "./ConfigTab.tsx";
 import { HistoryTab } from "./HistoryTab.tsx";
 import { InsightsTab } from "./InsightsTab.tsx";
 import { ModeSwitchDialog } from "./ModeSwitchDialog.tsx";
 import { OverviewTab } from "./OverviewTab.tsx";
+import { ObjectsTab } from "./objects/ObjectsTab.tsx";
 import { RollbackDialog } from "./RollbackDialog.tsx";
 import { type RolloutTone, rolloutView } from "./rollout.ts";
 import { SaveDialog } from "./SaveDialog.tsx";
@@ -107,6 +109,8 @@ function SiteDetailBody({ name }: { name: string }) {
   const dirtyRef = useRef(false);
   const following = pending !== null && now - pending.savedAt < FOLLOW_MS;
   const site = useSite(name, { refetchInterval: following ? 1_000 : false });
+  // The map's counts give the tab its label; the tab itself reads the map with its filters.
+  const objectMap = useSiteObjects(name);
   const remove = useDeleteSite();
   const data = site.data;
 
@@ -231,9 +235,14 @@ function SiteDetailBody({ name }: { name: string }) {
   const tab = search.tab ?? "overview";
   const edit = search.edit ?? "form";
   const group = isConfigGroup(search.group) ? search.group : "basics";
+  const proposed = objectMap.data?.counts.proposed ?? 0;
   const tabItems = [
     { key: "overview", label: "概览" },
     { key: "config", label: "配置" },
+    {
+      key: "objects",
+      label: proposed > 0 ? `${OBJECT_TEXT.tab} ${fmtInt(proposed)}` : OBJECT_TEXT.tab,
+    },
     {
       key: "insights",
       label: data.suggestions > 0 ? `调优建议 ${fmtInt(data.suggestions)}` : "调优建议",
@@ -260,6 +269,20 @@ function SiteDetailBody({ name }: { name: string }) {
         onDiscard={discard}
         onReview={requestSave}
         onSwitchMode={() => setModeOpen(true)}
+      />
+    );
+  } else if (tab === "objects") {
+    body = (
+      <ObjectsTab
+        site={data}
+        working={working}
+        now={now}
+        dialogOpen={saveOpen || modeOpen || rollbackTo !== null}
+        onAdd={changeDraft}
+        onApply={(spec) => {
+          changeDraft(spec);
+          setSaveOpen(true);
+        }}
       />
     );
   } else if (tab === "insights") {

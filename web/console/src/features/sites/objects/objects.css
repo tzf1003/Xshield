@@ -1,0 +1,220 @@
+/* The object map tab (console design 3.1 to 3.6): the counters and the search, the class list beside the class
+   card, the position drawer's sections and the cold start list. Colours come from the theme tokens of global.css. */
+
+.obj-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.obj-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.obj-tools-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.obj-search {
+  width: min(280px, 100%);
+}
+
+.obj-split {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+@media (max-width: 767px) {
+  .obj-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.obj-classes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.obj-class {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.obj-class[aria-current="true"] {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+}
+
+.obj-class-id {
+  color: var(--ink-2);
+}
+
+.obj-class[aria-current="true"] .obj-class-id {
+  color: var(--ink);
+}
+
+.obj-class-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.obj-class-name {
+  font-weight: 500;
+}
+
+.obj-class-meta {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.obj-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.obj-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.obj-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.obj-side {
+  color: var(--ink-2);
+  margin-right: 6px;
+}
+
+.obj-code {
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.obj-flows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.obj-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 13px;
+}
+
+.obj-flow-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.obj-flow:hover {
+  background: var(--sunken);
+}
+
+.obj-flow[data-hl="true"] {
+  background: var(--accent-weak);
+}
+
+.obj-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.obj-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.obj-ref-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+}
+
+.obj-learning-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.obj-learning-help {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.obj-number {
+  width: 96px;
+}
+
+.obj-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.obj-rule {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
