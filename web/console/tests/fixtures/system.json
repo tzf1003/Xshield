@@ -1,5 +1,5 @@
 {
-  "control_build": "v4.0.0-rc1",
+  "control_build": "4.0.0-rc1",
   "postgres": "16.4",
   "edges": [
     {
@@ -7,7 +7,7 @@
       "online": true,
       "started_at": "2026-11-01T13:00:00.000Z",
       "seen_at": "2026-11-01T13:19:59.800Z",
-      "build": "v4.0.0-rc1",
+      "build": "4.0.0-rc1",
       "listen": ":8443",
       "tls": true,
       "sessions": 1841,
@@ -53,7 +53,7 @@
       "online": true,
       "started_at": "2026-10-31T11:20:00.000Z",
       "seen_at": "2026-11-01T13:19:56.000Z",
-      "build": "v4.0.0-rc1",
+      "build": "4.0.0-rc1",
       "listen": ":8443",
       "tls": true,
       "sessions": 1602,
@@ -92,7 +92,7 @@
       "online": false,
       "started_at": "2026-10-31T11:20:00.000Z",
       "seen_at": "2026-11-01T13:17:00.000Z",
-      "build": "v4.0.0-rc1",
+      "build": "4.0.0-rc1",
       "listen": ":8443",
       "tls": true,
       "sessions": 0,
@@ -157,22 +157,6 @@
         "bytes": 0,
         "from_millis": 1793664000000,
         "to_millis": 1793750400000
-      }
-    ],
-    "gaps": [
-      {
-        "edge": "edge-1",
-        "from_millis": 1793538600000,
-        "to_millis": 1793538720000,
-        "rows": 37,
-        "reason": "queue_full"
-      },
-      {
-        "edge": "edge-2",
-        "from_millis": 1793445600000,
-        "to_millis": 1793445960000,
-        "rows": 5,
-        "reason": "write_error"
       }
     ]
   },
