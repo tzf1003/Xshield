@@ -343,32 +343,45 @@ pub async fn list(
 ///
 /// # Errors
 /// The same as [`list`] for the filters it shares.
+/// `GET /api/requests/counts` (docs/07 section 7.9.1). `scanned` accompanies `complete: false` only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CountsBody {
+    pub judged: i64,
+    pub attention: i64,
+    pub blocked: i64,
+    pub would_block: i64,
+    pub unjudged: i64,
+    pub jev: i64,
+    pub no_session: i64,
+    pub bypass: i64,
+    pub unknown_site: i64,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<i64>,
+}
+
 pub async fn counts(
     State(state): State<Arc<ControlState>>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<CountsBody>> {
     let params = Params::from(query);
     let filter = filter_from(&params, now_millis())?;
     let counts = decision_log_store::counts(&state.pool, &filter).await?;
     // Every row the count read is judged, bypassed or an unknown-site stub, so their sum is the scan.
     let scanned = counts.judged + counts.bypass + counts.unknown_site;
-    let mut body = json!({
-        "judged": counts.judged,
-        "attention": counts.attention,
-        "blocked": counts.blocked,
-        "would_block": counts.would_block,
-        "unjudged": counts.unjudged,
-        "jev": counts.jev,
-        "no_session": counts.no_session,
-        "bypass": counts.bypass,
-        "unknown_site": counts.unknown_site,
-        "complete": counts.complete,
-    });
-    // docs/07 section 7.9.1: `scanned` accompanies `complete: false` only.
-    if !counts.complete {
-        body["scanned"] = json!(scanned);
-    }
-    Ok(Json(body))
+    Ok(Json(CountsBody {
+        judged: counts.judged,
+        attention: counts.attention,
+        blocked: counts.blocked,
+        would_block: counts.would_block,
+        unjudged: counts.unjudged,
+        jev: counts.jev,
+        no_session: counts.no_session,
+        bypass: counts.bypass,
+        unknown_site: counts.unknown_site,
+        complete: counts.complete,
+        scanned: (!counts.complete).then_some(scanned),
+    }))
 }
 
 /// The request ids a trace refers to: value sources, the cached decision, the

@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 
-use crate::requests::RequestRow;
+use crate::requests::{CountsBody, RequestRow};
 
 const REQUESTS: &str = include_str!("../../../web/console/tests/fixtures/requests.json");
 const LOOKUP: &str = include_str!("../../../web/console/tests/fixtures/lookup.json");
+const COUNTS: &str = include_str!("../../../web/console/tests/fixtures/counts.json");
 const DETAILS: [&str; 3] = [
     include_str!(
         "../../../web/console/tests/fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json"
@@ -155,4 +156,16 @@ fn each_detail_rebuilds_as_a_decision_record() {
             normalized
         });
     }
+}
+
+#[test]
+fn counts_round_trip_through_the_counts_type() {
+    let counts = fixture(COUNTS);
+    assert_round_trips::<CountsBody>(&counts, exactly);
+
+    // `scanned` is written only when the count is incomplete (docs/07 section 7.9.1).
+    let mut partial = counts.clone();
+    partial["complete"] = json!(false);
+    partial["scanned"] = json!(57);
+    assert_round_trips::<CountsBody>(&partial, exactly);
 }
