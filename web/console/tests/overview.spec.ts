@@ -363,6 +363,8 @@ test("Jev timeouts at one percent of the calls are a note that opens the site's 
 
   const evidence = rowWith(page, "emr Jev 超时 9 次 / 412 次调用");
   await expect(evidence).toContainText("提示");
+  // The site's evidence fixture: p95 1,813 ms, and the timeout the site uses, 3,000 ms (docs/06 6.4.2).
+  await expect(evidence).toContainText("（p95 1,813 ms，超时 3,000 ms）");
   await follow(evidence, "查看证据");
   await expectAt(page, "/sites/emr", { tab: "config", group: "advanced" });
   await expect(page.getByText("Jev 证据", { exact: true })).toBeVisible();
