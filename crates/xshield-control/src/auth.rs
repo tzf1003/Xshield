@@ -39,9 +39,14 @@ use crate::{
     params::json_body,
 };
 
-/// The session cookie name. The `__Host-` prefix binds it to this origin, with
-/// `Secure` and `Path=/`.
+/// The session cookie name over HTTPS. The `__Host-` prefix binds it to this
+/// origin, with `Secure` and `Path=/`.
 pub const SESSION_COOKIE: &str = "__Host-xshield-session";
+/// The session cookie name when the console is served over plain HTTP
+/// (`XSHIELD_CONTROL_PLAIN_HTTP`). Browsers do not keep `Secure` cookies set by an
+/// `http://` origin, and the `__Host-` prefix requires `Secure`, so this name has
+/// neither.
+pub const PLAIN_HTTP_SESSION_COOKIE: &str = "xshield-session";
 /// How long a sign-in lasts: twelve hours.
 pub const SESSION_LIFETIME_SECS: u64 = 12 * 3600;
 const DEFAULT_PBKDF2_ITERATIONS: usize = 210_000;
@@ -242,10 +247,23 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     })
 }
 
-fn set_session_cookie(response: &mut Response, token: &str, max_age_secs: u64) {
-    let value = format!(
-        "{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age_secs}; Secure; HttpOnly; SameSite=Lax"
-    );
+/// The administrator cookie's name for the transport the console is served over.
+#[must_use]
+pub fn session_cookie_name(plain_http: bool) -> &'static str {
+    if plain_http {
+        PLAIN_HTTP_SESSION_COOKIE
+    } else {
+        SESSION_COOKIE
+    }
+}
+
+fn set_session_cookie(response: &mut Response, plain_http: bool, token: &str, max_age_secs: u64) {
+    // `Secure` keeps browsers from sending the cookie over plain HTTP. Only
+    // `XSHIELD_CONTROL_PLAIN_HTTP` leaves it out, as an explicit trade-off.
+    let secure = if plain_http { "" } else { "Secure; " };
+    let name = session_cookie_name(plain_http);
+    let value =
+        format!("{name}={token}; Path=/; Max-Age={max_age_secs}; {secure}HttpOnly; SameSite=Lax");
     if let Ok(header_value) = HeaderValue::from_str(&value) {
         response
             .headers_mut()
@@ -255,7 +273,7 @@ fn set_session_cookie(response: &mut Response, token: &str, max_age_secs: u64) {
 
 /// Whether the request carries a valid, unexpired session cookie.
 pub fn session_authenticated(state: &ControlState, headers: &HeaderMap) -> bool {
-    cookie_value(headers, SESSION_COOKIE)
+    cookie_value(headers, session_cookie_name(state.plain_http))
         .is_some_and(|token| verify_session_token(&state.session_key, &token))
 }
 
@@ -364,18 +382,23 @@ pub async fn login(
         authenticated: true,
     })
     .into_response();
-    set_session_cookie(&mut response, &token, SESSION_LIFETIME_SECS);
+    set_session_cookie(
+        &mut response,
+        state.plain_http,
+        &token,
+        SESSION_LIFETIME_SECS,
+    );
     Ok(response)
 }
 
 /// `POST /api/logout`: clears the session cookie. Needs no session.
 #[allow(clippy::unused_async)] // axum handlers are async functions.
-pub async fn logout() -> Response {
+pub async fn logout(State(state): State<Arc<ControlState>>) -> Response {
     let mut response = axum::Json(SessionStateBody {
         authenticated: false,
     })
     .into_response();
-    set_session_cookie(&mut response, "", 0);
+    set_session_cookie(&mut response, state.plain_http, "", 0);
     response
 }
 
@@ -471,6 +494,31 @@ mod tests {
             limiter.record_failure(address, start);
         }
         assert!(limiter.allows(address, start + LOGIN_WINDOW));
+    }
+
+    #[test]
+    fn the_cookie_is_secure_over_https_and_unprefixed_over_plain_http() {
+        let mut https = Response::new(axum::body::Body::empty());
+        set_session_cookie(&mut https, false, "token", 60);
+        let https_cookie = https.headers()[header::SET_COOKIE]
+            .to_str()
+            .expect("ascii cookie")
+            .to_owned();
+        assert_eq!(
+            https_cookie,
+            "__Host-xshield-session=token; Path=/; Max-Age=60; Secure; HttpOnly; SameSite=Lax"
+        );
+
+        let mut plain = Response::new(axum::body::Body::empty());
+        set_session_cookie(&mut plain, true, "token", 60);
+        let plain_cookie = plain.headers()[header::SET_COOKIE]
+            .to_str()
+            .expect("ascii cookie")
+            .to_owned();
+        assert_eq!(
+            plain_cookie,
+            "xshield-session=token; Path=/; Max-Age=60; HttpOnly; SameSite=Lax"
+        );
     }
 
     #[test]
