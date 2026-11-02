@@ -3,6 +3,8 @@
 // trusts a value it cannot name: an unknown option reads as absent, so a hand-edited link still opens.
 // Every key is optional, so a link names only what it needs, and any route accepts the global scope.
 
+import type { UnknownApiReason } from "../api/types.ts";
+import { isApiName, isClassId, isUnknownReason } from "../lib/filter-dsl.ts";
 import { isSiteName } from "../lib/ids.ts";
 import type { RangeParam } from "../lib/time-range.ts";
 import { isRangeParam, parseMillis } from "../lib/time-range.ts";
@@ -66,6 +68,12 @@ export type RequestsSearch = GlobalSearch & {
   peek?: string;
   live?: "1";
   batch?: "1";
+  /** A link's interface-name condition (`api:`); the page moves it into the condition text. */
+  api?: string;
+  /** A link's unknown-name condition (`api:unknown`, or one reason code). */
+  api_unknown?: UnknownApiReason | "any";
+  /** A link's object-class condition (`object:`). */
+  object?: string;
 };
 
 export function validateRequests(raw: Record<string, unknown>): RequestsSearch {
@@ -77,7 +85,20 @@ export function validateRequests(raw: Record<string, unknown>): RequestsSearch {
     peek: str(raw.peek),
     live: flag(raw.live),
     batch: flag(raw.batch),
+    api: validText(raw.api, isApiName),
+    api_unknown: unknownParam(raw.api_unknown),
+    object: validText(raw.object, isClassId),
   };
+}
+
+/** The string when the check accepts it; a value the check refuses reads as absent. */
+function validText(raw: unknown, valid: (value: string) => boolean): string | undefined {
+  return typeof raw === "string" && valid(raw) ? raw : undefined;
+}
+
+function unknownParam(raw: unknown): UnknownApiReason | "any" | undefined {
+  if (raw === "any") return "any";
+  return typeof raw === "string" && isUnknownReason(raw) ? raw : undefined;
 }
 
 export const DETAIL_TABS = ["pipeline", "values", "jev", "session", "raw"] as const;
