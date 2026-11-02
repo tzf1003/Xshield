@@ -5,7 +5,7 @@
 
 import type { FieldKindDeclaration, LearningSettings, ObjectsSpec } from "../api/types.ts";
 import { parsePattern } from "./patterns.ts";
-import { DECLARE_TEXT, LEARNING_TEXT } from "./vocab.ts";
+import { DECLARE_TEXT, LEARNING_TEXT, OBJECT_KIND_LABEL } from "./vocab.ts";
 
 export const FIELD_MAX = 32;
 export const KIND_MIN = 3;
@@ -133,10 +133,22 @@ export function checkDeclarations(list: readonly FieldKindDeclaration[]): string
   return messages;
 }
 
-/** A declaration in words: `字段 doc_id 归为 doctor（仅 /api/appointments*）`. */
+/** A class in words: its name when the vocabulary has one (医生), otherwise the id as it was written. */
+export function classWord(kind: string): string {
+  return OBJECT_KIND_LABEL[kind] ?? kind;
+}
+
+/** A declaration in words: `字段 doc_id 归为医生（仅 /api/appointments*）`. */
 export function declarationLabel(item: FieldKindDeclaration): string {
   const scope = item.in !== undefined && item.in.length > 0 ? item.in.join("、") : null;
-  return DECLARE_TEXT.label(item.field, item.kind, scope);
+  return DECLARE_TEXT.label(item.field, classWord(item.kind), scope);
+}
+
+/** Where a declaration applies in words: a field under the scope it names, or a field in every response. */
+function placeOf(item: FieldKindDeclaration): string {
+  return item.in !== undefined && item.in.length > 0
+    ? `响应 ${item.in.join("、")} ${item.field}`
+    : `字段 ${item.field}`;
 }
 
 /** The learning settings with the defaults filled in. */
@@ -170,8 +182,8 @@ export function declarationKey(item: FieldKindDeclaration): string {
 }
 
 /**
- * The lines the save dialog lists for the object map: declarations added or removed, and the learning settings
- * that differ (console design 6: a change reads as what it does to which positions).
+ * The lines the save dialog lists for the object map: declarations added or removed, a declaration whose class
+ * changed, and the learning settings that differ (console design 6: a change reads as what it does to which positions).
  */
 export function objectChanges(
   before: ObjectsSpec | undefined,
@@ -180,13 +192,25 @@ export function objectChanges(
   const changes: string[] = [];
   const old = before?.field_kinds ?? [];
   const next = after?.field_kinds ?? [];
-  const oldKeys = new Set(old.map(declarationKey));
-  const nextKeys = new Set(next.map(declarationKey));
+  // A declaration is matched by its field and its scope: the same place with another class is a change of class.
+  const placeKey = (item: FieldKindDeclaration) =>
+    `${fieldKey(item.field)}|${(item.in ?? []).join(",")}`;
+  const oldByPlace = new Map(
+    old.map((item): [string, FieldKindDeclaration] => [placeKey(item), item]),
+  );
+  const nextByPlace = new Map(
+    next.map((item): [string, FieldKindDeclaration] => [placeKey(item), item]),
+  );
   for (const item of next) {
-    if (!oldKeys.has(declarationKey(item))) changes.push(`对象表 ＋ ${declarationLabel(item)}`);
+    const previous = oldByPlace.get(placeKey(item));
+    if (previous === undefined) {
+      changes.push(`对象表 ＋ ${declarationLabel(item)}`);
+    } else if (kindKey(previous.kind) !== kindKey(item.kind)) {
+      changes.push(`${placeOf(item)} 从${classWord(previous.kind)}改为${classWord(item.kind)}`);
+    }
   }
   for (const item of old) {
-    if (!nextKeys.has(declarationKey(item))) changes.push(`对象表 －1：${declarationLabel(item)}`);
+    if (!nextByPlace.has(placeKey(item))) changes.push(`对象表 －1：${declarationLabel(item)}`);
   }
   const was = effectiveLearning(before?.learning);
   const now = effectiveLearning(after?.learning);
@@ -200,7 +224,7 @@ export function objectChanges(
   flag(LEARNING_TEXT.autoPause, was.auto_pause, now.auto_pause);
   if (was.agent.daily_limit !== now.agent.daily_limit) {
     changes.push(
-      `学习设置 ${LEARNING_TEXT.agentDaily} ${was.agent.daily_limit} → ${now.agent.daily_limit}`,
+      `学习设置 ${LEARNING_TEXT.agentDaily} ${was.agent.daily_limit} 次 → ${now.agent.daily_limit} 次`,
     );
   }
   if (

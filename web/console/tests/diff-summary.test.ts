@@ -67,9 +67,9 @@ test("字段归类改成另一类时，写出响应的范围、字段和两个�
   ]);
 });
 
-test("没有范围的字段归类写作字段，增加时不带范围", () => {
+test("没有范围的字段归类写作字段，增加时注明全站", () => {
   assert.deepEqual(semanticChanges(base, withKinds([{ field: "patient_no", kind: "patient" }])), [
-    "字段归类 ＋1：patient_no 归为患者",
+    "对象表 ＋ 字段 patient_no 归为患者（全站）",
   ]);
   assert.deepEqual(
     semanticChanges(
@@ -87,25 +87,22 @@ test("带范围的字段归类增加或删除时注明范围", () => {
   ]);
 
   assert.deepEqual(semanticChanges(before, after), [
-    "字段归类 ＋1：doc_id 归为文档（仅 /api/records/*、/api/files/*）",
-    "字段归类 －1：idcard（仅 /api/files/*）",
+    "对象表 ＋ 字段 doc_id 归为文档（仅 /api/records/*、/api/files/*）",
+    "对象表 －1：字段 idcard 归为患者（仅 /api/files/*）",
   ]);
 });
 
 test("类别没有中文名时，写出类别编号本身", () => {
   assert.deepEqual(semanticChanges(base, withKinds([{ field: "sku", kind: "vendor_code" }])), [
-    "字段归类 ＋1：sku 归为vendor_code",
+    "对象表 ＋ 字段 sku 归为vendor_code（全站）",
   ]);
 });
 
-test("学习设置的每一项都写出来，没有学习设置的按默认值计", () => {
+test("学习设置有变化的项都写出来，没有学习设置的按默认值计", () => {
   assert.deepEqual(semanticChanges(base, { ...base, objects: { learning } }), [
-    "学习 自动学习 默认 → 开",
-    "学习 自动收紧 默认 → 关",
-    "学习 自动暂停 默认 → 开",
-    "学习 agent 默认 → 关",
-    "学习 agent 每日上限 默认 → 20 次",
-    "学习 学习阈值 默认 → 5 次 / 3 个会话",
+    "学习设置 自动收紧 开 → 关",
+    "学习设置 agent 每日上限 200 次 → 20 次",
+    "学习设置 学习门槛 20 次、5 个会话 → 5 次、3 个会话",
   ]);
 });
 
@@ -113,7 +110,7 @@ test("只有一项学习设置变了时，只写那一项", () => {
   const before: SiteSpec = { ...base, objects: { learning } };
   const after: SiteSpec = { ...base, objects: { learning: { ...learning, auto_tighten: true } } };
 
-  assert.deepEqual(semanticChanges(before, after), ["学习 自动收紧 关 → 开"]);
+  assert.deepEqual(semanticChanges(before, after), ["学习设置 自动收紧 关 → 开"]);
 });
 
 test("没有变化时，路由和对象设置都不写出任何改动", () => {

@@ -268,16 +268,18 @@ test("a page that cannot render shows its own error page, with a retry and a way
 });
 
 for (const theme of ["light", "dark"] satisfies Theme[]) {
-  test(`every tab of the detail passes axe in the ${theme} theme`, async ({ page }) => {
-    await useFixtures(page);
-    await setTheme(page, theme);
-    for (const tab of TABS) {
+  // One test per tab: each loads the page afresh, so a slow scan of one tab cannot use up a shared time budget.
+  for (const tab of TABS) {
+    const label = tab.search === "" ? tab.name : `${tab.name} ${tab.search}`;
+    test(`the ${label} tab passes axe in the ${theme} theme`, async ({ page }) => {
+      await useFixtures(page);
+      await setTheme(page, theme);
       await page.goto(`/requests/${IDS.basket}${tab.search}`);
       await expect(heading(page, "/rest/basket/6")).toBeVisible();
       await expect(page.getByRole("tab", { name: tab.name, selected: true })).toBeVisible();
       await expectNoAxeViolations(page);
-    }
-  });
+    });
+  }
 
   test(`the not-found state passes axe in the ${theme} theme`, async ({ page }) => {
     await useFixtures(page);

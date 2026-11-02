@@ -131,7 +131,7 @@ test("confirming a proposal puts its declaration in the save dialog", async ({ p
   await drawer.getByRole("button", { name: "确认…", exact: true }).click();
   const save = page.getByRole("dialog", { name: "保存 emr 的配置" });
   await expect(save.getByRole("list", { name: "改动摘要" })).toContainText(
-    "对象表 ＋ 字段 doc_id 归为 doctor（仅 /api/appointments*）",
+    "对象表 ＋ 字段 doc_id 归为医生（仅 /api/appointments*）",
   );
 });
 
@@ -179,8 +179,8 @@ test("confirming the candidates puts their declarations in the save dialog", asy
 
   const save = page.getByRole("dialog", { name: "保存 juice 的配置" });
   const changes = save.getByRole("list", { name: "改动摘要" });
-  await expect(changes).toContainText("对象表 ＋ 字段 id 归为 doctor（仅 /api/doctors*）");
-  await expect(changes).toContainText("对象表 ＋ 字段 id 归为 patient（仅 /api/patients*）");
+  await expect(changes).toContainText("对象表 ＋ 字段 id 归为医生（仅 /api/doctors*）");
+  await expect(changes).toContainText("对象表 ＋ 字段 id 归为患者（仅 /api/patients*）");
 });
 
 test("the learning settings change the configuration, and the change goes through the save dialog", async ({
@@ -221,7 +221,7 @@ test("the synonym migration turns a group into declarations, and the save remove
   const save = page.getByRole("dialog", { name: "保存 emr 的配置" });
   const changes = save.getByRole("list", { name: "改动摘要" });
   await expect(changes).toContainText("同义词 －doc ↔ doctor");
-  await expect(changes).toContainText("对象表 ＋ 字段 doc_id 归为 doctor（仅 /api/appointments*）");
+  await expect(changes).toContainText("对象表 ＋ 字段 doc_id 归为医生（仅 /api/appointments*）");
 });
 
 test("the wizard can open the new site on its object map", async ({ page }) => {

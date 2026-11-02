@@ -141,17 +141,23 @@ test("the save dialog reads declarations and learning changes in words", () => {
     },
   };
   assert.deepEqual(objectChanges(before, after), [
-    "对象表 ＋ 字段 doc_id 归为 doctor（仅 /api/appointments*）",
+    "对象表 ＋ 字段 doc_id 归为医生（仅 /api/appointments*）",
     "学习设置 自动收紧 开 → 关",
   ]);
   assert.deepEqual(objectChanges(after, before), [
-    "对象表 －1：字段 doc_id 归为 doctor（仅 /api/appointments*）",
+    "对象表 －1：字段 doc_id 归为医生（仅 /api/appointments*）",
     "学习设置 自动收紧 关 → 开",
   ]);
   assert.deepEqual(objectChanges(undefined, undefined), []);
   assert.deepEqual(objectChanges({}, { learning: undefined }), []);
   assert.deepEqual(objectChanges(undefined, { field_kinds: [decl("doc", "doctor")] }), [
-    "对象表 ＋ 字段 doc 归为 doctor（全站）",
+    "对象表 ＋ 字段 doc 归为医生（全站）",
+  ]);
+  // The same field under the same scope with another class is a change of class, read as the move.
+  const moved = { field_kinds: [decl("doc_id", "doctor", ["/api/appointments*"])] };
+  const changed = { field_kinds: [decl("doc_id", "document", ["/api/appointments*"])] };
+  assert.deepEqual(objectChanges(moved, changed), [
+    "响应 /api/appointments* doc_id 从医生改为文档",
   ]);
 });
 

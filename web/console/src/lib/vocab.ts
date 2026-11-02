@@ -603,7 +603,7 @@ export const DECLARE_TEXT = {
   learningShape: "学习设置的格式不对",
   unknownKey: (key: string) => `未知字段 ${key}`,
   label: (field: string, kind: string, scope: string | null) =>
-    `字段 ${field} 归为 ${kind}（${scope === null ? "全站" : `仅 ${scope}`}）`,
+    `字段 ${field} 归为${kind}（${scope === null ? "全站" : `仅 ${scope}`}）`,
 };
 
 /** The learning settings in words, for the change list and the version conflict. */
