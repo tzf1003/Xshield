@@ -22,6 +22,7 @@ const PAGES: [string, string][] = [
   ["storage table", "/system?tab=storage"],
   ["parameter table", "/system?tab=params"],
   ["overview", "/"],
+  ["site history, version table", "/sites/emr?tab=history"],
 ];
 
 /** Runs in the page: one line for each cell whose content spills out of it or is cut where it must not be. */
