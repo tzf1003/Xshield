@@ -759,6 +759,9 @@ CREATE TABLE jev_prompts (
 | `call_limit` | 改上限后：会触发上限的调用数和涉及的会话、地址数；或原来触发上限、调大后能调用的次数 | Jev 记录按 `(session, 分钟)` 计数，加上 `JEV_CALL_LIMIT` 行 |
 | `cache` | 缓存改为 0 时，原来的缓存放行都会变成 Jev 调用 | `cached_allow` 行数；调大无法预估，只给警告 |
 | `secret_fields` | 新增脱敏词会影响的 Jev 调用数和值数；`detail.fields` 列出受影响最多的 10 个字段名及次数，界面据此警告“像标识的字段也会被脱敏” | 解析时间窗内 Jev 记录的 `state`，最多 2 万条 |
+| `api_split` | 草稿给路径加上接口名后，按接口区分的请求数，`top` 列出这些路径 | 按 URL 路径匹配草稿路由；路由是新增的，或与现在的 `name_from` 不同即计入。历史记录没有接口名，只按路径计数 |
+| `entry_unreachable` | 入口仍登记在 URL 路径上，但请求的逻辑路径多了接口名，入口不再命中的请求数 | 草稿路由覆盖的路径按 `URL/~` 重新匹配入口（`~` 是占位名）：精确入口不再命中，前缀入口仍命中；子路径的接口名未知，不作入口 |
+| `cache_by_api` | 放行缓存的键加上接口名后，原来命中缓存放行的请求数 | 被草稿路由按接口区分的路径上，原为 `cached_allow` 的行数；缓存时长为 0 时不计 |
 
 会话凭证、Host 或同义词改变时只给警告（`SESSION_CHANGED`、`HOSTS_CHANGED`、`SYNONYMS_CHANGED`）：会话凭证换了以后现有会话上下文全部作废，Host 换了以后流量路由改变，同义词改变核验结果，都无法从历史记录可靠预估。
 
@@ -774,6 +777,7 @@ CREATE TABLE jev_prompts (
   - `raise_call_limit`：出现 `JEV_CALL_LIMIT`。推荐值为观察到的每分钟最高调用数加 20%，不超过 600；理由里提醒先看触发的是不是未登录页面的轮询，那种情况把接口登记为入口或绕过通常更合适（[04.5.2](04-deployment-testing.md#452-第二轮修复后重跑572-条记录)）。
   - `secret_field_candidate`：Jev 记录的 `state` 里出现未脱敏、字段名明显是敏感个人信息的输入值（含 `ssn`、`idcard`、`id_card`、`passport`、`cardnum`、`card_number`、`cvc`、`iban`、`bankaccount`），推荐加入 `secret_fields`，理由里说明被脱敏的值 Jev 无法判断越权。
   - `hot_would_block`：本应拦截最多的路径模板（数字、十六进制、UUID 段替换为 `{id}`），不给配置动作，只链接到筛选后的请求列表。
+  - `route_rule_candidate`：同一路径（没有路由、不是旁路、路径不含 `*`）有 20 个以上请求，且请求头名以 `-` 分隔的最后一个词，或正文字段路径的最后一个键（`body.<键路径>`），是方法词（`method`、`action`、`operation`、`op`、`cmd`、`command`、`rpc`、`func`、`function`、`service`、`api`，不分大小写）时，推荐动作为 `add_route`，即把该来源写成路由规则的 `name_from`。每条路径最多给 3 个来源，按请求数从多到少排序；每个来源都先按保存校验检查，网关会拒绝的不推荐。数字值的正文字段不算接口名。只读这些路径最近 2 万条请求，超过时 `complete` 为 false。入口路径也可能收到这条建议，应用前的影响预估会用 `entry_unreachable` 显示入口是否失效。建议的 `detail` 给出路径占本站点请求的比例（`share`）；推荐的来源里有正文字段时，还给出其中排在最前的一个（`field`，不含 `body.` 前缀）及它的不同取值数（`values`）。控制台的路由规则卡片读取这些数值。
 - `readiness`：观察开始时间（最近一次切到观察或创建站点的版本时间）、时间窗内本应拦截按判定路径计数、未处理建议数、Jev 健康、7.4.6 的“由本应拦截请求学到的值被引用次数”。
 
 忽略某条建议只存在浏览器 `localStorage`（按建议 `id`），不进数据库。

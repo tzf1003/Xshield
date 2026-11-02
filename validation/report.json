@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3962,
-  "passed_count": 3962,
+  "checks_total": 3964,
+  "passed_count": 3964,
   "acceptance_cases": {
     "total": 78,
     "planned": 61,
@@ -19212,6 +19212,16 @@
     },
     {
       "name": "no_tool_tokens:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
