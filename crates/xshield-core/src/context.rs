@@ -4,6 +4,7 @@
 
 pub mod advanced;
 pub mod config;
+pub mod learning;
 pub mod log;
 pub mod objects;
 pub mod route;
