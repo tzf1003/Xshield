@@ -1,0 +1,373 @@
+{
+  "description": "Shared cases for the logical path and interface name (docs/header-routes-design section 2). The gateway (crates/xshield-core, context/route.rs) and the console (web/console/src/lib/logical-path.ts) must both produce `expect` for `request` under `routes`. `headers` is a list of [name, value] pairs and may repeat a name; `body` is the raw body text (null for an empty body); `body_unread` true means the gateway did not read the body; `query` is the raw query string without `?`.",
+  "cases": [
+    {
+      "name": "no route keeps the URL path",
+      "routes": [],
+      "request": {
+        "path": "/api/patients/8",
+        "query": null,
+        "content_type": null,
+        "headers": [],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/api/patients/8",
+        "api": null
+      }
+    },
+    {
+      "name": "a header names the interface",
+      "routes": [
+        {
+          "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
+          "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]
+        }
+      ],
+      "request": {
+        "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
+        "query": null,
+        "content_type": "application/json",
+        "headers": [
+          ["X-Service-Id", "bus.buriedPointService"],
+          ["X-Service-Method", "saveBuriedPointList"]
+        ],
+        "body": "[[{\"list\":[]}]]"
+      },
+      "expect": {
+        "logical_path": "/weixin/wx/mp/wx361163d21a65f679/gateway/bus.buriedPointService/saveBuriedPointList",
+        "api": {
+          "name": "bus.buriedPointService/saveBuriedPointList",
+          "from": ["header.X-Service-Id", "header.X-Service-Method"]
+        }
+      }
+    },
+    {
+      "name": "header names match without regard to case",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/gw",
+        "query": null,
+        "content_type": null,
+        "headers": [["x-service-method", "getDoctorById"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/gw/getDoctorById",
+        "api": {"name": "getDoctorById", "from": ["header.X-Service-Method"]}
+      }
+    },
+    {
+      "name": "a repeated header is an unknown interface",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/gw",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-Service-Method", "a"], ["X-Service-Method", "a"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/gw",
+        "api": {"unknown": "repeated", "source": "header.X-Service-Method"}
+      }
+    },
+    {
+      "name": "a missing source is an unknown interface",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/gw",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-Service-Method", "save"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/gw",
+        "api": {"unknown": "missing", "source": "header.X-Service-Id"}
+      }
+    },
+    {
+      "name": "a value outside the plain name charset is invalid",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/gw",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-Service-Method", "save/list"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/gw",
+        "api": {"unknown": "invalid_name", "source": "header.X-Service-Method"}
+      }
+    },
+    {
+      "name": "a query parameter names the interface when the body does not",
+      "routes": [
+        {"path": "/index.php", "name_from": [["query.action", "body.action"]]}
+      ],
+      "request": {
+        "path": "/index.php",
+        "query": "action=list",
+        "content_type": "application/x-www-form-urlencoded",
+        "headers": [],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/index.php/list",
+        "api": {"name": "list", "from": ["query.action"]}
+      }
+    },
+    {
+      "name": "query and body that agree name the interface once",
+      "routes": [
+        {"path": "/index.php", "name_from": [["query.action", "body.action"]]}
+      ],
+      "request": {
+        "path": "/index.php",
+        "query": "action=list",
+        "content_type": "application/json",
+        "headers": [],
+        "body": "{\"action\": \"list\"}"
+      },
+      "expect": {
+        "logical_path": "/index.php/list",
+        "api": {"name": "list", "from": ["query.action", "body.action"]}
+      }
+    },
+    {
+      "name": "query and body that disagree are a conflict",
+      "routes": [
+        {"path": "/index.php", "name_from": [["query.action", "body.action"]]}
+      ],
+      "request": {
+        "path": "/index.php",
+        "query": "action=get",
+        "content_type": "application/json",
+        "headers": [],
+        "body": "{\"action\": \"list\"}"
+      },
+      "expect": {
+        "logical_path": "/index.php",
+        "api": {"unknown": "conflict", "source": "query.action"}
+      }
+    },
+    {
+      "name": "a JSON body field names the interface",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
+      "request": {
+        "path": "/api/rpc",
+        "query": null,
+        "content_type": "application/json; charset=utf-8",
+        "headers": [],
+        "body": "{\"id\": 1, \"method\": \"getDoctorById\"}"
+      },
+      "expect": {
+        "logical_path": "/api/rpc/getDoctorById",
+        "api": {"name": "getDoctorById", "from": ["body.method"]}
+      }
+    },
+    {
+      "name": "a nested JSON field names the interface by its path",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.call.name"]]}
+      ],
+      "request": {
+        "path": "/api/rpc",
+        "query": null,
+        "content_type": "application/json",
+        "headers": [],
+        "body": "{\"call\": {\"name\": \"listDoctors\", \"args\": []}}"
+      },
+      "expect": {
+        "logical_path": "/api/rpc/listDoctors",
+        "api": {"name": "listDoctors", "from": ["body.call.name"]}
+      }
+    },
+    {
+      "name": "a duplicate JSON key on the path is refused",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
+      "request": {
+        "path": "/api/rpc",
+        "query": null,
+        "content_type": "application/json",
+        "headers": [],
+        "body": "{\"method\": \"a\", \"method\": \"b\"}"
+      },
+      "expect": {
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "repeated", "source": "body.method"}
+      }
+    },
+    {
+      "name": "an array on the path is a batch call and is not taken",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
+      "request": {
+        "path": "/api/rpc",
+        "query": null,
+        "content_type": "application/json",
+        "headers": [],
+        "body": "[{\"method\": \"a\"}, {\"method\": \"b\"}]"
+      },
+      "expect": {
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "missing", "source": "body.method"}
+      }
+    },
+    {
+      "name": "a JSON body that does not parse is refused",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
+      "request": {
+        "path": "/api/rpc",
+        "query": null,
+        "content_type": "application/json",
+        "headers": [],
+        "body": "{\"method\": \"a\""
+      },
+      "expect": {
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "body_not_json", "source": "body.method"}
+      }
+    },
+    {
+      "name": "a body that is neither JSON nor a form is unsupported",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
+      "request": {
+        "path": "/api/rpc",
+        "query": null,
+        "content_type": "text/plain",
+        "headers": [],
+        "body": "method=a"
+      },
+      "expect": {
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "body_unsupported", "source": "body.method"}
+      }
+    },
+    {
+      "name": "a body that was not read is too large",
+      "routes": [
+        {"path": "/api/rpc", "name_from": [["body.method"]]}
+      ],
+      "request": {
+        "path": "/api/rpc",
+        "query": null,
+        "content_type": "application/json",
+        "headers": [],
+        "body": null,
+        "body_unread": true
+      },
+      "expect": {
+        "logical_path": "/api/rpc",
+        "api": {"unknown": "body_too_large", "source": "body.method"}
+      }
+    },
+    {
+      "name": "a form field is matched by its whole dotted name",
+      "routes": [
+        {"path": "/f", "name_from": [["body.a.b"]]}
+      ],
+      "request": {
+        "path": "/f",
+        "query": null,
+        "content_type": "application/x-www-form-urlencoded",
+        "headers": [],
+        "body": "a.b=doctor&c=1"
+      },
+      "expect": {
+        "logical_path": "/f/doctor",
+        "api": {"name": "doctor", "from": ["body.a.b"]}
+      }
+    },
+    {
+      "name": "a path under an exact route is never named by its spelling",
+      "routes": [
+        {
+          "path": "/weixin/wx/mp/wx361163d21a65f679/gateway",
+          "name_from": [["header.X-Service-Id"], ["header.X-Service-Method"]]
+        }
+      ],
+      "request": {
+        "path": "/weixin/wx/mp/wx361163d21a65f679/gateway/bus.buriedPointService/saveBuriedPointList",
+        "query": null,
+        "content_type": null,
+        "headers": [],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/weixin/wx/mp/wx361163d21a65f679/gateway/bus.buriedPointService/saveBuriedPointList",
+        "api": {"unknown": "route_subpath"}
+      }
+    },
+    {
+      "name": "a trailing slash on an exact route is not the route",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/gw/",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-Service-Method", "save"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/gw/",
+        "api": {"unknown": "route_subpath"}
+      }
+    },
+    {
+      "name": "a path outside every route keeps its URL path",
+      "routes": [
+        {"path": "/gw", "name_from": [["header.X-Service-Method"]]}
+      ],
+      "request": {
+        "path": "/other",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-Service-Method", "save"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/other",
+        "api": null
+      }
+    },
+    {
+      "name": "a prefix route fixes only its own segments and drops a trailing slash",
+      "routes": [
+        {"path": "/api*", "name_from": [["header.X-M"]]}
+      ],
+      "request": {
+        "path": "/api/",
+        "query": null,
+        "content_type": null,
+        "headers": [["X-M", "list"]],
+        "body": null
+      },
+      "expect": {
+        "logical_path": "/api/list",
+        "api": {"name": "list", "from": ["header.X-M"]}
+      }
+    }
+  ]
+}

@@ -1,14 +1,15 @@
 //! The decision flow of docs/01 section 1.4, and the row that describes each
 //! decision (docs/07 sections 7.4 and 7.5).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use xshield_core::context::{
     Conclusion, ContextKind, DecisionPath, DecisionRecord, FieldCount, JevRecord, Mode,
-    ObservationSummary, Observed, OnJevUnavailable, Outcome, SessionCredential, ShapeField,
-    SiteSpec, Skip, Trace, TraceSession,
+    ObservationSummary, Observed, OnJevUnavailable, Outcome, Resolved, SessionCredential,
+    ShapeField, SiteSpec, Skip, Trace, TraceSession,
 };
 use xshield_core::kind::{Rules, Used};
 
@@ -58,6 +59,11 @@ pub struct RequestFacts<'a> {
     pub client: &'a str,
     /// Unix time in milliseconds.
     pub now_ms: u64,
+    /// The route resolution of the request: its logical path and interface name.
+    /// `None` when no route covers it, which is a plain resolution of `path`.
+    pub route: Option<&'a Resolved>,
+    /// The request's header names, lower case, as the decision row keeps them.
+    pub request_headers: &'a [String],
 }
 
 /// What to do with the request.
@@ -96,6 +102,8 @@ pub struct Observation<'a> {
     pub path: &'a str,
     /// Origin status.
     pub status: u16,
+    /// The request's route resolution; `None` when no route covers it.
+    pub route: Option<&'a Resolved>,
     /// Response `Content-Type`.
     pub content_type: Option<&'a str>,
     /// Buffered response body (empty when it was not read).
@@ -210,6 +218,8 @@ impl<'a> Tuning<'a> {
 /// session it names and the parameters of its site.
 struct Turn<'a> {
     request: &'a RequestFacts<'a>,
+    /// The request's logical path and interface name.
+    resolved: &'a Resolved,
     entry: bool,
     session_id: Option<Digest16>,
     extracted: &'a ExtractedRequest,
@@ -255,8 +265,14 @@ impl<J: JevPort> Judge<J> {
     /// row that describes the decision.
     pub async fn judge(&self, site: &SiteSpec, request: &RequestFacts<'_>) -> Judgement {
         let started = Instant::now();
-        let mut record = base_row(Some(site), request);
-        if let Some(pattern) = site.matching_bypass(request.path) {
+        let routed = resolved_of(request);
+        let resolved: &Resolved = &routed;
+        let mut record = base_row(Some(site), request, resolved);
+        // Entries and bypass patterns see the logical path (URL path plus the
+        // interface name). An unknown interface has no such path: it is never an
+        // entry and never bypassed.
+        let logical = resolved.entry_path();
+        if let Some(pattern) = logical.and_then(|path| site.matching_bypass(path)) {
             record.decision_path = DecisionPath::Bypass;
             record.outcome = Outcome::Allowed;
             record.trace.bypass = Some(pattern.to_owned());
@@ -268,18 +284,19 @@ impl<J: JevPort> Judge<J> {
                 sent: Vec::new(),
             };
         }
-        let entry = site.matching_entry(request.path);
+        let entry = logical.and_then(|path| site.matching_entry(path));
         let session_id = request
             .credential
             .filter(|credential| !credential.is_empty())
             .map(|credential| self.key.mac("session", credential.as_bytes()));
-        let extracted = extract_request(
+        let mut extracted = extract_request(
             request.path,
             request.query,
             request.content_type,
             request.body,
         );
-        let cache_key = self.cache_key(request, &extracted.values);
+        settle_values(&mut extracted, resolved);
+        let cache_key = self.cache_key(request, resolved, &extracted.values);
         let tuning = Tuning::new(site, self.jev.default_timeout());
         record.session = session_id.map(|id| label(&id)).unwrap_or_default();
         record.context = match (session_id, entry) {
@@ -291,6 +308,7 @@ impl<J: JevPort> Judge<J> {
         record.trace.values_truncated = extracted.truncated;
         let turn = Turn {
             request,
+            resolved,
             entry: entry.is_some(),
             session_id,
             extracted: &extracted,
@@ -372,7 +390,7 @@ impl<J: JevPort> Judge<J> {
         for value in &turn.extracted.values {
             let used = Used {
                 value: &value.value,
-                path: request.path,
+                path: turn.resolved.logical_path(),
                 key: value.key.as_deref(),
                 segment: path_segment(&value.at),
             };
@@ -418,10 +436,14 @@ impl<J: JevPort> Judge<J> {
             entries_passed: None,
             recent: None,
         });
-        if all_known && !turn.extracted.truncated {
+        // An unknown interface always goes to Jev: neither its values nor a cached
+        // allow of another request can settle it.
+        let unknown = turn.resolved.is_unknown();
+        if all_known && !turn.extracted.truncated && !unknown {
             return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
         }
         if tuning.cache_ms > 0
+            && !unknown
             && let Some(source) = session.cached_allow(turn.cache_key, request.now_ms)
         {
             trace.cache_source = request_text(source);
@@ -470,7 +492,7 @@ impl<J: JevPort> Judge<J> {
             entries_passed: &entries,
             recent: snapshot.recent.iter().collect(),
             method: request.method,
-            path: request.path,
+            path: turn.resolved.logical_path(),
             values,
             truncated: turn.extracted.truncated,
             credential: request.credential,
@@ -515,7 +537,7 @@ impl<J: JevPort> Judge<J> {
         row.conclusion = Some(conclusion);
         let verdict = match conclusion {
             Conclusion::Allow => {
-                if tuning.cache_ms > 0 {
+                if tuning.cache_ms > 0 && !turn.resolved.is_unknown() {
                     self.lock()
                         .store
                         .session(turn.session_id.unwrap_or(limit_key), request.now_ms)
@@ -568,9 +590,13 @@ impl<J: JevPort> Judge<J> {
         })
     }
 
+    /// The allow cache key: the method, the logical path and the request values.
+    /// The interface name is part of the logical path, so two methods that take
+    /// the same values never share an allow.
     fn cache_key(
         &self,
         request: &RequestFacts<'_>,
+        resolved: &Resolved,
         values: &[crate::values::RequestValue],
     ) -> Digest16 {
         let mut parts: Vec<String> = values
@@ -578,7 +604,12 @@ impl<J: JevPort> Judge<J> {
             .map(|v| format!("{}={}", v.at, v.value))
             .collect();
         parts.sort_unstable();
-        let text = format!("{}\0{}\0{}", request.method, request.path, parts.join("\0"));
+        let text = format!(
+            "{}\0{}\0{}",
+            request.method,
+            resolved.logical_path(),
+            parts.join("\0")
+        );
         self.key.mac("cache", text.as_bytes())
     }
 
@@ -589,6 +620,9 @@ impl<J: JevPort> Judge<J> {
     /// login form answering `302` with `Set-Cookie`) creates the new session,
     /// empty. A failed request teaches nothing.
     pub fn observe(&self, site: &SiteSpec, observation: &Observation<'_>) -> ObservationSummary {
+        let routed = routed_observation(observation);
+        let resolved: &Resolved = &routed;
+        let logical = resolved.entry_path();
         let bytes = u64::try_from(observation.body.len()).unwrap_or(u64::MAX);
         let mut summary = ObservationSummary::new(
             observation.content_type.map(str::to_owned),
@@ -601,7 +635,7 @@ impl<J: JevPort> Judge<J> {
             .filter(|credential| !credential.is_empty());
         summary.issued_session =
             issued.map(|credential| label(&self.key.mac("session", credential.as_bytes())));
-        if site.is_bypass(observation.path) {
+        if logical.is_some_and(|path| site.is_bypass(path)) {
             summary.skip = Some(Skip::Bypass);
             return summary;
         }
@@ -625,21 +659,17 @@ impl<J: JevPort> Judge<J> {
         summary.values = values.len();
         summary.fields = field_counts(&values);
 
-        let request = format!("{} {}", observation.method, observation.path);
+        let request = format!("{} {}", observation.method, resolved.logical_path());
         let request_id = request_number(observation.request_id);
         let source = Source {
             request: &request,
             request_id,
             at_ms: observation.now_ms,
         };
-        let entry = site.is_entry(observation.path);
-        let seeded = if success {
-            observation
-                .credential
-                .filter(|credential| !credential.is_empty())
-        } else {
-            None
-        };
+        let entry = logical.is_some_and(|path| site.is_entry(path));
+        let seeded = observation
+            .credential
+            .filter(|credential| success && !credential.is_empty());
         let mut inner = self.lock();
         if let Some(shape) = shape {
             summary.shape = shape_if_new(
@@ -683,12 +713,13 @@ impl<J: JevPort> Judge<J> {
             }
             session.record_request(Recent {
                 method: observation.method.to_owned(),
-                path: observation.path.to_owned(),
+                path: resolved.logical_path().to_owned(),
                 status: observation.status,
                 request_id,
                 at_ms: observation.now_ms,
             });
-            if entry && session.pass_entry(observation.path, observation.now_ms, request_id) {
+            if entry && session.pass_entry(resolved.logical_path(), observation.now_ms, request_id)
+            {
                 summary.entry_passed = true;
             }
         }
@@ -791,9 +822,50 @@ impl<J: JevPort> Judge<J> {
     }
 }
 
+/// The route resolution of an observed response: the one the edge computed, or the
+/// plain one when no route covers its request.
+fn routed_observation<'a>(observation: &Observation<'a>) -> Cow<'a, Resolved> {
+    observation.route.map_or_else(
+        || Cow::Owned(Resolved::plain(observation.path)),
+        Cow::Borrowed,
+    )
+}
+
+/// The request's route resolution: the one the edge computed, or the plain one
+/// when no route covers the request.
+fn resolved_of<'a>(request: &RequestFacts<'a>) -> Cow<'a, Resolved> {
+    request
+        .route
+        .map_or_else(|| Cow::Owned(Resolved::plain(request.path)), Cow::Borrowed)
+}
+
+/// Takes out of the request's values the ones that are the interface name (they
+/// are the name now, not values to verify), and marks the URL path segments a
+/// route fixes as inert: they are configuration.
+fn settle_values(extracted: &mut ExtractedRequest, resolved: &Resolved) {
+    extracted
+        .values
+        .retain(|value| !resolved.name_locations().contains(&value.at));
+    for value in &mut extracted.values {
+        let fixed = value
+            .at
+            .strip_prefix("path[")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|index| index.parse::<usize>().ok())
+            .is_some_and(|index| index < resolved.fixed_segments());
+        if fixed {
+            value.inert = true;
+        }
+    }
+}
+
 /// The row before judging: the request as the gateway read it. `judge` settles
 /// the decision fields before the row is returned.
-fn base_row(site: Option<&SiteSpec>, request: &RequestFacts<'_>) -> DecisionRecord {
+fn base_row(
+    site: Option<&SiteSpec>,
+    request: &RequestFacts<'_>,
+    resolved: &Resolved,
+) -> DecisionRecord {
     let secret_words = site.map_or(&[][..], |site| site.advanced().secret_fields());
     DecisionRecord {
         at_millis: request.now_ms,
@@ -807,6 +879,9 @@ fn base_row(site: Option<&SiteSpec>, request: &RequestFacts<'_>) -> DecisionReco
         context: None,
         method: request.method.to_owned(),
         path: request.path.to_owned(),
+        logical_path: resolved.logical_path().to_owned(),
+        api: resolved.api().cloned(),
+        request_headers: request.request_headers.to_vec(),
         query: request
             .query
             .map(|query| redacted_query(query, request.credential, secret_words)),
@@ -836,7 +911,8 @@ pub fn refused_row(
     decision_path: DecisionPath,
     status: u16,
 ) -> DecisionRecord {
-    let mut record = base_row(site, request);
+    let routed = resolved_of(request);
+    let mut record = base_row(site, request, &routed);
     record.decision_path = decision_path;
     record.outcome = Outcome::Blocked;
     record.status = Some(status);
@@ -1094,6 +1170,8 @@ mod tests {
         now_ms: u64,
     ) -> RequestFacts<'a> {
         RequestFacts {
+            route: None,
+            request_headers: &[],
             request_id: "req_00000000000000000000000000000002",
             method: "GET",
             path,
@@ -1108,6 +1186,7 @@ mod tests {
 
     fn list_response(credential: &str, now_ms: u64) -> Observation<'_> {
         Observation {
+            route: None,
             request_id: RID,
             unread: None,
             would_block: false,
@@ -1122,6 +1201,105 @@ mod tests {
             now_ms,
             sent: &[],
         }
+    }
+
+    /// A site with one route: the interface name is the `x-method` header.
+    fn routed_site(extra: &str) -> SiteSpec {
+        SiteSpec::from_json(&format!(
+            r#"{{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{{"cookie":"SID"}},
+               "entries":["/api/rpc/login"],
+               "routes":[{{"path":"/api/rpc","name_from":[["header.x-method"]]}}]{extra}}}"#
+        ))
+        .expect("the test site is valid")
+    }
+
+    /// The route resolution of a request to `path` whose `x-method` header is
+    /// `name`; `None` leaves the header out.
+    fn resolved(site: &SiteSpec, path: &str, name: Option<&str>) -> Resolved {
+        let headers: Vec<(&str, &str)> = name.map(|name| ("x-method", name)).into_iter().collect();
+        site.resolve(&xshield_core::context::RequestView {
+            path,
+            query: None,
+            headers: &headers,
+            body: xshield_core::context::Body::Unread,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_route_judges_an_entry_by_its_logical_path() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = routed_site(r#","mode":"enforce""#);
+        // The login method is the entry; another method at the same URL path is not.
+        let login = resolved(&site, "/api/rpc", Some("login"));
+        let other = resolved(&site, "/api/rpc", Some("getDoctor"));
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    route: Some(&login),
+                    method: "POST",
+                    ..get("/api/rpc", None, None, 1_000)
+                },
+            )
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.logical_path, "/api/rpc/login");
+        assert_eq!(verdict.record.context, Some(ContextKind::Address));
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    route: Some(&other),
+                    ..get("/api/rpc", None, None, 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::NoSession);
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_interface_always_goes_to_jev() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = routed_site(r#","mode":"enforce""#);
+        // Without the header the interface name is missing: an unknown interface.
+        // It has no values to check, yet only Jev may allow it.
+        let unknown = resolved(&site, "/api/rpc", None);
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    route: Some(&unknown),
+                    ..get("/api/rpc", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert_eq!(verdict.record.logical_path, "/api/rpc");
+        assert!(matches!(
+            verdict.record.api,
+            Some(xshield_core::context::Api::Unknown { .. })
+        ));
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[test]
+    fn the_allow_cache_key_names_the_interface() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = routed_site("");
+        let login = resolved(&site, "/api/rpc", Some("login"));
+        let other = resolved(&site, "/api/rpc", Some("getDoctor"));
+        let request = get("/api/rpc", Some("id=7"), Some("alice"), 1_000);
+        // Two interfaces at one URL path, taking the same values, never share an allow.
+        assert_ne!(
+            judge.cache_key(&request, &login, &[]),
+            judge.cache_key(&request, &other, &[])
+        );
     }
 
     #[tokio::test]
@@ -1197,6 +1375,7 @@ mod tests {
     /// What the origin showed `credential` for `GET path`.
     fn shown<'a>(path: &'a str, body: &'a [u8], credential: &'a str) -> Observation<'a> {
         Observation {
+            route: None,
             request_id: RID,
             unread: None,
             would_block: false,
@@ -1222,6 +1401,7 @@ mod tests {
         credential: &'a str,
     ) -> Observation<'a> {
         Observation {
+            route: None,
             sent: &verdict.sent,
             ..shown(path, body, credential)
         }
@@ -1446,6 +1626,8 @@ mod tests {
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
         let login = RequestFacts {
+            route: None,
+            request_headers: &[],
             method: "POST",
             content_type: Some("application/json"),
             body: br#"{"userId":"P-0000099"}"#,
@@ -1457,6 +1639,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -1503,6 +1686,8 @@ mod tests {
             .judge(
                 &site,
                 &RequestFacts {
+                    route: None,
+                    request_headers: &[],
                     method: "POST",
                     ..get("/api/session/renew", None, Some("alice"), 2_000)
                 },
@@ -1512,6 +1697,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -1549,6 +1735,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         let upload = RequestFacts {
+            route: None,
+            request_headers: &[],
             method: "POST",
             content_type: Some("text/plain"),
             body: body.as_bytes(),
@@ -1581,6 +1769,8 @@ mod tests {
         let site = site(r#","mode":"enforce""#);
         // The gateway cannot read this body, but the origin parses it and echoes the id.
         let search = RequestFacts {
+            route: None,
+            request_headers: &[],
             method: "POST",
             content_type: Some("text/plain"),
             body: br#"{"patientId":"P-0000099"}"#,
@@ -1591,6 +1781,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 method: "POST",
                 ..answered(
                     &searched,
@@ -1627,6 +1818,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 status: 403,
                 ..answered(
                     &refused,
@@ -1673,6 +1865,8 @@ mod tests {
         // The gateway cannot read this body as JSON, but the origin does, and it
         // decodes the escaped id before echoing it. The body is `{"patientId":"\u0050-0000099"}`.
         let search = RequestFacts {
+            route: None,
+            request_headers: &[],
             method: "POST",
             content_type: Some("text/plain"),
             body: b"{\"patientId\":\"\\u0050-0000099\"}",
@@ -1683,6 +1877,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 method: "POST",
                 ..answered(
                     &searched,
@@ -1940,6 +2135,7 @@ mod tests {
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
         let redeem = Observation {
+            route: None,
             request_id: RID,
             unread: None,
             would_block: false,
@@ -2137,6 +2333,8 @@ mod tests {
         let judge = judge(&fake);
         let site = site("");
         let login = RequestFacts {
+            route: None,
+            request_headers: &[],
             method: "POST",
             path: "/login",
             content_type: Some("application/json"),
@@ -2164,6 +2362,8 @@ mod tests {
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
         let poll = RequestFacts {
+            route: None,
+            request_headers: &[],
             method: "GET",
             path: "/login",
             query: Some("name=Score%20Board"),
@@ -2171,6 +2371,8 @@ mod tests {
         };
         for index in 0..(ADDRESS_CALLS_PER_MINUTE * 2) {
             let at = RequestFacts {
+                route: None,
+                request_headers: &[],
                 now_ms: 1_000 + u64::from(index),
                 ..poll
             };
@@ -2181,6 +2383,8 @@ mod tests {
         // The injection that follows still reaches Jev with budget left.
         fake.answer("ALLOW", "ATTACK");
         let attack = RequestFacts {
+            route: None,
+            request_headers: &[],
             query: Some("name=%27%20OR%201%3D1--"),
             now_ms: 9_000,
             ..poll
@@ -2198,6 +2402,8 @@ mod tests {
         let site = site(r#","mode":"enforce""#);
         // A sign-up page: no credential yet, the origin shows the new id.
         let sign_up = |client| RequestFacts {
+            route: None,
+            request_headers: &[],
             client,
             ..get("/api/patients", Some("id=7"), None, 5_000)
         };
@@ -2207,6 +2413,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -2312,6 +2519,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -2331,6 +2539,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -2357,6 +2566,7 @@ mod tests {
         judge.observe(
             &site,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -2400,6 +2610,8 @@ mod tests {
         let judge = judge(&fake);
         let site = site("");
         let upload = RequestFacts {
+            route: None,
+            request_headers: &[],
             method: "POST",
             content_type: Some("application/octet-stream"),
             body: b"\x00\x01data",
@@ -2514,6 +2726,8 @@ mod tests {
         let plain = site("");
         let guarded = site(r#","advanced":{"secret_fields":["ssn"]}"#);
         let login = |body: &'static [u8]| RequestFacts {
+            route: None,
+            request_headers: &[],
             method: "POST",
             path: "/login",
             content_type: Some("application/json"),
@@ -2544,6 +2758,7 @@ mod tests {
         judge.observe(
             &plain,
             &Observation {
+                route: None,
                 request_id: RID,
                 unread: None,
                 would_block: false,
@@ -2572,6 +2787,8 @@ mod tests {
             .judge(
                 &synonym,
                 &RequestFacts {
+                    route: None,
+                    request_headers: &[],
                     now_ms: 2_000,
                     ..request.clone()
                 },
@@ -2727,6 +2944,8 @@ mod tests {
         judge.observe(&site, &list_response("alice", 5_000));
         let query = format!("token=Sekr3t&note={}", "x".repeat(300));
         let request = RequestFacts {
+            route: None,
+            request_headers: &[],
             request_id: "req_00000000000000000000000000000003",
             method: "POST",
             path: "/api/patients/7/notes",

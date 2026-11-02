@@ -168,6 +168,7 @@ impl From<ConfigError> for ApiError {
             ConfigError::Session => ("SITE_CONFIG_SESSION_INVALID", Some("session")),
             ConfigError::Entries => ("SITE_CONFIG_ENTRIES_INVALID", Some("entries")),
             ConfigError::Bypass => ("SITE_CONFIG_BYPASS_INVALID", Some("bypass")),
+            ConfigError::Routes => ("SITE_CONFIG_ROUTES_INVALID", Some("routes")),
             ConfigError::Advanced => ("SITE_CONFIG_ADVANCED_INVALID", Some("advanced")),
         };
         let error = Self::new(StatusCode::BAD_REQUEST, code);

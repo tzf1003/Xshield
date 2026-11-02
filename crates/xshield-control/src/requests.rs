@@ -24,9 +24,11 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use xshield_core::context::Api;
 use xshield_postgres::{
     decision_log_store::{
-        self, NewDecision, PathMatch, RequestDetail, RequestFilter, RequestSummary, StatusMatch,
+        self, ApiMatch, NewDecision, PathMatch, RequestDetail, RequestFilter, RequestSummary,
+        StatusMatch,
     },
     partitions,
 };
@@ -69,7 +71,7 @@ const IMPORT_WRITE_CHUNK: usize = 500;
 const IMPORT_ERROR_LINES: usize = 20;
 const CSV_HEADER: &str = "id,request_id,at_millis,site,site_version,edge,host,client,session,\
 context,method,path,query,status,decision_path,outcome,total_ms,jev_ms,jev_access,jev_attack,\
-jev_confidence,jev_failure\n";
+jev_confidence,jev_failure,logical_path,api\n";
 
 /// The time a request id encodes, in Unix milliseconds: the first twelve hex
 /// digits after `req_`. `None` for anything that is not `req_` and 32 lowercase hex.
@@ -148,6 +150,30 @@ fn path_param(params: &Params) -> ApiResult<Option<PathMatch>> {
     }))
 }
 
+/// `api=<interface name>` for one interface, `api_unknown=true` for any unknown
+/// interface, or `api_unknown=<reason>` for one reason code such as `missing`.
+fn api_param(params: &Params) -> ApiResult<Option<ApiMatch>> {
+    match (params.text("api"), params.text("api_unknown")) {
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Err(ApiError::invalid_filter("api")),
+        (Some(_), None) => Ok(bounded_text(params, "api", TEXT_MAX_CHARS)?.map(ApiMatch::Name)),
+        (None, Some("true")) => Ok(Some(ApiMatch::Unknown(None))),
+        (None, Some(code)) if is_reason_code(code) => {
+            Ok(Some(ApiMatch::Unknown(Some(code.to_owned()))))
+        }
+        (None, Some(_)) => Err(ApiError::invalid_filter("api_unknown")),
+    }
+}
+
+/// A reason code as the gateway writes it: lower case words joined by `_`.
+fn is_reason_code(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= 32
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+}
+
 fn confidence_param(params: &Params) -> ApiResult<Option<f32>> {
     match params.text("max_confidence") {
         None => Ok(None),
@@ -195,6 +221,7 @@ fn filter_from(params: &Params, now: i64) -> ApiResult<RequestFilter> {
         method: method_param(params)?,
         status: status_param(params)?,
         path: path_param(params)?,
+        api: api_param(params)?,
         session: bounded_text(params, "session", TEXT_MAX_CHARS)?,
         client: bounded_text(params, "client", TEXT_MAX_CHARS)?,
         request_id: bounded_text(params, "request_id", TEXT_MAX_CHARS)?,
@@ -232,6 +259,13 @@ pub struct RequestRow {
     pub host: String,
     /// Request path without the query.
     pub path: String,
+    /// The path the request was judged by: `path` plus the interface name a route
+    /// read. Equals `path` when no route covers the request.
+    #[serde(default)]
+    pub logical_path: String,
+    /// The interface name, or why there is none. `None` when no route covers the request.
+    #[serde(default)]
+    pub api: Option<Api>,
     /// Redacted query string, if any.
     pub query: Option<String>,
     /// Status returned to the client.
@@ -279,6 +313,8 @@ impl From<&RequestSummary> for RequestRow {
             method: row.method.clone(),
             host: row.host.clone(),
             path: row.path.clone(),
+            logical_path: row.logical_path.clone(),
+            api: row.api.clone(),
             query: row.query.clone(),
             status: row.status,
             decision_path: row.decision_path.clone(),
@@ -342,6 +378,8 @@ pub struct RequestDetailBody {
     pub trace: Value,
     /// The stored Jev document (docs/07 section 7.5.1), null when Jev was not involved.
     pub jev: Option<Value>,
+    /// Names of the request headers, lower case and never their values.
+    pub request_headers: Vec<String>,
     pub neighbors: NeighborsBody,
     /// The summaries of the requests the trace refers to, by request id. Ids past
     /// retention are missing.
@@ -545,6 +583,7 @@ pub async fn detail(
         edge: found.summary.edge,
         trace: found.trace,
         jev: found.jev,
+        request_headers: found.request_headers,
         neighbors: NeighborsBody { prev, next },
         sources,
     }))
@@ -635,6 +674,9 @@ fn jsonl_line(detail: &RequestDetail) -> String {
         "context": row.context,
         "method": row.method,
         "path": row.path,
+        "logical_path": row.logical_path,
+        "api": row.api,
+        "request_headers": detail.request_headers,
         "query": row.query,
         "status": row.status,
         "decision_path": row.decision_path,
@@ -685,6 +727,8 @@ fn csv_line(detail: &RequestDetail) -> String {
         json!(row.jev_attack),
         json!(row.jev_confidence),
         json!(row.jev_failure),
+        json!(row.logical_path),
+        json!(row.api),
     ];
     let line: Vec<String> = cells
         .iter()
@@ -801,6 +845,25 @@ fn decision_from_json(value: &Value) -> Option<NewDecision> {
         None | Some(Value::Null) => None,
         Some(status) => Some(i16::try_from(status.as_i64()?).ok()?),
     };
+    let path = text("path")?;
+    // Lines from a build before routes carry no logical path: their path is it.
+    let logical_path = text("logical_path").unwrap_or_else(|| path.clone());
+    // A line that names an interface this build cannot read is not a row it understands.
+    let api = match value.get("api") {
+        None | Some(Value::Null) => None,
+        Some(api) => Some(serde_json::from_value::<Api>(api.clone()).ok()?),
+    };
+    let request_headers = value
+        .get("request_headers")
+        .and_then(Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     Some(NewDecision {
         at_millis: value.get("at_millis").and_then(Value::as_i64)?,
         request_id: text("request_id")?,
@@ -812,7 +875,10 @@ fn decision_from_json(value: &Value) -> Option<NewDecision> {
         session: text("session").unwrap_or_default(),
         context: text("context"),
         method: text("method")?,
-        path: text("path")?,
+        path,
+        logical_path,
+        api,
+        request_headers,
         query: text("query"),
         status,
         decision_path,

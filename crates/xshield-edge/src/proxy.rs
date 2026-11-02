@@ -11,7 +11,8 @@ use pingora::prelude::{HttpPeer, ProxyHttp, Session};
 use pingora::proxy::FailToProxy;
 use pingora::{Error, ErrorSource, ErrorType, Result};
 use xshield_core::context::{
-    DecisionPath, DecisionRecord, ObservationSummary, Outcome, SessionCredential, SiteSpec, Skip,
+    Body, DecisionPath, DecisionRecord, ObservationSummary, Outcome, RequestView, Resolved,
+    SessionCredential, SiteSpec, Skip, header_names,
 };
 use xshield_judge::context::Digest16;
 use xshield_judge::engine::{Judge, Observation, RequestFacts, refused_row};
@@ -76,6 +77,10 @@ pub struct RequestContext {
     /// Digests of the request values the judge found unseen, handed to the
     /// judge with the response (see `Judgement::sent`).
     sent: Vec<Digest16>,
+    /// The request's logical path and interface name, once the request is routed.
+    resolved: Option<Resolved>,
+    /// The request was bypassed: forwarded as it arrived, never judged.
+    bypass: bool,
 }
 
 /// A response body being copied for observation while it streams through.
@@ -98,6 +103,34 @@ fn millis_since(started: Instant) -> u32 {
 
 fn header_text<'a>(header: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
     header.get(name).and_then(|value| value.to_str().ok())
+}
+
+/// The interface name a route reads from the request, or the reason it has none.
+/// `body` is the request body when it was read, `None` when it was not.
+fn resolve_request(spec: &SiteSpec, header: &RequestHeader, body: Option<&[u8]>) -> Resolved {
+    let headers: Vec<(&str, &str)> = header
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.to_str().unwrap_or("")))
+        .collect();
+    let body = match body {
+        Some(bytes) => Body::Read {
+            content_type: header_text(&header.headers, "content-type"),
+            bytes,
+        },
+        None => Body::Unread,
+    };
+    spec.resolve(&RequestView {
+        path: header.uri.path(),
+        query: header.uri.query(),
+        headers: &headers,
+        body,
+    })
+}
+
+/// The names of the request's headers: lower case, never their values.
+fn request_header_names(header: &RequestHeader) -> Vec<String> {
+    header_names(header.headers.keys().map(http::HeaderName::as_str))
 }
 
 /// All `Cookie` headers joined, since HTTP/2 clients may split them.
@@ -229,8 +262,10 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
         site: Option<&SiteSpec>,
         decision_path: DecisionPath,
         status: u16,
+        route: Option<&Resolved>,
     ) -> DecisionRecord {
         let header = session.req_header();
+        let names = request_header_names(header);
         let facts = RequestFacts {
             request_id: &ctx.request_id,
             method: header.method.as_str(),
@@ -241,6 +276,8 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
             credential: None,
             client: &ctx.client,
             now_ms: now_ms(),
+            route,
+            request_headers: &names,
         };
         let mut record = refused_row(site, &facts, decision_path, status);
         record.edge.clone_from(&self.edge);
@@ -278,6 +315,7 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
                 method: request.method.as_str(),
                 path: request.uri.path(),
                 status: ctx.status,
+                route: ctx.resolved.as_ref(),
                 content_type: ctx.content_type.as_deref(),
                 body,
                 unread,
@@ -311,6 +349,8 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
             status: 0,
             observed: false,
             sent: Vec::new(),
+            resolved: None,
+            bypass: false,
         }
     }
 
@@ -322,42 +362,61 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
         let host = request_host(session.req_header());
         ctx.host = host.as_deref().map(host_label).unwrap_or_default();
         let Some(site) = host.as_deref().and_then(|host| self.sites.find(host)) else {
-            let record = self.refusal(session, ctx, None, DecisionPath::UnknownSite, 404);
+            let record = self.refusal(session, ctx, None, DecisionPath::UnknownSite, 404, None);
             ctx.record = Some(record);
             refuse(session, 404, &ctx.request_id, "unknown_site").await?;
             return Ok(true);
         };
         ctx.site = Some(Arc::clone(&site));
+        let spec = site.spec();
 
-        // A bypassed path is forwarded as it arrives: its body is never read,
-        // so an upload of any size reaches the origin untouched.
-        let bypass = site.spec().is_bypass(session.req_header().uri.path());
-        let body = if bypass {
-            Bytes::new()
-        } else if let Some(body) = buffer_body(session).await? {
-            body
+        // The interface name comes from the URL, the headers and the query, and
+        // from the body only when a route names the request from it. A bypassed
+        // request is forwarded as it arrives: its body is never read, so an upload
+        // of any size reaches the origin untouched, unless it had to be read to be
+        // named.
+        let url_path = session.req_header().uri.path().to_owned();
+        let read_first = if spec.names_from_body(&url_path) {
+            Some(buffer_body(session).await?)
         } else {
+            None
+        };
+        let read_body = read_first.as_ref().and_then(|read| read.as_deref());
+        let resolved = resolve_request(spec, session.req_header(), read_body);
+        let bypass = resolved
+            .entry_path()
+            .is_some_and(|path| spec.is_bypass(path));
+        let body = match read_first {
+            Some(Some(bytes)) => Some(bytes),
+            // The body was too large to read, so its name is unknown.
+            Some(None) => None,
+            None if bypass => Some(Bytes::new()),
+            None => buffer_body(session).await?,
+        };
+        let Some(body) = body else {
             let mut record = self.refusal(
                 session,
                 ctx,
-                Some(site.spec()),
+                Some(spec),
                 DecisionPath::BodyNotInspectable,
                 413,
+                Some(&resolved),
             );
             record.site_version = Some(site.version());
             ctx.record = Some(record);
             refuse(session, 413, &ctx.request_id, "body_not_inspectable").await?;
             return Ok(true);
         };
+        let names = request_header_names(session.req_header());
 
         let header = session.req_header();
         let cookies = cookie_header(&header.headers);
-        let named = match site.spec().session() {
+        let from_header = match site.spec().session() {
             SessionCredential::Header(name) => header_text(&header.headers, name),
             SessionCredential::Cookie(_) => None,
         };
-        let credential =
-            Judge::<J>::credential_from(site.spec(), cookies.as_deref(), named).map(str::to_owned);
+        let credential = Judge::<J>::credential_from(site.spec(), cookies.as_deref(), from_header)
+            .map(str::to_owned);
         let method = header.method.as_str().to_owned();
         let path = header.uri.path().to_owned();
         let query = header.uri.query().map(str::to_owned);
@@ -376,11 +435,15 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
                     credential: credential.as_deref(),
                     client: &ctx.client,
                     now_ms: now_ms(),
+                    route: Some(&resolved),
+                    request_headers: &names,
                 },
             )
             .await;
         ctx.credential = credential;
         ctx.sent = judgement.sent;
+        ctx.bypass = bypass;
+        ctx.resolved = Some(resolved);
         let mut record = judgement.record;
         record.edge.clone_from(&self.edge);
         record.host.clone_from(&ctx.host);
@@ -429,11 +492,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
         ctx.origin_started = Some(Instant::now());
         // Compressed responses cannot be read for observation; static paths,
         // which are never observed, keep their compression.
-        let bypass = ctx
-            .site
-            .as_ref()
-            .is_some_and(|site| site.spec().is_bypass(upstream.uri.path()));
-        if !bypass {
+        if !ctx.bypass {
             upstream.remove_header("Accept-Encoding");
         }
         if !ctx.client.is_empty() {
@@ -464,7 +523,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
         let sized = header_text(&response.headers, "content-length")
             .and_then(|value| value.trim().parse::<usize>().ok());
         let request = session.req_header();
-        let unread = if site.spec().is_bypass(request.uri.path()) {
+        let unread = if ctx.bypass {
             Some(Skip::Bypass)
         } else if request.method == http::Method::HEAD {
             Some(Skip::Head)

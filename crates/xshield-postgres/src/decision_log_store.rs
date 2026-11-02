@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use sqlx::{AssertSqlSafe, PgPool, Postgres, QueryBuilder, Row, postgres::PgRow};
+use xshield_core::context::Api;
 
 use crate::decision_stats::SCAN_LIMIT;
 
@@ -34,14 +35,15 @@ const DETAIL_WINDOW_MILLIS: i64 = 60_000;
 
 /// Columns of a list row. Trace and Jev document are not selected here.
 pub(crate) const SUMMARY_COLUMNS: &str = "id, at_millis, request_id, site, site_version, edge, host, \
-     client, session, context, method, path, query, status, decision_path, outcome, total_ms, \
-     jev_ms, jev_access, jev_attack, jev_confidence, jev_failure, (jev IS NOT NULL) AS has_jev";
+     client, session, context, method, path, COALESCE(logical_path, path) AS logical_path, api, \
+     query, status, decision_path, outcome, total_ms, jev_ms, jev_access, jev_attack, \
+     jev_confidence, jev_failure, (jev IS NOT NULL) AS has_jev";
 
-/// Columns of a full row: the list columns plus the trace and the Jev document.
+/// Columns of a full row: the list columns, the header names, the trace and the Jev document.
 pub(crate) const DETAIL_COLUMNS: &str = "id, at_millis, request_id, site, site_version, edge, host, \
-     client, session, context, method, path, query, status, decision_path, outcome, total_ms, \
-     jev_ms, jev_access, jev_attack, jev_confidence, jev_failure, (jev IS NOT NULL) AS has_jev, \
-     trace, jev";
+     client, session, context, method, path, COALESCE(logical_path, path) AS logical_path, api, \
+     query, status, decision_path, outcome, total_ms, jev_ms, jev_access, jev_attack, \
+     jev_confidence, jev_failure, (jev IS NOT NULL) AS has_jev, request_headers, trace, jev";
 
 /// Failure of a decision log storage operation.
 #[derive(Debug)]
@@ -103,6 +105,11 @@ pub struct RequestSummary {
     pub method: String,
     /// Request path without the query.
     pub path: String,
+    /// The path the request was judged by: `path`, followed by the interface name a
+    /// route read. Equals `path` when no route covers the request.
+    pub logical_path: String,
+    /// The interface name, or why there is none. `None` when no route covers the request.
+    pub api: Option<Api>,
     /// Redacted query string, if any.
     pub query: Option<String>,
     /// Status returned to the client.
@@ -136,6 +143,9 @@ pub struct RequestDetail {
     pub trace: serde_json::Value,
     /// The Jev document (docs/07 section 7.5.1), when Jev was involved.
     pub jev: Option<serde_json::Value>,
+    /// Names of the request headers, lower case and never their values. Empty for
+    /// rows written before header names were recorded.
+    pub request_headers: Vec<String>,
 }
 
 /// Matches a status code exactly, or a whole class such as `4xx`.
@@ -154,6 +164,16 @@ pub enum PathMatch {
     Exact(String),
     /// Paths starting with this text.
     Prefix(String),
+}
+
+/// Matches the interface name a row was judged under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiMatch {
+    /// This interface name, exactly.
+    Name(String),
+    /// An unknown interface: any reason when `None`, otherwise this reason code,
+    /// such as `missing` or `repeated`.
+    Unknown(Option<String>),
 }
 
 /// Filters for the decision log. The time window is always present; every
@@ -176,6 +196,8 @@ pub struct RequestFilter {
     pub status: Option<StatusMatch>,
     /// Path, exact or prefix.
     pub path: Option<PathMatch>,
+    /// The interface name the request was judged under, or an unknown interface.
+    pub api: Option<ApiMatch>,
     /// Exact session label.
     pub session: Option<String>,
     /// Exact client address.
@@ -289,6 +311,20 @@ fn push_common_filter(query: &mut QueryBuilder<Postgres>, filter: &RequestFilter
         }
         None => {}
     }
+    match &filter.api {
+        Some(ApiMatch::Name(name)) => {
+            query.push(" AND api ->> 'name' = ").push_bind(name.clone());
+        }
+        Some(ApiMatch::Unknown(None)) => {
+            query.push(" AND api ->> 'unknown' IS NOT NULL");
+        }
+        Some(ApiMatch::Unknown(Some(code))) => {
+            query
+                .push(" AND api ->> 'unknown' = ")
+                .push_bind(code.clone());
+        }
+        None => {}
+    }
     if let Some(session) = &filter.session {
         // The literal condition lets the partial index decision_log_session_idx
         // serve the query (docs/07 section 7.8.3). An empty label matches the
@@ -385,6 +421,10 @@ pub(crate) fn summary_from_row(row: &PgRow) -> Result<RequestSummary, sqlx::Erro
         context: row.try_get("context")?,
         method: row.try_get("method")?,
         path: row.try_get("path")?,
+        logical_path: row.try_get("logical_path")?,
+        api: row
+            .try_get::<Option<sqlx::types::Json<Api>>, _>("api")?
+            .map(|api| api.0),
         query: row.try_get("query")?,
         status: row.try_get("status")?,
         decision_path: row.try_get("decision_path")?,
@@ -404,6 +444,7 @@ fn detail_from_row(row: &PgRow) -> Result<RequestDetail, sqlx::Error> {
         summary: summary_from_row(row)?,
         trace: row.try_get("trace")?,
         jev: row.try_get("jev")?,
+        request_headers: row.try_get("request_headers")?,
     })
 }
 
@@ -674,6 +715,12 @@ pub struct NewDecision {
     pub method: String,
     /// Path without the query.
     pub path: String,
+    /// The path the request was judged by; `path` when no route covers it.
+    pub logical_path: String,
+    /// The interface name, or why there is none.
+    pub api: Option<Api>,
+    /// Names of the request headers, lower case and never their values.
+    pub request_headers: Vec<String>,
     /// Redacted query string.
     pub query: Option<String>,
     /// Status returned to the client.
@@ -798,8 +845,9 @@ pub async fn insert_many(
     }
     let mut query = QueryBuilder::<Postgres>::new(
         "INSERT INTO decision_log (at_millis, request_id, site, site_version, edge, host, client, \
-         session, context, method, path, query, status, decision_path, outcome, total_ms, jev_ms, \
-         jev_access, jev_attack, jev_confidence, jev_failure, trace, jev) ",
+         session, context, method, path, logical_path, api, request_headers, query, status, \
+         decision_path, outcome, total_ms, jev_ms, jev_access, jev_attack, jev_confidence, \
+         jev_failure, trace, jev) ",
     );
     query.push_values(rows, |mut bind, row| {
         let columns = jev_columns(row.jev.as_ref());
@@ -814,6 +862,9 @@ pub async fn insert_many(
             .push_bind(row.context.clone())
             .push_bind(row.method.clone())
             .push_bind(row.path.clone())
+            .push_bind(row.logical_path.clone())
+            .push_bind(row.api.clone().map(sqlx::types::Json))
+            .push_bind(row.request_headers.clone())
             .push_bind(row.query.clone())
             .push_bind(row.status)
             .push_bind(row.decision_path.clone())

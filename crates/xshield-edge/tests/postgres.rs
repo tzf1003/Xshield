@@ -11,7 +11,7 @@ use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use xshield_core::context::{
-    Conclusion, ContextKind, DecisionPath, DecisionRecord, JevRecord, Outcome, Timing, Trace,
+    Api, Conclusion, ContextKind, DecisionPath, DecisionRecord, JevRecord, Outcome, Timing, Trace,
 };
 use xshield_edge::sink::{Counters, DecisionSink, Gap, now_millis, write_postgres};
 use xshield_edge::sites::{ORIGIN_INVALID, SiteStatus, SiteTable};
@@ -33,6 +33,7 @@ const SCHEMA: &[&str] = &[
      at_millis bigint NOT NULL, request_id text NOT NULL, site text, site_version bigint, \
      edge text NOT NULL, host text NOT NULL, client text NOT NULL, \
      session text NOT NULL DEFAULT '', context text, method text NOT NULL, path text NOT NULL, \
+     logical_path text, api jsonb, request_headers text[] NOT NULL DEFAULT '{}', \
      query text, status smallint, decision_path text NOT NULL, outcome text NOT NULL, \
      total_ms integer, jev_ms integer, jev_access text, jev_attack text, \
      jev_confidence real, jev_failure text, trace jsonb NOT NULL, jev jsonb, \
@@ -128,6 +129,16 @@ fn judged(request_id: &str, at_millis: u64) -> DecisionRecord {
         context: Some(ContextKind::Session),
         method: "GET".to_owned(),
         path: "/api/patients/patient-D".to_owned(),
+        logical_path: "/api/patients/patient-D/getPatient".to_owned(),
+        api: Some(Api::Named {
+            name: "getPatient".to_owned(),
+            from: vec!["header.x-method".to_owned()],
+        }),
+        request_headers: vec![
+            "accept".to_owned(),
+            "x-method".to_owned(),
+            "x-request-id".to_owned(),
+        ],
         query: Some("page=2".to_owned()),
         status: Some(403),
         decision_path: DecisionPath::JevDeny,
@@ -168,6 +179,8 @@ fn bypass(request_id: &str, at_millis: u64) -> DecisionRecord {
         outcome: Outcome::Allowed,
         status: Some(200),
         path: "/assets/logo.png".to_owned(),
+        logical_path: "/assets/logo.png".to_owned(),
+        request_headers: Vec::new(),
         query: None,
         context: None,
         session: String::new(),
@@ -299,9 +312,9 @@ async fn a_batch_lands_with_its_derived_columns() {
     assert_eq!(counters.write_errors(), 0);
 
     let rows = sqlx::query(
-        "SELECT request_id, at_millis, edge, site_version, context, query, status, \
-         decision_path, outcome, total_ms, jev_ms, jev_access, jev_attack, jev_confidence, \
-         jev_failure, trace, jev FROM decision_log ORDER BY id",
+        "SELECT request_id, at_millis, edge, site_version, context, logical_path, api, \
+         request_headers, query, status, decision_path, outcome, total_ms, jev_ms, jev_access, \
+         jev_attack, jev_confidence, jev_failure, trace, jev FROM decision_log ORDER BY id",
     )
     .fetch_all(&pool)
     .await
@@ -330,6 +343,20 @@ async fn a_batch_lands_with_its_derived_columns() {
     assert_eq!(first.get::<Option<i16>, _>("status"), Some(403));
     assert_eq!(first.get::<String, _>("decision_path"), "jev_deny");
     assert_eq!(first.get::<String, _>("outcome"), "blocked");
+    // The route fields: the logical path, the interface name as JSON, and the
+    // header names, which are names and never values.
+    assert_eq!(
+        first.get::<Option<String>, _>("logical_path").as_deref(),
+        Some("/api/patients/patient-D/getPatient")
+    );
+    assert_eq!(
+        first.get::<Option<serde_json::Value>, _>("api"),
+        Some(json!({"name": "getPatient", "from": ["header.x-method"]}))
+    );
+    assert_eq!(
+        first.get::<Vec<String>, _>("request_headers"),
+        ["accept", "x-method", "x-request-id"]
+    );
     assert_eq!(first.get::<Option<i32>, _>("total_ms"), Some(12));
     assert_eq!(first.get::<Option<i32>, _>("jev_ms"), Some(12));
     assert_eq!(
