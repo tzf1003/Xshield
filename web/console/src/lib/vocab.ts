@@ -14,6 +14,7 @@ import type {
   RefusedReason,
   ResponseSkip,
   SuggestionKind,
+  UnknownApiReason,
   UpstreamError,
   ValueKind,
 } from "../api/types.ts";
@@ -274,3 +275,51 @@ export const RANGE_LABEL = {
   "24h": "24 小时",
   "7d": "7 天",
 } as const;
+
+// ------------------------------------------------------------------ interface names and object classes
+// Design 4 and 9 of console-design-objects-routes.md: the request trace, the request detail and the
+// explanation read these words. `{src}` in a reason stands for the source that went wrong.
+
+export const API_LABEL = {
+  /** The short word of the detail's interface line. */
+  api: "接口",
+  name: "接口名",
+  logical: "逻辑路径",
+  unknown: "未知接口",
+  object: "类别",
+  objectMap: "对象表",
+  inferred: "名字推断",
+  mismatch: "类别不同",
+} as const;
+
+/** Where a rule reads a name segment from (`header.X-Service-Id` is a header). */
+export const API_SOURCE_LABEL: Record<"header" | "query" | "body" | "path", string> = {
+  header: "请求头",
+  query: "查询参数",
+  body: "正文字段",
+  path: "URL 路径",
+};
+
+/** Why a name could not be read (types.ts `UnknownApiReason`); `desc` is the hover text. */
+export const UNKNOWN_API_REASON: Record<UnknownApiReason, { text: string; desc: string }> = {
+  missing: { text: "{src} 没有出现", desc: "规则要求的位置里没有接口名" },
+  repeated: {
+    text: "{src} 出现了多次",
+    desc: "同一个位置出现多次时不取，源站可能取前一个，也可能取后一个",
+  },
+  conflict: { text: "{src} 与同组的位置不一致", desc: "源站在几个位置都认的接口名必须相同" },
+  invalid_name: {
+    text: "{src} 的值不合规",
+    desc: "接口名只能用字母、数字、. _ - /，最长 64 个字符",
+  },
+  body_unsupported: {
+    text: "正文结构不支持取 {src}",
+    desc: "路径上遇到数组（例如批量调用）时不取",
+  },
+  body_not_json: { text: "正文不是 JSON，无法取 {src}", desc: "正文必须能解析成 JSON 才能取字段" },
+  body_too_large: { text: "正文超过解析上限，无法取 {src}", desc: "超过解析上限的正文不解析" },
+  route_subpath: {
+    text: "路径在规则之下还有子路径",
+    desc: "规则路径之下的子路径，接口名的位置不确定",
+  },
+};
