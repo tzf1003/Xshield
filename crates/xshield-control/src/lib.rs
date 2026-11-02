@@ -66,6 +66,9 @@ pub struct ControlState {
     pub(crate) admin_password_hash: String,
     pub(crate) session_key: [u8; 32],
     pub(crate) console_origin: Option<String>,
+    /// Whether the console is served over plain HTTP, which changes the
+    /// administrator cookie (see [`auth::session_cookie_name`]).
+    pub(crate) plain_http: bool,
     pub(crate) console: &'static [static_files::ConsoleFile],
     pub(crate) login_limiter: auth::LoginLimiter,
     /// The last pending-suggestion count per site, with the time it was counted.
@@ -74,7 +77,8 @@ pub struct ControlState {
 
 impl ControlState {
     /// Builds control-plane state from a database pool, the operator-configured
-    /// `XSHIELD_ADMIN_PASSWORD_HASH` value, and the optional CORS origin. The
+    /// `XSHIELD_ADMIN_PASSWORD_HASH` value, the optional CORS origin, and whether
+    /// the console is served over plain HTTP (`XSHIELD_CONTROL_PLAIN_HTTP`). The
     /// console served is the one embedded at build time.
     ///
     /// # Errors
@@ -85,11 +89,13 @@ impl ControlState {
         pool: PgPool,
         admin_password_hash: String,
         console_origin: Option<String>,
+        plain_http: bool,
     ) -> Result<Arc<Self>, StartupError> {
         Self::with_console(
             pool,
             admin_password_hash,
             console_origin,
+            plain_http,
             static_files::EMBEDDED_CONSOLE,
         )
     }
@@ -100,6 +106,7 @@ impl ControlState {
         pool: PgPool,
         admin_password_hash: String,
         console_origin: Option<String>,
+        plain_http: bool,
         console: &'static [static_files::ConsoleFile],
     ) -> Result<Arc<Self>, StartupError> {
         if !auth::is_password_hash(&admin_password_hash) {
@@ -112,6 +119,7 @@ impl ControlState {
             admin_password_hash,
             session_key,
             console_origin,
+            plain_http,
             console,
             login_limiter: auth::LoginLimiter::default(),
             suggestion_counts: Mutex::new(BTreeMap::new()),

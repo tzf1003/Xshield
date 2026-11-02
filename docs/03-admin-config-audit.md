@@ -58,6 +58,7 @@ v4 目标状态必需的环境变量只有这些（TLS 多证书、PROXY 协议�
 | `XSHIELD_EDGE_TLS_CERT_PATH` / `XSHIELD_EDGE_TLS_KEY_PATH` | 可选：证书和私钥文件，两者同时设置时所有端口都走 TLS（只有一张证书；多域名证书请用前置负载均衡终结 TLS）。不设置则监听明文 |
 | `XSHIELD_EDGE_SITES_FILE` | 仅开发和测试：站点配置 JSON 数组文件。设置它且不设 `XSHIELD_DATABASE_URL` 时，网关不连数据库，判定日志以 JSON 行写到标准输出 |
 | `XSHIELD_CONTROL_LISTEN` | 控制台监听地址 |
+| `XSHIELD_CONTROL_PLAIN_HTTP` | 可选：控制台只经 `http://` 访问时设为 `true`。管理员 Cookie 改为不带 `__Host-` 前缀、不带 `Secure`，因为浏览器不保存 HTTP 下的 Secure Cookie。只用于网络本身已加密或可信的情况，例如经 Tailscale 访问 `http://主机名:端口`；其余情况保持默认 |
 | `XSHIELD_ADMIN_PASSWORD_HASH` | 管理员口令哈希（新增） |
 | `XSHIELD_CONTEXT_KEY_HEX` | 会话键和已见值哈希用的密钥（新增） |
 | `AI_GATEWAY_API_KEY` | Jev 调用凭证 |

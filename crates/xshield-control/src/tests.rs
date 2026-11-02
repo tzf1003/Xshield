@@ -48,7 +48,8 @@ fn lazy_pool() -> PgPool {
 
 fn state_with_console(console: &'static [ConsoleFile]) -> Arc<ControlState> {
     let hash = hash_password(TEST_PASSWORD).expect("hash_password");
-    ControlState::with_console(lazy_pool(), hash, None, console).expect("valid admin password hash")
+    ControlState::with_console(lazy_pool(), hash, None, false, console)
+        .expect("valid admin password hash")
 }
 
 fn test_state() -> Arc<ControlState> {
@@ -147,6 +148,40 @@ async fn login_sets_a_host_prefixed_session_cookie() {
     assert!(cookie.contains("HttpOnly"));
     assert!(cookie.contains("SameSite=Lax"));
     assert!(cookie.contains("Max-Age=43200"));
+}
+
+#[tokio::test]
+async fn over_plain_http_the_session_cookie_is_unprefixed_and_not_secure() {
+    let hash = hash_password(TEST_PASSWORD).expect("hash_password");
+    let state = ControlState::with_console(lazy_pool(), hash, None, true, TEST_CONSOLE)
+        .expect("valid admin password hash");
+    let app = router(state);
+    let response = send(
+        &app,
+        json_request(
+            "POST",
+            "/api/login",
+            None,
+            &json!({ "password": TEST_PASSWORD }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = header_text(response.headers(), header::SET_COOKIE).unwrap_or_default();
+    assert!(cookie.starts_with("xshield-session="), "{cookie}");
+    assert!(!cookie.contains("Secure"), "{cookie}");
+
+    // A browser sends back only the name=value pair.
+    let pair = cookie.split(';').next().unwrap_or_default();
+    let session = send(&app, get("/api/session", Some(pair))).await;
+    assert_eq!(session.status(), StatusCode::OK);
+    assert_eq!(body_json(session).await["authenticated"], true);
+
+    // The HTTPS cookie name is not accepted over plain HTTP.
+    let token = pair.trim_start_matches("xshield-session=");
+    let host_prefixed = format!("{SESSION_COOKIE}={token}");
+    let refused = send(&app, get("/api/session", Some(&host_prefixed))).await;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -396,7 +431,7 @@ async fn connect_live_state() -> Arc<ControlState> {
         .await
         .expect("connect to XSHIELD_DATABASE_URL");
     let hash = hash_password(TEST_PASSWORD).expect("hash_password");
-    ControlState::new(pool, hash, None).expect("valid admin password hash")
+    ControlState::new(pool, hash, None, false).expect("valid admin password hash")
 }
 
 #[tokio::test]

@@ -9,7 +9,9 @@
 //! required. `XSHIELD_CONTROL_LISTEN` defaults to `127.0.0.1:8081`.
 //! `XSHIELD_CONTROL_CONSOLE_ORIGIN` enables CORS for a console served from
 //! another origin during development. The console itself is embedded in the
-//! binary at build time and needs no setting.
+//! binary at build time and needs no setting. `XSHIELD_CONTROL_PLAIN_HTTP=true`
+//! drops `Secure` from the administrator cookie, for a console reached over
+//! plain `http://` on a network that is already encrypted (docs/03 section 3.3).
 
 use std::{env, error::Error, io::Read as _, net::SocketAddr};
 
@@ -34,10 +36,22 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
     let admin_password_hash = env::var("XSHIELD_ADMIN_PASSWORD_HASH")
         .map_err(|_| "XSHIELD_ADMIN_PASSWORD_HASH is required")?;
     let console_origin = env::var("XSHIELD_CONTROL_CONSOLE_ORIGIN").ok();
+    let plain_http = env::var("XSHIELD_CONTROL_PLAIN_HTTP")
+        .is_ok_and(|value| matches!(value.trim(), "1" | "true"));
+    if plain_http {
+        eprintln!(
+            "xshield-control: XSHIELD_CONTROL_PLAIN_HTTP is set, so the administrator cookie is sent without Secure; serve the console only over an encrypted network"
+        );
+    }
 
     let pool = PgPoolOptions::new().connect(&database_url).await?;
-    let state = ControlState::new(pool.clone(), admin_password_hash, console_origin)
-        .map_err(|error| error.to_string())?;
+    let state = ControlState::new(
+        pool.clone(),
+        admin_password_hash,
+        console_origin,
+        plain_http,
+    )
+    .map_err(|error| error.to_string())?;
 
     tokio::spawn(run_maintenance(pool));
 

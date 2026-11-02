@@ -73,7 +73,7 @@ AGENTS.md 要求新增配置项、表、依赖之前先确认现有机制不够�
 
 - `xshield-control` 在同一端口提供控制台静态文件（构建时嵌入 `web/console/dist`，开发时仍用 Vite 代理），控制台和 API 同源，生产不需要 `XSHIELD_CONTROL_CONSOLE_ORIGIN`（保留给前后端分开托管的情况）。Dockerfile 的 control 镜像增加一个 Node 构建阶段。
 - `xshield-control` 启动时执行 `migrations/`（sqlx `migrate` 特性），网关不执行迁移；表缺失时网关报错退出，交给 Compose 重启。
-- 管理员 Cookie 带 `__Host-` 前缀和 `Secure`，控制台必须经 HTTPS 或 `localhost`（例如 SSH 隧道）访问。
+- 管理员 Cookie 带 `__Host-` 前缀和 `Secure`，控制台必须经 HTTPS 或 `localhost`（例如 SSH 隧道）访问。唯一例外是设置 `XSHIELD_CONTROL_PLAIN_HTTP=true`：Cookie 改为不带前缀、不带 `Secure`，只用于经 tailnet 等已加密网络的纯 HTTP 访问（[03.3](03-admin-config-audit.md#33-部署级环境变量)）。
 
 ## 7.3 请求标识与追溯链路
 
