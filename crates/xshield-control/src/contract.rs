@@ -11,6 +11,7 @@ use crate::auth::SessionStateBody;
 use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
 use crate::requests::{CountsBody, RequestRow};
 use crate::sessions::{SessionDetailBody, SessionsBody};
+use crate::sites::{SiteDetailBody, SitesBody, VersionsBody};
 use crate::stats::{SummaryBody, TimeseriesBody};
 use crate::status::StatusBody;
 use crate::system::SystemBody;
@@ -28,6 +29,10 @@ const STATUS_DOWN: &str = include_str!("../../../web/console/tests/fixtures/stat
 const SYSTEM: &str = include_str!("../../../web/console/tests/fixtures/system.json");
 const SESSION: &str = include_str!("../../../web/console/tests/fixtures/session.json");
 const SESSIONS: &str = include_str!("../../../web/console/tests/fixtures/sessions.json");
+const SITES: &str = include_str!("../../../web/console/tests/fixtures/sites.json");
+const SITE_JUICE: &str = include_str!("../../../web/console/tests/fixtures/site-juice.json");
+const SITE_EMR: &str = include_str!("../../../web/console/tests/fixtures/site-emr.json");
+const VERSIONS_EMR: &str = include_str!("../../../web/console/tests/fixtures/versions-emr.json");
 const SESSION_TIMELINE: &str =
     include_str!("../../../web/console/tests/fixtures/session-timeline.json");
 const DETAILS: [&str; 3] = [
@@ -239,6 +244,22 @@ fn session_round_trips_through_the_session_state_type() {
     let mut signed_out = fixture(SESSION);
     signed_out["authenticated"] = json!(false);
     assert_round_trips::<SessionStateBody>(&signed_out, exactly);
+}
+
+#[test]
+fn sites_round_trip_through_the_sites_type() {
+    assert_round_trips::<SitesBody>(&fixture(SITES), exactly);
+}
+
+#[test]
+fn site_details_round_trip_through_the_detail_type() {
+    assert_round_trips::<SiteDetailBody>(&fixture(SITE_JUICE), exactly);
+    assert_round_trips::<SiteDetailBody>(&fixture(SITE_EMR), exactly);
+}
+
+#[test]
+fn versions_round_trip_through_the_versions_type() {
+    assert_round_trips::<VersionsBody>(&fixture(VERSIONS_EMR), exactly);
 }
 
 #[test]

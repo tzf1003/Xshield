@@ -17,9 +17,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::PgPool;
-use xshield_core::context::SiteSpec;
+use xshield_core::context::{Mode, SiteSpec};
 use xshield_postgres::{
     decision_stats,
     edge_status_store::{self, EdgeStatus},
@@ -31,7 +32,7 @@ use xshield_postgres::{
 
 use crate::{
     ControlState,
-    error::{ApiError, ApiResult},
+    error::{ApiError, ApiResult, ValidationBody},
     params::{DAY_MILLIS, Params, json_body, now_millis},
 };
 
@@ -41,6 +42,133 @@ const RESERVED_SITE_NAMES: &[&str] = &["validate"];
 const DEFAULT_VERSION_PAGE: i64 = 50;
 /// The largest history page.
 const MAX_VERSION_PAGE: i64 = 200;
+/// Versions read per page while looking for the start of an observing run.
+const OBSERVING_PAGE: i64 = 200;
+
+/// `GET /api/sites` (docs/07 section 7.9.2): every site, with what each gateway
+/// loaded for it and the requests it saw in the last 24 hours.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SitesBody {
+    pub sites: Vec<SiteSummaryBody>,
+}
+
+/// A site's summary (`SiteSummary` in the console contract): identity, version,
+/// rollout across the gateways and the figures of the last 24 hours.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SiteSummaryBody {
+    pub name: String,
+    pub hosts: Vec<String>,
+    pub origin: String,
+    pub mode: Mode,
+    pub version: i64,
+    pub updated_at: String,
+    /// When the site started observing: the first version of its current run of
+    /// observe-mode versions. `None` in enforce mode.
+    pub observing_since_millis: Option<i64>,
+    /// The lowest version the online gateways loaded; `None` when none has loaded it.
+    pub loaded_version: Option<i64>,
+    /// Every gateway seen in the last 24 hours, with what it loaded.
+    pub edges: Vec<EdgeLoadBody>,
+    /// How far the online gateways have loaded `version` (section 7.9.13).
+    pub rollout: RolloutBody,
+    pub requests_24h: i64,
+    pub blocked_24h: i64,
+    pub would_block_24h: i64,
+    pub jev_calls_24h: i64,
+    pub unjudged_24h: i64,
+    pub jev_timeouts_24h: i64,
+    pub call_limits_24h: i64,
+    pub suggestions: i64,
+}
+
+/// What one gateway has loaded for a site.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EdgeLoadBody {
+    pub edge: String,
+    /// The version the instance has loaded; `None` while it has none.
+    pub version: Option<i64>,
+    /// The error code when the instance rejected the site.
+    pub error: Option<String>,
+    /// When the instance loaded the version. The heartbeat does not carry it yet, so
+    /// this is `None` until a gateway reports it.
+    pub loaded_at_millis: Option<i64>,
+}
+
+/// The rollout of a site's current version across the gateways (section 7.9.13).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RolloutBody {
+    pub version: i64,
+    pub edges_online: i64,
+    pub edges_loaded: i64,
+    pub edges: Vec<RolloutEdgeBody>,
+}
+
+/// One gateway's place in a rollout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RolloutEdgeBody {
+    pub edge: String,
+    pub online: bool,
+    pub loaded_version: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// `GET /api/sites/{name}` and the write endpoints' answer: the summary, the
+/// configuration and the creation time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SiteDetailBody {
+    #[serde(flatten)]
+    pub summary: SiteSummaryBody,
+    pub spec: SiteSpec,
+    pub created_at: String,
+}
+
+/// `DELETE /api/sites/{name}`: the version the deletion recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedBody {
+    pub deleted: bool,
+    pub version: i64,
+}
+
+/// `GET /api/sites/{name}/versions`: one page of the history, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VersionsBody {
+    pub versions: Vec<HistoryRowBody>,
+    /// The `before` of the next page; `None` on the last page.
+    pub next_before: Option<i64>,
+}
+
+/// A history row: a version, what it recorded, and the changes from the version
+/// before it. `GET /api/sites/{name}/versions/{version}` answers with one row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryRowBody {
+    pub version: i64,
+    pub change: String,
+    pub rollback_of: Option<i64>,
+    pub note: Option<String>,
+    pub changed_at: String,
+    /// The whole configuration of the version; `None` for a deletion.
+    pub spec: Option<SiteSpec>,
+    /// What changed from the version before this one.
+    pub summary: Vec<DiffBody>,
+}
+
+/// One change between two configurations, as the history shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DiffBody {
+    /// A list of strings: what was added to it and what was removed from it.
+    Items {
+        field: String,
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
+    /// Any other value: what it was and what it became.
+    Scalar {
+        field: String,
+        from: Value,
+        to: Value,
+    },
+}
 
 fn site_not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "SITE_NOT_FOUND")
@@ -54,100 +182,106 @@ fn time_text(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-/// The rollout of a site's current version across the gateways (section 7.9.13):
-/// every instance seen in the last 24 hours, with the version it loaded and the
-/// error that kept it from loading. `edges_loaded` counts the online instances
-/// that loaded the current version.
-fn rollout_json(name: &str, version: i64, edges: &[EdgeStatus], now: DateTime<Utc>) -> Value {
+/// The version a gateway reports it loaded for a site.
+#[must_use]
+fn loaded_version_of(edge: &EdgeStatus, name: &str) -> Option<i64> {
+    edge.sites
+        .get(name)
+        .and_then(|entry| entry.get("version"))
+        .and_then(Value::as_i64)
+}
+
+/// The error a gateway reports for a site it refused.
+#[must_use]
+fn error_of(edge: &EdgeStatus, name: &str) -> Option<String> {
+    edge.sites
+        .get(name)
+        .and_then(|entry| entry.get("error"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// The rollout of a site's current version across the gateways (section 7.9.13): every
+/// instance seen in the last 24 hours, with the version it loaded and the error that
+/// kept it from loading. `edges_loaded` counts the online instances that loaded the
+/// current version.
+#[must_use]
+fn rollout_of(name: &str, version: i64, edges: &[EdgeStatus], now: DateTime<Utc>) -> RolloutBody {
     let mut edges_online = 0_i64;
     let mut edges_loaded = 0_i64;
-    let rows: Vec<Value> = edges
+    let rows = edges
         .iter()
         .map(|edge| {
             let online = edge.is_online(now);
-            let entry = edge.sites.get(name);
-            let loaded_version = entry
-                .and_then(|entry| entry.get("version"))
-                .and_then(Value::as_i64);
-            let error = entry
-                .and_then(|entry| entry.get("error"))
-                .filter(|error| !error.is_null())
-                .cloned()
-                .unwrap_or(Value::Null);
+            let loaded_version = loaded_version_of(edge, name);
             if online {
                 edges_online += 1;
                 if loaded_version == Some(version) {
                     edges_loaded += 1;
                 }
             }
-            json!({
-                "edge": edge.edge,
-                "online": online,
-                "loaded_version": loaded_version,
-                "error": error,
-            })
+            RolloutEdgeBody {
+                edge: edge.edge.clone(),
+                online,
+                loaded_version,
+                error: error_of(edge, name),
+            }
         })
         .collect();
-    json!({
-        "version": version,
-        "edges_online": edges_online,
-        "edges_loaded": edges_loaded,
-        "edges": rows,
-    })
+    RolloutBody {
+        version,
+        edges_online,
+        edges_loaded,
+        edges: rows,
+    }
 }
 
-/// The console's summary of a site (`SiteSummary` in the console contract): identity,
-/// version, rollout across the gateways and the figures of the last 24 hours.
+/// The console's summary of a site: identity, version, when it started observing,
+/// what the gateways loaded, and the figures of the last 24 hours.
+#[must_use]
 fn site_summary(
     record: &SiteRecord,
     edges: &[EdgeStatus],
     counts: Option<&decision_stats::SiteCounts>,
     suggestions: i64,
+    observing_since_millis: Option<i64>,
     now: DateTime<Utc>,
-) -> Value {
-    json!({
-        "name": record.spec.name(),
-        "hosts": record.spec.hosts(),
-        "origin": record.spec.origin(),
-        "mode": serde_json::to_value(record.spec.mode()).unwrap_or(Value::Null),
-        "version": record.version,
-        "updated_at": time_text(record.updated_at),
-        "rollout": rollout_json(record.spec.name(), record.version, edges, now),
-        "requests_24h": counts.map_or(0, |count| count.requests),
-        "blocked_24h": counts.map_or(0, |count| count.blocked),
-        "would_block_24h": counts.map_or(0, |count| count.would_block),
-        "jev_calls_24h": counts.map_or(0, |count| count.jev_calls),
-        "unjudged_24h": counts.map_or(0, |count| count.unjudged),
-        "jev_timeouts_24h": counts.map_or(0, |count| count.jev_timeouts),
-        "call_limits_24h": counts.map_or(0, |count| count.call_limits),
-        "suggestions": suggestions,
-    })
-}
-
-/// A site's detail: its summary plus the configuration and the creation time.
-fn site_detail(
-    record: &SiteRecord,
-    edges: &[EdgeStatus],
-    counts: Option<&decision_stats::SiteCounts>,
-    suggestions: i64,
-    now: DateTime<Utc>,
-) -> Value {
-    let mut value = site_summary(record, edges, counts, suggestions, now);
-    if let Value::Object(map) = &mut value {
-        map.insert(
-            "spec".to_owned(),
-            serde_json::to_value(&record.spec).unwrap_or(Value::Null),
-        );
-        map.insert("created_at".to_owned(), json!(time_text(record.created_at)));
+) -> SiteSummaryBody {
+    let name = record.spec.name();
+    SiteSummaryBody {
+        name: name.to_owned(),
+        hosts: record.spec.hosts().to_vec(),
+        origin: record.spec.origin().to_owned(),
+        mode: record.spec.mode(),
+        version: record.version,
+        updated_at: time_text(record.updated_at),
+        observing_since_millis,
+        loaded_version: edges
+            .iter()
+            .filter(|edge| edge.is_online(now))
+            .filter_map(|edge| loaded_version_of(edge, name))
+            .min(),
+        edges: edges
+            .iter()
+            .map(|edge| EdgeLoadBody {
+                edge: edge.edge.clone(),
+                version: loaded_version_of(edge, name),
+                error: error_of(edge, name),
+                loaded_at_millis: None,
+            })
+            .collect(),
+        rollout: rollout_of(name, record.version, edges, now),
+        requests_24h: counts.map_or(0, |count| count.requests),
+        blocked_24h: counts.map_or(0, |count| count.blocked),
+        would_block_24h: counts.map_or(0, |count| count.would_block),
+        jev_calls_24h: counts.map_or(0, |count| count.jev_calls),
+        unjudged_24h: counts.map_or(0, |count| count.unjudged),
+        jev_timeouts_24h: counts.map_or(0, |count| count.jev_timeouts),
+        call_limits_24h: counts.map_or(0, |count| count.call_limits),
+        suggestions,
     }
-    value
 }
 
-/// The detail of a site as the console reads it, with the live rollout and the
-/// last 24 hours' figures.
-///
-/// # Errors
-/// `INTERNAL` when the database cannot be read.
 /// How long a site's pending-suggestion count is reused. The analysis reads up to
 /// 20 000 Jev states, so the site list must not run it again on every load.
 const SUGGESTION_CACHE_MILLIS: i64 = 60_000;
@@ -173,12 +307,52 @@ async fn pending_suggestions_of(state: &ControlState, site: &str, now: i64) -> A
     Ok(count)
 }
 
-async fn detail_view(state: &ControlState, record: &SiteRecord) -> ApiResult<Value> {
+/// When a site started observing: the first version of its current run of observe-mode
+/// versions, read from the history newest first. `None` in enforce mode. A version in
+/// enforce mode, or a deletion, ends the run.
+///
+/// # Errors
+/// `INTERNAL` when the database cannot be read.
+async fn observing_since(pool: &PgPool, record: &SiteRecord) -> ApiResult<Option<i64>> {
+    if record.spec.mode() != Mode::Observe {
+        return Ok(None);
+    }
+    let mut since = None;
+    let mut before = None;
+    loop {
+        let page =
+            site_spec_store::history(pool, record.spec.name(), before, OBSERVING_PAGE).await?;
+        for entry in &page {
+            if entry.spec.as_ref().map(SiteSpec::mode) != Some(Mode::Observe) {
+                return Ok(since);
+            }
+            since = Some(entry.changed_at.timestamp_millis());
+        }
+        match page.last() {
+            Some(oldest) if i64::try_from(page.len()).unwrap_or(i64::MAX) == OBSERVING_PAGE => {
+                before = Some(oldest.version);
+            }
+            _ => return Ok(since),
+        }
+    }
+}
+
+/// The detail of a site as the console reads it, with the live rollout and the last 24
+/// hours' figures.
+///
+/// # Errors
+/// `INTERNAL` when the database cannot be read.
+async fn detail_view(state: &ControlState, record: &SiteRecord) -> ApiResult<SiteDetailBody> {
     let edges = edge_status_store::list(&state.pool).await?;
     let counts = decision_stats::site_counts(&state.pool, now_millis() - DAY_MILLIS).await?;
     let found = counts.iter().find(|count| count.site == record.spec.name());
     let suggestions = pending_suggestions_of(state, record.spec.name(), now_millis()).await?;
-    Ok(site_detail(record, &edges, found, suggestions, Utc::now()))
+    let observing = observing_since(&state.pool, record).await?;
+    Ok(SiteDetailBody {
+        summary: site_summary(record, &edges, found, suggestions, observing, Utc::now()),
+        spec: record.spec.clone(),
+        created_at: time_text(record.created_at),
+    })
 }
 
 /// The `spec` member of a write body, validated the way the gateway validates it.
@@ -236,7 +410,7 @@ async fn check_hosts_free(pool: &PgPool, spec: &SiteSpec) -> ApiResult<()> {
 ///
 /// # Errors
 /// `INTERNAL` when the database cannot be read.
-pub async fn list(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Value>> {
+pub async fn list(State(state): State<Arc<ControlState>>) -> ApiResult<Json<SitesBody>> {
     let records = site_spec_store::list(&state.pool).await?;
     let edges = edge_status_store::list(&state.pool).await?;
     let counts = decision_stats::site_counts(&state.pool, now_millis() - DAY_MILLIS).await?;
@@ -245,9 +419,17 @@ pub async fn list(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Valu
     for record in &records {
         let found = counts.iter().find(|count| count.site == record.spec.name());
         let suggestions = pending_suggestions_of(&state, record.spec.name(), now_millis()).await?;
-        sites.push(site_summary(record, &edges, found, suggestions, now));
+        let observing = observing_since(&state.pool, record).await?;
+        sites.push(site_summary(
+            record,
+            &edges,
+            found,
+            suggestions,
+            observing,
+            now,
+        ));
     }
-    Ok(Json(json!({ "sites": sites })))
+    Ok(Json(SitesBody { sites }))
 }
 
 /// `POST /api/sites`: creates a site from `{"spec": {...}, "note": "..."}`.
@@ -259,7 +441,7 @@ pub async fn create(
     State(state): State<Arc<ControlState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> ApiResult<(StatusCode, Json<Value>)> {
+) -> ApiResult<(StatusCode, Json<SiteDetailBody>)> {
     let body: Value = json_body(&headers, &body)?;
     let spec = spec_from_body(&body)?;
     let note = note_from(&body)?;
@@ -278,7 +460,7 @@ pub async fn create(
 pub async fn get(
     State(state): State<Arc<ControlState>>,
     Path(name): Path<String>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SiteDetailBody>> {
     let record = site_spec_store::get(&state.pool, &name)
         .await?
         .ok_or_else(site_not_found)?;
@@ -297,7 +479,7 @@ pub async fn update(
     Path(name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SiteDetailBody>> {
     let body: Value = json_body(&headers, &body)?;
     let spec = spec_from_body(&body)?;
     if spec.name() != name {
@@ -323,14 +505,15 @@ pub async fn delete(
     Path(name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<DeletedBody>> {
     let body: Value = json_body(&headers, &body)?;
     let expected = expected_version(&body)?;
     let note = note_from(&body)?;
     match site_spec_store::delete(&state.pool, &name, expected, note.as_deref()).await? {
-        DeleteOutcome::Deleted { version } => {
-            Ok(Json(json!({ "deleted": true, "version": version })))
-        }
+        DeleteOutcome::Deleted { version } => Ok(Json(DeletedBody {
+            deleted: true,
+            version,
+        })),
         DeleteOutcome::NotFound => Err(site_not_found()),
         DeleteOutcome::VersionConflict { current } => Err(version_conflict(current)),
     }
@@ -346,35 +529,36 @@ pub async fn validate(
     State(state): State<Arc<ControlState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<ValidationBody>> {
     let body: Value = json_body(&headers, &body)?;
     let outcome = match spec_from_body(&body) {
         Ok(spec) => check_hosts_free(&state.pool, &spec).await,
         Err(error) => Err(error),
     };
     match outcome {
-        Ok(()) => Ok(Json(json!({ "valid": true }))),
+        Ok(()) => Ok(Json(ValidationBody::accepted())),
         Err(error) if error.status() == StatusCode::INTERNAL_SERVER_ERROR => Err(error),
         Err(error) => Ok(Json(error.validation_report())),
     }
 }
 
-/// A history row: its version, what changed, when, and the summary of the
-/// change from the version before it.
-fn history_json(entry: &HistoryEntry, summary: &[Value]) -> Value {
-    json!({
-        "version": entry.version,
-        "change": entry.change.as_str(),
-        "rollback_of": entry.rollback_of,
-        "note": entry.note,
-        "changed_at": time_text(entry.changed_at),
-        "spec": entry.spec.as_ref().and_then(|spec| serde_json::to_value(spec).ok()),
-        "summary": summary,
-    })
+/// A history row: its version, what changed, when, and the summary of the change from
+/// the version before it.
+#[must_use]
+fn history_row(entry: &HistoryEntry, summary: Vec<DiffBody>) -> HistoryRowBody {
+    HistoryRowBody {
+        version: entry.version,
+        change: entry.change.as_str().to_owned(),
+        rollback_of: entry.rollback_of,
+        note: entry.note.clone(),
+        changed_at: time_text(entry.changed_at),
+        spec: entry.spec.clone(),
+        summary,
+    }
 }
 
-/// `GET /api/sites/{name}/versions?before=&limit=`: the history, newest first,
-/// each row with its change summary.
+/// `GET /api/sites/{name}/versions?before=&limit=`: the history, newest first, each row
+/// with its change summary.
 ///
 /// # Errors
 /// `SITE_NOT_FOUND` when the site does not exist, `INVALID_FILTER` for a bad
@@ -383,7 +567,7 @@ pub async fn versions(
     State(state): State<Arc<ControlState>>,
     Path(name): Path<String>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<VersionsBody>> {
     let params = Params::from(query);
     let limit = params.limit(DEFAULT_VERSION_PAGE, MAX_VERSION_PAGE)?;
     let before = params.int("before")?;
@@ -394,35 +578,36 @@ pub async fn versions(
     }
     let page = usize::try_from(limit).unwrap_or(usize::MAX);
     let shown = fetched.len().min(page);
-    let rows: Vec<Value> = (0..shown)
+    let rows: Vec<HistoryRowBody> = (0..shown)
         .filter_map(|index| {
             let entry = fetched.get(index)?;
             let older = fetched
                 .get(index + 1)
                 .and_then(|previous| previous.spec.as_ref());
             let summary = diff_specs(older, entry.spec.as_ref());
-            Some(history_json(entry, &summary))
+            Some(history_row(entry, summary))
         })
         .collect();
     let next_before = if fetched.len() > page {
-        rows.last().and_then(|row| row.get("version")).cloned()
+        rows.last().map(|row| row.version)
     } else {
         None
     };
-    Ok(Json(
-        json!({ "versions": rows, "next_before": next_before }),
-    ))
+    Ok(Json(VersionsBody {
+        versions: rows,
+        next_before,
+    }))
 }
 
-/// `GET /api/sites/{name}/versions/{version}`: one version in full, with its
-/// summary and its configuration.
+/// `GET /api/sites/{name}/versions/{version}`: one version in full, with its summary and
+/// its configuration.
 ///
 /// # Errors
 /// `VERSION_NOT_FOUND` when the site has no such version.
 pub async fn version(
     State(state): State<Arc<ControlState>>,
     Path((name, version)): Path<(String, i64)>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<HistoryRowBody>> {
     let entry = site_spec_store::version(&state.pool, &name, version)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "VERSION_NOT_FOUND"))?;
@@ -436,11 +621,7 @@ pub async fn version(
         previous.as_ref().and_then(|entry| entry.spec.as_ref()),
         entry.spec.as_ref(),
     );
-    let mut value = history_json(&entry, &summary);
-    if let Value::Object(map) = &mut value {
-        map.insert("spec".to_owned(), json!(entry.spec));
-    }
-    Ok(Json(value))
+    Ok(Json(history_row(&entry, summary)))
 }
 
 /// `POST /api/sites/{name}/rollback`: makes a new version with the text of
@@ -454,7 +635,7 @@ pub async fn rollback(
     Path(name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<SiteDetailBody>> {
     let body: Value = json_body(&headers, &body)?;
     let to_version = body
         .get("to_version")
@@ -479,12 +660,12 @@ pub async fn rollback(
     }
 }
 
-/// The changes between two configurations, as the history shows them. Scalars
-/// give `from` and `to`; string lists give what was `added` and `removed`;
-/// objects such as `advanced` are compared field by field. Nothing is listed
-/// when either side is absent, as for a creation or a deletion.
+/// The changes between two configurations, as the history shows them. Scalars give
+/// `from` and `to`; string lists give what was `added` and `removed`; objects such as
+/// `advanced` are compared field by field. Nothing is listed when either side is
+/// absent, as for a creation or a deletion.
 #[must_use]
-pub fn diff_specs(before: Option<&SiteSpec>, after: Option<&SiteSpec>) -> Vec<Value> {
+pub fn diff_specs(before: Option<&SiteSpec>, after: Option<&SiteSpec>) -> Vec<DiffBody> {
     let (Some(before), Some(after)) = (before, after) else {
         return Vec::new();
     };
@@ -495,7 +676,7 @@ pub fn diff_specs(before: Option<&SiteSpec>, after: Option<&SiteSpec>) -> Vec<Va
     changes
 }
 
-fn diff_values(prefix: &str, before: &Value, after: &Value, out: &mut Vec<Value>) {
+fn diff_values(prefix: &str, before: &Value, after: &Value, out: &mut Vec<DiffBody>) {
     match (before, after) {
         (Value::Object(old), Value::Object(new)) => {
             let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
@@ -529,10 +710,18 @@ fn diff_values(prefix: &str, before: &Value, after: &Value, out: &mut Vec<Value>
                 .filter(|item| !new.contains(item))
                 .map(item_text)
                 .collect();
-            out.push(json!({ "field": prefix, "added": added, "removed": removed }));
+            out.push(DiffBody::Items {
+                field: prefix.to_owned(),
+                added,
+                removed,
+            });
         }
         _ if before != after => {
-            out.push(json!({ "field": prefix, "from": before, "to": after }));
+            out.push(DiffBody::Scalar {
+                field: prefix.to_owned(),
+                from: before.clone(),
+                to: after.clone(),
+            });
         }
         _ => {}
     }
@@ -555,6 +744,8 @@ fn item_text(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn spec(json_text: &str) -> SiteSpec {
@@ -582,7 +773,11 @@ mod tests {
         let changes = diff_specs(Some(&spec(BASE)), Some(&spec(&after)));
         assert_eq!(
             changes,
-            vec![json!({"field": "entries", "added": ["/share/*"], "removed": []})]
+            vec![DiffBody::Items {
+                field: "entries".to_owned(),
+                added: vec!["/share/*".to_owned()],
+                removed: Vec::new(),
+            }]
         );
     }
 
@@ -592,7 +787,11 @@ mod tests {
         let changes = diff_specs(Some(&spec(BASE)), Some(&spec(&after)));
         assert_eq!(
             changes,
-            vec![json!({"field": "mode", "from": "observe", "to": "enforce"})]
+            vec![DiffBody::Scalar {
+                field: "mode".to_owned(),
+                from: json!("observe"),
+                to: json!("enforce"),
+            }]
         );
     }
 
@@ -605,7 +804,11 @@ mod tests {
         let changes = diff_specs(Some(&spec(BASE)), Some(&spec(&after)));
         assert_eq!(
             changes,
-            vec![json!({"field": "advanced.jev_timeout_ms", "from": null, "to": 1500})]
+            vec![DiffBody::Scalar {
+                field: "advanced.jev_timeout_ms".to_owned(),
+                from: Value::Null,
+                to: json!(1500),
+            }]
         );
     }
 
@@ -614,8 +817,8 @@ mod tests {
         let body = json!({"spec": serde_json::from_str::<Value>(&BASE.replace("juice", "validate")).expect("json")});
         let error = spec_from_body(&body).expect_err("reserved");
         assert_eq!(
-            error.validation_report()["error"],
-            "SITE_CONFIG_NAME_INVALID"
+            error.validation_report().error.as_deref(),
+            Some("SITE_CONFIG_NAME_INVALID")
         );
     }
 

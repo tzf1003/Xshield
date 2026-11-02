@@ -81,8 +81,7 @@
       "/favicon.ico"
     ],
     "mode": "observe",
-    "on_jev_unavailable": "deny",
-    "advanced": {}
+    "on_jev_unavailable": "deny"
   },
   "created_at": "2026-10-26T09:20:00Z"
 }

@@ -8,7 +8,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use xshield_core::context::ConfigError;
 use xshield_postgres::{
     decision_log_store::DecisionLogStoreError, partitions::PartitionError,
@@ -74,8 +75,12 @@ impl ApiError {
     /// The body a configuration check reports for this error: `valid: false`
     /// with the code and the field, rather than an HTTP error.
     #[must_use]
-    pub fn validation_report(&self) -> Value {
-        json!({ "valid": false, "error": self.code, "field": self.field })
+    pub fn validation_report(&self) -> ValidationBody {
+        ValidationBody {
+            valid: false,
+            error: Some(self.code.to_owned()),
+            field: self.field.clone(),
+        }
     }
 
     /// A 500 that names no cause to the client. The cause goes to the log.
@@ -83,6 +88,30 @@ impl ApiError {
     pub fn internal(context: &str, cause: impl std::fmt::Display) -> Self {
         eprintln!("xshield-control: {context} failed: {cause}");
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL")
+    }
+}
+
+/// The verdict of `POST /api/sites/validate` (docs/07 section 7.9.2): `valid` alone
+/// for a configuration the gateway would accept, or the error code and the field of
+/// one it would refuse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidationBody {
+    pub valid: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+impl ValidationBody {
+    /// The verdict for a configuration the gateway would accept.
+    #[must_use]
+    pub fn accepted() -> Self {
+        Self {
+            valid: true,
+            error: None,
+            field: None,
+        }
     }
 }
 
