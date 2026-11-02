@@ -1,8 +1,9 @@
 // The tuning suggestions of a site (docs/06 6.4.9, docs/07 7.9.11): each one says what the change is and why. A
 // change can be added to the draft, or applied at once through the save dialog. Ignoring a suggestion is kept
-// in this browser only. While the site observes, the readiness checklist sits above the list.
+// in this browser only. While the site observes, the readiness checklist sits above the list. Two kinds point to
+// other pages instead: the proposals of the object table (design 5) and a gateway route that needs a rule.
 
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { useInsights } from "../../api/queries.ts";
 import type {
@@ -12,7 +13,8 @@ import type {
   SuggestionAction,
   SuggestionKind,
 } from "../../api/types.ts";
-import { fmtInt } from "../../lib/format.ts";
+import { hrefFor } from "../../app/href.ts";
+import { fmtInt, pct } from "../../lib/format.ts";
 import { PARAM_INFO, SUGGESTION_INFO } from "../../lib/vocab.ts";
 import { Card, Empty, ErrorBar, Loading } from "../../ui/Page.tsx";
 import { RequestLink } from "../../ui/RequestRef.tsx";
@@ -37,6 +39,8 @@ const KIND_ORDER: SuggestionKind[] = [
   "raise_call_limit",
   "secret_field_candidate",
   "hot_would_block",
+  "object_proposals",
+  "route_rule_candidate",
 ];
 
 const UPLOAD_NOTE = "绕过后该接口不做越权判定，只在确实需要上传大文件时使用。";
@@ -57,6 +61,46 @@ function costNote(suggestion: Suggestion, option: SuggestionAction | undefined):
     default:
       return null;
   }
+}
+
+/** The address of a site page tab, built from data: the console opens it without a page load (app/href.ts). */
+function siteHref(name: string, search: Record<string, string>): string {
+  return hrefFor(`/sites/${encodeURIComponent(name)}`, search);
+}
+
+function numberOf(detail: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = detail?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function textOf(detail: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = detail?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function linesOf(detail: Record<string, unknown> | undefined, key: string): string[] {
+  const value = detail?.[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+}
+
+/** A link to another page of the console, opened in place (the same address as the page links of app/href.ts). */
+function InsightLink({ href, children }: { href: string; children: string }) {
+  const navigate = useNavigate();
+  return (
+    <a
+      href={href}
+      className="btn"
+      onClick={(event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+        event.preventDefault();
+        void navigate({ href });
+      }}
+    >
+      {children}
+    </a>
+  );
 }
 
 type CardProps = {
@@ -160,6 +204,93 @@ function SuggestionCard({
   );
 }
 
+type PageCardProps = {
+  siteName: string;
+  suggestion: Suggestion;
+  onIgnore: (id: string) => void;
+};
+
+/** 对象表待确认: how many proposals wait, what confirming them saves, and the three that weigh most. */
+function ObjectProposalsCard({ siteName, suggestion, onIgnore }: PageCardProps) {
+  const saving = numberOf(suggestion.detail, "jev_calls_saved_per_day");
+  const top = linesOf(suggestion.detail, "top").slice(0, 3);
+  const summary =
+    saving === undefined
+      ? `对象表有 ${fmtInt(suggestion.count)} 条待确认`
+      : `对象表有 ${fmtInt(suggestion.count)} 条待确认，确认后预计每天少调用 Jev ${fmtInt(saving)} 次`;
+
+  return (
+    <article className="sugg">
+      <div className="sugg-h">
+        <span>{SUGGESTION_INFO.object_proposals}</span>
+        <span className="sugg-meta">{fmtInt(suggestion.count)} 条</span>
+      </div>
+      <div className="sugg-body">{summary}</div>
+      {top.length > 0 ? (
+        <ul className="changes" aria-label="待确认的前 3 条">
+          {top.map((line) => (
+            <li key={line}>· {line}</li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="small muted">{suggestion.reason}</div>
+      <div className="sugg-actions">
+        <button type="button" className="linkbtn" onClick={() => onIgnore(suggestion.id)}>
+          忽略
+        </button>
+        <InsightLink href={siteHref(siteName, { tab: "objects", state: "proposed" })}>
+          前往对象表
+        </InsightLink>
+      </div>
+    </article>
+  );
+}
+
+/** 可能是统一网关: the path's share of the site's requests, and the body field that names the interface. */
+function RouteRuleCard({ siteName, suggestion, onIgnore }: PageCardProps) {
+  const path = suggestion.path ?? "";
+  const share = numberOf(suggestion.detail, "share");
+  const field = textOf(suggestion.detail, "field");
+  const values = numberOf(suggestion.detail, "values");
+  const reach =
+    share === undefined
+      ? `${path} 有 ${fmtInt(suggestion.count)} 次请求`
+      : `${path} 占本站点 ${pct(share)} 的请求`;
+
+  return (
+    <article className="sugg">
+      <div className="sugg-h">
+        <span>{SUGGESTION_INFO.route_rule_candidate}</span>
+        <span className="sugg-meta">{fmtInt(suggestion.count)} 次</span>
+      </div>
+      <div className="sugg-body">
+        {reach}
+        {field !== undefined && values !== undefined ? (
+          <>
+            ，正文字段 <span className="mono">{field}</span> 有 {fmtInt(values)} 种取值
+          </>
+        ) : null}
+      </div>
+      <div className="small muted">{suggestion.reason}</div>
+      {suggestion.sample ? (
+        <div className="small muted">
+          示例请求 <RequestLink id={suggestion.sample} />
+        </div>
+      ) : null}
+      <div className="sugg-actions">
+        <button type="button" className="linkbtn" onClick={() => onIgnore(suggestion.id)}>
+          忽略
+        </button>
+        {path !== "" ? (
+          <InsightLink href={siteHref(siteName, { tab: "config", route: path })}>
+            写接口名规则…
+          </InsightLink>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
 export function InsightsTab({ site, working, now, onAdd, onApply }: Props) {
   const insights = useInsights(site.name);
   const [ignored, setIgnored] = useState<string[]>(() => readIgnored(site.name));
@@ -210,21 +341,43 @@ export function InsightsTab({ site, working, now, onAdd, onApply }: Props) {
           <div className="field-label">
             {SUGGESTION_INFO[group.kind]}（{fmtInt(group.items.length)}）
           </div>
-          {group.items.map((suggestion) => (
-            <SuggestionCard
-              key={suggestion.id}
-              siteName={site.name}
-              suggestion={suggestion}
-              working={working}
-              choice={picked[suggestion.id] ?? 0}
-              onChoice={(index) =>
-                setPicked((previous) => ({ ...previous, [suggestion.id]: index }))
-              }
-              onAdd={onAdd}
-              onApply={onApply}
-              onIgnore={ignore}
-            />
-          ))}
+          {group.items.map((suggestion) => {
+            if (suggestion.kind === "object_proposals") {
+              return (
+                <ObjectProposalsCard
+                  key={suggestion.id}
+                  siteName={site.name}
+                  suggestion={suggestion}
+                  onIgnore={ignore}
+                />
+              );
+            }
+            if (suggestion.kind === "route_rule_candidate") {
+              return (
+                <RouteRuleCard
+                  key={suggestion.id}
+                  siteName={site.name}
+                  suggestion={suggestion}
+                  onIgnore={ignore}
+                />
+              );
+            }
+            return (
+              <SuggestionCard
+                key={suggestion.id}
+                siteName={site.name}
+                suggestion={suggestion}
+                working={working}
+                choice={picked[suggestion.id] ?? 0}
+                onChoice={(index) =>
+                  setPicked((previous) => ({ ...previous, [suggestion.id]: index }))
+                }
+                onAdd={onAdd}
+                onApply={onApply}
+                onIgnore={ignore}
+              />
+            );
+          })}
         </section>
       ))}
 

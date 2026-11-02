@@ -9,7 +9,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { api } from "./client.ts";
-import type { SiteSpec, SiteWriteBody } from "./types.ts";
+import type { ObjectsFilter, SiteSpec, SiteWriteBody } from "./types.ts";
 
 export const keys = {
   session: ["session"] as const,
@@ -295,5 +295,56 @@ export function useImport() {
   return useMutation({
     mutationFn: (text: string) => api.importLog(text),
     onSuccess: () => client.invalidateQueries({ queryKey: ["requests"] }),
+  });
+}
+
+// ------------------------------------------------------------------ the object map (console design 7)
+
+/** The map of a site, filtered by state and search text. Counts and classes are always the whole map. */
+export function useSiteObjects(
+  name: string | null,
+  filter: ObjectsFilter = {},
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: ["objects", name ?? "", filter] as const,
+    queryFn: () => api.objects(name ?? "", filter),
+    enabled: name !== null && (options.enabled ?? true),
+    staleTime: 30_000,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useObjectSlot(name: string | null, id: string | null) {
+  return useQuery({
+    queryKey: ["object-slot", name ?? "", id ?? ""] as const,
+    queryFn: () => api.objectSlot(name ?? "", id ?? ""),
+    enabled: name !== null && id !== null,
+    staleTime: 30_000,
+  });
+}
+
+/** The cold start candidates of a site (object-map design 3): read once, the list is shown until confirmed. */
+export function useBootstrap(name: string | null) {
+  return useQuery({
+    queryKey: ["bootstrap", name ?? ""] as const,
+    queryFn: () => api.bootstrap(name ?? ""),
+    enabled: name !== null,
+    staleTime: 60_000,
+  });
+}
+
+/** Ignores a proposal or marks a position ambiguous. Learning state only: no site version is written. */
+export function useSlotLearning() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; id: string; action: "dismiss" | "ambiguous" }) =>
+      args.action === "dismiss"
+        ? api.dismissSlot(args.name, args.id)
+        : api.ambiguousSlot(args.name, args.id),
+    onSuccess: (_result, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
+    },
   });
 }

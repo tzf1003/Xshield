@@ -13,9 +13,15 @@ import { DiffView } from "./DiffView.tsx";
 import { ImpactView } from "./ImpactPreview.tsx";
 import { requestProblem } from "./site-messages.ts";
 
+/**
+ * The version a rollback goes back to. An undo of an automatic change carries that change as `undoes`, and its
+ * note is the reason the dialog starts from. The history builds it; the page passes it on unchanged.
+ */
+export type RollbackTarget = SiteVersion & { undoes?: SiteVersion };
+
 type Props = {
   site: SiteDetail;
-  target: SiteVersion;
+  target: RollbackTarget;
   /** Unsaved draft changes: the rollback works on the saved configuration, so it waits for them. */
   dirty: boolean;
   onClose: () => void;
@@ -27,7 +33,7 @@ export function RollbackDialog({ site, target, dirty, onClose, onDone }: Props) 
   const client = useQueryClient();
   const targetSpec = target.spec;
   const preview = usePreview(site.name, targetSpec);
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState(() => target.undoes?.note ?? "");
 
   const unchanged = targetSpec !== null && canonical(targetSpec) === canonical(site.spec);
   const ready = targetSpec !== null && !dirty && !rollback.isPending;
@@ -72,6 +78,12 @@ export function RollbackDialog({ site, target, dirty, onClose, onDone }: Props) 
         {unchanged ? (
           <div className="small muted">
             v{target.version} 的内容与当前版本相同，回滚只会生成一个内容相同的新版本。
+          </div>
+        ) : null}
+        {target.undoes ? (
+          <div className="small muted">
+            撤销 v{target.undoes.version} 的自动改动：回到 v{target.version} 的内容。备注已填入 v
+            {target.undoes.version} 的原因，可以改。
           </div>
         ) : null}
 

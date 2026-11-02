@@ -12,7 +12,7 @@ import { errorText } from "../../lib/vocab.ts";
 import { type FieldIssue, validateSpec } from "../../lib/site-validate.ts";
 import { ErrorBar, Loading } from "../../ui/Page.tsx";
 import { DiffView } from "./DiffView.tsx";
-import { ImpactView } from "./ImpactPreview.tsx";
+import { hasNewFastAllow, ImpactView } from "./ImpactPreview.tsx";
 import { type Choices, rebaseSpec, sameJson, valueText } from "./spec-model.ts";
 import { serverProblem } from "./site-messages.ts";
 
@@ -44,6 +44,7 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
   const [conflict, setConflict] = useState<number | null>(null);
   const [showLatest, setShowLatest] = useState(false);
   const [rebase, setRebase] = useState<Rebase | null>(null);
+  const [examplesChecked, setExamplesChecked] = useState(false);
 
   const base =
     versions.data?.versions.find((item) => item.version === baseVersion)?.spec ?? site.spec;
@@ -76,13 +77,20 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
       ? rebased.conflicts.filter((item) => rebase.choices[item.field] === undefined).length
       : 0;
   const conflictBlocked = conflict !== null && rebase === null;
+  // Design 3.2 and 6: an enforce site that gets fast allows is saved only after the example requests were looked at.
+  // While this draft's impact is still on its way (or still the previous draft's), the answer does not count yet.
+  const enforce = working.mode === "enforce";
+  const fastAllow = preview.data !== undefined && hasNewFastAllow(preview.data);
+  const examplesWait =
+    enforce && !examplesChecked && (preview.isPending || preview.isPlaceholderData || fastAllow);
   const canSave =
     localOk &&
     !unchanged &&
     remote?.valid !== false &&
     !save.isPending &&
     !conflictBlocked &&
-    unresolved === 0;
+    unresolved === 0 &&
+    !examplesWait;
   const saveError =
     save.error instanceof ApiError && save.error.code === "VERSION_CONFLICT" ? null : save.error;
 
@@ -249,6 +257,21 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
           ) : preview.data ? (
             <ImpactView preview={preview.data} />
           ) : null
+        ) : null}
+        {localOk && enforce && fastAllow ? (
+          <div className="stack-tight">
+            <div className="small muted">
+              拦截模式下，这些请求会直接放行，不再调用 Jev。保存前请展开上面的示例请求。
+            </div>
+            <label className="adv-radio">
+              <input
+                type="checkbox"
+                checked={examplesChecked}
+                onChange={(event) => setExamplesChecked(event.target.checked)}
+              />
+              我已查看示例请求
+            </label>
+          </div>
         ) : null}
 
         <div aria-live="polite" className="small">

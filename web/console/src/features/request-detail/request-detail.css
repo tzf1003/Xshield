@@ -68,6 +68,16 @@
   word-break: break-all;
 }
 
+/* The interface line under the request line; an unknown name is a warning (design 4.2). */
+.rd-api {
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.rd-api-unknown {
+  color: var(--would-ink);
+}
+
 .rd-meta {
   display: flex;
   flex-wrap: wrap;
@@ -211,6 +221,11 @@
   gap: 4px 12px;
 }
 
+/* A step that could not decide shows ! in the warning colour (design 4.2). */
+.rd-step-warn .step-mark {
+  color: var(--would-ink);
+}
+
 .rd-attention {
   margin-top: 4px;
   font-size: 13px;
@@ -265,6 +280,43 @@
 
 .rd-row.rd-inert {
   color: var(--ink-3);
+}
+
+/* A composite value's parts sit under it, indented (their own rows carry the checks). */
+.rd-row.rd-part td:first-child {
+  padding-left: 18px;
+}
+
+.rd-cls {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* The class is from the object map unless it is written in grey: the name of the field (design 4.2). */
+.rd-cls-inferred {
+  color: var(--ink-3);
+}
+
+/* The class of the position a value was seen at, after its source (design 4.2). */
+.rd-srccls {
+  color: var(--ink-3);
+}
+
+.rd-srccls-mismatch {
+  color: var(--would-ink);
+}
+
+/* The line under a value whose origin showed another class: ! in the warning colour, across the row. */
+.rd-mismatch td {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.rd-mismatch-text {
+  font-size: 13px;
 }
 
 .rd-fold {

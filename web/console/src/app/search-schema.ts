@@ -3,6 +3,8 @@
 // trusts a value it cannot name: an unknown option reads as absent, so a hand-edited link still opens.
 // Every key is optional, so a link names only what it needs, and any route accepts the global scope.
 
+import type { UnknownApiReason } from "../api/types.ts";
+import { isApiName, isClassId, isUnknownReason } from "../lib/filter-dsl.ts";
 import { isSiteName } from "../lib/ids.ts";
 import type { RangeParam } from "../lib/time-range.ts";
 import { isRangeParam, parseMillis } from "../lib/time-range.ts";
@@ -66,6 +68,12 @@ export type RequestsSearch = GlobalSearch & {
   peek?: string;
   live?: "1";
   batch?: "1";
+  /** A link's interface-name condition (`api:`); the page moves it into the condition text. */
+  api?: string;
+  /** A link's unknown-name condition (`api:unknown`, or one reason code). */
+  api_unknown?: UnknownApiReason | "any";
+  /** A link's object-class condition (`object:`). */
+  object?: string;
 };
 
 export function validateRequests(raw: Record<string, unknown>): RequestsSearch {
@@ -77,7 +85,20 @@ export function validateRequests(raw: Record<string, unknown>): RequestsSearch {
     peek: str(raw.peek),
     live: flag(raw.live),
     batch: flag(raw.batch),
+    api: validText(raw.api, isApiName),
+    api_unknown: unknownParam(raw.api_unknown),
+    object: validText(raw.object, isClassId),
   };
+}
+
+/** The string when the check accepts it; a value the check refuses reads as absent. */
+function validText(raw: unknown, valid: (value: string) => boolean): string | undefined {
+  return typeof raw === "string" && valid(raw) ? raw : undefined;
+}
+
+function unknownParam(raw: unknown): UnknownApiReason | "any" | undefined {
+  if (raw === "any") return "any";
+  return typeof raw === "string" && isUnknownReason(raw) ? raw : undefined;
 }
 
 export const DETAIL_TABS = ["pipeline", "values", "jev", "session", "raw"] as const;
@@ -148,8 +169,18 @@ export function validateJev(raw: Record<string, unknown>): JevSearch {
   };
 }
 
-export const SITE_TABS = ["overview", "config", "insights", "history"] as const;
+export const SITE_TABS = ["overview", "config", "objects", "insights", "history"] as const;
 export type SiteTab = (typeof SITE_TABS)[number];
+
+/** The learning states the object map's counters and links name (console design 3.1, 9). */
+export const OBJECT_STATES = [
+  "pending",
+  "proposed",
+  "confirmed",
+  "ambiguous",
+  "suspended",
+  "retired",
+] as const;
 
 export type SiteSearch = GlobalSearch & {
   tab?: SiteTab;
@@ -157,6 +188,17 @@ export type SiteSearch = GlobalSearch & {
   group?: string;
   /** The version to compare with the current one, in the history tab. */
   diff?: string;
+  /** A path for a new interface-name rule in the configuration tab (`route=/gw/path`). */
+  route?: string;
+  /** The object map: the counter's state, the class, the search text, the table view and the open position. */
+  state?: (typeof OBJECT_STATES)[number];
+  class?: string;
+  q?: string;
+  view?: "slot";
+  slot?: string;
+  /** The declaration dialog, opened with this field and scope (console design 3.3). */
+  declare?: string;
+  in?: string;
 };
 
 export function validateSite(raw: Record<string, unknown>): SiteSearch {
@@ -166,6 +208,14 @@ export function validateSite(raw: Record<string, unknown>): SiteSearch {
     edit: oneOf(raw.edit, ["form", "yaml"] as const),
     group: str(raw.group),
     diff: str(raw.diff),
+    route: str(raw.route),
+    state: oneOf(raw.state, OBJECT_STATES),
+    class: str(raw.class),
+    q: str(raw.q),
+    view: oneOf(raw.view, ["slot"] as const),
+    slot: str(raw.slot),
+    declare: str(raw.declare),
+    in: str(raw.in),
   };
 }
 

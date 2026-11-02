@@ -3,7 +3,22 @@
 // a suggestion to a draft, and how a value reads in words. Pure functions: no React, no requests.
 
 import { parseDocument } from "yaml";
-import type { Advanced, SessionCredential, SiteSpec, SuggestionAction } from "../../api/types.ts";
+import type {
+  Advanced,
+  LearningSettings,
+  ObjectsSpec,
+  RouteRule,
+  SessionCredential,
+  SiteSpec,
+  SuggestionAction,
+} from "../../api/types.ts";
+import {
+  declarationKey,
+  declarationsOf,
+  learningText,
+  parseLearning,
+  parseObjects,
+} from "../../lib/objects-validate.ts";
 import { isRecord } from "../../lib/storage.ts";
 import { parseSiteText } from "../../lib/yaml.ts";
 import { PARAM_INFO } from "../../lib/vocab.ts";
@@ -168,6 +183,33 @@ function sessionOf(value: unknown): Check<SessionCredential> {
   return { ok: true, value: { header: header.value } };
 }
 
+/** The interface-name rules of a YAML or JSON configuration: each rule has a path and its segments. */
+function routesOf(value: unknown): Check<RouteRule[] | undefined> {
+  if (value === undefined || value === null) return { ok: true, value: undefined };
+  if (!Array.isArray(value)) return fail("接口名规则应写成列表，每条有 path 和 name_from");
+  const rules: RouteRule[] = [];
+  const items: unknown[] = value;
+  for (const item of items) {
+    if (!isRecord(item) || typeof item.path !== "string" || !Array.isArray(item.name_from)) {
+      return fail("接口名规则每条要写成 path 和 name_from 两个键");
+    }
+    const segments: unknown[] = item.name_from;
+    const groups: string[][] = [];
+    for (const segment of segments) {
+      const locations: unknown[] = Array.isArray(segment) ? segment : [];
+      const texts = locations.filter(
+        (location): location is string => typeof location === "string",
+      );
+      if (!Array.isArray(segment) || texts.length !== locations.length) {
+        return fail("name_from 每一段要写成位置列表，例如 [header.X-Service-Id]");
+      }
+      groups.push(texts);
+    }
+    rules.push({ path: item.path, name_from: groups });
+  }
+  return { ok: true, value: rules };
+}
+
 function advancedOf(value: unknown): Check<Advanced | undefined> {
   if (value === undefined || value === null) return { ok: true, value: undefined };
   if (!isRecord(value)) return fail("高级判定参数应写成 名称: 值 的形式");
@@ -200,6 +242,11 @@ function advancedOf(value: unknown): Check<Advanced | undefined> {
     }
     out.synonyms = pairs;
   }
+  if (value.field_kinds !== undefined && value.field_kinds !== null) {
+    const declarations = declarationsOf(value.field_kinds);
+    if (!declarations.ok) return declarations;
+    out.field_kinds = declarations.value;
+  }
   return { ok: true, value: out };
 }
 
@@ -227,6 +274,10 @@ export function normalizeSpec(raw: unknown): Check<SiteSpec> {
   if (!unavailable.ok) return unavailable;
   const advanced = advancedOf(raw.advanced);
   if (!advanced.ok) return advanced;
+  const routes = routesOf(raw.routes);
+  if (!routes.ok) return routes;
+  const objects = parseObjects(raw.objects);
+  if (!objects.ok) return fail(objects.message);
   const spec: SiteSpec = {
     name: name.value,
     hosts: hosts.value,
@@ -238,6 +289,8 @@ export function normalizeSpec(raw: unknown): Check<SiteSpec> {
   if (mode.value !== undefined) spec.mode = mode.value;
   if (unavailable.value !== undefined) spec.on_jev_unavailable = unavailable.value;
   if (advanced.value !== undefined) spec.advanced = advanced.value;
+  if (routes.value !== undefined && routes.value.length > 0) spec.routes = routes.value;
+  if (objects.value !== undefined) spec.objects = objects.value;
   return { ok: true, value: spec };
 }
 
@@ -279,6 +332,7 @@ const CONFLICT_LABELS: Record<string, string> = {
   "advanced.session_calls_per_minute": "会话调用上限",
   "advanced.address_calls_per_minute": "地址调用上限",
   "advanced.allow_cache_minutes": "放行缓存时长",
+  "objects.learning": "学习设置",
 };
 
 /**
@@ -342,6 +396,40 @@ export function rebaseSpec(
     (pair) => `${pair[0]}|${pair[1]}`,
   );
   if (synonyms.length > 0) advanced.synonyms = synonyms;
+  const learning = pick<LearningSettings | undefined>(
+    "objects.learning",
+    base.objects?.learning,
+    mine.objects?.learning,
+    latest.objects?.learning,
+  );
+  const declarations = mergeList(
+    base.advanced?.field_kinds ?? [],
+    mine.advanced?.field_kinds ?? [],
+    latest.advanced?.field_kinds ?? [],
+    declarationKey,
+  );
+  if (declarations.length > 0) advanced.field_kinds = declarations;
+  // The gateway's sections: a draft never edits them, so they come from the newer version unless it changed them.
+  const classes = pick<unknown>(
+    "objects.classes",
+    base.objects?.classes,
+    mine.objects?.classes,
+    latest.objects?.classes,
+  );
+  const slots = pick<unknown>(
+    "objects.slots",
+    base.objects?.slots,
+    mine.objects?.slots,
+    latest.objects?.slots,
+  );
+  const objects: ObjectsSpec | undefined =
+    learning === undefined && classes === undefined && slots === undefined
+      ? undefined
+      : {
+          ...(learning === undefined ? {} : { learning }),
+          ...(classes === undefined ? {} : { classes }),
+          ...(slots === undefined ? {} : { slots }),
+        };
   const spec: SiteSpec = {
     name: latest.name,
     hosts: mergeList(base.hosts, mine.hosts, latest.hosts, (host) => host),
@@ -357,7 +445,13 @@ export function rebaseSpec(
       latest.on_jev_unavailable,
     ),
     advanced: Object.keys(advanced).length > 0 ? advanced : undefined,
+    objects,
   };
+  // A rule is identified by its whole text: an edited rule is a removal and an addition.
+  const routes = mergeList(base.routes ?? [], mine.routes ?? [], latest.routes ?? [], (rule) =>
+    JSON.stringify(rule),
+  );
+  if (routes.length > 0) spec.routes = routes;
   return { spec, conflicts };
 }
 
@@ -371,6 +465,10 @@ const VALUE_UNITS: Record<string, string> = {
 /** A configuration value in words, for the conflict choices and the change summaries. */
 export function valueText(field: string, value: unknown): string {
   if (value === undefined || value === null) return "默认";
+  if (field === "objects.learning") {
+    const learning = parseLearning(value);
+    return learning.ok ? learningText(learning.value) : "无法显示";
+  }
   if (field === "session" && isRecord(value)) {
     if (typeof value.cookie === "string") return `Cookie ${value.cookie}`;
     if (typeof value.header === "string") return `请求头 ${value.header}`;

@@ -109,6 +109,95 @@
   gap: 2px;
 }
 
+/* Interface-name rules: one card per rule; its segments sit inside it, each location on one line (docs/06 6.5). */
+.route-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.route-head,
+.route-loc {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.route-loc {
+  grid-template-columns: minmax(0, 120px) minmax(0, 1fr) auto;
+}
+
+.route-seg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.route-seg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.route-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.route-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.route-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.route-candidate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--sunken);
+  color: var(--ink);
+  padding: 4px 8px;
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.route-tester textarea {
+  min-height: 72px;
+}
+
+@media (max-width: 640px) {
+  .route-head,
+  .route-loc {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* Rule rows: a note line under the rule, spanning the whole row. */
 .rulerow-note {
   grid-column: 1 / -1;

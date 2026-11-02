@@ -7,8 +7,11 @@ import type { ReactNode } from "react";
 import type { ImpactChange, ImpactPreview, SiteSpec } from "../../api/types.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { validHost, type FieldGroup, type FieldIssue } from "../../lib/site-validate.ts";
+import { ROUTE_HELP, ROUTE_SOURCE_HELP } from "../../lib/vocab.ts";
 import { PatternListEditor } from "./PatternListEditor.tsx";
 import { PatternTester } from "./PatternTester.tsx";
+import { RouteRuleTester } from "./RouteRuleTester.tsx";
+import { RoutesEditor } from "./RoutesEditor.tsx";
 import { TagInput } from "./TagInput.tsx";
 import {
   LOGIN_PATHS,
@@ -19,11 +22,12 @@ import {
   withSession,
 } from "./spec-model.ts";
 
-export type FormGroup = "basics" | "session" | "entries" | "bypass" | "mode";
+export type FormGroup = "basics" | "session" | "routes" | "entries" | "bypass" | "mode";
 
 export const FORM_GROUP_LABEL: Record<FormGroup, string> = {
   basics: "基本信息",
   session: "会话凭证",
+  routes: "接口名规则",
   entries: "入口",
   bypass: "绕过",
   mode: "模式与 Jev 不可用",
@@ -32,6 +36,8 @@ export const FORM_GROUP_LABEL: Record<FormGroup, string> = {
 type Props = {
   group: FormGroup;
   mode: "create" | "edit";
+  /** The site's name, for the records the rules read; null while the site is created. */
+  site: string | null;
   spec: SiteSpec;
   /** The saved configuration (edit mode): the session warning compares against it. */
   saved: SiteSpec | null;
@@ -227,14 +233,49 @@ function SessionGroup({
   );
 }
 
+function RoutesGroup({
+  spec,
+  saved,
+  site,
+  onChange,
+  issues,
+}: Pick<Props, "spec" | "saved" | "site" | "onChange" | "issues">) {
+  const groupErrors = issues
+    .filter((issue) => issue.group === "routes" && issue.field === "routes")
+    .map((issue) => issue.message);
+  return (
+    <div className="stack">
+      <Field label="接口名规则" help={`${ROUTE_HELP} ${ROUTE_SOURCE_HELP}`} errors={groupErrors}>
+        <RoutesEditor
+          site={site}
+          routes={spec.routes ?? []}
+          issues={issues}
+          onChange={(routes) =>
+            onChange({ ...spec, routes: routes.length > 0 ? routes : undefined })
+          }
+        />
+      </Field>
+      <RouteRuleTester
+        routes={spec.routes ?? []}
+        entries={spec.entries}
+        bypass={spec.bypass ?? []}
+        savedEntries={saved?.entries ?? []}
+        savedBypass={saved?.bypass ?? []}
+      />
+    </div>
+  );
+}
+
 function EntriesGroup({
   spec,
   saved,
   mode,
+  site,
   hits,
+  warnings,
   onChange,
   issues,
-}: Pick<Props, "spec" | "saved" | "mode" | "hits" | "onChange" | "issues">) {
+}: Pick<Props, "spec" | "saved" | "mode" | "site" | "hits" | "warnings" | "onChange" | "issues">) {
   return (
     <div className="stack">
       <Field
@@ -247,6 +288,9 @@ function EntriesGroup({
           rules={spec.entries}
           hits={hits?.entries}
           issues={issues}
+          warnings={warnings}
+          site={site}
+          routes={spec.routes ?? []}
           presets={mode === "create" ? [{ label: "常见登录路径", rules: LOGIN_PATHS }] : []}
           onChange={(entries) => onChange({ ...spec, entries })}
         />
@@ -254,6 +298,7 @@ function EntriesGroup({
       <PatternTester
         entries={spec.entries}
         bypass={spec.bypass ?? []}
+        routes={spec.routes ?? []}
         savedEntries={saved?.entries ?? []}
         savedBypass={saved?.bypass ?? []}
       />
@@ -265,11 +310,16 @@ function BypassGroup({
   spec,
   saved,
   mode,
+  site,
   hits,
   impact,
+  warnings,
   onChange,
   issues,
-}: Pick<Props, "spec" | "saved" | "mode" | "hits" | "impact" | "onChange" | "issues">) {
+}: Pick<
+  Props,
+  "spec" | "saved" | "mode" | "site" | "hits" | "impact" | "warnings" | "onChange" | "issues"
+>) {
   const change = impact.find((item) => item.kind === "judged_to_bypass");
   const notice = change
     ? `这条绕过会让 ${fmtInt(change.count)} 个原本判定的请求不再判定${
@@ -288,6 +338,9 @@ function BypassGroup({
           rules={spec.bypass ?? []}
           hits={hits?.bypass}
           issues={issues}
+          warnings={warnings}
+          site={site}
+          routes={spec.routes ?? []}
           notice={notice}
           presets={mode === "create" ? [{ label: "常见静态资源", rules: STATIC_PATHS }] : []}
           onChange={(bypass) => onChange({ ...spec, bypass })}
@@ -296,6 +349,7 @@ function BypassGroup({
       <PatternTester
         entries={spec.entries}
         bypass={spec.bypass ?? []}
+        routes={spec.routes ?? []}
         savedEntries={saved?.entries ?? []}
         savedBypass={saved?.bypass ?? []}
       />
@@ -386,6 +440,8 @@ export function ConfigForm(props: Props) {
       return <BasicsGroup {...props} />;
     case "session":
       return <SessionGroup {...props} />;
+    case "routes":
+      return <RoutesGroup {...props} />;
     case "entries":
       return <EntriesGroup {...props} />;
     case "bypass":

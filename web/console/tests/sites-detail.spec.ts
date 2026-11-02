@@ -1,4 +1,4 @@
-// The site page at /sites/$name (docs/06 6.4.9): four tabs over one draft. Each tab renders from the fixtures,
+// The site page at /sites/$name (docs/06 6.4.9): five tabs over one draft. Each tab renders from the fixtures,
 // the tuning suggestions can be added to the draft, and every tab passes axe in both themes.
 
 import { expect, type Page, test } from "@playwright/test";
@@ -52,13 +52,14 @@ test("the overview of an observing site shows its readiness checklist", async ({
   );
 });
 
-test("the four tabs are overview, configuration, tuning suggestions and history", async ({
+test("the five tabs are overview, configuration, object map, tuning suggestions and history", async ({
   page,
 }) => {
+  // juice has no object map yet, so its tab has no count; emr's shows its seven proposals.
   await openSite(page, "/sites/juice");
 
   const tabs = page.getByRole("tab");
-  await expect(tabs).toHaveText(["概览", "配置", "调优建议 2", "变更历史"]);
+  await expect(tabs).toHaveText(["概览", "配置", "对象表", "调优建议 2", "变更历史"]);
   await expect(page.getByRole("tab", { name: "概览" })).toHaveAttribute("aria-selected", "true");
 
   await page.getByRole("tab", { name: "变更历史" }).click();
@@ -207,6 +208,7 @@ const PAGES = [
   { name: "the observing overview with its readiness checklist", path: "/sites/juice" },
   { name: "the configuration form", path: "/sites/emr?tab=config" },
   { name: "the configuration YAML", path: "/sites/emr?tab=config&edit=yaml" },
+  { name: "the object map", path: "/sites/emr?tab=objects" },
   { name: "the tuning suggestions", path: "/sites/juice?tab=insights" },
   { name: "the change history", path: "/sites/emr?tab=history" },
   { name: "the advanced parameters", path: "/sites/emr?tab=config&group=advanced" },

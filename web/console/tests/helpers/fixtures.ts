@@ -10,8 +10,11 @@
 // types.ts when the files are made.
 
 import type {
+  BootstrapResponse,
   Evidence,
   ImpactPreview,
+  ObjectSlotDetail,
+  ObjectsResponse,
   Insights,
   JevPrompt,
   JevStats,
@@ -60,6 +63,10 @@ import statusJson from "../fixtures/status.json" with { type: "json" };
 import summaryJson from "../fixtures/summary.json" with { type: "json" };
 import systemJson from "../fixtures/system.json" with { type: "json" };
 import timeseriesJson from "../fixtures/timeseries.json" with { type: "json" };
+import objectSlotS2Json from "../fixtures/object-slot-s2.json" with { type: "json" };
+import objectsBootstrapJson from "../fixtures/objects-bootstrap.json" with { type: "json" };
+import objectsEmptyJson from "../fixtures/objects-empty.json" with { type: "json" };
+import objectsEmrJson from "../fixtures/objects-emr.json" with { type: "json" };
 import versionsEmrJson from "../fixtures/versions-emr.json" with { type: "json" };
 
 /**
@@ -101,3 +108,11 @@ export const lookup: LookupResponse = wire(lookupJson);
 export const status: StatusResponse = wire(statusJson);
 export const statusDown: StatusResponse = wire(statusDownJson);
 export const session: SessionState = sessionJson;
+/** The object map of emr (console design 7): counts, classes, positions and events. */
+export const objectsEmr: ObjectsResponse = wire(objectsEmrJson);
+/** The map of a site that has none yet (juice): empty, so the cold start shows. */
+export const objectsEmpty: ObjectsResponse = wire(objectsEmptyJson);
+/** The drawer of position s2 of emr: a proposal with its flows, examples, shape and impact. */
+export const objectSlotS2: ObjectSlotDetail = wire(objectSlotS2Json);
+/** The cold start candidates read from the last 24 hours of juice's requests. */
+export const bootstrapCandidates: BootstrapResponse = wire(objectsBootstrapJson);

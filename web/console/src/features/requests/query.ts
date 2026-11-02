@@ -8,7 +8,12 @@ import { qs } from "../../api/client.ts";
 import type { RequestCounts } from "../../api/types.ts";
 import type { ChipId } from "../../app/search-schema.ts";
 import type { Scope } from "../../app/scope.ts";
-import { type FilterError, type FilterParams, parseFilter } from "../../lib/filter-dsl.ts";
+import {
+  type FilterError,
+  type FilterParams,
+  parseFilter,
+  serializeFilter,
+} from "../../lib/filter-dsl.ts";
 
 export const CHIPS: ReadonlyArray<{ id: ChipId; label: string }> = [
   { id: "judged", label: "已判定" },
@@ -42,6 +47,7 @@ export const CONDITION_MENU: ReadonlyArray<{ term: string; label: string }> = [
   { term: "decision:jev_deny", label: "判定：Jev 拒绝" },
   { term: "decision:jev_unavailable", label: "判定：Jev 不可用" },
   { term: "decision:no_session", label: "判定：无会话" },
+  { term: "api:unknown", label: "接口名：未知接口" },
   { term: "access:DENY", label: "Jev 访问：越权" },
   { term: "attack:ATTACK", label: "Jev 内容：攻击" },
   { term: "failure:JEV_TIMEOUT", label: "Jev 失败：超时" },
@@ -51,6 +57,22 @@ export const CONDITION_MENU: ReadonlyArray<{ term: string; label: string }> = [
   { term: "method:POST", label: "方法：POST" },
   { term: "entry:true", label: "命中入口" },
 ];
+
+/**
+ * The condition text that a link's own parameters name (`api`, `api_unknown`, `object`), or "" when it
+ * names none. The page writes it into the condition text, which is the one place the filter lives.
+ */
+export function linkedCondition(link: {
+  api?: string;
+  api_unknown?: string;
+  object?: string;
+}): string {
+  const params: FilterParams = {};
+  if (link.api !== undefined) params.api = link.api;
+  if (link.api_unknown !== undefined) params.api_unknown = link.api_unknown;
+  if (link.object !== undefined) params.object = link.object;
+  return serializeFilter(params);
+}
 
 export type ListPlan = {
   query: string;

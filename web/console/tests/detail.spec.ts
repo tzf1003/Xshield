@@ -268,16 +268,18 @@ test("a page that cannot render shows its own error page, with a retry and a way
 });
 
 for (const theme of ["light", "dark"] satisfies Theme[]) {
-  test(`every tab of the detail passes axe in the ${theme} theme`, async ({ page }) => {
-    await useFixtures(page);
-    await setTheme(page, theme);
-    for (const tab of TABS) {
+  // One test per tab: each loads the page afresh, so a slow scan of one tab cannot use up a shared time budget.
+  for (const tab of TABS) {
+    const label = tab.search === "" ? tab.name : `${tab.name} ${tab.search}`;
+    test(`the ${label} tab passes axe in the ${theme} theme`, async ({ page }) => {
+      await useFixtures(page);
+      await setTheme(page, theme);
       await page.goto(`/requests/${IDS.basket}${tab.search}`);
       await expect(heading(page, "/rest/basket/6")).toBeVisible();
       await expect(page.getByRole("tab", { name: tab.name, selected: true })).toBeVisible();
       await expectNoAxeViolations(page);
-    }
-  });
+    });
+  }
 
   test(`the not-found state passes axe in the ${theme} theme`, async ({ page }) => {
     await useFixtures(page);
@@ -287,3 +289,86 @@ for (const theme of ["light", "dark"] satisfies Theme[]) {
     await expectNoAxeViolations(page);
   });
 }
+
+// Two rule rows of the requests fixture (design 4.2): a name that a rule read, and one that could not be
+// read. They have no sample record, so the detail is built from the row.
+const NAMED_ROW = "req_01a1973d7630773798b4592bb8ca5fde";
+const UNKNOWN_ROW = "req_01a1973204807054a82075e6b298fb37";
+
+/** The judgement step of the interface name (the step after the site). */
+function nameStep(page: Page) {
+  return page.getByRole("list", { name: "判定步骤" }).locator("li").filter({ hasText: "接口名" });
+}
+
+test("the head names the interface and where it came from, and the step says the rule", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto(`/requests/${NAMED_ROW}`);
+  await expect(heading(page, "/api/home")).toBeVisible();
+  await expect(page.locator(".rd-api")).toContainText("接口 dashboard.HomeService/getStats");
+  await expect(page.locator(".rd-api")).toContainText("来自请求头");
+  await expect(nameStep(page)).toContainText(
+    "规则 /api/home → dashboard.HomeService/getStats（请求头）",
+  );
+  await expect(nameStep(page).locator(".step-mark")).toHaveText("✓");
+});
+
+test("a name that could not be read is a warning in the head, and a ! in the step, with the reason", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto(`/requests/${UNKNOWN_ROW}`);
+  await expect(page.locator(".rd-api-unknown")).toContainText(
+    "未知接口：X-Service-Method 出现了多次",
+  );
+  await expect(nameStep(page)).toContainText("按未知接口处理（不算入口、不走绕过）");
+  await expect(nameStep(page).locator(".step-mark")).toHaveText("!");
+});
+
+test("a path without a rule says so in grey, and its name is the URL path", async ({ page }) => {
+  await useFixtures(page);
+  await openBasket(page);
+  await expect(nameStep(page)).toContainText("没有规则，用 URL 路径");
+  await expect(nameStep(page).locator(".step-mark")).toHaveText("–");
+  await expect(nameStep(page)).toHaveClass(/skipped/);
+});
+
+test("the values name each value's class and where it came from, and a changed class says so", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await openBasket(page, "?tab=values");
+  const table = page.locator(".rd-table");
+  await expect(table.getByRole("columnheader", { name: "类别" })).toBeVisible();
+  // The class tag is inline-flex, so the cell's accessible name gets a space; the text is what counts.
+  const basketClass = table.locator(".rd-cls").filter({ hasText: "basket" });
+  await expect(basketClass).toHaveCount(1);
+  await expect(basketClass).toContainText("（对象表）");
+  await expect(table.getByText("类别不同：count ≠ basket")).toBeVisible();
+  await expect(table.getByText("· count", { exact: true })).toBeVisible();
+});
+
+test("the Jev view and the explanation say the value was seen only as another class", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await openBasket(page, "?tab=jev");
+  await expect(page.getByText("值只以 count 出现过，现在用作 basket")).toBeVisible();
+  await expect(page.locator(".explain")).toContainText("只以 count 出现过，现在用作 basket");
+});
+
+test("the related rail offers to declare the field's class and to name this path's rule", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await openBasket(page);
+  await expect(page.getByRole("link", { name: "把这个字段归类…" })).toHaveAttribute(
+    "href",
+    /tab=objects&declare=quantity&in=%2Frest%2Fbasket%2F1$/,
+  );
+  await expect(page.getByRole("link", { name: "为这条路径写接口名规则…" })).toHaveAttribute(
+    "href",
+    /\/sites\/juice\?tab=config&route=%2Frest%2Fbasket%2F6$/,
+  );
+});
