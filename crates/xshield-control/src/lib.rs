@@ -19,6 +19,7 @@ mod insights;
 mod jev;
 mod maintenance;
 mod migrations;
+mod object_learning;
 mod params;
 mod preview;
 mod requests;
