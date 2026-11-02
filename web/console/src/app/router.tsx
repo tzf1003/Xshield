@@ -29,6 +29,7 @@ import { SiteWizardPage } from "../features/sites/SiteWizardPage.tsx";
 import { SystemPage } from "../features/system/SystemPage.tsx";
 import { LoginPage } from "./LoginPage.tsx";
 import { NotFoundPage } from "./NotFoundPage.tsx";
+import { RouteError } from "./RouteError.tsx";
 import { Shell } from "./Shell.tsx";
 import {
   validateDetail,
@@ -170,6 +171,8 @@ export const router = createRouter({
   routeTree,
   context: { queryClient },
   defaultPreload: "intent",
+  // A render error replaces that page with RouteError; the shell and the other pages stay usable.
+  defaultErrorComponent: RouteError,
   // Plain strings only: TanStack's own decoder turns "1" and "true" into numbers and booleans, which
   // the validators in search-schema.ts would then drop. stringifySearch keeps string values plain.
   parseSearch: (search) => Object.fromEntries(new URLSearchParams(search)),

@@ -10,12 +10,13 @@ import { VALUE_KIND_LABEL } from "../../lib/vocab.ts";
 import { Card, Empty } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
 import { SourceChip } from "../../ui/SourceChip.tsx";
-import { SessionSummary, newestFirst } from "./SessionPanel.tsx";
+import { SessionSummary } from "./SessionPanel.tsx";
 import {
   type SentRow,
   type SessionView,
   REDACTED,
   needsEvidence,
+  newestFirst,
   readingOf,
 } from "./detail-model.ts";
 import { CopyAction, HintMark, keyed, useFlash, ValueText } from "./parts.tsx";

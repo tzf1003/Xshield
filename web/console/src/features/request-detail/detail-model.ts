@@ -14,6 +14,7 @@ import type {
   RecentAccess,
   RequestRow,
   Trace,
+  TraceSession,
   TraceSource,
   TraceTiming,
   TraceValue,
@@ -129,8 +130,8 @@ export function alignState(state: JevState, trace: Trace): Alignment {
     );
   });
   if (!same) return { aligned: false };
-  const recentCount = trace.session?.recent.length ?? 0;
-  const entryCount = trace.session?.entries_passed.length ?? 0;
+  const recentCount = trace.session?.recent?.length ?? 0;
+  const entryCount = trace.session?.entries_passed?.length ?? 0;
   if (state.recent.length > recentCount) return { aligned: false };
   if (state.session.entries_passed.length > entryCount) return { aligned: false };
   return { aligned: true, sent };
@@ -201,6 +202,26 @@ export function sentRows(
   return alignValues(trace.values ?? []).map((item) =>
     rowFromTrace(item.jevIndex, item.traceIndex, item.value),
   );
+}
+
+// ------------------------------------------------------------------ the session tab
+
+/** Recent accesses newest first; the gateway keeps them in the order it saw them. */
+export function newestFirst(items: RecentAccess[]): RecentAccess[] {
+  return [...items].sort((a, b) => (b.at_millis ?? 0) - (a.at_millis ?? 0));
+}
+
+/**
+ * The two session lists as the session tab shows them. Both are null when the record made no Jev call:
+ * the gateway writes them for Jev records only, so a missing list means "not kept", not "empty".
+ */
+export function sessionLists(session: TraceSession): {
+  entries: EntryPass[] | null;
+  recent: RecentAccess[] | null;
+} {
+  const entries = session.entries_passed ?? null;
+  const recent = session.recent ?? null;
+  return { entries, recent: recent === null ? null : newestFirst(recent) };
 }
 
 export type SessionView = {
