@@ -13,8 +13,10 @@
 -- A site's rows carry only the site's name. Deleting the site removes its evidence and
 -- positions in the same transaction (site_spec_store::delete) and moves its cursor to
 -- the deletion time, so a site created later under the same name never learns from the
--- decision rows the old site logged. Every learning write checks that the site still
--- has a configuration.
+-- decision rows the old site logged. Every learning write that adds state names the
+-- site's generation, the creation time of its configuration, and lands only while that
+-- configuration still exists, so a pass that began before a deletion writes nothing into
+-- the site created in its place.
 
 CREATE TABLE object_evidence (
     site       text NOT NULL,

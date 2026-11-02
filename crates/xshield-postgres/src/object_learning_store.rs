@@ -7,14 +7,19 @@
 //! counted once, and a judgement overwrites only the rows the rules own, so a pass
 //! that reads a batch twice, or stops half way, changes nothing it should not.
 //!
-//! A write for a site with no configuration is dropped. A site deleted while a pass
-//! runs keeps no state, and a site created later under its name never learns from the
-//! traffic the old site logged: the deletion removes the evidence and the positions and
-//! moves the cursor to the deletion time (`forget_site`). Each write checks that the
-//! site row exists while it holds a share lock on that row.
+//! A site's generation is the creation time of its configuration. A write that adds
+//! state names the generation its pass read and lands only while the site still has
+//! that configuration, so a site deleted while a pass runs keeps no state, and a pass
+//! that began before a deletion writes nothing into a site created later under the same
+//! name. Each such write checks the row, by name and generation, while it holds a share
+//! lock on that row. The deletion removes the evidence and the positions and moves the
+//! cursor to the deletion time (`forget_site`), so the new site never learns from the
+//! traffic the old one logged. Pruning and retirement only act on rows the window has
+//! aged out, so they need no generation.
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
@@ -177,15 +182,17 @@ fn facts_of(row: &PgRow, at_millis: i64) -> Result<Option<DecisionFacts>, sqlx::
     }))
 }
 
-/// Records the votes and refusals of a batch. A position, session and UTC day is
-/// counted once: a repeat changes nothing, and the first vote keeps the response
-/// position it came from. Recording the same rows again is therefore harmless.
+/// Records the votes and refusals of a batch of the site's `generation`. A position,
+/// session and UTC day is counted once: a repeat changes nothing, and the first vote
+/// keeps the response position it came from. Recording the same rows again is therefore
+/// harmless. Rows of a generation the site no longer has are dropped.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
 pub async fn record_evidence(
     pool: &PgPool,
     site: &str,
+    generation: DateTime<Utc>,
     votes: &[Vote],
     denials: &[Denial],
 ) -> Result<(), LearningStoreError> {
@@ -228,13 +235,16 @@ pub async fn record_evidence(
             values.push_bind(row.from.clone());
             values.push_unseparated("::text[]");
         });
-        // The rows land only while the site has a configuration. The share lock holds
-        // the site row, so a deletion of the site waits for this statement.
+        // The rows land only while the site still has the configuration of this
+        // generation. The share lock holds that row, so a deletion of the site waits
+        // for this statement.
         builder.push(
             ") AS v(site, slot, session, day, kind, from_slots)
              WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = ",
         );
         builder.push_bind(site);
+        builder.push(" AND created_at = ");
+        builder.push_bind(generation);
         builder.push(" FOR SHARE) ON CONFLICT DO NOTHING");
         builder.build().execute(pool).await?;
     }
@@ -309,15 +319,16 @@ pub async fn prune_evidence(
     Ok(result.rows_affected())
 }
 
-/// Writes the state of one position. A row an administrator dismissed or marked
-/// ambiguous is left alone, and a confirmed write never undoes a suspension: that
-/// one waits for an administrator.
+/// Writes the state of one position of the site's `generation`. A row an administrator
+/// dismissed or marked ambiguous is left alone, and a confirmed write never undoes a
+/// suspension: that one waits for an administrator.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
 pub async fn put_judgement(
     pool: &PgPool,
     site: &str,
+    generation: DateTime<Utc>,
     judgement: &Judgement<'_>,
     now_millis: i64,
 ) -> Result<(), LearningStoreError> {
@@ -326,7 +337,7 @@ pub async fn put_judgement(
              (site, slot, state, class, votes, sessions, share_per_mille, last_day, updated_millis)
          SELECT $1::text, $2::text, $3::text, $4::text, $5::integer, $6::integer, $7::integer,
              $8::bigint, $9::bigint
-         WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = $1 FOR SHARE)
+         WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $10 FOR SHARE)
          ON CONFLICT (site, slot) DO UPDATE SET
              state = EXCLUDED.state,
              class = EXCLUDED.class,
@@ -347,6 +358,7 @@ pub async fn put_judgement(
     .bind(i32::try_from(judgement.share_per_mille).unwrap_or(1_000))
     .bind(day_i64(judgement.last_day))
     .bind(now_millis)
+    .bind(generation)
     .execute(pool)
     .await?;
     Ok(())
@@ -395,21 +407,22 @@ pub async fn cursor(pool: &PgPool, site: &str) -> Result<Option<Cursor>, Learnin
     }
 }
 
-/// Moves the site's cursor to `after`. The cursor never moves back, and a site with
-/// no configuration keeps none.
+/// Moves the site's cursor to `after`, for a pass of the site's `generation`. The cursor
+/// never moves back, and a site with no configuration of that generation keeps none.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
 pub async fn advance_cursor(
     pool: &PgPool,
     site: &str,
+    generation: DateTime<Utc>,
     after: Cursor,
     now_millis: i64,
 ) -> Result<(), LearningStoreError> {
     sqlx::query(
         "INSERT INTO object_learning_cursor (site, after_millis, after_id, updated_millis)
          SELECT $1::text, $2::bigint, $3::bigint, $4::bigint
-         WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = $1 FOR SHARE)
+         WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $5 FOR SHARE)
          ON CONFLICT (site) DO UPDATE SET
              after_millis = EXCLUDED.after_millis,
              after_id = EXCLUDED.after_id,
@@ -421,6 +434,7 @@ pub async fn advance_cursor(
     .bind(after.at_millis)
     .bind(after.id)
     .bind(now_millis)
+    .bind(generation)
     .execute(pool)
     .await?;
     Ok(())
@@ -440,21 +454,24 @@ pub async fn proposed_slots(pool: &PgPool, site: &str) -> Result<Vec<String>, Le
     Ok(slots)
 }
 
-/// Withdraws the proposal of a position, when it is still a proposal. Confirmed,
-/// suspended, retired, dismissed and ambiguous positions are left alone.
+/// Withdraws the proposal of a position of the site's `generation`, when it is still a
+/// proposal. Confirmed, suspended, retired, dismissed and ambiguous positions are left alone.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
 pub async fn withdraw_proposal(
     pool: &PgPool,
     site: &str,
+    generation: DateTime<Utc>,
     slot: &str,
 ) -> Result<(), LearningStoreError> {
     sqlx::query(
-        "DELETE FROM object_positions WHERE site = $1 AND slot = $2 AND state = 'proposed'",
+        "DELETE FROM object_positions WHERE site = $1 AND slot = $2 AND state = 'proposed'
+           AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $3 FOR SHARE)",
     )
     .bind(site)
     .bind(slot)
+    .bind(generation)
     .execute(pool)
     .await?;
     Ok(())
@@ -464,8 +481,8 @@ pub async fn withdraw_proposal(
 /// The evidence and the positions go. The cursor stays, moved to `deleted_millis`, so
 /// the decision rows the old site logged before the deletion are never learned from,
 /// not even by a site created again under the same name. The deletion locks the site
-/// row until it commits, so a write still running waits, then finds no site and writes
-/// nothing.
+/// row until it commits, so a write still running waits, then finds no site of its
+/// generation and writes nothing.
 ///
 /// # Errors
 /// Returns [`sqlx::Error`] on a database failure.
@@ -525,13 +542,17 @@ mod tests {
         PgPool::connect(&url).await.expect("connect")
     }
 
-    /// The configuration row a learning write looks for: a site without one keeps no state.
-    async fn with_site(pool: &PgPool, site: &str) {
-        sqlx::query("INSERT INTO site_configs (name, spec, version) VALUES ($1, '{}'::jsonb, 1)")
-            .bind(site)
-            .execute(pool)
-            .await
-            .expect("create the site row");
+    /// Creates the configuration row a learning write looks for, and returns its
+    /// generation. A site without one keeps no state.
+    async fn with_site(pool: &PgPool, site: &str) -> DateTime<Utc> {
+        sqlx::query_scalar(
+            "INSERT INTO site_configs (name, spec, version) VALUES ($1, '{}'::jsonb, 1)
+             RETURNING created_at",
+        )
+        .bind(site)
+        .fetch_one(pool)
+        .await
+        .expect("create the site row")
     }
 
     fn cursor_at(at_millis: i64, id: i64) -> Cursor {
@@ -593,12 +614,16 @@ mod tests {
     async fn a_vote_is_counted_once_and_keeps_its_first_position() {
         let pool = connect_test_pool().await;
         let site = unique_site("evidence_once");
-        with_site(&pool, &site).await;
+        let generation = with_site(&pool, &site).await;
         let first = vec![vote("a", 3, &["GET /api/appointments [].doc_id"])];
-        record_evidence(&pool, &site, &first, &[]).await.unwrap();
+        record_evidence(&pool, &site, generation, &first, &[])
+            .await
+            .unwrap();
         // The same session and day again, from another position: changes nothing.
         let again = vec![vote("a", 3, &["GET /api/other [].id"])];
-        record_evidence(&pool, &site, &again, &[]).await.unwrap();
+        record_evidence(&pool, &site, generation, &again, &[])
+            .await
+            .unwrap();
         let loaded = load_evidence(&pool, &site, &[SLOT.to_owned()], 0)
             .await
             .unwrap();
@@ -613,7 +638,7 @@ mod tests {
     async fn every_response_position_of_a_vote_is_kept() {
         let pool = connect_test_pool().await;
         let site = unique_site("evidence_from");
-        with_site(&pool, &site).await;
+        let generation = with_site(&pool, &site).await;
         // Both positions are doctors, so the first vote counts toward the doctor kind.
         let agree = vote(
             "a",
@@ -629,7 +654,7 @@ mod tests {
             3,
             &["GET /api/appointments [].doc_id", "GET /api/docs [].id"],
         );
-        record_evidence(&pool, &site, &[agree, disagree], &[])
+        record_evidence(&pool, &site, generation, &[agree, disagree], &[])
             .await
             .unwrap();
         let loaded = load_evidence(&pool, &site, &[SLOT.to_owned()], 0)
@@ -645,9 +670,11 @@ mod tests {
     async fn pruning_keeps_only_the_window() {
         let pool = connect_test_pool().await;
         let site = unique_site("evidence_window");
-        with_site(&pool, &site).await;
+        let generation = with_site(&pool, &site).await;
         let votes = vec![vote("a", 1, &[]), vote("b", 10, &[])];
-        record_evidence(&pool, &site, &votes, &[]).await.unwrap();
+        record_evidence(&pool, &site, generation, &votes, &[])
+            .await
+            .unwrap();
         let deleted = prune_evidence(&pool, &site, 5).await.unwrap();
         assert_eq!(deleted, 1);
         let loaded = load_evidence(&pool, &site, &["GET /doctor/{id} path[1]".to_owned()], 0)
@@ -661,7 +688,7 @@ mod tests {
     async fn a_dismissed_position_is_not_proposed_again() {
         let pool = connect_test_pool().await;
         let site = unique_site("dismissed");
-        with_site(&pool, &site).await;
+        let generation = with_site(&pool, &site).await;
         let slot = "GET /doctor/{id} path[1]";
         let judgement = Judgement {
             slot,
@@ -672,13 +699,17 @@ mod tests {
             share_per_mille: 950,
             last_day: 3,
         };
-        put_judgement(&pool, &site, &judgement, 1).await.unwrap();
+        put_judgement(&pool, &site, generation, &judgement, 1)
+            .await
+            .unwrap();
         sqlx::query("UPDATE object_positions SET state = 'dismissed' WHERE site = $1")
             .bind(&site)
             .execute(&pool)
             .await
             .unwrap();
-        put_judgement(&pool, &site, &judgement, 2).await.unwrap();
+        put_judgement(&pool, &site, generation, &judgement, 2)
+            .await
+            .unwrap();
         let state: String =
             sqlx::query_scalar("SELECT state FROM object_positions WHERE site = $1")
                 .bind(&site)
@@ -693,16 +724,16 @@ mod tests {
     async fn the_cursor_starts_empty_and_moves_forward() {
         let pool = connect_test_pool().await;
         let site = unique_site("cursor");
-        with_site(&pool, &site).await;
+        let generation = with_site(&pool, &site).await;
         assert_eq!(cursor(&pool, &site).await.unwrap(), None);
-        advance_cursor(&pool, &site, cursor_at(100, 0), 1_000)
+        advance_cursor(&pool, &site, generation, cursor_at(100, 0), 1_000)
             .await
             .unwrap();
-        advance_cursor(&pool, &site, cursor_at(250, 4), 2_000)
+        advance_cursor(&pool, &site, generation, cursor_at(250, 4), 2_000)
             .await
             .unwrap();
         // The cursor never moves back, not even within one millisecond.
-        advance_cursor(&pool, &site, cursor_at(250, 2), 3_000)
+        advance_cursor(&pool, &site, generation, cursor_at(250, 2), 3_000)
             .await
             .unwrap();
         assert_eq!(cursor(&pool, &site).await.unwrap(), Some(cursor_at(250, 4)));
@@ -714,11 +745,14 @@ mod tests {
         let pool = connect_test_pool().await;
         // No configuration row: the site was deleted while a pass was running.
         let site = unique_site("deleted");
-        record_evidence(&pool, &site, &[vote("a", 3, &[])], &[])
+        let generation = Utc::now();
+        record_evidence(&pool, &site, generation, &[vote("a", 3, &[])], &[])
             .await
             .unwrap();
-        put_judgement(&pool, &site, &proposal(), 1).await.unwrap();
-        advance_cursor(&pool, &site, cursor_at(100, 0), 1)
+        put_judgement(&pool, &site, generation, &proposal(), 1)
+            .await
+            .unwrap();
+        advance_cursor(&pool, &site, generation, cursor_at(100, 0), 1)
             .await
             .unwrap();
         assert_eq!(learning_rows(&pool, &site).await, 0);
@@ -730,12 +764,14 @@ mod tests {
     async fn forgetting_a_site_removes_its_evidence_and_moves_its_cursor() {
         let pool = connect_test_pool().await;
         let site = unique_site("forget");
-        with_site(&pool, &site).await;
-        record_evidence(&pool, &site, &[vote("a", 3, &[])], &[])
+        let generation = with_site(&pool, &site).await;
+        record_evidence(&pool, &site, generation, &[vote("a", 3, &[])], &[])
             .await
             .unwrap();
-        put_judgement(&pool, &site, &proposal(), 1).await.unwrap();
-        advance_cursor(&pool, &site, cursor_at(100, 0), 1)
+        put_judgement(&pool, &site, generation, &proposal(), 1)
+            .await
+            .unwrap();
+        advance_cursor(&pool, &site, generation, cursor_at(100, 0), 1)
             .await
             .unwrap();
         assert_eq!(learning_rows(&pool, &site).await, 3);
@@ -748,5 +784,46 @@ mod tests {
             cursor(&pool, &site).await.unwrap(),
             Some(cursor_at(500, i64::MAX))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_write_from_an_earlier_generation_of_the_site_is_dropped() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("generation");
+        let earlier = with_site(&pool, &site).await;
+        // The site is deleted and created again under the same name while a pass that read
+        // it before the deletion is still running.
+        let mut transaction = pool.begin().await.unwrap();
+        sqlx::query("DELETE FROM site_configs WHERE name = $1")
+            .bind(&site)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        forget_site(&mut transaction, &site, 500).await.unwrap();
+        transaction.commit().await.unwrap();
+        let current = with_site(&pool, &site).await;
+        assert_ne!(earlier, current);
+        // The earlier pass writes its batch, its judgement and its cursor: all dropped.
+        record_evidence(&pool, &site, earlier, &[vote("a", 3, &[])], &[])
+            .await
+            .unwrap();
+        put_judgement(&pool, &site, earlier, &proposal(), 1)
+            .await
+            .unwrap();
+        advance_cursor(&pool, &site, earlier, cursor_at(600, 0), 1)
+            .await
+            .unwrap();
+        // Only the cursor the deletion left remains, still at the deletion time.
+        assert_eq!(learning_rows(&pool, &site).await, 1);
+        assert_eq!(
+            cursor(&pool, &site).await.unwrap(),
+            Some(cursor_at(500, i64::MAX))
+        );
+        // The current generation writes as usual.
+        record_evidence(&pool, &site, current, &[vote("b", 3, &[])], &[])
+            .await
+            .unwrap();
+        assert_eq!(learning_rows(&pool, &site).await, 2);
     }
 }

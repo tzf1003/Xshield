@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use xshield_core::context::learning::{
     Evidence, RETIRE_DAYS, Thresholds, WINDOW_DAYS, contradicts, day_of, kind_share, observe,
@@ -39,7 +40,7 @@ pub async fn learn_once(pool: &PgPool, now_millis: i64) {
         }
     };
     for record in &records {
-        if let Err(error) = learn_site(pool, &record.spec, now_millis).await {
+        if let Err(error) = learn_site(pool, &record.spec, record.created_at, now_millis).await {
             eprintln!(
                 "xshield-control: object learning failed for site {}: {error}",
                 record.spec.name()
@@ -52,11 +53,16 @@ pub async fn learn_once(pool: &PgPool, now_millis: i64) {
 /// batch, then prunes the evidence older than the window, judges the proposals again,
 /// and retires the positions no vote has reached for the retirement period.
 ///
+/// `generation` is the creation time of the configuration the pass read. The store
+/// drops each write once the site has another configuration, so a pass that outlives a
+/// deletion of the site writes nothing into the site created in its place.
+///
 /// A batch is recorded before its cursor moves, and recording is idempotent: when a
 /// step fails, the next pass reads the same rows again and changes nothing twice.
 async fn learn_site(
     pool: &PgPool,
     spec: &SiteSpec,
+    generation: DateTime<Utc>,
     now_millis: i64,
 ) -> Result<(), store::LearningStoreError> {
     let site = spec.name();
@@ -97,7 +103,7 @@ async fn learn_site(
             votes.extend(observed.votes);
             denials.extend(observed.denials);
         }
-        store::record_evidence(pool, site, &votes, &denials).await?;
+        store::record_evidence(pool, site, generation, &votes, &denials).await?;
         let slots: Vec<String> = votes
             .iter()
             .map(|vote| vote.slot.clone())
@@ -109,18 +115,18 @@ async fn learn_site(
             let evidence = store::load_evidence(pool, site, &slots, oldest_day).await?;
             for slot in &slots {
                 if let Some(evidence) = evidence.get(slot) {
-                    judge(pool, spec, slot, evidence, today, now_millis).await?;
+                    judge(pool, spec, generation, slot, evidence, today, now_millis).await?;
                 }
             }
         }
-        store::advance_cursor(pool, site, next, now_millis).await?;
+        store::advance_cursor(pool, site, generation, next, now_millis).await?;
         after = next;
         if complete {
             break;
         }
     }
     store::prune_evidence(pool, site, oldest_day).await?;
-    rejudge_proposals(pool, spec, oldest_day, today, now_millis).await?;
+    rejudge_proposals(pool, spec, generation, oldest_day, today, now_millis).await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
     Ok(())
 }
@@ -130,13 +136,14 @@ async fn learn_site(
 async fn judge(
     pool: &PgPool,
     spec: &SiteSpec,
+    generation: DateTime<Utc>,
     slot: &str,
     evidence: &Evidence,
     today: u64,
     now_millis: i64,
 ) -> Result<(), store::LearningStoreError> {
     let Some(decision) = decide(slot, evidence, spec.objects(), today) else {
-        return store::withdraw_proposal(pool, spec.name(), slot).await;
+        return store::withdraw_proposal(pool, spec.name(), generation, slot).await;
     };
     let judgement = Judgement {
         slot,
@@ -147,7 +154,7 @@ async fn judge(
         share_per_mille: decision.share_per_mille,
         last_day: decision.last_day,
     };
-    store::put_judgement(pool, spec.name(), &judgement, now_millis).await
+    store::put_judgement(pool, spec.name(), generation, &judgement, now_millis).await
 }
 
 /// Judges every proposal of the site again. The window has moved on and refusals may
@@ -156,6 +163,7 @@ async fn judge(
 async fn rejudge_proposals(
     pool: &PgPool,
     spec: &SiteSpec,
+    generation: DateTime<Utc>,
     oldest_day: u64,
     today: u64,
     now_millis: i64,
@@ -169,7 +177,7 @@ async fn rejudge_proposals(
     let empty = Evidence::default();
     for slot in &slots {
         let evidence = evidence.get(slot).unwrap_or(&empty);
-        judge(pool, spec, slot, evidence, today, now_millis).await?;
+        judge(pool, spec, generation, slot, evidence, today, now_millis).await?;
     }
     Ok(())
 }
