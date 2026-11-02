@@ -19,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::DateTime;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use tokio::sync::mpsc;
@@ -211,33 +212,104 @@ fn filter_from(params: &Params, now: i64) -> ApiResult<RequestFilter> {
 }
 
 /// One list row as the console shows it (docs/07 section 7.9.3). The trace and
-/// the Jev document are left out: they come with the detail.
+/// the Jev document are left out: they come with the detail. The contract tests
+/// round-trip the console's fixtures through this type (section 7.10.8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestRow {
+    /// Row id.
+    pub id: i64,
+    /// Gateway-assigned request id.
+    pub request_id: String,
+    /// When the gateway received the request, Unix milliseconds.
+    pub at_millis: i64,
+    /// Site name; `None` when the host matched no site.
+    pub site: Option<String>,
+    /// Site configuration version the request was judged with.
+    pub site_version: Option<i64>,
+    /// HTTP method.
+    pub method: String,
+    /// Host header, lower case.
+    pub host: String,
+    /// Request path without the query.
+    pub path: String,
+    /// Redacted query string, if any.
+    pub query: Option<String>,
+    /// Status returned to the client.
+    pub status: Option<i16>,
+    /// The deciding step, as stored.
+    pub decision_path: String,
+    /// What the gateway did.
+    pub outcome: String,
+    /// Session label; empty when the request had no session.
+    pub session: String,
+    /// `session`, `address`, or `None` when no context applied.
+    pub context: Option<String>,
+    /// Client address.
+    pub client: String,
+    /// Total handling time in milliseconds.
+    pub total_ms: Option<i32>,
+    /// The Jev figures, present when a Jev document is stored for the row.
+    pub jev: Option<JevRow>,
+}
+
+/// The Jev figures a list row shows; the whole document comes with the detail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JevRow {
+    /// Top answer of the access question.
+    pub access: Option<String>,
+    /// Top answer of the attack question.
+    pub attack: Option<String>,
+    /// The smaller of the two top probabilities, as the shortest decimal that reads
+    /// back to the stored value (`0.88`, not `0.8799999952316284`).
+    pub confidence: Option<f64>,
+    /// Jev round trip in milliseconds.
+    pub ms: Option<i32>,
+    /// Failure code when Jev gave no usable answer.
+    pub failure: Option<String>,
+}
+
+impl From<&RequestSummary> for RequestRow {
+    fn from(row: &RequestSummary) -> Self {
+        Self {
+            id: row.id,
+            request_id: row.request_id.clone(),
+            at_millis: row.at_millis,
+            site: row.site.clone(),
+            site_version: row.site_version,
+            method: row.method.clone(),
+            host: row.host.clone(),
+            path: row.path.clone(),
+            query: row.query.clone(),
+            status: row.status,
+            decision_path: row.decision_path.clone(),
+            outcome: row.outcome.clone(),
+            session: row.session.clone(),
+            context: row.context.clone(),
+            client: row.client.clone(),
+            total_ms: row.total_ms,
+            jev: row.has_jev.then(|| JevRow {
+                access: row.jev_access.clone(),
+                attack: row.jev_attack.clone(),
+                confidence: row.jev_confidence.map(shortest_decimal),
+                ms: row.jev_ms,
+                failure: row.jev_failure.clone(),
+            }),
+        }
+    }
+}
+
+/// The shortest decimal that reads back to `value`. An `f32` widens to an `f64`
+/// with noise (`0.88f32` is `0.8799999952316284`), and the console shows the figure
+/// the gateway wrote.
+fn shortest_decimal(value: f32) -> f64 {
+    value
+        .to_string()
+        .parse()
+        .unwrap_or_else(|_| f64::from(value))
+}
+
 fn row_json(row: &RequestSummary) -> Value {
-    json!({
-        "id": row.id,
-        "request_id": row.request_id,
-        "at_millis": row.at_millis,
-        "site": row.site,
-        "site_version": row.site_version,
-        "method": row.method,
-        "host": row.host,
-        "path": row.path,
-        "query": row.query,
-        "status": row.status,
-        "decision_path": row.decision_path,
-        "outcome": row.outcome,
-        "session": row.session,
-        "context": row.context,
-        "client": row.client,
-        "total_ms": row.total_ms,
-        "jev": row.has_jev.then(|| json!({
-            "access": row.jev_access,
-            "attack": row.jev_attack,
-            "confidence": row.jev_confidence,
-            "ms": row.jev_ms,
-            "failure": row.jev_failure,
-        })),
-    })
+    serde_json::to_value(RequestRow::from(row)).unwrap_or(Value::Null)
 }
 
 /// `GET /api/requests`: one page of requests, newest first. Live mode asks

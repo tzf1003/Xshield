@@ -195,7 +195,7 @@ export interface TraceResponse {
   values: number;
   new_values: number;
   /** The 12 most frequent field names with their counts; never the values themselves. */
-  fields: Array<[string, number]>;
+  fields: Array<{ field: string; count: number }>;
   /** Label of the session this response created (a login). */
   issued_session: string | null;
   /** The response made the session pass an entry for the first time. */
