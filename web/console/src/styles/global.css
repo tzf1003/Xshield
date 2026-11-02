@@ -817,6 +817,9 @@ a:hover {
   white-space: nowrap;
 }
 
+/* A text cell gives way to its neighbours. What does not fit is cut at the cell edge with an ellipsis,
+   and the cell's title (when it has one) carries the whole value. Nothing is painted over the next
+   column. Cells that must not be cut opt out below. */
 .tbl td {
   height: var(--row-h);
   padding: 0 10px;
@@ -824,6 +827,29 @@ a:hover {
   white-space: nowrap;
   vertical-align: middle;
   max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Numbers, times and marks (.num, .tnum) and cells marked .keep are sized to their content, so the
+   column is never cut. The 1px width asks for the smallest width, which leaves the spare width of the
+   table to the text columns (a path, a host). A .tnum time that may wrap (.wrap) keeps the auto width
+   instead, so it can take two lines when the table is narrow. */
+.tbl td.num,
+.tbl td.tnum:not(.wrap),
+.tbl td.keep {
+  max-width: none;
+  width: 1px;
+}
+
+/* Text that may run to two lines (a host list, an origin, a rollout state, a time): the cell breaks it
+   at a space or between CJK characters. A long unbroken value is never broken mid-token, so the
+   column is never narrower than its longest token. */
+.tbl td.wrap {
+  max-width: none;
+  white-space: normal;
+  overflow-wrap: break-word;
+  padding-block: 4px;
 }
 
 .tbl tr.row-click {

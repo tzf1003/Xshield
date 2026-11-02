@@ -76,9 +76,7 @@ export function RequestTable({
       <table className="tbl" aria-label="请求列表" aria-rowcount={rows.length}>
         <thead>
           <tr>
-            <th scope="col" style={{ width: showDate ? 150 : 110 }}>
-              时间
-            </th>
+            <th scope="col">时间</th>
             {showSite ? (
               <th scope="col" className="rq-c-site" style={{ width: 90 }}>
                 站点
@@ -87,7 +85,10 @@ export function RequestTable({
             <th scope="col" className="rq-c-method" style={{ width: 64 }}>
               方法
             </th>
-            <th scope="col">路径</th>
+            {/* The path takes the width the other columns leave; they fit their content. */}
+            <th scope="col" style={{ width: "100%" }}>
+              路径
+            </th>
             <th scope="col" className="rq-c-status" style={{ width: 56 }}>
               状态
             </th>
@@ -148,13 +149,15 @@ export function RequestTable({
                 onMouseEnter={() => prefetch(row.request_id)}
                 onMouseLeave={cancelPrefetch}
               >
-                <td className="tnum" title={fmtUtc(row.at_millis)}>
+                <td className="tnum rq-c-time" title={fmtUtc(row.at_millis)}>
                   {showDate ? fmtLocalDateTime(row.at_millis) : fmtClock(row.at_millis)}
                 </td>
                 {showSite ? (
-                  <td className="rq-c-site">{row.site ?? <span className="dim">—</span>}</td>
+                  <td className="rq-c-site keep" title={row.site ?? undefined}>
+                    {row.site ?? <span className="dim">—</span>}
+                  </td>
                 ) : null}
-                <td className="mono small rq-c-method">{row.method}</td>
+                <td className="mono small rq-c-method keep">{row.method}</td>
                 <td style={{ maxWidth: 0 }}>
                   <span className="rq-path-line">
                     <span className="rq-method mono small">{row.method}</span>
@@ -181,18 +184,18 @@ export function RequestTable({
                   </span>
                 </td>
                 <td className="tnum num rq-c-status">{row.status ?? "—"}</td>
-                <td>
+                <td className="keep">
                   <DecisionTag path={row.decision_path} />
                 </td>
-                <td>
+                <td className="keep">
                   <OutcomeTag outcome={row.outcome} />
                 </td>
-                <td className="rq-c-jev">
+                <td className="rq-c-jev keep">
                   <JevColumn jev={row.jev} />
                 </td>
                 <td className="tnum num rq-c-dur">{fmtMs(row.total_ms)}</td>
                 {extras.includes("session") ? (
-                  <td>
+                  <td className="keep">
                     {row.session ? (
                       <Link
                         to="/sessions/$label"
@@ -209,7 +212,9 @@ export function RequestTable({
                   </td>
                 ) : null}
                 {extras.includes("client") ? (
-                  <td className="mono small">{row.client || <span className="dim">—</span>}</td>
+                  <td className="mono small" title={row.client || undefined}>
+                    {row.client || <span className="dim">—</span>}
+                  </td>
                 ) : null}
                 {extras.includes("host") ? (
                   <td className="mono small" title={row.host}>
@@ -219,13 +224,13 @@ export function RequestTable({
                 {extras.includes("version") ? (
                   <td className="tnum">{row.site_version ?? <span className="dim">—</span>}</td>
                 ) : null}
-                <td className="rq-c-id">
+                <td className="rq-c-id keep">
                   <span className="row" style={{ gap: 2, flexWrap: "nowrap" }}>
                     <RequestLink id={row.request_id} />
                     <CopyButton text={row.request_id} />
                   </span>
                 </td>
-                <td>
+                <td className="keep">
                   <RowMenu row={row} actions={actionsFor(row)} />
                 </td>
               </tr>

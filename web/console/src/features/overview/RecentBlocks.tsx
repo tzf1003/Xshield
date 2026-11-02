@@ -16,14 +16,20 @@ import { hms } from "./clock.ts";
 const ROWS = 10;
 
 function PathLink({ id, path }: { id: string; path: string }) {
-  if (!isRequestId(id)) return <span className="path">{path}</span>;
+  // The path may be cut to fit its cell, so the title carries the whole path.
+  if (!isRequestId(id))
+    return (
+      <span className="path" title={path}>
+        {path}
+      </span>
+    );
   return (
     <Link
       to="/requests/$requestId"
       params={{ requestId: id }}
       search={keepScope}
       className="path"
-      title={id}
+      title={path}
     >
       <SafeText text={path} />
     </Link>
@@ -56,7 +62,9 @@ export function RecentBlocks({ scope }: { scope: Scope }) {
               <th scope="col">时间</th>
               <th scope="col">站点</th>
               <th scope="col">方法</th>
-              <th scope="col">路径</th>
+              <th scope="col" style={{ width: "100%" }}>
+                路径
+              </th>
               <th scope="col">结论</th>
               <th scope="col">判定与 Jev</th>
             </tr>
@@ -67,15 +75,15 @@ export function RecentBlocks({ scope }: { scope: Scope }) {
                 <td className="tnum" title={fmtLocalDateTime(row.at_millis)}>
                   {hms(row.at_millis)}
                 </td>
-                <td>{row.site ?? "—"}</td>
-                <td className="mono small">{row.method}</td>
+                <td className="keep">{row.site ?? "—"}</td>
+                <td className="mono small keep">{row.method}</td>
                 <td className="path-cell">
                   <PathLink id={row.request_id} path={row.path} />
                 </td>
-                <td>
+                <td className="keep">
                   <OutcomeTag outcome={row.outcome} />
                 </td>
-                <td>
+                <td className="keep">
                   <span className="ov-judge">
                     <DecisionTag path={row.decision_path} />
                     <JevCell jev={row.jev} />

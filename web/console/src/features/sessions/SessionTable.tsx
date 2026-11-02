@@ -92,7 +92,7 @@ export function SessionTable({ rows, now }: { rows: SessionRow[]; now: number })
 function SessionLine({ row, now }: { row: SessionRow; now: number }) {
   return (
     <tr>
-      <td>
+      <td className="keep">
         {isSessionLabel(row.label) ? (
           <Link
             to="/sessions/$label"
@@ -108,10 +108,12 @@ function SessionLine({ row, now }: { row: SessionRow; now: number }) {
           <span className="mono">{shortSession(row.label)}</span>
         )}
       </td>
-      <td>
+      <td className="keep">
         <ContextTag context={row.context} />
       </td>
-      <td>{row.site === null ? <span className="dim">—</span> : <SafeText text={row.site} />}</td>
+      <td className="keep" title={row.site ?? undefined}>
+        {row.site === null ? <span className="dim">—</span> : <SafeText text={row.site} />}
+      </td>
       <td className="tnum" title={fmtLocalDateTime(row.first_at_millis)}>
         {fmtAgo(row.first_at_millis, now)}
       </td>
@@ -122,7 +124,7 @@ function SessionLine({ row, now }: { row: SessionRow; now: number }) {
       <td className="num tnum">{fmtInt(row.jev_calls)}</td>
       <td className="num tnum">{fmtInt(row.blocked)}</td>
       <td className="num tnum">{fmtInt(row.would_block)}</td>
-      <td>
+      <td className="keep">
         {row.issued_by === null ? (
           <span className="dim">—</span>
         ) : (

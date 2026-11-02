@@ -33,21 +33,22 @@ type Props = {
   noThreshold: boolean;
 };
 
-type Column = { key: string; label: string; width?: number; num?: boolean };
+type Column = { key: string; label: string; width?: number | string; num?: boolean };
 
-function columnsFor(showDate: boolean): Column[] {
+function columnsFor(): Column[] {
   return [
-    { key: "time", label: "时间", width: showDate ? 150 : 100 },
-    { key: "site", label: "站点", width: 90 },
-    { key: "request", label: "请求" },
-    { key: "conclusion", label: "Jev 结论", width: 96 },
-    { key: "access", label: "访问", width: 92 },
-    { key: "attack", label: "攻击", width: 92 },
-    { key: "confidence", label: "置信度", width: 84, num: true },
-    { key: "elapsed", label: "耗时", width: 90, num: true },
-    { key: "failure", label: "失败", width: 96 },
-    { key: "gateway", label: "网关", width: 96 },
-    { key: "id", label: "请求 ID", width: 120 },
+    { key: "time", label: "时间" },
+    { key: "site", label: "站点" },
+    // The request takes the width the other columns leave (docs/06 6.4.6); the rest fit their content.
+    { key: "request", label: "请求", width: "100%" },
+    { key: "conclusion", label: "Jev 结论" },
+    { key: "access", label: "访问" },
+    { key: "attack", label: "攻击" },
+    { key: "confidence", label: "置信度", num: true },
+    { key: "elapsed", label: "耗时", num: true },
+    { key: "failure", label: "失败" },
+    { key: "gateway", label: "网关" },
+    { key: "id", label: "请求 ID" },
   ];
 }
 
@@ -114,7 +115,7 @@ export function JevRequestList({
   const rows = useMemo(() => (pages.data?.pages ?? []).flatMap((page) => page.rows), [pages.data]);
 
   const showDate = scope.until - scope.since > 24 * 60 * 60 * 1000;
-  const columns = columnsFor(showDate);
+  const columns = columnsFor();
   const filtered = chip !== "all" || q.length > 0;
   const widerRange = scope.range !== "7d";
   const expand = () => setSearch({ range: "7d", since: undefined, until: undefined });
@@ -232,7 +233,9 @@ function JevRow({ row, showDate }: { row: RequestRow; showDate: boolean }) {
       <td className="tnum" title={fmtUtc(row.at_millis)}>
         {showDate ? fmtLocalDateTime(row.at_millis) : fmtClock(row.at_millis)}
       </td>
-      <td>{row.site === null ? <span className="dim">—</span> : <SafeText text={row.site} />}</td>
+      <td className="keep">
+        {row.site === null ? <span className="dim">—</span> : <SafeText text={row.site} />}
+      </td>
       <td style={{ maxWidth: 0 }}>
         {isRequestId(row.request_id) ? (
           <Link
@@ -250,12 +253,16 @@ function JevRow({ row, showDate }: { row: RequestRow; showDate: boolean }) {
           </span>
         )}
       </td>
-      <td>{conclusion ?? <span className="dim">—</span>}</td>
-      <td>{answered && jev?.access ? ACCESS_LABEL[jev.access] : <span className="dim">—</span>}</td>
-      <td>{answered && jev?.attack ? ATTACK_LABEL[jev.attack] : <span className="dim">—</span>}</td>
+      <td className="keep">{conclusion ?? <span className="dim">—</span>}</td>
+      <td className="keep">
+        {answered && jev?.access ? ACCESS_LABEL[jev.access] : <span className="dim">—</span>}
+      </td>
+      <td className="keep">
+        {answered && jev?.attack ? ATTACK_LABEL[jev.attack] : <span className="dim">—</span>}
+      </td>
       <td className="num tnum">{pct(jev?.confidence)}</td>
       <td className="num tnum">{fmtMs(jev?.ms)}</td>
-      <td>
+      <td className="keep">
         {jev?.failure ? (
           <span className="jev-cell fail" title={FAILURE_INFO[jev.failure].desc}>
             {FAILURE_INFO[jev.failure].short}
@@ -264,10 +271,10 @@ function JevRow({ row, showDate }: { row: RequestRow; showDate: boolean }) {
           <span className="dim">—</span>
         )}
       </td>
-      <td>
+      <td className="keep">
         <OutcomeTag outcome={row.outcome} />
       </td>
-      <td>
+      <td className="keep">
         <RequestLink id={row.request_id} />
       </td>
     </tr>

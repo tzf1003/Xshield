@@ -76,15 +76,15 @@ export function SitesPage() {
                 const status = rolloutListText(site.rollout, site.updated_at, now);
                 return (
                   <tr key={site.name}>
-                    <td className="cell-name">
+                    <td className="cell-name keep">
                       <Link to="/sites/$name" params={{ name: site.name }} className="site-name">
                         {site.name}
                       </Link>
                     </td>
-                    <td className="mono">{site.hosts.join("、")}</td>
-                    <td className="mono">{site.origin}</td>
-                    <td>{modeText(site, now)}</td>
-                    <td>{status.text}</td>
+                    <td className="mono wrap">{site.hosts.join("、")}</td>
+                    <td className="mono wrap">{site.origin}</td>
+                    <td className="keep">{modeText(site, now)}</td>
+                    <td className="wrap">{status.text}</td>
                     <td className="num tnum">{fmtInt(site.requests_24h)}</td>
                     <td className="num tnum">
                       {site.mode === "enforce"
