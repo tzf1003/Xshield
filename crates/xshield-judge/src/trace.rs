@@ -3,7 +3,7 @@
 //! showed them, and the query string with secrets removed.
 
 use xshield_core::context::trace::VALUE_CHARS_MAX;
-use xshield_core::context::{TraceEntry, TraceRecent, TraceSource, TraceValue};
+use xshield_core::context::{ObjectFrom, TraceEntry, TraceRecent, TraceSource, TraceValue};
 
 use crate::context::{EntryPass, Origin, Recent, request_text};
 use crate::slots::origin_slot;
@@ -15,9 +15,20 @@ pub const QUERY_BYTES_MAX: usize = 2 * 1024;
 /// Most sources shown per value.
 const SOURCES_SHOWN: usize = 3;
 
+/// Where a request value sits and what the object map says about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Place {
+    /// The position the value sits at (see [`crate::slots::request_slot`]).
+    pub slot: String,
+    /// The kind of object the map gives that position.
+    pub object: Option<String>,
+    /// The kind of object the map gives each origin's position, in the order of
+    /// the ranked origins.
+    pub origin_objects: Vec<Option<String>>,
+}
+
 /// One request value as the trace shows it. `ranked` is the session's origins
-/// for the value in the order the state lists them (most useful last). `slot`
-/// is the position the value sits at (see [`crate::slots::request_slot`]).
+/// for the value in the order the state lists them (most useful last).
 #[must_use]
 pub fn value_entry(
     value: &RequestValue,
@@ -26,7 +37,7 @@ pub fn value_entry(
     ranked: &[&Origin],
     credential: Option<&str>,
     secret_words: &[String],
-    slot: String,
+    place: Place,
 ) -> TraceValue {
     let key = value.key.as_deref();
     let (text, len, clipped) = shown(&value.at, key, &value.value, credential, secret_words);
@@ -44,21 +55,25 @@ pub fn value_entry(
         // in the same order.
         sources: ranked
             .iter()
+            .enumerate()
             .rev()
             .take(SOURCES_SHOWN)
-            .map(|origin| TraceSource {
-                field: origin.field.clone(),
-                request: origin.request.clone(),
-                request_id: request_text(origin.request_id),
-                at_millis: nonzero(origin.at_ms),
-                slot: origin_slot(origin),
-                object: None,
-                object_from: None,
+            .map(|(index, origin)| {
+                let object = place.origin_objects.get(index).cloned().flatten();
+                TraceSource {
+                    field: origin.field.clone(),
+                    request: origin.request.clone(),
+                    request_id: request_text(origin.request_id),
+                    at_millis: nonzero(origin.at_ms),
+                    slot: origin_slot(origin),
+                    object_from: object.as_ref().map(|_| ObjectFrom::Map),
+                    object,
+                }
             })
             .collect(),
-        slot: Some(slot),
-        object: None,
-        object_from: None,
+        slot: Some(place.slot),
+        object_from: place.object.as_ref().map(|_| ObjectFrom::Map),
+        object: place.object,
     }
 }
 

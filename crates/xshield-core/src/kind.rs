@@ -165,6 +165,27 @@ pub fn affinity(shown: Shown<'_>, used: Used<'_>, rules: &Rules) -> bool {
         })
 }
 
+/// Whether the request names the kind `kind` for the value, by the same words
+/// [`affinity`] compares. The object map uses it where it gives the origin's
+/// position a kind and the request's own kind comes from its name.
+#[must_use]
+pub fn names_kind(used: Used<'_>, rules: &Rules, kind: &str) -> bool {
+    wanted_kinds(used, rules)
+        .iter()
+        .any(|word| related(word, kind, &rules.synonyms))
+}
+
+/// Whether the origin shows the value as the kind `kind` by its name: the
+/// declared kind of its field, or the words of the field's own name. The object
+/// map uses it where it gives the request's position a kind and the origin's
+/// own name has to carry that kind.
+#[must_use]
+pub fn shows_kind(shown: Shown<'_>, rules: &Rules, kind: &str) -> bool {
+    shown_kinds(shown, rules)
+        .iter()
+        .any(|word| related(kind, word, &rules.synonyms))
+}
+
 /// Whether a declaration names the field the origin showed the value under, so
 /// that the field counts as an identifier whatever its name looks like.
 #[must_use]
@@ -486,5 +507,30 @@ mod tests {
             segment: None,
         };
         assert!(affinity(search, basket_product, &rules));
+    }
+
+    #[test]
+    fn a_kind_the_map_gives_is_matched_by_the_names_on_the_other_side() {
+        let used = Used {
+            value: "5",
+            path: "/doctor/5",
+            key: None,
+            segment: Some(1),
+        };
+        assert!(names_kind(used, &Rules::default(), "doctor"));
+        assert!(!names_kind(used, &Rules::default(), "document"));
+        let shown = Shown {
+            field: "doctor_id",
+            request: "GET /api/appointments",
+        };
+        assert!(shows_kind(shown, &Rules::default(), "doctor"));
+        assert!(!shows_kind(shown, &Rules::default(), "document"));
+        // A bare `id` takes the kind of the request that returned it.
+        let bare = Shown {
+            field: "id",
+            request: "GET /api/documents",
+        };
+        assert!(shows_kind(bare, &Rules::default(), "document"));
+        assert!(!shows_kind(bare, &Rules::default(), "doctor"));
     }
 }

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use xshield_core::context::{
-    Conclusion, ContextKind, DecisionPath, DecisionRecord, FieldCount, JevRecord, Mode,
+    Conclusion, ContextKind, DecisionPath, DecisionRecord, FieldCount, JevRecord, Mode, ObjectMap,
     ObservationSummary, Observed, OnJevUnavailable, Outcome, Resolved, SessionCredential,
     ShapeField, SiteSpec, Skip, Trace, TraceSession,
 };
@@ -18,11 +18,11 @@ use crate::context::{
     Source, label, request_number, request_text,
 };
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX};
-use crate::slots::{request_slot, route_template};
+use crate::slots::{origin_object, request_slot, route_template};
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
 };
-use crate::trace::{entry_trace, recent_trace, redacted_query, value_entry};
+use crate::trace::{Place, entry_trace, recent_trace, redacted_query, value_entry};
 use crate::values::{
     ExtractedRequest, ResponseValue, extract_request, extract_response_facts, json_unescape,
     path_segment, percent_decode,
@@ -197,6 +197,8 @@ struct Tuning<'a> {
     /// The site's kind rules: synonym pairs and declared field kinds.
     rules: Rules,
     secret_words: &'a [String],
+    /// The site's object map: the kind of object each confirmed position carries.
+    objects: &'a ObjectMap,
 }
 
 impl<'a> Tuning<'a> {
@@ -210,6 +212,7 @@ impl<'a> Tuning<'a> {
             cache_ms: u64::from(advanced.allow_cache_minutes_or(CACHE_MINUTES)) * 60_000,
             rules: Rules::of(advanced),
             secret_words: advanced.secret_fields(),
+            objects: site.objects(),
         }
     }
 }
@@ -296,8 +299,8 @@ impl<J: JevPort> Judge<J> {
             request.body,
         );
         settle_values(&mut extracted, resolved);
-        let cache_key = self.cache_key(request, resolved, &extracted.values);
         let tuning = Tuning::new(site, self.jev.default_timeout());
+        let cache_key = self.cache_key(request, resolved, &extracted.values, tuning.objects);
         record.session = session_id.map(|id| label(&id)).unwrap_or_default();
         record.context = match (session_id, entry) {
             (Some(_), _) => Some(ContextKind::Session),
@@ -400,12 +403,22 @@ impl<J: JevPort> Judge<J> {
             let ranked = seen
                 .map(|seen| seen.ranked(used, &tuning.rules))
                 .unwrap_or_default();
-            let verified =
-                !value.inert && seen.is_some_and(|seen| seen.is_specific(used, &tuning.rules));
+            let slot = request_slot(request.method, request.path, &value.at);
+            let request_object = tuning.objects.class_of(&slot);
+            let verified = !value.inert
+                && seen.is_some_and(|seen| {
+                    seen.is_shown_as(used, &tuning.rules, request_object, |origin| {
+                        origin_object(tuning.objects, origin)
+                    })
+                });
             if !verified {
                 // An origin that echoes this value would otherwise teach it.
                 sent.push(self.key.mac("value", value.value.as_bytes()));
             }
+            let origin_objects: Vec<Option<String>> = ranked
+                .iter()
+                .map(|origin| origin_object(tuning.objects, origin).map(str::to_owned))
+                .collect();
             if !value.inert {
                 all_known &= verified;
                 values.push(StateValue {
@@ -415,10 +428,20 @@ impl<J: JevPort> Judge<J> {
                     key: value.key.clone(),
                     seen_as: ranked
                         .iter()
-                        .map(|origin| format!("{} @ {}", origin.field, origin.request))
+                        .zip(&origin_objects)
+                        .map(|(origin, object)| match object {
+                            Some(kind) => format!("{} @ {} [{kind}]", origin.field, origin.request),
+                            None => format!("{} @ {}", origin.field, origin.request),
+                        })
                         .collect(),
+                    object: request_object.map(str::to_owned),
                 });
             }
+            let place = Place {
+                slot,
+                object: request_object.map(str::to_owned),
+                origin_objects,
+            };
             shown.push(value_entry(
                 value,
                 seen.is_some(),
@@ -426,7 +449,7 @@ impl<J: JevPort> Judge<J> {
                 &ranked,
                 request.credential,
                 tuning.secret_words,
-                request_slot(request.method, request.path, &value.at),
+                place,
             ));
         }
         trace.values = shown;
@@ -592,12 +615,15 @@ impl<J: JevPort> Judge<J> {
 
     /// The allow cache key: the method, the logical path and the request values.
     /// The interface name is part of the logical path, so two methods that take
-    /// the same values never share an allow.
+    /// the same values never share an allow. The key also names the site's object
+    /// map: a map change can turn the same request into a different judgement, so
+    /// an allow made under the old map must not be reused under the new one.
     fn cache_key(
         &self,
         request: &RequestFacts<'_>,
         resolved: &Resolved,
         values: &[crate::values::RequestValue],
+        objects: &ObjectMap,
     ) -> Digest16 {
         let mut parts: Vec<String> = values
             .iter()
@@ -610,7 +636,10 @@ impl<J: JevPort> Judge<J> {
             resolved.logical_path(),
             parts.join("\0")
         );
-        self.key.mac("cache", text.as_bytes())
+        let map = serde_json::to_string(objects).unwrap_or_default();
+        let map = self.key.mac("objects", map.as_bytes());
+        self.key
+            .mac("cache", &[map.as_slice(), text.as_bytes()].concat())
     }
 
     /// Remembers what the origin returned (docs/01 section 1.4 step 8) and
@@ -1297,8 +1326,8 @@ mod tests {
         let request = get("/api/rpc", Some("id=7"), Some("alice"), 1_000);
         // Two interfaces at one URL path, taking the same values, never share an allow.
         assert_ne!(
-            judge.cache_key(&request, &login, &[]),
-            judge.cache_key(&request, &other, &[])
+            judge.cache_key(&request, &login, &[], site.objects()),
+            judge.cache_key(&request, &other, &[], site.objects())
         );
     }
 
@@ -2195,6 +2224,30 @@ mod tests {
             .await;
         assert!(!verdict.forward);
         assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+    }
+
+    #[tokio::test]
+    async fn an_allow_made_under_the_old_object_map_is_not_reused_under_a_new_one() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let query = Some("q=%E6%82%A3%E8%80%85");
+        let first = judge
+            .judge(
+                &site(r#","mode":"enforce""#),
+                &get("/api/search", query, Some("alice"), 0),
+            )
+            .await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        let mapped = site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"doctor","name":"医生"}],
+                "slots":[{"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"}]}"#,
+        );
+        let second = judge
+            .judge(&mapped, &get("/api/search", query, Some("alice"), 1_000))
+            .await;
+        assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
     }
 
     #[tokio::test]
@@ -3161,5 +3214,126 @@ mod tests {
             Some("GET /api/patients items[].id")
         );
         assert_eq!(value.object, None);
+    }
+
+    /// A site whose object map says what the positions of the kind tests carry:
+    /// appointments and `/doctor/{id}` are doctors, `/api/docs` and `/docs/{id}`
+    /// and record attachments are documents.
+    fn kinds_site() -> SiteSpec {
+        site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"doctor","name":"医生"},{"id":"document","name":"文档"}],
+                "slots":[
+                    {"key":"GET /api/appointments [].doc_id","class":"doctor","source":"rule"},
+                    {"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"},
+                    {"key":"GET /api/docs [].id","class":"document","source":"admin"},
+                    {"key":"GET /docs/{id} path[1]","class":"document","source":"admin"},
+                    {"key":"GET /api/records/{id} attachments[].doc_id","class":"document","source":"rule"}
+                ]}"#,
+        )
+    }
+
+    /// A successful response of `path` to alice's session.
+    fn shown_by(path: &'static str, body: &'static [u8]) -> Observation<'static> {
+        Observation {
+            path,
+            body,
+            ..list_response("alice", 0)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_doctor_shown_as_a_doctor_is_allowed_without_jev_and_says_so() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = kinds_site();
+        judge.observe(&site, &shown_by("/api/appointments", br#"[{"doc_id":2}]"#));
+        let verdict = judge
+            .judge(&site, &get("/doctor/2", None, Some("alice"), 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        let value = &verdict.record.trace.values[1];
+        assert_eq!(value.slot.as_deref(), Some("GET /doctor/{id} path[1]"));
+        assert_eq!(value.object.as_deref(), Some("doctor"));
+        assert_eq!(
+            value.object_from,
+            Some(xshield_core::context::ObjectFrom::Map)
+        );
+        assert_eq!(value.sources[0].object.as_deref(), Some("doctor"));
+    }
+
+    #[tokio::test]
+    async fn a_document_id_is_not_a_doctor_and_jev_is_told_both_kinds() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = kinds_site();
+        judge.observe(&site, &shown_by("/api/docs", br#"[{"id":5}]"#));
+        let verdict = judge
+            .judge(&site, &get("/doctor/5", None, Some("alice"), 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 1);
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "5")
+            .unwrap();
+        assert!(!value.verified);
+        let sent = fake.sent.lock().unwrap();
+        assert!(sent[0].contains(r#""object":"doctor""#));
+        assert!(sent[0].contains("id @ GET /api/docs [document]"));
+    }
+
+    #[tokio::test]
+    async fn a_doctor_id_is_not_a_document_on_a_document_route() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = kinds_site();
+        judge.observe(&site, &shown_by("/api/appointments", br#"[{"doc_id":2}]"#));
+        let verdict = judge
+            .judge(&site, &get("/docs/2", None, Some("alice"), 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_document_attachment_is_judged_by_its_own_kind() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = kinds_site();
+        judge.observe(
+            &site,
+            &shown_by("/api/records/7", br#"{"attachments":[{"doc_id":5}]}"#),
+        );
+        // Named as a doctor: the attachment is a document, so Jev decides.
+        let as_doctor = judge
+            .judge(&site, &get("/doctor/5", None, Some("alice"), 1_000))
+            .await;
+        assert_eq!(as_doctor.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 1);
+        // Named as a document: the same value is allowed without Jev.
+        let as_document = judge
+            .judge(&site, &get("/docs/5", None, Some("alice"), 2_000))
+            .await;
+        assert_eq!(as_document.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_mapped_request_still_matches_an_unmapped_position_by_name() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = kinds_site();
+        // `/api/doctors` is not in the map, so its id is judged by its name.
+        judge.observe(&site, &shown_by("/api/doctors", br#"[{"id":3}]"#));
+        let verdict = judge
+            .judge(&site, &get("/doctor/3", None, Some("alice"), 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
     }
 }

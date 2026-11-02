@@ -1,5 +1,5 @@
 //! Positions: where a value sits in a request or in a response, keyed by the
-//! route it travels on (docs/object-map-design.md section 1). A position is
+//! route it travels on (the object-map design note, section 1). A position is
 //! `METHOD route-template location`, for example `GET /doctor/{id} path[1]` for
 //! a request value and `GET /api/appointments [].doc_id` for a response field.
 //!
@@ -8,6 +8,7 @@
 //! only place a template is made for positions, so a later change to route
 //! templates changes every position in one spot.
 
+use xshield_core::context::ObjectMap;
 use xshield_core::path_template::normalize;
 
 use crate::context::Origin;
@@ -38,6 +39,12 @@ pub fn response_slot(method: &str, path: &str, at: &str) -> Option<String> {
 pub fn origin_slot(origin: &Origin) -> Option<String> {
     let (method, path) = origin.request.split_once(' ')?;
     response_slot(method, path, &origin.at)
+}
+
+/// The kind of object the map gives the position an origin was seen at.
+#[must_use]
+pub fn origin_object<'a>(objects: &'a ObjectMap, origin: &Origin) -> Option<&'a str> {
+    objects.class_of(&origin_slot(origin)?)
 }
 
 #[cfg(test)]
