@@ -4,9 +4,10 @@
 
 import { Link } from "@tanstack/react-router";
 import { qs } from "../../api/client.ts";
-import { useRequestCounts } from "../../api/queries.ts";
+import { useInsights, useRequestCounts } from "../../api/queries.ts";
 import type { RequestDetail, Trace, TraceSource } from "../../api/types.ts";
 import { keepScope, useNowBucket } from "../../app/scope.ts";
+import { classMismatch } from "../../lib/api-name.ts";
 import { serializeFilter } from "../../lib/filter-dsl.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { isRequestId, isSessionLabel, isSiteName } from "../../lib/ids.ts";
@@ -17,7 +18,7 @@ import { SafeText } from "../../ui/SafeText.tsx";
 import type { QuickTarget } from "../sites/QuickRuleDialog.tsx";
 import { neighborSearch, timelineSearch } from "./DetailHead.tsx";
 import { DAY_MS, sensitiveFieldOf } from "./detail-model.ts";
-import { CopyAction, LinkedRequest } from "./parts.tsx";
+import { CopyAction, HrefLink, LinkedRequest } from "./parts.tsx";
 
 type Props = {
   detail: RequestDetail;
@@ -34,6 +35,25 @@ export function RelatedRail({ detail, requestId, onOperation }: Props) {
   const cache = trace.cache_source ?? null;
   const issued = trace.response?.issued_session ?? null;
   const operations = site === null ? [] : operationsOf(detail, requestId, site);
+  const insights = useInsights(site);
+  const classed = classSource(trace);
+  // Declaring the field's class (design 4.2): the objects tab, with the field and the path it was seen on.
+  const declareHref =
+    site !== null && classed !== null
+      ? `/sites/${site}?tab=objects&declare=${encodeURIComponent(classed.field)}&in=${encodeURIComponent(pathOf(classed.request))}`
+      : null;
+  // A name rule for this path: when no rule names it, or a suggestion of the window points at it.
+  const candidate = (insights.data?.suggestions ?? []).some(
+    (item) =>
+      item.kind === "route_rule_candidate" &&
+      item.path !== null &&
+      summary.path.startsWith(item.path),
+  );
+  const unnamed = summary.api === null || "unknown" in summary.api;
+  const ruleHref =
+    site !== null && (unnamed || candidate)
+      ? `/sites/${site}?tab=config&route=${encodeURIComponent(summary.path)}`
+      : null;
 
   return (
     <div className="stack rd-related">
@@ -102,7 +122,7 @@ export function RelatedRail({ detail, requestId, onOperation }: Props) {
         </Card>
       ) : null}
 
-      <SamePathCard path={summary.path} site={site} />
+      <SamePathCard path={summary.logical_path} site={site} />
 
       <Card title="操作">
         <div className="stack rd-ops">
@@ -116,6 +136,8 @@ export function RelatedRail({ detail, requestId, onOperation }: Props) {
               {operation.label}
             </button>
           ))}
+          {declareHref !== null ? <HrefLink href={declareHref}>把这个字段归类…</HrefLink> : null}
+          {ruleHref !== null ? <HrefLink href={ruleHref}>为这条路径写接口名规则…</HrefLink> : null}
           {site !== null ? (
             <Link to="/sites/$name" params={{ name: site }} search={{ tab: "config" }}>
               在配置中打开
@@ -234,28 +256,51 @@ function SamePathCard({ path, site }: { path: string; site: string | null }) {
   );
 }
 
+/**
+ * The first unverified value whose origin showed it as another class than the position it is used at:
+ * the field to declare (design 4.2). Null when no value has such a mismatch.
+ */
+function classSource(trace: Trace): TraceSource | null {
+  for (const value of trace.values ?? []) {
+    if (value.inert || value.verified) continue;
+    const source = value.sources.find((item) => classMismatch(value.object, item));
+    if (source !== undefined) return source;
+  }
+  return null;
+}
+
+/** The path of a source request, which a declaration's `in` takes: `GET /rest/basket/1` reads `/rest/basket/1`. */
+function pathOf(request: string): string {
+  const space = request.indexOf(" ");
+  return space < 0 ? request : request.slice(space + 1);
+}
+
 type Operation = { key: string; label: string; target: QuickTarget };
 
 /** The operations that fit this record, as in docs/06 6.4.4; each opens the quick rule dialog. */
 function operationsOf(detail: RequestDetail, requestId: string, site: string): Operation[] {
   const { summary, trace, jev } = detail;
   const operations: Operation[] = [];
-  if (summary.session === "") {
+  // An unknown interface is never an entry and never bypassed, so no rule is offered for it (design 4.2).
+  const unknownApi = summary.api !== null && "unknown" in summary.api;
+  // Rules are keyed by the logical path, the path the judgement uses (docs/06 6.4.3).
+  if (!unknownApi && summary.session === "") {
     operations.push({
       key: "entry",
       label: "登记为入口…",
-      target: { kind: "entry", site, path: summary.path, requestId },
+      target: { kind: "entry", site, path: summary.logical_path, requestId },
     });
   }
   if (
-    summary.status === 413 ||
-    summary.decision_path === "body_not_inspectable" ||
-    isStaticAsset(summary.path)
+    !unknownApi &&
+    (summary.status === 413 ||
+      summary.decision_path === "body_not_inspectable" ||
+      isStaticAsset(summary.path))
   ) {
     operations.push({
       key: "bypass",
       label: "加入绕过…",
-      target: { kind: "bypass", site, path: summary.path, requestId },
+      target: { kind: "bypass", site, path: summary.logical_path, requestId },
     });
   }
   if (jev?.failure === "JEV_TIMEOUT") {

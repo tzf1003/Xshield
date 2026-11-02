@@ -7,10 +7,11 @@ import { Dropdown } from "antd";
 import { type RefObject, useRef } from "react";
 import { api } from "../../api/client.ts";
 import { keys } from "../../api/queries.ts";
-import type { RequestRow } from "../../api/types.ts";
+import type { ApiInfo, RequestRow } from "../../api/types.ts";
+import { apiTitle, unknownTitle } from "../../lib/api-name.ts";
 import { fmtClock, fmtLocalDateTime, fmtMs, fmtUtc, pct } from "../../lib/format.ts";
 import { CONFIDENCE_LINE } from "../jev/jev-model.ts";
-import { FAILURE_INFO } from "../../lib/vocab.ts";
+import { API_LABEL, FAILURE_INFO } from "../../lib/vocab.ts";
 import type { JevSummary } from "../../api/types.ts";
 import { DecisionTag, OutcomeTag } from "../../ui/Badges.tsx";
 import { CopyButton, RequestLink } from "../../ui/RequestRef.tsx";
@@ -166,6 +167,7 @@ export function RequestTable({
                       title={row.query ? `${row.path}?${row.query}` : row.path}
                     >
                       <SafeText text={row.path} />
+                      <RuleName api={row.api} />
                       {row.query ? <span className="query">{`?${row.query}`}</span> : null}
                     </span>
                   </span>
@@ -274,6 +276,23 @@ function JevColumn({ jev }: { jev: JevSummary | null }) {
           低
         </span>
       ) : null}
+    </span>
+  );
+}
+
+/**
+ * The logical path's second part: the interface name a rule read, or 未知接口 (design 4.1). The hover
+ * says where the name came from, or why it could not be read.
+ */
+function RuleName({ api }: { api: ApiInfo | null }) {
+  if (api === null) return null;
+  if ("unknown" in api) {
+    return <span className="rq-via" title={unknownTitle(api)}>{` › ${API_LABEL.unknown}`}</span>;
+  }
+  return (
+    <span className="rq-via" title={apiTitle(api)}>
+      {" › "}
+      <SafeText text={api.name} />
     </span>
   );
 }

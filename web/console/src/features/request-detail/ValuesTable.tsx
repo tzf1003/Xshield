@@ -1,7 +1,8 @@
 // The request values tab (docs/06 6.4.4): every value the trace recorded, with its location, field,
-// kind, whether the gateway has seen and verified it, its sources, and its number in Jev's request.
-// Inert values fold away; the values that still need checking carry an amber bar. The value that a
-// link asked for is scrolled to and highlighted.
+// kind, object class, whether the gateway has seen and verified it, its sources, and its number in
+// Jev's request. Inert values fold away, and so do the values that are the interface name; the values
+// that still need checking carry an amber bar. A value whose origin showed another class says so on the
+// line under it (design 4.2). The value that a link asked for is scrolled to and highlighted.
 
 import { Switch } from "antd";
 import { useEffect, useRef, useState } from "react";
@@ -9,17 +10,25 @@ import type { RequestDetail, TraceValue } from "../../api/types.ts";
 import { useSite } from "../../api/queries.ts";
 import { useSetSearch } from "../../app/scope.ts";
 import { alignValues } from "../../lib/align.ts";
+import { apiValueLocations, classMismatch, isNameValue } from "../../lib/api-name.ts";
 import { countHits } from "../../lib/highlight.ts";
 import { isSiteName } from "../../lib/ids.ts";
-import { VALUE_KIND_LABEL } from "../../lib/vocab.ts";
+import { API_LABEL, VALUE_KIND_LABEL } from "../../lib/vocab.ts";
 import { Empty, Notice } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
-import { SourceChip } from "../../ui/SourceChip.tsx";
 import { REDACTED, secretMatchOf } from "./detail-model.ts";
-import { keyed, ValueText, useFlash } from "./parts.tsx";
+import { ClassTag, keyed, SourceWithClass, useFlash, ValueText } from "./parts.tsx";
 
 /** At most this many source tags per value; the rest are counted (docs/06 6.4.4). */
 const SOURCE_TAGS = 3;
+
+/** A value that still needs a check: its own flags, or, for a composite value, one of its parts. */
+function unverified(value: TraceValue): boolean {
+  if (value.parts && value.parts.length > 0) {
+    return value.parts.some((part) => !part.inert && !part.verified);
+  }
+  return !value.verified;
+}
 
 export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number | undefined }) {
   const { summary, trace, sources } = detail;
@@ -49,13 +58,19 @@ export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number 
     );
   }
 
+  // The interface name is shown as a name and folded with the inert values: it is not checked.
+  const names = apiValueLocations(summary.api);
+  const isName = (value: TraceValue) => isNameValue(value, names);
+  const folded = (value: TraceValue) => value.inert || isName(value);
+
   const jevNumbers = new Map<number, number>();
   for (const item of alignValues(values)) jevNumbers.set(item.traceIndex, item.jevIndex);
-  const inertCount = values.filter((value) => value.inert).length;
+  const inertCount = values.filter(folded).length;
+  const nameCount = values.filter(isName).length;
   const rows = values
     .map((value, traceIndex) => ({ value, traceIndex }))
     .filter(({ value }) =>
-      onlyNeeds ? !value.inert && !value.verified : !value.inert || showInert,
+      onlyNeeds ? !folded(value) && unverified(value) : !folded(value) || showInert,
     );
   const term = query.trim();
   const hits =
@@ -106,6 +121,7 @@ export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number 
               <th scope="col">字段</th>
               <th scope="col">值</th>
               <th scope="col">类型</th>
+              <th scope="col">{API_LABEL.object}</th>
               <th scope="col">已见</th>
               <th scope="col">已核验</th>
               <th scope="col">来源</th>
@@ -120,6 +136,7 @@ export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number 
                 traceIndex={traceIndex}
                 jevNumber={jevNumbers.get(traceIndex) ?? null}
                 summaries={sources}
+                names={names}
                 secret={value.value === REDACTED ? secretTitle(value, extraWords) : null}
                 query={term}
                 highlighted={flashing && hl === traceIndex}
@@ -138,7 +155,7 @@ export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number 
             aria-expanded={showInert}
             onClick={() => setShowInert((open) => !open)}
           >
-            {`另有 ${inertCount} 个惰性值（路由词、分页参数）· ${showInert ? "收起" : "显示"}`}
+            {`另有 ${inertCount} 个惰性值（路由词、分页参数${nameCount > 0 ? `、${API_LABEL.name}` : ""}）· ${showInert ? "收起" : "显示"}`}
           </button>
         </div>
       ) : null}
@@ -152,90 +169,146 @@ function secretTitle(value: TraceValue, extra: readonly string[]): string {
   return `字段名含 ${match.word}（${match.builtin ? "内置" : "本站点追加"}）`;
 }
 
+/** The class of a value and where the object map or the field name gave it (design 4.2). */
+function ClassCell({ value }: { value: TraceValue }) {
+  if (value.object === undefined) return <span className="dim">—</span>;
+  return <ClassTag object={value.object} from={value.object_from === "map" ? "map" : "name"} />;
+}
+
 function ValueRow({
   value,
   traceIndex,
   jevNumber,
   summaries,
+  names,
   secret,
   query,
   highlighted,
   onJev,
+  nested = false,
 }: {
   value: TraceValue;
   traceIndex: number;
   jevNumber: number | null;
   summaries: RequestDetail["sources"];
+  names: readonly string[];
   secret: string | null;
   query: string;
   highlighted: boolean;
   onJev: () => void;
+  /** A part of a composite value: its own row under the value, with no Jev number of its own. */
+  nested?: boolean;
 }) {
-  const needs = !value.inert && !value.verified;
+  const name = isNameValue(value, names);
+  const parts = value.parts ?? [];
+  const composite = parts.length > 0;
+  const needs = !value.inert && !name && !composite && !value.verified;
   const classes = ["rd-row"];
   if (needs) classes.push("rd-needs");
-  if (value.inert) classes.push("rd-inert");
+  if (value.inert || name) classes.push("rd-inert");
   if (highlighted) classes.push("rd-flash");
+  if (nested) classes.push("rd-part");
+  const checkedMark = (done: boolean) => (name || composite ? "–" : done ? "✓" : "–");
+  const mismatch = value.sources.find((source) => classMismatch(value.object, source));
   return (
-    <tr className={classes.join(" ")} data-trace-index={traceIndex}>
-      <td className="mono rd-clip" title={value.at}>
-        <SafeText text={value.at} query={query} />
-      </td>
-      <td className="mono rd-clip">
-        {value.key === null ? (
-          <span className="dim">—</span>
-        ) : (
-          <SafeText text={value.key} query={query} />
-        )}
-      </td>
-      <td className="rd-valcell">
-        <span className="mono rd-clip">
-          <ValueText
-            value={value.value}
-            len={value.len ?? null}
-            clipped={value.clipped === true}
-            secret={secret}
-            query={query}
-          />
-        </span>
-      </td>
-      <td>
-        {VALUE_KIND_LABEL[value.kind]}
-        {value.inert ? " · 惰性" : ""}
-      </td>
-      <td className="tnum">{value.seen ? "✓" : "–"}</td>
-      <td className="tnum">{value.verified ? "✓" : "–"}</td>
-      <td>
-        {value.sources.length > 0 ? (
-          <span className="rd-srcs">
-            {keyed(
-              value.sources.slice(0, SOURCE_TAGS),
-              (source) => `${source.field}|${source.request}|${source.request_id ?? ""}`,
-            ).map(({ key, item }) => (
-              <SourceChip key={key} source={item} sources={summaries} copyable />
-            ))}
-            {value.sources.length > SOURCE_TAGS ? (
-              <span className="small dim">另 {value.sources.length - SOURCE_TAGS} 个</span>
-            ) : null}
-          </span>
-        ) : (
-          <span className="dim">—</span>
-        )}
-      </td>
-      <td className="tnum">
-        {jevNumber === null ? (
-          <span className="dim">–</span>
-        ) : (
-          <button
-            type="button"
-            className="linkbtn"
-            onClick={onJev}
-            title="在 Jev 上下文中查看这个值"
-          >
-            #{jevNumber}
-          </button>
-        )}
-      </td>
-    </tr>
+    <>
+      <tr className={classes.join(" ")} data-trace-index={nested ? undefined : traceIndex}>
+        <td className="mono rd-clip" title={value.at}>
+          <SafeText text={value.at} query={query} />
+        </td>
+        <td className="mono rd-clip">
+          {value.key === null ? (
+            <span className="dim">—</span>
+          ) : (
+            <SafeText text={value.key} query={query} />
+          )}
+        </td>
+        <td className="rd-valcell">
+          {composite ? (
+            <span className="small dim">{`复合值 · ${value.format ?? "按段拆开核验"}`}</span>
+          ) : (
+            <span className="mono rd-clip">
+              <ValueText
+                value={value.value}
+                len={value.len ?? null}
+                clipped={value.clipped === true}
+                secret={secret}
+                query={query}
+              />
+            </span>
+          )}
+        </td>
+        <td>
+          {name ? API_LABEL.name : VALUE_KIND_LABEL[value.kind]}
+          {value.inert && !name ? " · 惰性" : ""}
+        </td>
+        <td>
+          <ClassCell value={value} />
+        </td>
+        <td className="tnum">{checkedMark(value.seen)}</td>
+        <td className="tnum">{checkedMark(value.verified)}</td>
+        <td>
+          {value.sources.length > 0 ? (
+            <span className="rd-srcs">
+              {keyed(
+                value.sources.slice(0, SOURCE_TAGS),
+                (source) => `${source.field}|${source.request}|${source.request_id ?? ""}`,
+              ).map(({ key, item }) => (
+                <SourceWithClass
+                  key={key}
+                  source={item}
+                  summaries={summaries}
+                  mismatch={classMismatch(value.object, item)}
+                />
+              ))}
+              {value.sources.length > SOURCE_TAGS ? (
+                <span className="small dim">另 {value.sources.length - SOURCE_TAGS} 个</span>
+              ) : null}
+            </span>
+          ) : (
+            <span className="dim">—</span>
+          )}
+        </td>
+        <td className="tnum">
+          {jevNumber === null || name || composite ? (
+            <span className="dim">–</span>
+          ) : (
+            <button
+              type="button"
+              className="linkbtn"
+              onClick={onJev}
+              title="在 Jev 上下文中查看这个值"
+            >
+              #{jevNumber}
+            </button>
+          )}
+        </td>
+      </tr>
+      {mismatch ? (
+        <tr className="rd-mismatch">
+          <td colSpan={9}>
+            <span className="rd-mismatch-text hint-warn">
+              <span aria-hidden="true">!</span>
+              {` ${API_LABEL.mismatch}：${mismatch.object ?? ""} ≠ ${value.object ?? ""}`}
+            </span>
+          </td>
+        </tr>
+      ) : null}
+      {keyed(parts, (part) => part.at).map(({ key, item }) => (
+        <ValueRow
+          key={key}
+          value={item}
+          traceIndex={traceIndex}
+          jevNumber={null}
+          summaries={summaries}
+          names={names}
+          secret={null}
+          query={query}
+          highlighted={false}
+          onJev={onJev}
+          nested
+        />
+      ))}
+    </>
   );
 }

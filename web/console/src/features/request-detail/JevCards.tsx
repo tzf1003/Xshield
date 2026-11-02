@@ -5,11 +5,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { RequestId, SourceSummary, Trace } from "../../api/types.ts";
+import { classMismatch } from "../../lib/api-name.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { VALUE_KIND_LABEL } from "../../lib/vocab.ts";
 import { Card, Empty } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
-import { SourceChip } from "../../ui/SourceChip.tsx";
 import { SessionSummary } from "./SessionPanel.tsx";
 import {
   type SentRow,
@@ -19,7 +19,15 @@ import {
   newestFirst,
   readingOf,
 } from "./detail-model.ts";
-import { CopyAction, HintMark, keyed, useFlash, ValueText } from "./parts.tsx";
+import {
+  ClassTag,
+  CopyAction,
+  HintMark,
+  keyed,
+  SourceWithClass,
+  useFlash,
+  ValueText,
+} from "./parts.tsx";
 
 const FOLD_ABOVE = 8;
 
@@ -134,6 +142,8 @@ function ValueCard({
   if (needsEvidence(row)) classes.push("rd-attn");
   if (highlighted) classes.push("rd-flash");
   const position = row.traceIndex !== null ? `trace.values[${row.traceIndex}] · ${row.at}` : row.at;
+  // A source that showed the value as another class than the position it is used at (design 4.2).
+  const clash = row.sources.find((source) => classMismatch(row.object, source));
 
   return (
     <article
@@ -147,6 +157,7 @@ function ValueCard({
           <SafeText text={row.at} query={query} />
         </span>
         <span className="small dim">{VALUE_KIND_LABEL[row.kind]}</span>
+        {row.object === null ? null : <ClassTag object={row.object} from={row.objectFrom} />}
         <button
           type="button"
           className="linkbtn small"
@@ -165,13 +176,23 @@ function ValueCard({
           <div className="small">
             <HintMark reading={reading} />
           </div>
+          {clash === undefined ? null : (
+            <div className="small hint-warn">
+              {`值只以 ${clash.object ?? ""} 出现过，现在用作 ${row.object ?? ""}`}
+            </div>
+          )}
           {row.sources.length > 0 ? (
             <div className="rd-srcs">
               {keyed(
                 row.sources,
                 (source) => `${source.field}|${source.request}|${source.request_id ?? ""}`,
               ).map(({ key, item }) => (
-                <SourceChip key={key} source={item} sources={summaries} copyable />
+                <SourceWithClass
+                  key={key}
+                  source={item}
+                  summaries={summaries}
+                  mismatch={classMismatch(row.object, item)}
+                />
               ))}
             </div>
           ) : null}

@@ -2,12 +2,15 @@
 // a copy button for long text, a value's text with its redaction and clipping notes, the reading mark
 // of a value, a gauge bar, and the short highlight that marks a value someone asked for.
 
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
+import type { RequestDetail, TraceSource } from "../../api/types.ts";
 import { keepScope } from "../../app/scope.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { isRequestId } from "../../lib/ids.ts";
+import { API_LABEL } from "../../lib/vocab.ts";
 import { SafeText } from "../../ui/SafeText.tsx";
+import { SourceChip } from "../../ui/SourceChip.tsx";
 import { REDACTED, type Reading } from "./detail-model.ts";
 
 /** A request as a link to its record; without a valid id the text stays plain (docs/07 7.10.6). */
@@ -31,6 +34,26 @@ export function LinkedRequest({
     >
       {children}
     </Link>
+  );
+}
+
+/**
+ * A link to a page whose search keys the router does not type (the site's objects and route keys, design
+ * 7). It keeps its real href, so it can be opened in a new tab, and a plain click moves inside the console.
+ */
+export function HrefLink({ href, children }: { href: string; children: ReactNode }) {
+  const navigate = useNavigate();
+  return (
+    <a
+      href={href}
+      onClick={(event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        void navigate({ href });
+      }}
+    >
+      {children}
+    </a>
   );
 }
 
@@ -92,6 +115,51 @@ export function ValueText({
         <span className="small dim">{` 已截断${len !== null && len !== undefined ? ` · 原长 ${fmtInt(len)}` : ""}`}</span>
       ) : null}
     </>
+  );
+}
+
+/** Where a class came from: the confirmed object map, or a name read from the field (design 4.2). */
+export type ClassFrom = "map" | "name" | null;
+
+/**
+ * A class id with where it came from: 对象表 when the map confirmed it, 名字推断 in grey when it was read
+ * from the field name, and nothing when the origin is not known (a value that Jev received alone).
+ */
+export function ClassTag({ object, from }: { object: string; from: ClassFrom }) {
+  return (
+    <span className="rd-cls">
+      <SafeText text={object} />
+      {from === null ? null : (
+        <span className={from === "name" ? "small rd-cls-inferred" : "small"}>
+          {`（${from === "map" ? API_LABEL.objectMap : API_LABEL.inferred}）`}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * A source chip with the class of the position it was seen at after it (design 4.2). The chip itself is
+ * the shared SourceChip; the class is a sibling, so the chip keeps its own text.
+ */
+export function SourceWithClass({
+  source,
+  summaries,
+  mismatch = false,
+}: {
+  source: TraceSource;
+  summaries: RequestDetail["sources"];
+  mismatch?: boolean;
+}) {
+  return (
+    <span className="rd-srcwrap">
+      <SourceChip source={source} sources={summaries} copyable />
+      {source.object === undefined ? null : (
+        <span className={mismatch ? "small rd-srccls rd-srccls-mismatch" : "small rd-srccls"}>
+          {`· ${source.object}`}
+        </span>
+      )}
+    </span>
   );
 }
 

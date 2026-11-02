@@ -8,6 +8,8 @@
     "method": "POST",
     "host": "juice.example.com",
     "path": "/rest/user/login",
+    "logical_path": "/rest/user/login",
+    "api": null,
     "query": null,
     "status": 200,
     "decision_path": "jev_allow",

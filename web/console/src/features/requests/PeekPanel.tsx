@@ -5,6 +5,7 @@ import { Link } from "@tanstack/react-router";
 import { Button } from "antd";
 import { useRequestDetail } from "../../api/queries.ts";
 import { keepScope } from "../../app/scope.ts";
+import { apiValueLocations, isNameValue } from "../../lib/api-name.ts";
 import { explainRecord } from "../../lib/explain.ts";
 import { fmtElapsed, fmtLocalDateTime, fmtMs } from "../../lib/format.ts";
 import { isRequestId, shortSession } from "../../lib/ids.ts";
@@ -42,7 +43,11 @@ export function PeekPanel({ requestId, onClose, onOpen }: Props) {
   }
 
   const { summary, trace, jev, sources } = detail.data;
-  const toVerify = (trace.values ?? []).filter((value) => !value.inert && !value.verified);
+  // A value that is the interface name is not checked (design 4.2), so it is not listed to verify.
+  const names = apiValueLocations(summary.api);
+  const toVerify = (trace.values ?? []).filter(
+    (value) => !value.inert && !value.verified && !isNameValue(value, names),
+  );
   const explanation = explainRecord({
     decision_path: summary.decision_path,
     outcome: summary.outcome,
@@ -51,6 +56,7 @@ export function PeekPanel({ requestId, onClose, onOpen }: Props) {
     context: summary.context,
     trace,
     jev,
+    api: summary.api,
   });
 
   return (

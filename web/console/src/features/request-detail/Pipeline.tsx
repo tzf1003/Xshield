@@ -89,10 +89,13 @@ function StepRow({ step, outcome }: { step: PipelineStep; outcome: Outcome }) {
   const classes = ["step", "rd-step"];
   if (step.decisive) classes.push("dec", `rd-${outcome}`);
   if (!step.done) classes.push("skipped");
+  if (step.warn) classes.push("rd-step-warn");
+  const mark = step.warn ? "!" : step.done ? "✓" : "–";
+  const label = step.warn ? "需要注意" : step.done ? "已执行" : "未执行或不满足";
   return (
     <li className={classes.join(" ")}>
-      <span className="step-mark" role="img" aria-label={step.done ? "已执行" : "未执行或不满足"}>
-        {step.done ? "✓" : "–"}
+      <span className="step-mark" role="img" aria-label={label}>
+        {mark}
       </span>
       <span className="rd-stepname">{step.name}</span>
       <div className="step-body">
