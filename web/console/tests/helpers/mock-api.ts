@@ -234,7 +234,12 @@ function freshState(options: MockOptions): State {
 type Handler = (match: RegExpMatchArray, call: Call, state: State, options: MockOptions) => Answer;
 
 const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
-  ["GET", /^\/api\/session$/, (_m, _c, s) => ok(s.signedIn ? session : { authenticated: false })],
+  // The control answers a signed-out session check with 401 and authenticated false (auth.rs `session`).
+  [
+    "GET",
+    /^\/api\/session$/,
+    (_m, _c, s) => (s.signedIn ? ok(session) : { status: 401, body: { authenticated: false } }),
+  ],
   ["POST", /^\/api\/login$/, (_m, c, s, o) => login(c, s, o)],
   ["POST", /^\/api\/logout$/, (_m, _c, s) => logout(s)],
   ["GET", /^\/api\/requests$/, (_m, c) => listRequests(c)],
