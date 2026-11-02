@@ -88,7 +88,7 @@ export function objectsAnswer(site: string, params: URLSearchParams, owner: obje
 /** `GET .../objects/slots/{id}`: the drawer of one position. The samples carry evidence for s2 only. */
 export function objectSlotAnswer(site: string, id: string, owner: object): ObjectAnswer {
   const row = rowsOf(site, owner).find((item) => item.id === id);
-  if (row === undefined) return { status: 404, body: { error: "OBJECT_SLOT_NOT_FOUND" } };
+  if (row === undefined) return { status: 404, body: { error: "SLOT_NOT_FOUND" } };
   const detail: ObjectSlotDetail =
     id === objectSlotS2.id
       ? { ...objectSlotS2, state: row.state }
@@ -105,7 +105,7 @@ export function learnAnswer(
 ): ObjectAnswer {
   const store = storeOf(owner, site);
   const row = rowsOf(site, owner).find((item) => item.id === id);
-  if (row === undefined) return { status: 404, body: { error: "OBJECT_SLOT_NOT_FOUND" } };
+  if (row === undefined) return { status: 404, body: { error: "SLOT_NOT_FOUND" } };
   const from = row.state;
   const to: ObjectState = action === "dismiss" ? "pending" : "ambiguous";
   store.states.set(id, to);
