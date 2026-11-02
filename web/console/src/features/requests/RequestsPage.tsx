@@ -22,7 +22,14 @@ import { ExportDialog } from "./ExportDialog.tsx";
 import { FilterBar } from "./FilterBar.tsx";
 import { PeekPanel } from "./PeekPanel.tsx";
 import { RequestTable, EXTRA_COLUMNS, type ExtraColumn, type RowAction } from "./RequestTable.tsx";
-import { CHIPS, chipCount, planCounts, planList, unknownSiteCount } from "./query.ts";
+import {
+  CHIPS,
+  chipCount,
+  linkedCondition,
+  planCounts,
+  planList,
+  unknownSiteCount,
+} from "./query.ts";
 import { LIVE_LIMIT, useLivePoll } from "./live.ts";
 
 const LIVE_WINDOW_MS = 10 * 60 * 1000;
@@ -58,12 +65,21 @@ export function RequestsPage() {
   const scope = useScope();
   const system = useSystem();
 
-  const q = search.q ?? "";
+  // A link may name a condition in its own parameters (`api`, `api_unknown`, `object`). The condition
+  // text is where the filter lives, so the link's condition joins it, and the effect below moves the
+  // parameters into the text in the address bar.
+  const linked = linkedCondition(search);
+  const q = appendTerm(search.q ?? "", linked);
   const chip: ChipId = search.chip ?? "judged";
   const allOn = search.scope === "all";
   const live = search.live === "1";
   const peek = search.peek ?? null;
   const batchOpen = search.batch === "1";
+
+  useEffect(() => {
+    if (linked === "") return;
+    setSearch({ q, api: undefined, api_unknown: undefined, object: undefined }, true);
+  }, [linked, q, setSearch]);
 
   const [exportOpen, setExportOpen] = useState(false);
   const [quick, setQuick] = useState<QuickTarget | null>(null);
@@ -227,10 +243,14 @@ export function RequestsPage() {
       {
         key: "only-path",
         label: "只看这个路径",
-        onSelect: () => setSearch({ q: appendTerm(q, `path:${row.path}`), peek: undefined }),
+        onSelect: () =>
+          setSearch({ q: appendTerm(q, `path:${row.logical_path}`), peek: undefined }),
       },
     ];
-    if (row.site !== null && row.decision_path === "no_session") {
+    // An unknown interface is neither an entry nor bypassed (docs/06 6.4.3, design 4.2), so no rule
+    // is offered for it.
+    const unknownApi = row.api !== null && "unknown" in row.api;
+    if (!unknownApi && row.site !== null && row.decision_path === "no_session") {
       items.push({
         key: "entry",
         label: "登记为入口…",
@@ -238,12 +258,13 @@ export function RequestsPage() {
           setQuick({
             kind: "entry",
             site: row.site ?? "",
-            path: row.path,
+            path: row.logical_path,
             requestId: row.request_id,
           }),
       });
     }
     if (
+      !unknownApi &&
       row.site !== null &&
       (isStaticAsset(row.path) || row.decision_path === "body_not_inspectable")
     ) {
@@ -254,7 +275,7 @@ export function RequestsPage() {
           setQuick({
             kind: "bypass",
             site: row.site ?? "",
-            path: row.path,
+            path: row.logical_path,
             requestId: row.request_id,
           }),
       });
