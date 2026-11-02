@@ -5,7 +5,7 @@
 
 import { Link, useBlocker, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { Modal, Tabs } from "antd";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, Suspense, useEffect, useRef, useState } from "react";
 import { useDeleteSite, useSite, useSiteObjects } from "../../api/queries.ts";
 import type { SiteDetail, SiteSpec, SiteVersion } from "../../api/types.ts";
 import { useKeys } from "../../app/keys.ts";
@@ -20,7 +20,7 @@ import { HistoryTab } from "./HistoryTab.tsx";
 import { InsightsTab } from "./InsightsTab.tsx";
 import { ModeSwitchDialog } from "./ModeSwitchDialog.tsx";
 import { OverviewTab } from "./OverviewTab.tsx";
-import { ObjectsTab } from "./objects/ObjectsTab.tsx";
+import { LazyObjectsTab } from "./objects/objects-lazy.ts";
 import { RollbackDialog } from "./RollbackDialog.tsx";
 import { type RolloutTone, rolloutView } from "./rollout.ts";
 import { SaveDialog } from "./SaveDialog.tsx";
@@ -273,17 +273,19 @@ function SiteDetailBody({ name }: { name: string }) {
     );
   } else if (tab === "objects") {
     body = (
-      <ObjectsTab
-        site={data}
-        working={working}
-        now={now}
-        dialogOpen={saveOpen || modeOpen || rollbackTo !== null}
-        onAdd={changeDraft}
-        onApply={(spec) => {
-          changeDraft(spec);
-          setSaveOpen(true);
-        }}
-      />
+      <Suspense fallback={<Loading height={240} />}>
+        <LazyObjectsTab
+          site={data}
+          working={working}
+          now={now}
+          dialogOpen={saveOpen || modeOpen || rollbackTo !== null}
+          onAdd={changeDraft}
+          onApply={(spec) => {
+            changeDraft(spec);
+            setSaveOpen(true);
+          }}
+        />
+      </Suspense>
     );
   } else if (tab === "insights") {
     body = (
