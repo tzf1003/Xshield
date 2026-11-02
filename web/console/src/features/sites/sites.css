@@ -312,9 +312,11 @@ table.tbl.history-tbl td {
   max-width: none;
 }
 
+/* The shared cells clip their content with an ellipsis. The history's buttons, focus rings and notes must show in full. */
 table.tbl.history-tbl td {
   height: auto;
   padding: 6px 10px;
+  overflow: visible;
 }
 
 table.tbl.history-tbl td.history-note {
