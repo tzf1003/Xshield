@@ -6,6 +6,7 @@ use xshield_core::context::trace::VALUE_CHARS_MAX;
 use xshield_core::context::{TraceEntry, TraceRecent, TraceSource, TraceValue};
 
 use crate::context::{EntryPass, Origin, Recent, request_text};
+use crate::slots::origin_slot;
 use crate::state::{REDACTED, is_secret_name};
 use crate::values::{RequestValue, value_kind};
 
@@ -15,7 +16,8 @@ pub const QUERY_BYTES_MAX: usize = 2 * 1024;
 const SOURCES_SHOWN: usize = 3;
 
 /// One request value as the trace shows it. `ranked` is the session's origins
-/// for the value in the order the state lists them (most useful last).
+/// for the value in the order the state lists them (most useful last). `slot`
+/// is the position the value sits at (see [`crate::slots::request_slot`]).
 #[must_use]
 pub fn value_entry(
     value: &RequestValue,
@@ -24,6 +26,7 @@ pub fn value_entry(
     ranked: &[&Origin],
     credential: Option<&str>,
     secret_words: &[String],
+    slot: String,
 ) -> TraceValue {
     let key = value.key.as_deref();
     let (text, len, clipped) = shown(&value.at, key, &value.value, credential, secret_words);
@@ -48,8 +51,14 @@ pub fn value_entry(
                 request: origin.request.clone(),
                 request_id: request_text(origin.request_id),
                 at_millis: nonzero(origin.at_ms),
+                slot: origin_slot(origin),
+                object: None,
+                object_from: None,
             })
             .collect(),
+        slot: Some(slot),
+        object: None,
+        object_from: None,
     }
 }
 

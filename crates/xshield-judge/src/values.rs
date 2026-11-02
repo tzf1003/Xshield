@@ -4,7 +4,10 @@
 //! segment, a query or form value, a JSON scalar. Extraction is lossy by
 //! design: it only needs to be deterministic and bounded.
 
+use std::collections::BTreeSet;
+
 use serde_json::Value;
+use xshield_core::context::{SHAPE_FIELDS_MAX, ShapeField};
 use xshield_core::kind::kind_words;
 
 /// Longest value kept; longer scalars are not object references.
@@ -43,6 +46,11 @@ pub struct ResponseValue {
     pub field: String,
     /// The value.
     pub value: String,
+    /// Where it sits in the response: the JSON path with `[]` for array items
+    /// (`[].doc_id`, `attachments[].doc_id`), `$` for a bare scalar, and the
+    /// field name for HTML (`link`, `value`). Empty when the path is too long to
+    /// keep; such a value is still judged, but no position is learned from it.
+    pub at: String,
 }
 
 /// Request values plus whether the body had to be summarised.
@@ -53,6 +61,23 @@ pub struct ExtractedRequest {
     /// The body was not structured, too large, or the value cap was reached.
     pub truncated: bool,
 }
+
+/// What a successful response teaches: its scalars with their positions, and
+/// for JSON its structure.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ResponseFacts {
+    /// Scalars in the order the JSON parser yields them (object keys sorted).
+    pub values: Vec<ResponseValue>,
+    /// Field paths and types, sorted by path, at most [`SHAPE_FIELDS_MAX`].
+    /// `Some` only for a JSON document that parsed, where an empty document
+    /// has an empty structure. `None` for HTML, for a body that was not read,
+    /// and for JSON that did not parse, so a broken body is never reported as
+    /// a structure.
+    pub shape: Option<Vec<ShapeField>>,
+}
+
+/// The longest response position kept, in bytes.
+const AT_MAX: usize = 128;
 
 /// Whether a field name reads like an object identifier.
 #[must_use]
@@ -429,8 +454,16 @@ fn walk_request(
 /// Extracts the values of a successful response. Unparsed types yield none.
 #[must_use]
 pub fn extract_response(content_type: Option<&str>, body: &[u8]) -> Vec<ResponseValue> {
+    extract_response_facts(content_type, body).values
+}
+
+/// Extracts the values and, for JSON, the structure of a successful response.
+/// Unparsed types and oversized bodies yield nothing.
+#[must_use]
+pub fn extract_response_facts(content_type: Option<&str>, body: &[u8]) -> ResponseFacts {
+    let mut facts = ResponseFacts::default();
     if body.len() > RESPONSE_PARSE_MAX {
-        return Vec::new();
+        return facts;
     }
     let kind = content_type
         .map(|value| {
@@ -442,26 +475,47 @@ pub fn extract_response(content_type: Option<&str>, body: &[u8]) -> Vec<Response
                 .to_ascii_lowercase()
         })
         .unwrap_or_default();
-    let mut out = Vec::new();
     match kind.as_str() {
         "application/json" => {
             if let Ok(json) = serde_json::from_slice::<Value>(body) {
-                walk_response(&mut out, &json, "", "value", 0);
+                let mut shape = BTreeSet::new();
+                walk_response(&mut facts.values, &mut shape, &json, "", "value", "", 0);
+                facts.shape = Some(
+                    shape
+                        .into_iter()
+                        .map(|(path, kind)| ShapeField {
+                            path,
+                            kind: kind.to_owned(),
+                        })
+                        .collect(),
+                );
             }
         }
         "text/html" | "application/xhtml+xml" => {
-            html_values(&mut out, &String::from_utf8_lossy(body));
+            html_values(&mut facts.values, &String::from_utf8_lossy(body));
         }
         _ => {}
     }
-    out
+    facts
 }
 
 fn field_name(name: &str) -> String {
     name.chars().take(FIELD_MAX).collect()
 }
 
-fn add(out: &mut Vec<ResponseValue>, field: &str, value: String) {
+/// The position a value keeps: `$` for a bare scalar, empty when the path is
+/// too long to keep.
+fn position(at: &str) -> String {
+    if at.is_empty() {
+        "$".to_owned()
+    } else if at.len() <= AT_MAX {
+        at.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+fn add_at(out: &mut Vec<ResponseValue>, field: &str, at: &str, value: String) {
     if !value.is_empty()
         && value.chars().count() <= VALUE_MAX_CHARS
         && out.len() < RESPONSE_VALUES_MAX
@@ -469,7 +523,34 @@ fn add(out: &mut Vec<ResponseValue>, field: &str, value: String) {
         out.push(ResponseValue {
             field: field_name(field),
             value,
+            at: position(at),
         });
+    }
+}
+
+/// HTML values: the position is the field name itself.
+fn add(out: &mut Vec<ResponseValue>, field: &str, value: String) {
+    add_at(out, field, field, value);
+}
+
+/// Records one structure entry, keeping the [`SHAPE_FIELDS_MAX`] smallest paths
+/// seen so far, since that is what the structure reports. Positions too long to
+/// keep are left out, as they are for values. A path that sorts after all the
+/// kept ones is dropped, so a field late in a long list still shows when it
+/// sorts early.
+fn note_shape(shape: &mut BTreeSet<(String, &'static str)>, at: &str, kind: &'static str) {
+    if at.len() > AT_MAX {
+        return;
+    }
+    let entry = (position(at), kind);
+    if shape.contains(&entry) {
+        return;
+    }
+    if shape.len() < SHAPE_FIELDS_MAX {
+        shape.insert(entry);
+    } else if shape.last().is_some_and(|last| entry < *last) {
+        shape.pop_last();
+        shape.insert(entry);
     }
 }
 
@@ -499,11 +580,15 @@ fn qualified(parent: &str, field: &str) -> String {
     }
 }
 
+/// Walks a JSON response. `at` is the JSON path so far: empty at the root,
+/// `attachments[]` inside an array, `attachments[].doc_id` at a field.
 fn walk_response(
     out: &mut Vec<ResponseValue>,
+    shape: &mut BTreeSet<(String, &'static str)>,
     json: &Value,
     parent: &str,
     field: &str,
+    at: &str,
     depth: usize,
 ) {
     if depth > JSON_DEPTH_MAX {
@@ -512,17 +597,30 @@ fn walk_response(
     match json {
         Value::Object(map) => {
             for (name, inner) in map {
-                walk_response(out, inner, field, name, depth + 1);
+                let child = if at.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{at}.{name}")
+                };
+                walk_response(out, shape, inner, field, name, &child, depth + 1);
             }
         }
         Value::Array(items) => {
+            let item = format!("{at}[]");
             for inner in items {
-                walk_response(out, inner, parent, field, depth + 1);
+                walk_response(out, shape, inner, parent, field, &item, depth + 1);
             }
         }
-        Value::String(text) => add(out, &qualified(parent, field), text.clone()),
-        Value::Number(number) => add(out, &qualified(parent, field), number.to_string()),
-        Value::Bool(_) | Value::Null => {}
+        Value::String(text) => {
+            note_shape(shape, at, "string");
+            add_at(out, &qualified(parent, field), at, text.clone());
+        }
+        Value::Number(number) => {
+            note_shape(shape, at, "number");
+            add_at(out, &qualified(parent, field), at, number.to_string());
+        }
+        Value::Bool(_) => note_shape(shape, at, "boolean"),
+        Value::Null => note_shape(shape, at, "null"),
     }
 }
 
@@ -814,5 +912,94 @@ mod tests {
                 .any(|v| v.at.ends_with("#name") && v.value == "user[$ne]")
         );
         assert!(!form.values.iter().any(|v| v.at.ends_with("plain#name")));
+    }
+
+    #[test]
+    fn response_values_keep_their_positions() {
+        let body = br#"{"items":[{"id":5,"name":"a"}],"total":2,"meta":{"doc_id":7}}"#;
+        let at: Vec<String> = extract_response(Some("application/json"), body)
+            .into_iter()
+            .map(|value| value.at)
+            .collect();
+        assert_eq!(at, ["items[].id", "items[].name", "meta.doc_id", "total"]);
+        let root: Vec<String> = extract_response(Some("application/json"), br#"[{"doc_id":2}]"#)
+            .into_iter()
+            .map(|value| value.at)
+            .collect();
+        assert_eq!(root, ["[].doc_id"]);
+        let bare = extract_response(Some("application/json"), br#""abc""#);
+        assert_eq!(bare[0].at, "$");
+        let html = extract_response(Some("text/html"), br#"<input value="7">"#);
+        assert_eq!(html[0].at, "value");
+    }
+
+    #[test]
+    fn a_position_too_long_to_keep_is_left_empty() {
+        let long = "k".repeat(AT_MAX + 1);
+        let body = format!(r#"{{"{long}":"abc"}}"#);
+        let values = extract_response(Some("application/json"), body.as_bytes());
+        assert_eq!(values.len(), 1);
+        assert!(values[0].at.is_empty());
+        assert!(
+            extract_response_facts(Some("application/json"), body.as_bytes())
+                .shape
+                .is_some_and(|shape| shape.is_empty())
+        );
+    }
+
+    #[test]
+    fn response_shape_lists_each_path_with_its_types_and_no_values() {
+        let body = br#"[{"id":1,"ok":true,"note":null,"name":"x"},{"id":2,"ok":false,"note":"n","name":"y"}]"#;
+        let facts = extract_response_facts(Some("application/json"), body);
+        let shape: Vec<(&str, &str)> = facts
+            .shape
+            .iter()
+            .flatten()
+            .map(|field| (field.path.as_str(), field.kind.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("[].id", "number"),
+                ("[].name", "string"),
+                ("[].note", "null"),
+                ("[].note", "string"),
+                ("[].ok", "boolean"),
+            ]
+        );
+        assert!(
+            extract_response_facts(Some("text/html"), b"<a href='/x/1'>")
+                .shape
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_body_that_does_not_parse_has_no_structure() {
+        let facts = extract_response_facts(Some("application/json"), b"{bad");
+        assert!(facts.values.is_empty());
+        assert_eq!(facts.shape, None);
+        // An empty document is a structure with no fields, not a failure.
+        assert_eq!(
+            extract_response_facts(Some("application/json"), b"[]").shape,
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_long_list_keeps_the_first_paths_whatever_comes_after_them() {
+        let mut items: Vec<String> = (0..5_000)
+            .map(|index| format!(r#"{{"z{index:04}":1}}"#))
+            .collect();
+        items.push(r#"{"a":1}"#.to_owned());
+        let body = format!("[{}]", items.join(","));
+        let shape = extract_response_facts(Some("application/json"), body.as_bytes())
+            .shape
+            .expect("a parsed document has a structure");
+        assert_eq!(shape.len(), SHAPE_FIELDS_MAX);
+        // `[].a` sorts before all 5,000 of the `[].z...` paths that came first.
+        assert_eq!(shape[0].path, "[].a");
+        assert_eq!(shape[0].kind, "number");
+        assert!(shape.windows(2).all(|pair| pair[0].path <= pair[1].path));
     }
 }
