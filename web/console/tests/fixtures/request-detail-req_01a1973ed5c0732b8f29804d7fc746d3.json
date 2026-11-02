@@ -8,6 +8,8 @@
     "method": "POST",
     "host": "emr.example.com",
     "path": "/api/patients/search",
+    "logical_path": "/api/patients/search",
+    "api": null,
     "query": null,
     "status": 403,
     "decision_path": "jev_deny",
