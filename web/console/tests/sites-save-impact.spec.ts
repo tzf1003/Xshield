@@ -3,7 +3,7 @@
 // gets new fast allows is saved only after its example requests were looked at (design 3.2).
 
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import type { ImpactChange } from "../src/api/types.ts";
+import type { ImpactChange, ImpactWarning } from "../src/api/types.ts";
 import { setTheme, type Theme } from "./helpers/axe.ts";
 import { mockApi } from "./helpers/mock-api.ts";
 import {
@@ -38,9 +38,14 @@ async function openSave(page: Page, site: string): Promise<Locator> {
 }
 
 /** Juice (observe) with the given impact for the draft; the draft adds an entry. */
-async function juiceWith(page: Page, changes: ImpactChange[], complete = true): Promise<Locator> {
+async function juiceWith(
+  page: Page,
+  changes: ImpactChange[],
+  complete = true,
+  warnings: ImpactWarning[] = [],
+): Promise<Locator> {
   await freezeClock(page);
-  const preview = { ...impactWith(changes), complete };
+  const preview = { ...impactWith(changes, { warnings }), complete };
   await mockApi(page, { overrides: { "POST /api/sites/juice/preview": preview } });
   await draftEntry(page, "juice");
   return openSave(page, "juice");
@@ -102,6 +107,51 @@ test("新增快速放行写出次数，近似时附上来源的说明", async ({
   await expect(dialog.getByText("新增快速放行：158 次 Jev 调用会变成快速放行")).toBeVisible();
   await expect(
     dialog.getByText("来源只记录了前 3 个，结果是近似值", { exact: true }),
+  ).toBeVisible();
+});
+
+test("估算的按接口拆分、入口不再命中和缓存按接口区分，都附上近似的说明", async ({ page }) => {
+  const dialog = await juiceWith(page, [
+    {
+      kind: "api_split",
+      count: 9812,
+      detail: { apis: 37, approximate: true },
+      top: [["POST", GATEWAY, 9812]],
+      sample: SAMPLE,
+    },
+    {
+      kind: "entry_unreachable",
+      count: 41,
+      detail: { approximate: true },
+      top: [["POST", "/rest/user/login", 41]],
+    },
+    { kind: "cache_by_api", count: 0, detail: { approximate: true } },
+  ]);
+
+  await expect(dialog.getByText("来源只记录了前 3 个，结果是近似值", { exact: true })).toHaveCount(
+    3,
+  );
+  await expect(dialog.getByText("只提示，不计数", { exact: true })).toHaveCount(1);
+});
+
+test("接口名没有核对过时，影响的提示写明按接口和前缀入口的数字可能不完整", async ({ page }) => {
+  const dialog = await juiceWith(
+    page,
+    [
+      {
+        kind: "api_split",
+        count: 9812,
+        detail: { apis: 37, approximate: true },
+        top: [["POST", GATEWAY, 9812]],
+        sample: SAMPLE,
+      },
+    ],
+    true,
+    ["INTERFACE_UNVERIFIED"],
+  );
+
+  await expect(
+    dialog.getByText("接口名没有在历史里核对过，按接口和前缀入口的数字可能不完整"),
   ).toBeVisible();
 });
 

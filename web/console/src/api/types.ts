@@ -723,7 +723,8 @@ export type ImpactWarning =
   | "SESSION_CHANGED"
   | "HOSTS_CHANGED"
   | "SYNONYMS_CHANGED"
-  | "CACHE_RAISED";
+  | "CACHE_RAISED"
+  | "INTERFACE_UNVERIFIED";
 
 export interface ImpactPreview {
   window_hours: number;

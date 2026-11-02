@@ -193,6 +193,7 @@ export const WARNING_TEXT: Record<string, string> = {
   HOSTS_CHANGED: "Host 改变后流量路由也改变，无法从历史记录可靠预估",
   SYNONYMS_CHANGED: "同义词改变核验结果，无法从历史记录预估影响，保存后请观察一段时间",
   CACHE_RAISED: "放行缓存调大后，缓存放行的覆盖范围无法从历史记录预估",
+  INTERFACE_UNVERIFIED: "接口名没有在历史里核对过，按接口和前缀入口的数字可能不完整",
 };
 
 export const PARAM_INFO = {
