@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use xshield_core::context::ConfigError;
 use xshield_postgres::{
-    decision_log_store::DecisionLogStoreError, partitions::PartitionError,
-    site_spec_store::SiteSpecStoreError,
+    decision_log_store::DecisionLogStoreError, object_learning_store::LearningStoreError,
+    partitions::PartitionError, site_spec_store::SiteSpecStoreError,
 };
 
 /// The result of a control API handler.
@@ -138,6 +138,12 @@ impl From<sqlx::Error> for ApiError {
 impl From<DecisionLogStoreError> for ApiError {
     fn from(error: DecisionLogStoreError) -> Self {
         Self::internal("decision log", error)
+    }
+}
+
+impl From<LearningStoreError> for ApiError {
+    fn from(error: LearningStoreError) -> Self {
+        Self::internal("object learning", error)
     }
 }
 

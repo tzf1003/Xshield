@@ -20,6 +20,7 @@ mod jev;
 mod maintenance;
 mod migrations;
 mod object_learning;
+mod object_map;
 mod params;
 mod preview;
 mod requests;
@@ -186,6 +187,23 @@ pub fn router(state: Arc<ControlState>) -> Router {
         .route("/api/sites/{name}/preview", post(preview::preview))
         .route("/api/sites/{name}/insights", get(insights::insights))
         .route("/api/sites/{name}/evidence", get(insights::evidence))
+        .route("/api/sites/{name}/objects", get(object_map::list))
+        .route(
+            "/api/sites/{name}/objects/bootstrap",
+            get(object_map::bootstrap),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}",
+            get(object_map::slot),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}/dismiss",
+            post(object_map::dismiss),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}/ambiguous",
+            post(object_map::ambiguous),
+        )
         .route("/api/status", get(status::status))
         .route("/api/system", get(system::system))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))

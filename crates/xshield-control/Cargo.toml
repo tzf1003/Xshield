@@ -12,6 +12,9 @@ chrono = { workspace = true, features = ["serde"] }
 openssl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Digests each declared position's key into its id (object_map.rs). The migration test
+# also uses it, to compute the checksum independently (docs/04's adoption recipe).
+sha2.workspace = true
 # `macros` and `migrate` embed migrations/ in the binary (`sqlx::migrate!`) and apply the
 # pending ones at start-up (docs/07 section 7.2.3). The gateway enables neither.
 sqlx = { workspace = true, features = ["macros", "migrate"] }
@@ -21,8 +24,6 @@ xshield-core = { path = "../xshield-core" }
 xshield-postgres = { path = "../xshield-postgres" }
 
 [dev-dependencies]
-# Computes the migration checksum independently, to check the adoption recipe in docs/04.
-sha2.workspace = true
 tower.workspace = true
 
 [lints]
