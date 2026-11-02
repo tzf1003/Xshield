@@ -553,6 +553,7 @@ export const OBJECT_TEXT = {
       name: "agent",
       help: "规则判不了的位置是否交给 agent",
       unavailable: "没有配置模型，agent 暂不可用。",
+      notReady: "学习代理还没有上线，暂不可用。",
       daily: "每日调用上限",
     },
     thresholds: {

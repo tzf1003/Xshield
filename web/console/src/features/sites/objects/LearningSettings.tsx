@@ -20,10 +20,16 @@ type Props = {
 const text = OBJECT_TEXT.learning;
 
 /**
- * Whether the drawer can save a change. The gateway refuses `objects.learning` until its object map accepts the key,
- * so until then the values are shown but cannot be changed. Set to true once the gateway takes the key.
+ * Whether the drawer can save a change. The gateway takes `objects.learning` since #124; set it to false to show the
+ * values read-only again if the gateway ever refuses the key.
  */
-export const LEARNING_SAVE_READY = false;
+export const LEARNING_SAVE_READY = true;
+
+/**
+ * Whether the drawer can turn the agent on. The learning agent is not on the gateway yet, and the gateway refuses
+ * `agent.enabled: true` until it is, so the switch stays off.
+ */
+export const AGENT_SAVE_READY = false;
 
 function sameLearning(a: Learning, b: Learning): boolean {
   return (
@@ -41,12 +47,14 @@ function NumberField({
   label,
   value,
   min,
+  max,
   disabled = false,
   onChange,
 }: {
   label: string;
   value: number;
   min: number;
+  max: number;
   disabled?: boolean;
   onChange: (value: number) => void;
 }) {
@@ -56,6 +64,7 @@ function NumberField({
       className="native-input obj-number"
       aria-label={label}
       min={min}
+      max={max}
       step={1}
       value={value}
       disabled={disabled}
@@ -69,15 +78,20 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
   const [value, setValue] = useState<Learning>(saved);
   const editable = LEARNING_SAVE_READY;
   const changed = !sameLearning(value, saved);
+  // The gateway's ranges (objects.learning in #124): thresholds 1 to 10000, the daily cap 0 to 100000.
   const countsOk =
     Number.isInteger(value.thresholds.uses) &&
     value.thresholds.uses >= 1 &&
+    value.thresholds.uses <= 10000 &&
     Number.isInteger(value.thresholds.sessions) &&
     value.thresholds.sessions >= 1 &&
+    value.thresholds.sessions <= 10000 &&
     Number.isInteger(value.agent.daily_limit) &&
-    value.agent.daily_limit >= 0;
+    value.agent.daily_limit >= 0 &&
+    value.agent.daily_limit <= 100000;
   const canSave = editable && changed && countsOk;
-  const agentOn = agentConfigured && value.agent.enabled;
+  const agentReady = AGENT_SAVE_READY && agentConfigured;
+  const agentOn = agentReady && value.agent.enabled;
 
   return (
     <Drawer open placement="right" size={460} onClose={onClose} title={text.title}>
@@ -116,7 +130,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
           <Switch
             aria-label={text.agent.name}
             checked={agentOn}
-            disabled={!agentConfigured || !editable}
+            disabled={!agentReady || !editable}
             checkedChildren={text.on}
             unCheckedChildren={text.off}
             onChange={(checked) =>
@@ -125,13 +139,16 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
           />
           <span className="obj-learning-help">
             {text.agent.help}
-            {agentConfigured ? "" : `。${text.agent.unavailable}`}
+            {agentReady
+              ? ""
+              : `。${agentConfigured ? text.agent.notReady : text.agent.unavailable}`}
           </span>
           <span className="small">{text.agent.daily}</span>
           <NumberField
             label={text.agent.daily}
             value={value.agent.daily_limit}
             min={0}
+            max={100000}
             disabled={!agentOn || !editable}
             onChange={(daily) =>
               setValue({ ...value, agent: { ...value.agent, daily_limit: daily } })
@@ -147,6 +164,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
               label={text.thresholds.usesLabel}
               value={value.thresholds.uses}
               min={1}
+              max={10000}
               disabled={!editable}
               onChange={(uses) => setValue({ ...value, thresholds: { ...value.thresholds, uses } })}
             />
@@ -155,6 +173,7 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
               label={text.thresholds.sessionsLabel}
               value={value.thresholds.sessions}
               min={1}
+              max={10000}
               disabled={!editable}
               onChange={(sessions) =>
                 setValue({ ...value, thresholds: { ...value.thresholds, sessions } })

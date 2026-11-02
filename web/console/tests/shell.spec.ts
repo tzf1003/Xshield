@@ -5,9 +5,11 @@
 import { expect, test } from "@playwright/test";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
 import { mockApi } from "./helpers/mock-api.ts";
+import { freezeClock } from "./helpers/sites-flow.ts";
 
 for (const theme of ["light", "dark"] satisfies Theme[]) {
   test(`the request list passes axe in the ${theme} theme`, async ({ page }) => {
+    await freezeClock(page);
     await mockApi(page);
     await setTheme(page, theme);
     await page.goto("/requests");
