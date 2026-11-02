@@ -95,6 +95,7 @@ export function NeedsAttention() {
       now,
       onJevUnavailable: reads.onJevUnavailable,
       insights: reads.insights,
+      evidence: reads.evidence,
     });
     if (items.length > 0) {
       body = (

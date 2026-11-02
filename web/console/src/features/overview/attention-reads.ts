@@ -1,19 +1,23 @@
 // The reads the "需要处理" rows need beyond the status and the site list (docs/06 6.4.2). The site
 // detail is read only for a site with unjudged requests, because on_jev_unavailable is not in the
-// list; the insights only for a site whose row shows a breakdown (observation misses, suggestions).
+// list; the insights only for a site whose row shows a breakdown (observation misses, suggestions); the
+// evidence only for a site whose evidence row shows.
 // Both use the query keys of the site pages, so a page that has read them already shares the answer.
 
 import { useQueries } from "@tanstack/react-query";
 import { api } from "../../api/client.ts";
 import { keys } from "../../api/queries.ts";
-import type { Insights, OnJevUnavailable, SiteSummary } from "../../api/types.ts";
+import type { Evidence, Insights, OnJevUnavailable, SiteSummary } from "../../api/types.ts";
 import { isSiteName } from "../../lib/ids.ts";
+import { evidenceRowShows } from "./attention.ts";
 
 export type AttentionReads = {
   /** on_jev_unavailable of each site with unjudged requests whose detail has loaded. */
   onJevUnavailable: ReadonlyMap<string, OnJevUnavailable>;
   /** Insights of each site that needs a breakdown and has loaded them. */
   insights: ReadonlyMap<string, Insights>;
+  /** Evidence of each site whose evidence row shows and has loaded it. The row shows without it. */
+  evidence: ReadonlyMap<string, Evidence>;
   /** A detail that a row depends on is still loading, so that row cannot be judged yet. */
   pending: boolean;
   /** A detail that a row depends on failed to load; the card says which rows are missing. */
@@ -44,6 +48,14 @@ export function useAttentionReads(sites: SiteSummary[]): AttentionReads {
       staleTime: 30_000,
     })),
   });
+  const evidenceSites = sites.filter((site) => evidenceRowShows(site) && isSiteName(site.name));
+  const evidenceReads = useQueries({
+    queries: evidenceSites.map((site) => ({
+      queryKey: keys.evidence(site.name),
+      queryFn: () => api.evidence(site.name),
+      staleTime: 60_000,
+    })),
+  });
 
   const onJevUnavailable = new Map<string, OnJevUnavailable>();
   detailSites.forEach((site, index) => {
@@ -56,6 +68,11 @@ export function useAttentionReads(sites: SiteSummary[]): AttentionReads {
     const read = insightReads[index];
     if (read?.data) insights.set(site.name, read.data);
   });
+  const evidence = new Map<string, Evidence>();
+  evidenceSites.forEach((site, index) => {
+    const read = evidenceReads[index];
+    if (read?.data) evidence.set(site.name, read.data);
+  });
 
   const retry = () => {
     for (const read of details) {
@@ -66,6 +83,7 @@ export function useAttentionReads(sites: SiteSummary[]): AttentionReads {
   return {
     onJevUnavailable,
     insights,
+    evidence,
     pending: details.some((read) => read.isPending),
     failed: details.some((read) => read.isError),
     retry,

@@ -8,6 +8,7 @@
 
 import type {
   DecisionPath,
+  Evidence,
   GatewayProblem,
   Insights,
   OnJevUnavailable,
@@ -17,7 +18,7 @@ import type {
   SuggestionKind,
 } from "../../api/types.ts";
 import type { ChipId, RequestsSearch, SiteTab, SystemTab } from "../../app/search-schema.ts";
-import { fmtInt } from "../../lib/format.ts";
+import { fmtInt, fmtMs } from "../../lib/format.ts";
 import { lostReasons, problemText } from "../../lib/health.ts";
 import { isSiteName } from "../../lib/ids.ts";
 import { DECISION_INFO, FAILURE_INFO, HEALTH_LABEL, SUGGESTION_INFO } from "../../lib/vocab.ts";
@@ -45,6 +46,8 @@ export type AttentionInput = {
   onJevUnavailable: ReadonlyMap<string, OnJevUnavailable>;
   /** Insights of the sites whose rows show a breakdown. A site without them is listed without it. */
   insights: ReadonlyMap<string, Insights>;
+  /** The evidence of each site whose evidence row shows, once it has loaded. A row waits for none. */
+  evidence: ReadonlyMap<string, Evidence>;
 };
 
 const RANK: Record<Level, number> = { serious: 0, warn: 1, info: 2 };
@@ -308,19 +311,38 @@ function suggestionItem(site: SiteSummary, insight: Insights | undefined): Atten
   };
 }
 
-/** The evidence line: Jev timeouts or call-limit hits that reach 1% of the site's Jev calls. */
-function evidenceItem(site: SiteSummary): AttentionItem | null {
+/** Whether the site's evidence row shows: a timeout or call-limit hit at 1% of its Jev calls or more. */
+export function evidenceRowShows(site: SiteSummary): boolean {
+  return (
+    atLeastOnePercent(site.jev_timeouts_24h, site.jev_calls_24h) ||
+    atLeastOnePercent(site.call_limits_24h, site.jev_calls_24h)
+  );
+}
+
+/**
+ * The evidence line: Jev timeouts or call-limit hits that reach 1% of the site's Jev calls. Once the
+ * site's evidence has loaded, the line also gives its p95 and its Jev timeout (docs/06 6.4.2).
+ */
+function evidenceItem(site: SiteSummary, evidence: Evidence | undefined): AttentionItem | null {
+  if (!evidenceRowShows(site)) return null;
   const calls = site.jev_calls_24h;
-  const timeouts = atLeastOnePercent(site.jev_timeouts_24h, calls);
-  const limits = atLeastOnePercent(site.call_limits_24h, calls);
-  if (!timeouts && !limits) return null;
   const parts: string[] = [];
-  if (timeouts) parts.push(`Jev 超时 ${fmtInt(site.jev_timeouts_24h)} 次`);
-  if (limits) parts.push(`触发调用上限 ${fmtInt(site.call_limits_24h)} 次`);
+  if (atLeastOnePercent(site.jev_timeouts_24h, calls)) {
+    parts.push(`Jev 超时 ${fmtInt(site.jev_timeouts_24h)} 次`);
+  }
+  if (atLeastOnePercent(site.call_limits_24h, calls)) {
+    parts.push(`触发调用上限 ${fmtInt(site.call_limits_24h)} 次`);
+  }
+  const figures: string[] = [];
+  if (evidence) {
+    if (evidence.jev.p95_ms !== null) figures.push(`p95 ${fmtMs(evidence.jev.p95_ms)}`);
+    figures.push(`超时 ${fmtMs(evidence.jev.timeout_ms_used)}`);
+  }
+  const detail = figures.length > 0 ? `（${figures.join("，")}）` : "";
   return {
     key: `evidence-${site.name}`,
     level: "info",
-    text: `${site.name} ${parts.join("、")} / ${fmtInt(calls)} 次调用`,
+    text: `${site.name} ${parts.join("、")} / ${fmtInt(calls)} 次调用${detail}`,
     actions: siteActions(site.name, [["查看证据", toSite(site.name, "config", "advanced")]]),
   };
 }
@@ -331,7 +353,7 @@ function siteItems(site: SiteSummary, input: AttentionInput): AttentionItem[] {
     observeItem(site, input.now, insight),
     unjudgedItem(site, input.onJevUnavailable.get(site.name)),
     suggestionItem(site, insight),
-    evidenceItem(site),
+    evidenceItem(site, input.evidence.get(site.name)),
   ].filter((item): item is AttentionItem => item !== null);
 }
 
