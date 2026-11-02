@@ -7,10 +7,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 
-use crate::requests::RequestRow;
+use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
+use crate::requests::{CountsBody, RequestRow};
+use crate::stats::TimeseriesBody;
+use crate::status::StatusBody;
 
 const REQUESTS: &str = include_str!("../../../web/console/tests/fixtures/requests.json");
 const LOOKUP: &str = include_str!("../../../web/console/tests/fixtures/lookup.json");
+const COUNTS: &str = include_str!("../../../web/console/tests/fixtures/counts.json");
+const TIMESERIES: &str = include_str!("../../../web/console/tests/fixtures/timeseries.json");
+const JEV_STATUS: &str = include_str!("../../../web/console/tests/fixtures/jev-status.json");
+const JEV_STATS: &str = include_str!("../../../web/console/tests/fixtures/jev-stats.json");
+const PROMPT: &str = include_str!("../../../web/console/tests/fixtures/prompt.json");
+const STATUS: &str = include_str!("../../../web/console/tests/fixtures/status.json");
+const STATUS_DOWN: &str = include_str!("../../../web/console/tests/fixtures/status-down.json");
 const DETAILS: [&str; 3] = [
     include_str!(
         "../../../web/console/tests/fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json"
@@ -155,4 +165,42 @@ fn each_detail_rebuilds_as_a_decision_record() {
             normalized
         });
     }
+}
+
+#[test]
+fn counts_round_trip_through_the_counts_type() {
+    let counts = fixture(COUNTS);
+    assert_round_trips::<CountsBody>(&counts, exactly);
+
+    // `scanned` is written only when the count is incomplete (docs/07 section 7.9.1).
+    let mut partial = counts.clone();
+    partial["complete"] = json!(false);
+    partial["scanned"] = json!(57);
+    assert_round_trips::<CountsBody>(&partial, exactly);
+}
+
+#[test]
+fn timeseries_round_trips_through_the_timeseries_type() {
+    assert_round_trips::<TimeseriesBody>(&fixture(TIMESERIES), exactly);
+}
+
+#[test]
+fn jev_status_round_trips_through_the_status_type() {
+    assert_round_trips::<JevStatusBody>(&fixture(JEV_STATUS), exactly);
+}
+
+#[test]
+fn jev_stats_round_trips_through_the_stats_type() {
+    assert_round_trips::<JevStatsBody>(&fixture(JEV_STATS), exactly);
+}
+
+#[test]
+fn prompt_round_trips_through_the_prompt_type() {
+    assert_round_trips::<PromptBody>(&fixture(PROMPT), exactly);
+}
+
+#[test]
+fn status_fixtures_round_trip_through_the_status_type() {
+    assert_round_trips::<StatusBody>(&fixture(STATUS), exactly);
+    assert_round_trips::<StatusBody>(&fixture(STATUS_DOWN), exactly);
 }
