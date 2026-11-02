@@ -219,6 +219,7 @@ test("a confirmed position becomes one declaration, and a path position cannot",
     source: "rule",
     basis: "流向 87%",
     last_seen: null,
+    dismissed: false,
   };
   assert.deepEqual(declarationFor(slot), {
     field: "doc_id",

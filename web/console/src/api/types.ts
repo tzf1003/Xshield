@@ -1083,6 +1083,8 @@ export interface ObjectSlotRow {
   basis: string;
   /** RFC 3339 UTC, or null when the position was never seen. */
   last_seen: string | null;
+  /** The proposal was ignored: the position stays listed, and the learning task does not propose it again. */
+  dismissed: boolean;
 }
 
 /** An automatic change of the learning task, shown in the banner (object-map design 5). */

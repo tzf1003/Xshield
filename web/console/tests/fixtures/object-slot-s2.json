@@ -7,6 +7,7 @@
   "source": "rule",
   "basis": "流向 87% · 23 会话 · 0 拒绝",
   "last_seen": "2026-11-01T13:15:00Z",
+  "dismissed": false,
   "flows_in": [
     {
       "key": "GET /doctor/{id} path[1]",

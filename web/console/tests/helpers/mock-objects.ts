@@ -23,7 +23,7 @@ const COUNT_KEYS: readonly CountKey[] = [
   "suspended",
 ];
 
-type Store = { states: Map<string, ObjectState>; counts: ObjectCounts };
+type Store = { states: Map<string, ObjectState>; dismissed: Set<string>; counts: ObjectCounts };
 
 const stores = new WeakMap<object, Map<string, Store>>();
 
@@ -43,6 +43,7 @@ function storeOf(owner: object, site: string): Store {
     const base = baseOf(site);
     store = {
       states: new Map(base.slots.map((row) => [row.id, row.state])),
+      dismissed: new Set(),
       counts: { ...base.counts },
     };
     byName.set(site, store);
@@ -56,6 +57,7 @@ function rowsOf(site: string, owner: object): ObjectSlotRow[] {
   return baseOf(site).slots.map((row) => ({
     ...row,
     state: store.states.get(row.id) ?? row.state,
+    dismissed: store.dismissed.has(row.id) || row.dismissed,
   }));
 }
 
@@ -91,7 +93,7 @@ export function objectSlotAnswer(site: string, id: string, owner: object): Objec
   if (row === undefined) return { status: 404, body: { error: "SLOT_NOT_FOUND" } };
   const detail: ObjectSlotDetail =
     id === objectSlotS2.id
-      ? { ...objectSlotS2, state: row.state }
+      ? { ...objectSlotS2, state: row.state, dismissed: row.dismissed }
       : { ...row, flows_in: [], examples: [], shape: [], history: [], impact: [] };
   return { status: 200, body: detail };
 }
@@ -109,6 +111,7 @@ export function learnAnswer(
   const from = row.state;
   const to: ObjectState = action === "dismiss" ? "pending" : "ambiguous";
   store.states.set(id, to);
+  if (action === "dismiss") store.dismissed.add(id);
   const counts = { ...store.counts };
   const fromKey = COUNT_KEYS.find((key) => key === from);
   const toKey = COUNT_KEYS.find((key) => key === to);
