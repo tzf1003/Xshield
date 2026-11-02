@@ -13,6 +13,7 @@ use axum::{
     http::StatusCode,
 };
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use xshield_postgres::{
@@ -93,37 +94,110 @@ pub(crate) struct Report {
     config: Option<Value>,
 }
 
+/// The Jev health fields that `GET /api/jev/status` and the `jev` block of
+/// `GET /api/status` share.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JevStatusFields {
+    pub health: String,
+    pub window_minutes: i64,
+    pub calls: i64,
+    pub ok: i64,
+    pub failures: BTreeMap<String, i64>,
+    pub p50_ms: Option<i64>,
+    pub p95_ms: Option<i64>,
+    pub last_ok_at: Option<String>,
+    pub last_failure: Option<JevFailure>,
+}
+
+/// The newest Jev failure within the retention: when, which code, which site.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JevFailure {
+    pub at: Option<String>,
+    pub failure: String,
+    pub site: Option<String>,
+}
+
+/// `GET /api/jev/status`: the shared fields and the newest online gateway's `config`,
+/// which is `null` when no gateway is online.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JevStatusBody {
+    #[serde(flatten)]
+    pub fields: JevStatusFields,
+    pub config: Option<Value>,
+}
+
+/// `GET /api/jev/stats`: calls, conclusions, failure codes, latency and confidence
+/// histograms, and the hourly series.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JevStatsBody {
+    pub since_millis: i64,
+    pub until_millis: i64,
+    pub calls: i64,
+    pub by_conclusion: BTreeMap<String, i64>,
+    pub by_failure: BTreeMap<String, i64>,
+    pub p50_ms: Option<i64>,
+    pub p95_ms: Option<i64>,
+    pub latency_histogram: LatencyHistogram,
+    pub confidence_histogram: ConfidenceHistogram,
+    pub hourly: Vec<HourBody>,
+    pub complete: bool,
+}
+
+/// Calls per latency bucket, up to the timeout bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LatencyHistogram {
+    pub bucket_ms: i64,
+    pub counts: Vec<i64>,
+    pub timeout_ms: i64,
+}
+
+/// Calls per confidence bucket, all ten in order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfidenceHistogram {
+    pub counts: Vec<i64>,
+}
+
+/// One hour of the hourly series.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HourBody {
+    pub at_millis: i64,
+    pub allow: i64,
+    pub deny: i64,
+    pub unavailable: i64,
+}
+
 impl Report {
     /// The fields shared by `GET /api/jev/status` and the `jev` block of
     /// `GET /api/status`.
     #[must_use]
-    pub(crate) fn fields(&self) -> Value {
-        json!({
-            "health": self.health.as_str(),
-            "window_minutes": WINDOW_MINUTES,
-            "calls": self.calls,
-            "ok": self.ok,
-            "failures": failure_counts(&self.failures),
-            "p50_ms": self.p50_ms,
-            "p95_ms": self.p95_ms,
-            "last_ok_at": self.last_ok_at.and_then(rfc3339),
-            "last_failure": self.last_failure.as_ref().map(|(at, failure, site)| {
-                json!({ "at": rfc3339(*at), "failure": failure, "site": site })
-            }),
-        })
+    pub(crate) fn fields(&self) -> JevStatusFields {
+        JevStatusFields {
+            health: self.health.as_str().to_owned(),
+            window_minutes: WINDOW_MINUTES,
+            calls: self.calls,
+            ok: self.ok,
+            failures: failure_counts(&self.failures),
+            p50_ms: self.p50_ms,
+            p95_ms: self.p95_ms,
+            last_ok_at: self.last_ok_at.and_then(rfc3339),
+            last_failure: self
+                .last_failure
+                .as_ref()
+                .map(|(at, failure, site)| JevFailure {
+                    at: rfc3339(*at),
+                    failure: failure.clone(),
+                    site: site.clone(),
+                }),
+        }
     }
 
     /// The body of `GET /api/jev/status`: the shared fields and `config`.
     #[must_use]
-    pub(crate) fn with_config(&self) -> Value {
-        let mut body = self.fields();
-        if let Value::Object(map) = &mut body {
-            map.insert(
-                "config".to_owned(),
-                self.config.clone().unwrap_or(Value::Null),
-            );
+    pub(crate) fn with_config(&self) -> JevStatusBody {
+        JevStatusBody {
+            fields: self.fields(),
+            config: self.config.clone(),
         }
-        body
     }
 }
 
@@ -132,7 +206,7 @@ impl Report {
 ///
 /// # Errors
 /// `INTERNAL` when the database cannot be read.
-pub async fn status(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Value>> {
+pub async fn status(State(state): State<Arc<ControlState>>) -> ApiResult<Json<JevStatusBody>> {
     let report = health_summary(&state.pool, now_millis()).await?;
     Ok(Json(report.with_config()))
 }
@@ -145,7 +219,7 @@ pub async fn status(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Va
 pub async fn stats(
     State(state): State<Arc<ControlState>>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<JevStatsBody>> {
     let params = Params::from(query);
     let window = params.window(now_millis())?;
     let site = params.text("site").map(str::to_owned);
@@ -160,19 +234,21 @@ pub async fn stats(
     let latency = decision_stats::jev_latency_histogram(&state.pool, &scope).await?;
     let confidence = decision_stats::jev_confidence_histogram(&state.pool, &scope).await?;
     let summary = decision_stats::summary(&state.pool, &scope).await?;
-    Ok(Json(json!({
-        "since_millis": window.since_millis,
-        "until_millis": window.until_millis,
-        "calls": totals.calls,
-        "by_conclusion": by_conclusion(&outcomes),
-        "by_failure": failure_counts(&totals.failures),
-        "p50_ms": whole_ms(totals.p50_ms),
-        "p95_ms": whole_ms(totals.p95_ms),
-        "latency_histogram": latency_histogram(&latency, timeout_ms),
-        "confidence_histogram": { "counts": confidence_counts(&confidence) },
-        "hourly": hourly(&outcomes, window),
-        "complete": summary.complete,
-    })))
+    Ok(Json(JevStatsBody {
+        since_millis: window.since_millis,
+        until_millis: window.until_millis,
+        calls: totals.calls,
+        by_conclusion: by_conclusion(&outcomes),
+        by_failure: failure_counts(&totals.failures),
+        p50_ms: whole_ms(totals.p50_ms),
+        p95_ms: whole_ms(totals.p95_ms),
+        latency_histogram: latency_histogram(&latency, timeout_ms),
+        confidence_histogram: ConfidenceHistogram {
+            counts: confidence_counts(&confidence),
+        },
+        hourly: hourly(&outcomes, window),
+        complete: summary.complete,
+    }))
 }
 
 /// `GET /api/jev/prompts/{id}`: the two questions of one instruction version and
@@ -183,18 +259,38 @@ pub async fn stats(
 pub async fn prompt(
     State(state): State<Arc<ControlState>>,
     Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<PromptBody>> {
     let found = jev_prompt_store::get(&state.pool, &id)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "PROMPT_NOT_FOUND"))?;
-    Ok(Json(json!({
-        "id": found.id,
-        "first_seen": rfc3339(found.first_seen.timestamp_millis()),
-        "questions": {
-            "access": found.questions.get("access").cloned().unwrap_or(Value::Null),
-            "attack": found.questions.get("attack").cloned().unwrap_or(Value::Null),
+    Ok(Json(PromptBody {
+        first_seen: rfc3339(found.first_seen.timestamp_millis()),
+        questions: PromptQuestions {
+            access: found.questions.get("access").cloned(),
+            attack: found.questions.get("attack").cloned(),
         },
-    })))
+        calls: None,
+        id: found.id,
+    }))
+}
+
+/// `GET /api/jev/prompts/{id}`: one instruction version, its two questions, and when the
+/// gateway first registered it. Each question is kept as the gateway stored it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptBody {
+    pub id: String,
+    pub first_seen: Option<String>,
+    pub questions: PromptQuestions,
+    /// Calls inside the retention window that used this version, when counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<i64>,
+}
+
+/// The two questions of an instruction version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptQuestions {
+    pub access: Option<Value>,
+    pub attack: Option<Value>,
 }
 
 /// Reads the Jev health of the last five minutes and the newest gateway's configuration.
@@ -324,8 +420,8 @@ fn whole_ms(value: Option<f64>) -> Option<i64> {
 
 /// Failure counts as an object from failure code to count.
 #[must_use]
-fn failure_counts(failures: &[(String, i64)]) -> Value {
-    json!(failures.iter().cloned().collect::<BTreeMap<String, i64>>())
+fn failure_counts(failures: &[(String, i64)]) -> BTreeMap<String, i64> {
+    failures.iter().cloned().collect()
 }
 
 /// The conclusion of one Jev call from its stored answers (docs/02-jev.md section
@@ -353,7 +449,7 @@ fn conclusion_of(
 
 /// Calls by conclusion, summed over the outcome rows. Every key is present.
 #[must_use]
-fn by_conclusion(outcomes: &[OutcomeRow]) -> Value {
+fn by_conclusion(outcomes: &[OutcomeRow]) -> BTreeMap<String, i64> {
     let mut counts = BTreeMap::from([("allow", 0_i64), ("deny", 0), ("unknown", 0)]);
     for (_, failure, access, attack, count) in outcomes {
         let Some(conclusion) =
@@ -364,7 +460,10 @@ fn by_conclusion(outcomes: &[OutcomeRow]) -> Value {
         let total = counts.entry(conclusion).or_insert(0);
         *total = total.saturating_add(*count);
     }
-    json!(counts)
+    counts
+        .into_iter()
+        .map(|(conclusion, count)| (conclusion.to_owned(), count))
+        .collect()
 }
 
 /// The start of the UTC hour that holds `millis`.
@@ -376,7 +475,7 @@ fn floor_hour(millis: i64) -> i64 {
 /// One entry per hour the window touches, in time order. A call is `allow` or `deny`
 /// when it was answered so, and `unavailable` otherwise.
 #[must_use]
-fn hourly(outcomes: &[OutcomeRow], window: Window) -> Vec<Value> {
+fn hourly(outcomes: &[OutcomeRow], window: Window) -> Vec<HourBody> {
     let mut tallies: BTreeMap<i64, Tally> = BTreeMap::new();
     for (hour, failure, access, attack, count) in outcomes {
         let tally = tallies.entry(*hour).or_default();
@@ -392,12 +491,12 @@ fn hourly(outcomes: &[OutcomeRow], window: Window) -> Vec<Value> {
         .map(|step| {
             let at = first.saturating_add(step.saturating_mul(HOUR_MILLIS));
             let tally = tallies.get(&at).copied().unwrap_or_default();
-            json!({
-                "at_millis": at,
-                "allow": tally.allow,
-                "deny": tally.deny,
-                "unavailable": tally.unavailable,
-            })
+            HourBody {
+                at_millis: at,
+                allow: tally.allow,
+                deny: tally.deny,
+                unavailable: tally.unavailable,
+            }
         })
         .collect()
 }
@@ -405,7 +504,7 @@ fn hourly(outcomes: &[OutcomeRow], window: Window) -> Vec<Value> {
 /// Calls per 100 ms bucket, up to and including the timeout bucket. Calls at or
 /// beyond the timeout bucket are counted in it, so the counts add up to every call.
 #[must_use]
-fn latency_histogram(histogram: &[(i32, i64)], timeout_ms: i64) -> Value {
+fn latency_histogram(histogram: &[(i32, i64)], timeout_ms: i64) -> LatencyHistogram {
     let last = (timeout_ms / LATENCY_BUCKET_MS).max(0);
     let length = usize::try_from(last.saturating_add(1)).unwrap_or(1);
     let mut counts = vec![0_i64; length];
@@ -419,11 +518,11 @@ fn latency_histogram(histogram: &[(i32, i64)], timeout_ms: i64) -> Value {
             *slot = slot.saturating_add(count);
         }
     }
-    json!({
-        "bucket_ms": LATENCY_BUCKET_MS,
-        "counts": counts,
-        "timeout_ms": timeout_ms,
-    })
+    LatencyHistogram {
+        bucket_ms: LATENCY_BUCKET_MS,
+        counts,
+        timeout_ms,
+    }
 }
 
 /// Calls per 0.1 confidence bucket, all ten in order. A confidence of exactly 1.0 is
@@ -487,7 +586,7 @@ mod tests {
             (0, Some("JEV_TIMEOUT".to_owned()), None, None, 9),
         ];
         assert_eq!(
-            by_conclusion(&rows),
+            json!(by_conclusion(&rows)),
             json!({ "allow": 0, "deny": 3, "unknown": 0 })
         );
     }
@@ -499,7 +598,7 @@ mod tests {
         expected.extend(std::iter::repeat_n(0, 18));
         expected.push(2);
         assert_eq!(
-            latency_histogram(&[(1, 3), (2, 1), (301, 2)], 2_000),
+            json!(latency_histogram(&[(1, 3), (2, 1), (301, 2)], 2_000)),
             json!({ "bucket_ms": 100, "counts": expected, "timeout_ms": 2_000 })
         );
         assert_eq!(
@@ -533,12 +632,12 @@ mod tests {
             until_millis: hour + 2 * HOUR_MILLIS + 10 * 60_000,
         };
         assert_eq!(
-            hourly(&outcomes, window),
-            vec![
+            json!(hourly(&outcomes, window)),
+            json!([
                 json!({ "at_millis": hour, "allow": 4, "deny": 0, "unavailable": 1 }),
                 json!({ "at_millis": hour + HOUR_MILLIS, "allow": 0, "deny": 2, "unavailable": 0 }),
                 json!({ "at_millis": hour + 2 * HOUR_MILLIS, "allow": 0, "deny": 0, "unavailable": 0 }),
-            ]
+            ])
         );
     }
 }
