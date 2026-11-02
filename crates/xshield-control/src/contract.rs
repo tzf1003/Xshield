@@ -11,6 +11,7 @@ use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
 use crate::requests::{CountsBody, RequestRow};
 use crate::stats::{SummaryBody, TimeseriesBody};
 use crate::status::StatusBody;
+use crate::system::SystemBody;
 
 const REQUESTS: &str = include_str!("../../../web/console/tests/fixtures/requests.json");
 const LOOKUP: &str = include_str!("../../../web/console/tests/fixtures/lookup.json");
@@ -22,6 +23,7 @@ const JEV_STATS: &str = include_str!("../../../web/console/tests/fixtures/jev-st
 const PROMPT: &str = include_str!("../../../web/console/tests/fixtures/prompt.json");
 const STATUS: &str = include_str!("../../../web/console/tests/fixtures/status.json");
 const STATUS_DOWN: &str = include_str!("../../../web/console/tests/fixtures/status-down.json");
+const SYSTEM: &str = include_str!("../../../web/console/tests/fixtures/system.json");
 const DETAILS: [&str; 3] = [
     include_str!(
         "../../../web/console/tests/fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json"
@@ -216,4 +218,9 @@ fn prompt_round_trips_through_the_prompt_type() {
 fn status_fixtures_round_trip_through_the_status_type() {
     assert_round_trips::<StatusBody>(&fixture(STATUS), exactly);
     assert_round_trips::<StatusBody>(&fixture(STATUS_DOWN), exactly);
+}
+
+#[test]
+fn system_round_trips_through_the_system_type() {
+    assert_round_trips::<SystemBody>(&fixture(SYSTEM), exactly);
 }
