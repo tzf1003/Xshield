@@ -21,6 +21,13 @@ import type {
   ValueKind,
 } from "../../api/types.ts";
 import { type AlignedValue, alignRecent, alignValues, seenAsAligned } from "../../lib/align.ts";
+import {
+  apiFromWords,
+  apiValueLocations,
+  byMapNote,
+  isNameValue,
+  unknownTitle,
+} from "../../lib/api-name.ts";
 import { topOf } from "../../lib/explain.ts";
 import { lostReasons } from "../../lib/health.ts";
 import { fmtBytes, fmtElapsed, fmtInt, pct } from "../../lib/format.ts";
@@ -154,6 +161,10 @@ export type SentRow = {
   sources: TraceSource[];
   /** The `seen_as` text of the state (state-only rows). */
   seenAs: string[];
+  /** The class of the value, from the object map or a field name; null when there is none. */
+  object: string | null;
+  /** Where the class came from; null when the origin is not known (a state-only row). */
+  objectFrom: "map" | "name" | null;
 };
 
 function rowFromTrace(jevIndex: number, traceIndex: number, value: TraceValue): SentRow {
@@ -169,6 +180,8 @@ function rowFromTrace(jevIndex: number, traceIndex: number, value: TraceValue): 
     clipped: value.clipped === true,
     sources: value.sources,
     seenAs: [],
+    object: value.object ?? null,
+    objectFrom: value.object === undefined ? null : value.object_from === "map" ? "map" : "name",
   };
 }
 
@@ -197,6 +210,8 @@ export function sentRows(
       clipped: false,
       sources: [],
       seenAs: item.seen_as,
+      object: item.object ?? null,
+      objectFrom: null,
     }));
   }
   return alignValues(trace.values ?? []).map((item) =>
@@ -318,19 +333,26 @@ export function sensitiveFieldOf(trace: Trace): string | null {
   return null;
 }
 
-/** Count of the values by role, for the summary lines. */
-export function valueCounts(values: TraceValue[]): {
+/**
+ * Count of the values by role, for the summary lines. A value that is the interface name counts as
+ * inert: it is shown as a name and is not checked (design 4.2).
+ */
+export function valueCounts(
+  values: TraceValue[],
+  names: readonly string[] = [],
+): {
   total: number;
   sent: number;
   inert: number;
   unverified: number;
 } {
-  const sent = values.filter((value) => !value.inert).length;
+  const isInert = (value: TraceValue) => value.inert || isNameValue(value, names);
+  const sent = values.filter((value) => !isInert(value)).length;
   return {
     total: values.length,
     sent,
     inert: values.length - sent,
-    unverified: values.filter((value) => !value.inert && !value.verified).length,
+    unverified: values.filter((value) => !isInert(value) && !value.verified).length,
   };
 }
 
@@ -413,9 +435,38 @@ export type PipelineStep = {
   notes: string[];
   /** A note that needs attention, shown with ▲ beside its text (docs/06 6.4.4). */
   attention: string | null;
+  /** The step could not decide (an unreadable interface name): shown with ! instead of – (design 4.2). */
+  warn: boolean;
 };
 
 type StepInit = Pick<PipelineStep, "id" | "name" | "done" | "reason"> & Partial<PipelineStep>;
+
+/**
+ * The interface-name step after the site (design 4.2): ✓ with the rule's name, – without a rule (the
+ * path is the name), ! with the reason when the name could not be read.
+ */
+function interfaceStep(summary: RequestRow): PipelineStep {
+  const base = {
+    id: "api",
+    name: "接口名",
+    decisive: false,
+    links: [],
+    notes: [],
+    attention: null,
+    ms: null,
+    warn: false,
+  };
+  const api = summary.api;
+  if (api === null) return { ...base, done: false, reason: "没有规则，用 URL 路径" };
+  if ("unknown" in api) {
+    return { ...base, done: false, warn: true, reason: unknownTitle(api) };
+  }
+  return {
+    ...base,
+    done: true,
+    reason: `规则 ${summary.path} → ${api.name}（${apiFromWords(api)}）`,
+  };
+}
 
 function sessionDetail(trace: Trace): string {
   const parts: string[] = [];
@@ -465,6 +516,7 @@ function executionStep(summary: RequestRow, trace: Trace): PipelineStep {
     links: [],
     notes: [],
     attention: null,
+    warn: false,
   };
 }
 
@@ -501,6 +553,7 @@ function learningStep(summary: RequestRow, trace: Trace): PipelineStep | null {
     links,
     notes,
     attention: response.after_would_block ? "本应拦截请求的响应也进入了上下文" : null,
+    warn: false,
   };
 }
 
@@ -516,7 +569,15 @@ export function pipelineSteps(
 ): PipelineStep[] {
   const steps: PipelineStep[] = [];
   const add = (init: StepInit): void => {
-    steps.push({ ms: null, decisive: false, links: [], notes: [], attention: null, ...init });
+    steps.push({
+      ms: null,
+      decisive: false,
+      links: [],
+      notes: [],
+      attention: null,
+      warn: false,
+      ...init,
+    });
   };
   const finish = (): PipelineStep[] => {
     steps.push(executionStep(summary, trace));
@@ -539,6 +600,7 @@ export function pipelineSteps(
         : `${summary.site}（Host ${summary.host}）${version}${mode ? ` · ${mode}` : ""}`,
   });
   if (trace.v === 0 || path === "unknown_site") return finish();
+  add(interfaceStep(summary));
 
   if (path === "bypass") {
     add({
@@ -586,7 +648,8 @@ export function pipelineSteps(
   if (path === "no_session") return finish();
 
   const values = trace.values ?? [];
-  const counts = valueCounts(values);
+  const names = apiValueLocations(summary.api);
+  const counts = valueCounts(values, names);
   add({
     id: "values",
     name: "请求值",
@@ -598,6 +661,7 @@ export function pipelineSteps(
   });
 
   if (path === "fast_allow") {
+    const checked = values.filter((value) => !value.inert && !isNameValue(value, names));
     add({
       id: "fast",
       name: "快速放行",
@@ -605,7 +669,7 @@ export function pipelineSteps(
       decisive: true,
       reason:
         counts.sent > 0
-          ? `${counts.sent} 个需核验的值都已核验，没有调用 Jev`
+          ? `${counts.sent} 个需核验的值都已核验${byMapNote(checked)}，没有调用 Jev`
           : "请求里没有需要核验的值，没有调用 Jev",
     });
     return finish();

@@ -5,11 +5,12 @@
 import { Link } from "@tanstack/react-router";
 import { keepScope } from "../../app/scope.ts";
 import { validateDetail } from "../../app/search-schema.ts";
-import type { RequestDetail, TraceValue } from "../../api/types.ts";
+import type { ApiInfo, RequestDetail, TraceValue } from "../../api/types.ts";
+import { apiFromWords, unknownTitle } from "../../lib/api-name.ts";
 import { explainRecord } from "../../lib/explain.ts";
 import { fmtElapsed, fmtLocalDateTime, fmtMs, fmtUtc } from "../../lib/format.ts";
 import { isRequestId, isSessionLabel, isSiteName, shortSession } from "../../lib/ids.ts";
-import { CONTEXT_DESC } from "../../lib/vocab.ts";
+import { API_LABEL, CONTEXT_DESC } from "../../lib/vocab.ts";
 import { DecisionTag, JevCell, OutcomeTag } from "../../ui/Badges.tsx";
 import { CopyButton } from "../../ui/RequestRef.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
@@ -76,6 +77,25 @@ function QueryLine({ query, values }: { query: string; values: TraceValue[] }) {
   );
 }
 
+/**
+ * The interface line under the request line (design 4.2): the name and where it came from, or the
+ * reason it could not be read. A path without a rule has no line; the pipeline says so.
+ */
+function ApiLine({ api }: { api: ApiInfo }) {
+  if ("unknown" in api) {
+    return <div className="small rd-api rd-api-unknown">{unknownTitle(api)}</div>;
+  }
+  return (
+    <div className="small rd-api">
+      <span className="dim">{API_LABEL.api} </span>
+      <span className="mono">
+        <SafeText text={api.name} />
+      </span>
+      <span className="dim"> · 来自{apiFromWords(api)}</span>
+    </div>
+  );
+}
+
 export function DetailHead({ detail, requestId }: { detail: RequestDetail; requestId: string }) {
   const { summary, trace, jev, edge, neighbors } = detail;
   const explanation = explainRecord({
@@ -86,6 +106,7 @@ export function DetailHead({ detail, requestId }: { detail: RequestDetail; reque
     context: summary.context,
     trace,
     jev,
+    api: summary.api,
   });
   const utcClock = fmtUtc(summary.at_millis).split(" ")[1] ?? "";
   const prev = neighbors.prev !== null && isRequestId(neighbors.prev) ? neighbors.prev : null;
@@ -172,6 +193,7 @@ export function DetailHead({ detail, requestId }: { detail: RequestDetail; reque
             <JevCell jev={summary.jev} />
           </div>
         </div>
+        {summary.api !== null ? <ApiLine api={summary.api} /> : null}
 
         {summary.query !== null ? (
           <QueryLine query={summary.query} values={trace.values ?? []} />
