@@ -1005,3 +1005,175 @@ export interface Rollout {
   edges_loaded: number;
   edges: EdgeRollout[];
 }
+
+// ------------------------------------------------------------------ 对象表（接口）
+// Provisional: the objects endpoints (console design section 7) are not implemented yet, so these shapes
+// follow the design's names and will be replaced by the backend's JSON. Times follow the file's rule:
+// `*_millis` are Unix milliseconds, the rest RFC 3339 UTC strings.
+
+/** Learning state of a position (object-map design 1). */
+export type ObjectState =
+  | "pending"
+  | "proposed"
+  | "confirmed"
+  | "ambiguous"
+  | "suspended"
+  | "retired";
+
+/** Where a class or a position's class came from: a hand declaration, a rule, or the agent. */
+export type ObjectSource = "admin" | "rule" | "agent";
+
+/** The side of a request a position sits on. */
+export type ObjectSide = "request" | "response";
+
+/** Query of `GET /api/sites/{name}/objects`; the server filters the slots and counts the whole map. */
+export type ObjectsFilter = {
+  state?: ObjectState;
+  class?: string;
+  q?: string;
+};
+
+export interface ObjectCounts {
+  classes: number;
+  pending: number;
+  proposed: number;
+  confirmed: number;
+  ambiguous: number;
+  suspended: number;
+}
+
+export interface ObjectClass {
+  /** Stable id, e.g. `doctor`; a rename changes the name only. */
+  id: string;
+  name: string;
+  description: string;
+  origin: ObjectSource;
+  /** Sibling fields the class is usually seen with, e.g. `name`, `title`. */
+  fields: string[];
+  slot_count: number;
+  uses_24h: number;
+  /** Route templates the class is used in, e.g. `/doctor/{id}`. */
+  routes: string[];
+}
+
+/** One row of the position table. */
+export interface ObjectSlotRow {
+  id: string;
+  side: ObjectSide;
+  /** The position, e.g. `GET /api/appointments [].doc_id` or `GET /doctor/{id} path[1]`. */
+  key: string;
+  /** Class id, or null while the position has none. */
+  class: string | null;
+  state: ObjectState;
+  source: ObjectSource;
+  /** One line of evidence, e.g. `流向 87% · 23 会话 · 0 拒绝`. */
+  basis: string;
+  /** RFC 3339 UTC, or null when the position was never seen. */
+  last_seen: string | null;
+}
+
+/** An automatic change of the learning task, shown in the banner (object-map design 5). */
+export interface ObjectEvent {
+  kind: "auto_pause" | "auto_tighten";
+  /** RFC 3339 UTC. */
+  at: string;
+  /**
+   * The banner's words after the event's name and time. A pause reads `已自动暂停：{text}`, e.g.
+   * `GET /doctor/{id} path[1]，快速放行后源站 404 比例从 1% 升到 18%`. A tightening reads `学习任务 HH:mm {text}`,
+   * e.g. `自动收紧了 2 个位置`.
+   */
+  text: string;
+  /** The version the change made, for the 撤销 link; null when none. */
+  version: number | null;
+}
+
+/** `GET /api/sites/{name}/objects`: counts of the whole map, the classes, and the slots the filter matches. */
+export interface ObjectsResponse {
+  counts: ObjectCounts;
+  /** False when no model is configured: the agent switch of the learning settings is then greyed out. */
+  agent_configured: boolean;
+  classes: ObjectClass[];
+  slots: ObjectSlotRow[];
+  events: ObjectEvent[];
+}
+
+/** Where a position's values travel: the other end of each flow, with its share and evidence. */
+export interface ObjectFlow {
+  /** The position at the other end, e.g. `GET /doctor/{id} path[1]`. */
+  key: string;
+  side: ObjectSide;
+  /** Share of the position's uses that go this way, 0 to 1. */
+  share: number;
+  uses: number;
+  sessions: number;
+  jev_allow: number;
+  jev_deny: number;
+  /** Method and route template at the other end, for the link to the request list. */
+  method: string;
+  route: string;
+}
+
+/** A composite value split into parts (later PR; the section shows only when present). */
+export interface ObjectFormat {
+  /** e.g. `按 # 拆成 3 段（98% 的值符合）`. */
+  summary: string;
+  /** One line per part. */
+  parts: string[];
+  /** What happens to values that do not fit, e.g. `不符合格式的 2% 整体交给 Jev`. */
+  rest: string | null;
+}
+
+/** The agent's conclusion for a position; its reason is model output and is rendered as text only. */
+export interface ObjectAgentVerdict {
+  /** A class id, `new` or `ambiguous`. */
+  choice: string;
+  /** 0 to 1. */
+  confidence: number;
+  /** The evidence the verdict cites, e.g. `f1`, `endpoint_shape`. */
+  cites: string[];
+  reason: string;
+}
+
+export interface ObjectHistoryEntry {
+  /** RFC 3339 UTC. */
+  at: string;
+  /** e.g. `规则提议`, `证据更新`. */
+  text: string;
+}
+
+/** `GET /api/sites/{name}/objects/slots/{id}`: the drawer of one position. Never contains values. */
+export interface ObjectSlotDetail extends ObjectSlotRow {
+  /** Flows of the values: request positions for a response position, response positions for a request one. */
+  flows_in: ObjectFlow[];
+  /** Sample request ids, at most three. */
+  examples: RequestId[];
+  /** Response structure: field paths and types only. */
+  shape: ResponseShapeField[];
+  /** Only when the position takes a composite value (later PR). */
+  format?: ObjectFormat;
+  /** Only when the class depends on a condition (later PR), e.g. `由 query.by 决定：id 为患者`. */
+  condition?: string;
+  /** Only when the agent was asked about this position. */
+  agent?: ObjectAgentVerdict;
+  history: ObjectHistoryEntry[];
+  /** Effects of confirming the proposal, in the impact preview's shape. */
+  impact: ImpactChange[];
+}
+
+/** A class the cold start can propose, with the named positions it is read from. */
+export interface BootstrapCandidate {
+  /** Proposed class id, e.g. `doctor`. */
+  kind: string;
+  /** Proposed name in words, e.g. `医生`. */
+  name: string;
+  /** Position keys, e.g. `GET /api/doctors [].id`. */
+  slots: string[];
+  /** Why the candidate needs a look, e.g. the name is an abbreviation; null when it is clear. */
+  note: string | null;
+}
+
+/** `GET /api/sites/{name}/objects/bootstrap`: the candidates from the last `window_hours` of requests. */
+export interface BootstrapResponse {
+  window_hours: number;
+  candidates: BootstrapCandidate[];
+}

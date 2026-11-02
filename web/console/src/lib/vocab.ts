@@ -10,6 +10,9 @@ import type {
   JevFailure,
   JevHealth,
   JevRoute,
+  ObjectSide,
+  ObjectSource,
+  ObjectState,
   Outcome,
   RefusedReason,
   ResponseSkip,
@@ -273,4 +276,215 @@ export const RANGE_LABEL = {
   "6h": "6 小时",
   "24h": "24 小时",
   "7d": "7 天",
+} as const;
+
+// ------------------------------------------------------------------ the object map (console design 3, 9)
+// Words of the site's object map tab, its drawer, the declaration and synonym dialogs, the learning settings
+// and the cold start. Record text is never written here; it arrives as data and is shown as text nodes.
+
+export const OBJECT_STATE_INFO: Record<
+  ObjectState,
+  { name: string; icon: string; tone: Tone; desc: string }
+> = {
+  pending: { name: "学习中", icon: "◌", tone: "neutral", desc: "在攒证据，还没有提议类别" },
+  proposed: { name: "待确认", icon: "?", tone: "would", desc: "规则或 agent 给出了类别，未生效" },
+  confirmed: { name: "已确认", icon: "●", tone: "ok", desc: "已生效：快速放行按这个类别核验" },
+  ambiguous: { name: "有歧义", icon: "◇", tone: "unjudged", desc: "确实有歧义，永久交给 Jev 判定" },
+  suspended: {
+    name: "已暂停",
+    icon: "▲",
+    tone: "blocked",
+    desc: "出现异常，暂停使用，退回名字推断",
+  },
+  retired: { name: "已过期", icon: "○", tone: "neutral", desc: "30 天没有出现" },
+};
+
+export const OBJECT_SIDE_INFO: Record<ObjectSide, { name: string; icon: string; desc: string }> = {
+  request: { name: "请求", icon: "→", desc: "请求里的位置：路径、查询参数、请求体" },
+  response: { name: "响应", icon: "←", desc: "源站响应里的字段" },
+};
+
+export const OBJECT_SOURCE_LABEL: Record<ObjectSource, string> = {
+  admin: "管理员声明",
+  rule: "规则",
+  agent: "agent",
+};
+
+/** Words of the drawer's source line and the counters, keyed by the state each one filters on. */
+export const OBJECT_TEXT = {
+  tab: "对象表",
+  search: "搜索类别、字段、路径",
+  classes: "类别",
+  viewLabel: "视图",
+  view: { byClass: "按类别", byPosition: "按位置" },
+  table: "位置列表",
+  uses24h: "24 小时使用",
+  declareButton: "＋ 声明字段归类",
+  fromSynonyms: "从同义词改写…",
+  learningButton: "学习设置 ⚙",
+  none: "没有符合条件的位置。",
+  columns: { slot: "位置", state: "类别与状态", source: "来源", basis: "依据", seen: "最近出现" },
+  banner: {
+    paused: "已自动暂停",
+    task: (time: string) => `学习任务 ${time}`,
+    view: "查看",
+    undo: "撤销",
+  },
+  noClasses: "还没有类别。学习中的位置在“按位置”里可以看到。",
+  classCard: {
+    rename: "改名",
+    merge: "合并到…",
+    split: "拆分…",
+    unavailable: "改名、合并、拆分需要对象表接口，暂未提供。",
+    description: "说明",
+    fields: "常见字段",
+    routes: "相关路由",
+    pick: "选一个类别，查看它的位置。",
+    positions: "位置",
+  },
+  drawer: {
+    flowsOut: "这个位置的值之后用在：",
+    flowsIn: "这个位置的值之前出现在：",
+    examples: "示例请求",
+    shape: "响应结构（不含值）",
+    format: "格式",
+    condition: "条件",
+    agent: "agent 结论",
+    agentChoice: "选择",
+    agentConfidence: "置信度",
+    agentCites: "依据",
+    agentReason: "理由（模型输出，按文本显示）",
+    impact: "影响",
+    scope: "范围",
+    scopeOf: (scope: string) => `仅 ${scope}（证据里的接口）`,
+    history: "历史",
+    proposal: (name: string) => `提议：${name}`,
+    confirmPreview: "确认后：",
+    confirmLine: (side: string, key: string, cls: string, scope: string) =>
+      `对象表 ＋ ${side} ${key} 归为${cls}（仅 ${scope}）`,
+    noField: "路径参数没有字段名，不能用字段归类确认。",
+    noClass: "还没有提议的类别，先用“改为其他类别…”选一个。",
+    confirm: "确认…",
+    reclass: "改为其他类别…",
+    ambiguous: "标为有歧义",
+    ignore: "忽略",
+    dismissed: "已忽略这个位置的提议，学习任务不再提议同一结论。",
+    markedAmbiguous: "已标为有歧义，之后交给 Jev 判定。",
+  },
+  declare: {
+    title: "声明字段归类",
+    field: "字段",
+    fieldHint: "忽略大小写和 _、-：doc_id、docId、DocID 是同一个",
+    kind: "类别",
+    kindNew: "＋ 新类别",
+    kindNewLabel: "新类别的 id",
+    kindHint: "3 到 24 个小写字母，结尾的 s 不计",
+    scope: "范围",
+    scopeOnly: "仅这些接口",
+    scopeAll: "全站",
+    scopeAllNote: "站点里同名字段指两种东西时会错放行",
+    scopeAllWarn: (targets: string) => `站点里同名字段指两种东西：${targets}。全站生效会错放行。`,
+    scopeHint: "路径写法同入口，例如 /api/appointments*",
+    paths: "接口路径",
+    scopeEmpty: "至少填一个接口路径，或选全站。",
+    matches: "会匹配",
+    matchesInside: "范围内",
+    matchesOutside: "范围外",
+    outside: (count: number) => `另有 ${count} 个同名位置不在范围内`,
+    noMatches: "最近的记录里没有这个字段名。",
+    draft: "预估影响并加入草稿",
+    save: "预估影响并保存…",
+    cancel: "取消",
+  },
+  synonyms: {
+    title: "从同义词改写",
+    intro: "每组同义词改写成字段归类：逐个位置选择归为哪一类、限定在哪些接口，然后删除这组同义词。",
+    groupWarn: (word: string, other: string) => `会让路径里的 ${word} 也算成 ${other}`,
+    none: "最近的记录里没有这组词的位置，直接删除这组同义词。",
+    builtin: "内置的同义词不能改写。",
+    empty: "没有可以改写的同义词。",
+    affected: "这组同义词实际影响的位置",
+    classTo: "归为",
+    scopeTo: "范围",
+    scopeEvidence: "仅证据里的接口",
+    scopeAll: "全站",
+    apply: "改写并加入草稿",
+  },
+  learning: {
+    title: "学习设置",
+    intro: "学习设置属于站点配置：改动走保存对话框，保存后产生新版本。",
+    autoLearn: { name: "自动学习", help: "关闭后只用手工声明，已确认的位置照常生效" },
+    autoTighten: {
+      name: "自动收紧",
+      help: "只会让快速放行变少的改动是否自动生效；关闭后也进入待确认",
+    },
+    agent: {
+      name: "agent",
+      help: "规则判不了的位置是否交给 agent",
+      unavailable: "没有配置模型，agent 暂不可用。",
+      daily: "每日调用上限",
+    },
+    thresholds: {
+      name: "学习门槛",
+      help: "调低会更快学到，也更容易被少数会话影响",
+      atLeast: "至少",
+      usesLabel: "至少使用次数",
+      sessionsLabel: "至少会话数",
+      uses: "次使用",
+      sessions: "个会话",
+    },
+    autoPause: { name: "自动暂停", help: "已确认位置出现异常时自动暂停" },
+    on: "开",
+    off: "关",
+    unchanged: "没有改动",
+    save: "保存…",
+  },
+  coldStart: {
+    title: "还没有对象表",
+    intro: (hours: number, count: number) =>
+      `从最近 ${hours} 小时的请求里识别出 ${count} 个名字明确的类别。确认后它们作为学习的起点，其余位置照常判定。`,
+    none: "最近的请求里没有名字明确的位置。有请求后再来看，或在下面的声明里手工归类。",
+    pathOnly: "只在路径参数里，没有字段名，不能确认；学习会处理。",
+    later: "稍后再说",
+    skipped: "对象表还是空的，学习照常进行。",
+    confirm: (count: number) => `确认 ${count} 个类别…`,
+  },
+  wizard: {
+    title: "对象表（可选）",
+    text: "创建后，最近的请求里名字明确的位置会列为候选类别，可以在对象表里一次确认。现在可以跳过。",
+    open: "创建后打开对象表",
+  },
+  dismissInvalid: "这个位置已经不在对象表里，刷新后再试。",
+};
+
+/** The messages of field declarations (lib/objects-validate.ts). */
+export const DECLARE_TEXT = {
+  fieldEmpty: "字段名不能为空",
+  fieldLong: "字段名最多 32 个字符",
+  fieldChars: "字段名只能用字母、数字、_ 和 -",
+  kindFormat: "类别 id 为 3 到 24 个小写字母",
+  scopeMany: "范围最多 8 个路径",
+  scopeDup: "范围里有重复的路径",
+  countMax: "字段归类最多 32 条",
+  duplicate: (field: string) => `字段 ${field} 在重叠的范围里已经归过类`,
+  conflict: (field: string, kind: string) =>
+    `字段 ${field} 在重叠的范围里已归为 ${kind}，不能同时归为别的类别`,
+  shape: (where: string) => `字段归类 ${where} 的格式不对`,
+  learningShape: "学习设置的格式不对",
+  unknownKey: (key: string) => `未知字段 ${key}`,
+  label: (field: string, kind: string, scope: string | null) =>
+    `字段 ${field} 归为 ${kind}（${scope === null ? "全站" : `仅 ${scope}`}）`,
+};
+
+/** The learning settings in words, for the change list and the version conflict. */
+export const LEARNING_TEXT = {
+  autoLearn: "自动学习",
+  autoTighten: "自动收紧",
+  agent: "agent",
+  agentDaily: "agent 每日上限",
+  uses: "学习门槛 使用次数",
+  sessions: "学习门槛 会话数",
+  autoPause: "自动暂停",
+  on: "开",
+  off: "关",
 } as const;

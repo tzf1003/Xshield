@@ -2,8 +2,12 @@
 // field it names; codes are turned into text by lib/vocab.ts, never shown raw as data.
 
 import type {
+  BootstrapResponse,
   Evidence,
   ImpactPreview,
+  ObjectsFilter,
+  ObjectsResponse,
+  ObjectSlotDetail,
   ImportResult,
   Insights,
   JevPrompt,
@@ -141,6 +145,18 @@ export const api = {
   insights: (site: string, hours = 24) =>
     get<Insights>(`/sites/${name(site)}/insights?window_hours=${hours}`),
   evidence: (site: string) => get<Evidence>(`/sites/${name(site)}/evidence`),
+
+  // The object map (console design section 7). Dismissing and marking ambiguous change learning state, not
+  // the site's version.
+  objects: (site: string, filter: ObjectsFilter) =>
+    get<ObjectsResponse>(`/sites/${name(site)}/objects${qs({ ...filter })}`),
+  objectSlot: (site: string, id: string) =>
+    get<ObjectSlotDetail>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}`),
+  dismissSlot: (site: string, id: string) =>
+    post<void>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/dismiss`),
+  ambiguousSlot: (site: string, id: string) =>
+    post<void>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/ambiguous`),
+  bootstrap: (site: string) => get<BootstrapResponse>(`/sites/${name(site)}/objects/bootstrap`),
 
   status: () => get<StatusResponse>("/status"),
   system: () => get<SystemInfo>("/system"),
