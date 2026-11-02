@@ -92,8 +92,10 @@ export interface ApiName {
 
 /** A route rule covered the path, but the name could not be read. Treated as an unknown interface. */
 export interface ApiUnknown {
-  /** Reason code from the gateway, e.g. `header_repeated`, `body_not_json` (mapped in vocab). */
+  /** Reason code from the gateway, e.g. `repeated`, `body_not_json` (mapped in vocab). */
   unknown: string;
+  /** Where the problem was, e.g. `X-Service-Method`; shown after the reason when present. */
+  detail?: string;
 }
 
 export type ApiInfo = ApiName | ApiUnknown;
