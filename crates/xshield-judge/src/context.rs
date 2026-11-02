@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
-use xshield_core::kind::{Rules, Shown, Used, affinity, declares};
+use xshield_core::kind::{Rules, Shown, Used, affinity, declares, names_kind, shows_kind};
 
 use crate::values::{ResponseValue, is_id_like};
 
@@ -214,11 +214,38 @@ impl Seen {
     /// the request names for it (see `xshield_core::kind`).
     #[must_use]
     pub fn is_specific(&self, used: Used<'_>, rules: &Rules) -> bool {
+        self.is_shown_as(used, rules, None, |_| None)
+    }
+
+    /// [`Seen::is_specific`] with the object map (the object-map design note).
+    /// `request_object` is the kind the map gives the request position, and
+    /// `origin_object` the kind it gives each origin's position; both are `None`
+    /// where the map is silent.
+    ///
+    /// Where the map speaks for both sides, the two kinds decide and names do
+    /// not (`doc_id` mapped to a document never counts as a doctor). Where it
+    /// speaks for one side, the other side's name must name that kind. Where it
+    /// is silent on both, the name rules of [`Seen::is_specific`] apply
+    /// unchanged. A position the map gives a kind counts as an identifier
+    /// whatever its field is called.
+    #[must_use]
+    pub fn is_shown_as<'a>(
+        &self,
+        used: Used<'_>,
+        rules: &Rules,
+        request_object: Option<&str>,
+        origin_object: impl Fn(&Origin) -> Option<&'a str>,
+    ) -> bool {
         let long = used.value.chars().count() >= LONG_VALUE_CHARS;
         self.origins.iter().any(|origin| {
             let shown = as_shown(origin);
-            (is_id_like(&origin.field) || declares(shown, rules))
-                && (long || affinity(shown, used, rules))
+            let identifier = is_id_like(&origin.field) || declares(shown, rules);
+            match (request_object, origin_object(origin)) {
+                (Some(wanted), Some(kind)) => wanted == kind,
+                (None, Some(kind)) => names_kind(used, rules, kind),
+                (Some(wanted), None) => identifier && (long || shows_kind(shown, rules, wanted)),
+                (None, None) => identifier && (long || affinity(shown, used, rules)),
+            }
         })
     }
 
