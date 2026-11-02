@@ -218,9 +218,6 @@ pub async fn record_evidence(
             from: Vec::new(),
         }))
         .collect();
-    // The day and response positions of each vote row the evidence kept. A repeat of a vote
-    // keeps nothing, so its sources name no flow and make no position.
-    let mut kept: Vec<(i64, Vec<String>)> = Vec::new();
     for chunk in rows.chunks(EVIDENCE_CHUNK) {
         // One row per tuple: a text[] column cannot be unnested row by row, and a
         // vote's response positions are a list, not one value. The casts type each
@@ -253,36 +250,69 @@ pub async fn record_evidence(
         builder.push_bind(site);
         builder.push(" AND created_at = ");
         builder.push_bind(generation);
-        builder.push(" FOR SHARE) ON CONFLICT DO NOTHING RETURNING day, from_slots");
-        for row in builder.build().fetch_all(pool).await? {
-            kept.push((row.try_get("day")?, row.try_get("from_slots")?));
-        }
+        builder.push(" FOR SHARE) ON CONFLICT DO NOTHING");
+        builder.build().execute(pool).await?;
     }
-    record_positions(pool, site, generation, votes, denials, &kept).await?;
+    let stored = stored_sources(pool, site, votes).await?;
+    record_positions(pool, site, generation, votes, denials, &stored).await?;
     Ok(())
 }
 
+/// The day and the response positions of each vote the evidence holds, whether this call wrote
+/// that evidence or an earlier call did. The evidence and the positions are written by separate
+/// statements, so a call can fail between them, and its retry finds the evidence already there:
+/// the sources it holds name the positions to write, not what this call happened to insert.
+async fn stored_sources(
+    pool: &PgPool,
+    site: &str,
+    votes: &[Vote],
+) -> Result<Vec<(i64, Vec<String>)>, LearningStoreError> {
+    let mut stored: Vec<(i64, Vec<String>)> = Vec::new();
+    for chunk in votes.chunks(EVIDENCE_CHUNK) {
+        let slots: Vec<String> = chunk.iter().map(|vote| vote.slot.clone()).collect();
+        let sessions: Vec<String> = chunk.iter().map(|vote| vote.session.clone()).collect();
+        let days: Vec<i64> = chunk.iter().map(|vote| day_i64(vote.day)).collect();
+        let rows = sqlx::query(
+            "SELECT e.day, e.from_slots
+             FROM object_evidence e
+             JOIN unnest($2::text[], $3::text[], $4::bigint[]) AS k(slot, session, day)
+                 ON e.slot = k.slot AND e.session = k.session AND e.day = k.day
+             WHERE e.site = $1 AND e.kind = 'vote'",
+        )
+        .bind(site)
+        .bind(slots)
+        .bind(sessions)
+        .bind(days)
+        .fetch_all(pool)
+        .await?;
+        for row in rows {
+            stored.push((row.try_get("day")?, row.try_get("from_slots")?));
+        }
+    }
+    Ok(stored)
+}
+
 /// Keeps a row for every position the batch names: a request position a value sat at, and a
-/// response position a vote's kept evidence was shown at. A new row is pending until a
-/// judgement arrives, and a row the window retired comes back pending when a vote sees it
-/// again. A refusal is not a use: it adds a pending row when the position has none, and it
-/// never moves the day the position was last used, so retirement counts from the last vote.
+/// response position a vote's evidence holds. A new row is pending until a judgement arrives,
+/// and a row the window retired comes back pending when a vote sees it again. A refusal is not
+/// a use: it adds a pending row when the position has none, and it never moves the day the
+/// position was last used, so retirement counts from the last vote.
 async fn record_positions(
     pool: &PgPool,
     site: &str,
     generation: DateTime<Utc>,
     votes: &[Vote],
     denials: &[Denial],
-    kept: &[(i64, Vec<String>)],
+    stored: &[(i64, Vec<String>)],
 ) -> Result<(), LearningStoreError> {
     // One entry per position: a statement may not change the same row twice.
     let mut used: BTreeMap<&str, (&'static str, i64)> = BTreeMap::new();
     for vote in votes {
         note_position(&mut used, &vote.slot, "request", day_i64(vote.day));
     }
-    // A response position comes from the sources the evidence kept. A repeat of a vote keeps
-    // none of its sources, so they name no flow and make no position.
-    for (day, from) in kept {
+    // A response position comes from the sources the evidence holds. A repeat of a vote holds
+    // none of its own sources, so they name no flow and make no position.
+    for (day, from) in stored {
         for position in from {
             note_position(&mut used, position.as_str(), "response", *day);
         }
@@ -1333,6 +1363,43 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].other, source);
         assert_eq!(found[0].uses, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_retried_vote_names_the_response_positions_its_evidence_holds() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("retried_vote");
+        let generation = with_site(&pool, &site).await;
+        let response_slot = "GET /api/appointments [].doc_id";
+        // An earlier call wrote this vote's evidence, then failed before it wrote the positions.
+        sqlx::query(
+            "INSERT INTO object_evidence (site, slot, session, day, kind, from_slots)
+             VALUES ($1, $2, 'a', 3, 'vote', $3)",
+        )
+        .bind(&site)
+        .bind(SLOT)
+        .bind(vec![response_slot.to_owned()])
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The retry carries the same vote, so its evidence is already there and its insert is a no-op.
+        record_evidence(
+            &pool,
+            &site,
+            generation,
+            &[vote("a", 3, &[response_slot])],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(row_of(&pool, &site, SLOT, "request").await.last_day, 3);
+        assert_eq!(
+            row_of(&pool, &site, response_slot, "response")
+                .await
+                .last_day,
+            3
+        );
     }
 
     #[tokio::test]
