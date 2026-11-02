@@ -1,7 +1,7 @@
 //! The decision flow of docs/01 section 1.4, and the row that describes each
 //! decision (docs/07 sections 7.4 and 7.5).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,8 @@ use crate::state::{
 };
 use crate::trace::{entry_trace, recent_trace, redacted_query, value_entry};
 use crate::values::{
-    ExtractedRequest, ResponseValue, extract_request, extract_response, percent_decode,
+    ExtractedRequest, ResponseValue, extract_request, extract_response, json_unescape,
+    percent_decode,
 };
 
 /// Jev calls allowed per session per minute (docs/02 section 2.5).
@@ -597,14 +598,9 @@ impl<J: JevPort> Judge<J> {
             return summary;
         }
         // The origin answered the request, so an echo of what it sent teaches
-        // nothing, whatever the status. A 401 or 403 means the request never
-        // reached the application, so nothing it sent can have been echoed.
-        let refused = matches!(observation.status, 401 | 403);
-        let inherited = if refused {
-            None
-        } else {
-            self.note_request_sent(observation, issued.is_some())
-        };
+        // nothing, whatever the status: a refused request's values can still come
+        // back in a later response, such as a list of recent attempts.
+        let inherited = self.note_request_sent(observation, issued.is_some());
         let success = (200..300).contains(&observation.status);
         let issuing_redirect = (300..400).contains(&observation.status) && issued.is_some();
         if !success {
@@ -698,28 +694,37 @@ impl<J: JevPort> Judge<J> {
 
     /// The digests of every token of a request's path, query and body, for a
     /// request whose values were not all extracted: an echo of any token is then
-    /// not learned either. `None` when the tokens do not fit in what a session
-    /// may have sent.
+    /// not learned either. Each token is taken from the text as sent and as the
+    /// origin may decode it: percent escapes in the path, query and body, and
+    /// JSON `\uXXXX` escapes in the body. `None` when the distinct tokens do not
+    /// fit in what a session may have sent.
     fn token_digests(&self, request: &RequestFacts<'_>) -> Option<Vec<Digest16>> {
-        let query = request
-            .query
-            .map(|query| percent_decode(query, true))
-            .unwrap_or_default();
-        let body = percent_decode(&String::from_utf8_lossy(request.body), false);
-        let text = format!("{} {query} {body}", request.path);
-        let mut digests = Vec::new();
-        for token in text
-            .split(|c: char| {
-                !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '+'))
-            })
-            .filter(|token| !token.is_empty())
-        {
-            if digests.len() == SENT_MAX {
-                return None;
+        let query = request.query.unwrap_or("");
+        let body = String::from_utf8_lossy(request.body);
+        let texts = [
+            request.path.to_owned(),
+            percent_decode(request.path, false),
+            query.to_owned(),
+            percent_decode(query, true),
+            body.to_string(),
+            percent_decode(&body, false),
+            json_unescape(&body),
+        ];
+        let mut digests = HashSet::new();
+        for text in &texts {
+            for token in text
+                .split(|c: char| {
+                    !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '+'))
+                })
+                .filter(|token| !token.is_empty())
+            {
+                digests.insert(self.key.mac("value", token.as_bytes()));
+                if digests.len() > SENT_MAX {
+                    return None;
+                }
             }
-            digests.push(self.key.mac("value", token.as_bytes()));
         }
-        Some(digests)
+        Some(digests.into_iter().collect())
     }
 
     /// Records the values the request sent in the session it was judged in: its
@@ -1516,6 +1521,98 @@ mod tests {
             method: "POST",
             content_type: Some("text/plain"),
             body: br#"{"patientId":"P-0000099"}"#,
+            ..get("/api/search", None, Some("alice"), 1_000)
+        };
+        let searched = judge.judge(&site, &search).await;
+        assert!(searched.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                method: "POST",
+                ..answered(
+                    &searched,
+                    "/api/search",
+                    br#"{"patientId":"P-0000099","results":[]}"#,
+                    "alice",
+                )
+            },
+        );
+        fake.answer("DENY", "BENIGN");
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 2_000),
+            )
+            .await;
+        assert!(!object.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_value_a_refused_request_sent_is_not_learned_from_a_later_echo() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // Jev allows the request, and the origin refuses it with 403.
+        let refused = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 1_000),
+            )
+            .await;
+        assert!(refused.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                status: 403,
+                ..answered(
+                    &refused,
+                    "/api/patients/P-0000099",
+                    br#"{"error":"forbidden"}"#,
+                    "alice",
+                )
+            },
+        );
+        // A later response lists the refused id under an id field.
+        let home = judge
+            .judge(&site, &get("/api/home", None, Some("alice"), 2_000))
+            .await;
+        assert!(home.forward);
+        judge.observe(
+            &site,
+            &answered(
+                &home,
+                "/api/home",
+                br#"{"recent":[{"id":"P-0000099"}]}"#,
+                "alice",
+            ),
+        );
+        fake.answer("DENY", "BENIGN");
+        // The first request's allow is cached for minutes, so the same request an
+        // hour on is judged afresh.
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("alice"), 3_600_000),
+            )
+            .await;
+        assert!(!object.forward);
+        // Jev was asked for the refused request and for the object; the list needed none.
+        assert_eq!(fake.calls(), 2);
+        assert_eq!(home.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn a_truncated_body_with_a_json_escape_teaches_its_echo_nothing() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // The gateway cannot read this body as JSON, but the origin does, and it
+        // decodes the escaped id before echoing it. The body is `{"patientId":"\u0050-0000099"}`.
+        let search = RequestFacts {
+            method: "POST",
+            content_type: Some("text/plain"),
+            body: b"{\"patientId\":\"\\u0050-0000099\"}",
             ..get("/api/search", None, Some("alice"), 1_000)
         };
         let searched = judge.judge(&site, &search).await;
