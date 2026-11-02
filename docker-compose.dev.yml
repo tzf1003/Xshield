@@ -7,9 +7,10 @@ services:
       POSTGRES_PASSWORD: ${XSHIELD_DEV_POSTGRES_PASSWORD:-xshield_dev}
     ports:
       - "127.0.0.1:${XSHIELD_DEV_POSTGRES_PORT:-55432}:5432"
+    # The schema is not loaded here. xshield-control applies migrations/ at start-up
+    # (docs/04 section 4.2); an initdb copy would leave the tables without the ledger.
     volumes:
       - xshield-dev-postgres:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test:
         ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]

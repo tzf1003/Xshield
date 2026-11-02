@@ -5,6 +5,9 @@
 //! (the plaintext admin password) and prints the `pbkdf2-sha256$...` value
 //! for `XSHIELD_ADMIN_PASSWORD_HASH`, then exits.
 //!
+//! Before it serves, the server applies the pending schema migrations
+//! (docs/04 section 4.2) and exits when one fails.
+//!
 //! Environment: `XSHIELD_DATABASE_URL` and `XSHIELD_ADMIN_PASSWORD_HASH` are
 //! required. `XSHIELD_CONTROL_LISTEN` defaults to `127.0.0.1:8081`.
 //! `XSHIELD_CONTROL_CONSOLE_ORIGIN` enables CORS for a console served from
@@ -16,7 +19,7 @@
 use std::{env, error::Error, io::Read as _, net::SocketAddr};
 
 use sqlx::postgres::PgPoolOptions;
-use xshield_control::{ControlState, hash_password, router, run_maintenance};
+use xshield_control::{ControlState, hash_password, router, run_maintenance, run_migrations};
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8081";
 
@@ -45,6 +48,11 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
     }
 
     let pool = PgPoolOptions::new().connect(&database_url).await?;
+    run_migrations(&pool).await.map_err(|error| {
+        format!(
+            "database migration failed: {error} (docs/04 section 4.2 covers a database created before start-up migrations)"
+        )
+    })?;
     let state = ControlState::new(
         pool.clone(),
         admin_password_hash,

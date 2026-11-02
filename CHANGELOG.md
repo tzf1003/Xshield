@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 控制面启动时自动执行 `migrations/`（编译进二进制，sqlx `migrate`，记录在 `_sqlx_migrations`），迁移失败即退出，不再需要手动执行 SQL。开发用的 `docker-compose.dev.yml` 不再把迁移挂到 initdb。用 initdb 或手动 `psql` 建好基线的库需要一次性处理，见 [docs/04](docs/04-deployment-testing.md) 4.2 的"已有数据库的一次性处理"。
 - 设计重置为 v4，文档推倒重写：删除 v3 的 00–32 号文档、Word 总册、`START_HERE.html`、文档库清单与来源登记，新增 `docs/00`–`05`。v4 只保留"会话上下文 + Jev 判定"一条主线：请求中的业务对象必须在本会话此前的源站响应中出现过或来自登记的入口（含分享兑换接口），否则交给 Jev 判定越权与攻击；单管理员、站点配置收敛为少量字段、判定日志取代 v3 证据链。代码尚未改造，删减清单见 `docs/05`。
   - `scripts/validate_library.py` 去掉依赖 v3 文档的 RQ/INV 追踪与来源登记检查；`scripts/package_release.sh` 改为打包全部 `docs/*.md`；README、AGENTS、部署与控制台 README 的失效链接改为指向 v4 文档或注明 v3 旧文档所在提交 `ad524d4`。
 
