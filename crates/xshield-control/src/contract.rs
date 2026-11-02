@@ -8,10 +8,12 @@ use serde_json::{Map, Value, json};
 use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 
 use crate::requests::{CountsBody, RequestRow};
+use crate::stats::TimeseriesBody;
 
 const REQUESTS: &str = include_str!("../../../web/console/tests/fixtures/requests.json");
 const LOOKUP: &str = include_str!("../../../web/console/tests/fixtures/lookup.json");
 const COUNTS: &str = include_str!("../../../web/console/tests/fixtures/counts.json");
+const TIMESERIES: &str = include_str!("../../../web/console/tests/fixtures/timeseries.json");
 const DETAILS: [&str; 3] = [
     include_str!(
         "../../../web/console/tests/fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json"
@@ -168,4 +170,9 @@ fn counts_round_trip_through_the_counts_type() {
     partial["complete"] = json!(false);
     partial["scanned"] = json!(57);
     assert_round_trips::<CountsBody>(&partial, exactly);
+}
+
+#[test]
+fn timeseries_round_trips_through_the_timeseries_type() {
+    assert_round_trips::<TimeseriesBody>(&fixture(TIMESERIES), exactly);
 }

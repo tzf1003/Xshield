@@ -11,6 +11,7 @@ use axum::{
     Json,
     extract::{Query, State},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use xshield_postgres::decision_stats::{self, Bucket, Scope, Summary};
 
@@ -84,26 +85,41 @@ pub async fn summary(
 /// # Errors
 /// As `scope_from`, `INVALID_FILTER` naming `bucket_millis` for a bucket under one
 /// minute, and `INTERNAL` when the database cannot be read.
+/// The `GET /api/stats/timeseries` response. `scanned` accompanies `complete: false` only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimeseriesBody {
+    pub bucket_ms: i64,
+    pub since_millis: i64,
+    pub until_millis: i64,
+    pub buckets: Vec<BucketBody>,
+    pub complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<i64>,
+}
+
+/// One bucket of the timeline: its start, and the requests per decision path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BucketBody {
+    pub at_millis: i64,
+    pub counts: BTreeMap<String, i64>,
+}
+
 pub async fn timeseries(
     State(state): State<Arc<ControlState>>,
     Query(query): Query<BTreeMap<String, String>>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<Json<TimeseriesBody>> {
     let params = Params::from(query);
     let (scope, window) = scope_from(&params, now_millis())?;
     let bucket_ms = bucket_param(&params, window)?;
     let timeline = decision_stats::timeseries(&state.pool, &scope, bucket_ms).await?;
-    let mut body = json!({
-        "bucket_ms": bucket_ms,
-        "since_millis": window.since_millis,
-        "until_millis": window.until_millis,
-        "buckets": timeline.buckets.iter().map(bucket_json).collect::<Vec<_>>(),
-        "complete": timeline.complete,
-    });
-    // docs/07 section 7.9.1: `scanned` accompanies `complete: false` only.
-    if !timeline.complete {
-        body["scanned"] = json!(timeline.scanned);
-    }
-    Ok(Json(body))
+    Ok(Json(TimeseriesBody {
+        bucket_ms,
+        since_millis: window.since_millis,
+        until_millis: window.until_millis,
+        buckets: timeline.buckets.iter().map(bucket_body).collect(),
+        complete: timeline.complete,
+        scanned: (!timeline.complete).then_some(timeline.scanned),
+    }))
 }
 
 /// The totals as the console reads them: the window, the figures, the figures of
@@ -142,12 +158,11 @@ fn previous_json(totals: &Summary) -> Value {
     })
 }
 
-/// One bucket as the console reads it: its start, and the requests per decision path.
-fn bucket_json(bucket: &Bucket) -> Value {
-    json!({
-        "at_millis": bucket.start_millis,
-        "counts": bucket.counts,
-    })
+fn bucket_body(bucket: &Bucket) -> BucketBody {
+    BucketBody {
+        at_millis: bucket.start_millis,
+        counts: bucket.counts.clone(),
+    }
 }
 
 /// The window of the same length that ends just before `window` starts. `None`
