@@ -12,7 +12,13 @@ import { hm, parseTime, shortDateTime } from "./clock.ts";
 /** Columns of the instance table; the detail row spans all of them. */
 const COLUMNS = 14;
 
-type SiteState = { version?: number; error?: string };
+type SiteState = { version?: number; error?: string; loaded_at_millis?: number };
+
+/** "已加载 v13", with the time the instance loaded that version when it reports one. */
+function loadedText({ version, loaded_at_millis }: SiteState): string {
+  const text = `已加载 v${fmtInt(version)}`;
+  return loaded_at_millis === undefined ? text : `${text}（${shortDateTime(loaded_at_millis)}）`;
+}
 
 export function EdgesTable({ edges, now }: { edges: EdgeStatus[]; now: number }) {
   if (edges.length === 0) {
@@ -146,7 +152,7 @@ function EdgeDetail({ edge, sites }: { edge: EdgeStatus; sites: Array<[string, S
                       ) : state.version === undefined ? (
                         "未加载"
                       ) : (
-                        `已加载 v${fmtInt(state.version)}`
+                        loadedText(state)
                       )}
                     </td>
                   </tr>

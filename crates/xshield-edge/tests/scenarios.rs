@@ -226,7 +226,7 @@ fn site(name: &str, host: &str, origin_port: u16, extra: &str) -> Arc<EdgeSite> 
            "entries":["/login","/api/home","/api/patients","/share/*"],
            "bypass":["/static/*"]{extra}}}"#
     );
-    Arc::new(EdgeSite::new(SiteSpec::from_json(&json).expect("spec"), 1).expect("site"))
+    Arc::new(EdgeSite::new(SiteSpec::from_json(&json).expect("spec"), 1, 1_700).expect("site"))
 }
 
 fn harness() -> &'static Harness {

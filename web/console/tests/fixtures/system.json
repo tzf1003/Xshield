@@ -27,10 +27,12 @@
       ],
       "sites": {
         "emr": {
-          "version": 13
+          "version": 13,
+          "loaded_at_millis": 1793539051500
         },
         "juice": {
-          "version": 7
+          "version": 7,
+          "loaded_at_millis": 1793536802000
         }
       },
       "jev": {

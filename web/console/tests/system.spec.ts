@@ -31,6 +31,7 @@ test("the gateway tab lists each instance, and a gateway's detail shows its loss
   const siteLoad = page.getByRole("table", { name: "这个实例的站点加载结果" });
   await expect(siteLoad.getByText("已加载 v13")).toBeVisible();
   await expect(siteLoad.getByText("已加载 v7")).toBeVisible();
+  await expect(siteLoad.getByText(/已加载 v13（\d{2}-\d{2} \d{2}:\d{2}:\d{2}）/)).toBeVisible();
 
   const gaps = page.getByRole("table", { name: "这个实例的日志缺口" });
   const window = gapRow(gaps, "11-01 21:10:00 – 21:12");

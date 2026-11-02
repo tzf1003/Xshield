@@ -404,7 +404,7 @@ advanced:
 - `upstream_request_filter` 记下上游开始时间，`response_filter` 计算 `origin_ms`。
 - `response_body_filter` 结束时调用 `observe`，把摘要合入 `ctx.record.trace.response`；未转发的请求写 `skip: "not_forwarded"`。
 - `logging` 写 `status`、`total_ms`；`error` 参数非空时按 Pingora 错误类型写 `upstream_error`（`connect_refused`、`connect_timeout`、`read_timeout`、`tls`、`other`）。
-- `EdgeSite` 保存配置版本，`SiteLoader` 记录每个站点的加载结果（成功版本、校验失败的错误码、因 Host 冲突落选），供心跳上报。
+- `EdgeSite` 保存配置版本和加载时间（进程把这个版本装进路由表的时刻，Unix 毫秒），`SiteLoader` 记录每个站点的加载结果（成功版本及其加载时间、校验失败的错误码、因 Host 冲突落选），供心跳上报。同一版本再次读到时沿用原来的加载时间，只有版本变化才重新计时；校验失败时仍在服务的旧版本保留它的加载时间。
 
 ### 7.7.4 日志发送
 
@@ -418,7 +418,7 @@ advanced:
 
 ### 7.7.5 心跳
 
-`crates/xshield-edge/src/status.rs`（新增模块）每 10 秒、以及站点表变化后立即 upsert `edge_status` 一行：实例名、启动时间、构建版本、监听端口、是否 TLS、每个站点加载的版本和错误、会话数、队列长度、四个计数器（`written`、`dropped`、`dropped_bypass`、`write_errors`）、缺口历史 `gaps`（[7.7.4](#774-日志发送)）、Jev 线路配置（线路、端点主机名、模型、默认超时、指令 ID，不含密钥）和运行参数（[7.9.8](#798-系统)）。文件模式下不写。
+`crates/xshield-edge/src/status.rs`（新增模块）每 10 秒、以及站点表变化后立即 upsert `edge_status` 一行：实例名、启动时间、构建版本、监听端口、是否 TLS、每个站点加载的版本、加载时间（`loaded_at_millis`，Unix 毫秒；没有版本的站点不带这个键）和错误、会话数、队列长度、四个计数器（`written`、`dropped`、`dropped_bypass`、`write_errors`）、缺口历史 `gaps`（[7.7.4](#774-日志发送)）、Jev 线路配置（线路、端点主机名、模型、默认超时、指令 ID，不含密钥）和运行参数（[7.9.8](#798-系统)）。文件模式下不写。
 
 控制面认为一个实例“在线”的条件是 `seen_at` 在 30 秒内；超过 24 小时没有心跳的行被清理（[7.8.2](#782-分区与保留)）。多个实例各写一行，控制台按实例分别显示，不求平均。
 
@@ -592,7 +592,7 @@ CREATE TABLE jev_prompts (
 | `GET /api/stats/summary`、`GET /api/stats/timeseries` | 总览指标、按判定路径堆叠的时间序列 |
 | `GET /api/sessions`、`GET /api/sessions/{label}` | 会话列表（按时间窗聚合）、会话时间线（7.9.6） |
 | `GET /api/jev/status`、`GET /api/jev/stats`、`GET /api/jev/prompts/{id}` | Jev 健康、耗时与置信度分布、指令全文（7.9.7） |
-| `GET /api/sites`、`POST /api/sites` | 站点列表（含生效进度 `rollout` 和 24 小时计数，7.9.13）、新建 |
+| `GET /api/sites`、`POST /api/sites` | 站点列表（含每个实例加载的版本和加载时间、生效进度 `rollout` 和 24 小时计数，7.9.13）、新建 |
 | `GET/PUT/DELETE /api/sites/{name}` | 读取（含 `rollout`）、整体替换、删除 |
 | `GET /api/sites/{name}/versions`、`GET /api/sites/{name}/versions/{v}` | 版本列表（含自动生成的变更摘要）、某个版本全文 |
 | `POST /api/sites/{name}/rollback` | 以某版本全文生成新版本 |
@@ -693,7 +693,7 @@ CREATE TABLE jev_prompts (
 
 ### 7.9.8 系统
 
-`GET /api/system` 返回控制面构建版本、PostgreSQL 版本、每个网关实例的心跳内容（含四个计数器和 `gaps` 缺口历史）和是否在线（30 秒内有心跳）、判定日志按分区的范围、行数和大小、最早记录时间、保留期，以及网关上报的运行参数。它比 `/api/status` 重（要统计分区），只在系统页读取。参数分两组：可按站点覆盖的默认值，和不可配置的代码默认值：
+`GET /api/system` 返回控制面构建版本、PostgreSQL 版本、每个网关实例的心跳内容（含四个计数器和 `gaps` 缺口历史）和是否在线（30 秒内有心跳）、判定日志按分区的范围、行数和大小、最早记录时间、保留期，以及网关上报的运行参数。每个实例的 `sites` 给出站点加载的版本、加载时间（`loaded_at_millis`，Unix 毫秒）和错误码，不带加载时间的旧心跳只是不返回这个键。它比 `/api/status` 重（要统计分区），只在系统页读取。参数分两组：可按站点覆盖的默认值，和不可配置的代码默认值：
 
 ```json
 {

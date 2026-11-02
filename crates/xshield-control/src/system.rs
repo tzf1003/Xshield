@@ -76,12 +76,15 @@ pub struct GapBody {
     pub write_errors: i64,
 }
 
-/// One site on one instance: the version it loaded, or the error that kept it from
-/// loading. A key the heartbeat does not carry is left out.
+/// One site on one instance: the version it loaded and when, or the error that kept it
+/// from loading. A key the heartbeat does not carry is left out.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SiteStateBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<i64>,
+    /// When the instance loaded `version`, Unix milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loaded_at_millis: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -213,8 +216,8 @@ fn edge_body(edge: &EdgeStatus, now: DateTime<Utc>) -> EdgeBody {
     }
 }
 
-/// The state of each site on one instance: the version it loaded, or the error that
-/// made it refuse the site. Nothing else the heartbeat carries is returned.
+/// The state of each site on one instance: the version it loaded and when, or the error
+/// that made it refuse the site. Nothing else the heartbeat carries is returned.
 #[must_use]
 fn site_states(sites: &Value) -> BTreeMap<String, SiteStateBody> {
     sites
@@ -224,6 +227,7 @@ fn site_states(sites: &Value) -> BTreeMap<String, SiteStateBody> {
         .map(|(site, entry)| {
             let state = SiteStateBody {
                 version: field(Some(entry), "version"),
+                loaded_at_millis: field(Some(entry), "loaded_at_millis"),
                 error: field(Some(entry), "error"),
             };
             (site.clone(), state)
@@ -430,14 +434,26 @@ mod tests {
     }
 
     #[test]
-    fn a_site_keeps_only_its_version_and_error() {
-        let sites = json!({ "emr": { "version": 13, "state": "loaded", "error": null } });
+    fn a_site_keeps_its_version_load_time_and_error_only() {
+        let sites = json!({
+            "emr": { "version": 13, "loaded_at_millis": 1_793_539_051_500_i64, "state": "loaded", "error": null },
+            "juice": { "error": "SITE_CONFIG_ORIGIN_INVALID" },
+        });
         let states = site_states(&sites);
         assert_eq!(
             states["emr"],
             SiteStateBody {
                 version: Some(13),
+                loaded_at_millis: Some(1_793_539_051_500),
                 error: None,
+            }
+        );
+        assert_eq!(
+            states["juice"],
+            SiteStateBody {
+                version: None,
+                loaded_at_millis: None,
+                error: Some("SITE_CONFIG_ORIGIN_INVALID".to_owned()),
             }
         );
     }

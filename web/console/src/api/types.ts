@@ -702,7 +702,7 @@ export interface EdgeStatus {
   /** Loss history: merged minutes with lost records, the newest 50 (docs/07 7.7.4). */
   gaps: LogGap[];
   /** Per site: the version it loaded, or the error code that made it refuse the site. */
-  sites: Record<string, { version?: number; error?: string }>;
+  sites: Record<string, { version?: number; error?: string; loaded_at_millis?: number }>;
   jev: JevConfig;
 }
 
