@@ -1774,6 +1774,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bare_id_is_judged_by_its_object_or_the_route_word_at_the_end() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &shown(
+                "/api/doctors",
+                br#"[{"id":7,"name":"Dr A"},{"id":9,"name":"Dr B"}]"#,
+                "bare",
+            ),
+        );
+        // `?id=9` on a file path names the file the path addresses, so doctor 9 does not pass.
+        let verdict = judge
+            .judge(
+                &site,
+                &get("/api/doctors/7/files", Some("id=9"), Some("bare"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(fake.calls(), 1);
+        // On the doctors path the same key names a doctor, and 9 is one.
+        let verdict = judge
+            .judge(
+                &site,
+                &get("/api/doctors", Some("id=9"), Some("bare"), 2_000),
+            )
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1);
+        // A bare body id takes the file as well, but a doctor named by its parent passes.
+        let body_id = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: br#"{"id":9}"#,
+            ..get("/api/doctors/7/files", None, Some("bare"), 3_000)
+        };
+        assert!(!judge.judge(&site, &body_id).await.forward);
+        assert_eq!(fake.calls(), 2);
+        let nested = RequestFacts {
+            body: br#"{"doctor":{"id":9}}"#,
+            now_ms: 4_000,
+            ..body_id
+        };
+        let verdict = judge.judge(&site, &nested).await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 2);
+        // A document id under `doc` is a document wherever the record is.
+        judge.observe(
+            &site,
+            &shown("/api/docs", br#"[{"id":5,"title":"Consent"}]"#, "bare"),
+        );
+        let record = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: br#"{"doc":{"id":5}}"#,
+            ..get("/api/records", None, Some("bare"), 5_000)
+        };
+        let verdict = judge.judge(&site, &record).await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
     async fn a6_a_share_redemption_seeds_the_context() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
