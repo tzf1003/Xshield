@@ -1017,6 +1017,79 @@ mod tests {
         assert!(sent[0].contains("age @ GET /api/patients"));
     }
 
+    /// What the origin showed `credential` for `GET path`.
+    fn shown<'a>(path: &'a str, body: &'a [u8], credential: &'a str) -> Observation<'a> {
+        Observation {
+            request_id: RID,
+            unread: None,
+            would_block: false,
+            credential: Some(credential),
+            client: "10.0.0.1",
+            issued_credential: None,
+            method: "GET",
+            path,
+            status: 200,
+            content_type: Some("application/json"),
+            body,
+            now_ms: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_doctor_id_the_origin_showed_passes_the_same_number_on_the_doctor_path() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor_id":1,"name":"Dr A"}"#, "doctor-a"),
+        );
+        let verdict = judge
+            .judge(&site, &get("/doctor/1", None, Some("doctor-a"), 1_000))
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_doctor_id_the_session_never_saw_on_the_doctor_path_goes_to_jev() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor_id":1,"name":"Dr A"}"#, "doctor-a"),
+        );
+        let verdict = judge
+            .judge(&site, &get("/doctor/2", None, Some("doctor-a"), 1_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 403);
+        assert_eq!(fake.calls(), 1);
+        let sent = fake.sent.lock().unwrap();
+        assert!(sent[0].contains(r#""value":"2""#) && sent[0].contains(r#""seen_as":[]"#));
+    }
+
+    #[tokio::test]
+    async fn a_document_id_does_not_unlock_a_doctor_path() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor_id":1,"name":"Dr A"}"#, "doctor-a"),
+        );
+        judge.observe(&site, &shown("/api/docs", br#"{"doc_id":2}"#, "doctor-a"));
+        let verdict = judge
+            .judge(&site, &get("/doctor/2", None, Some("doctor-a"), 1_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(fake.calls(), 1);
+    }
+
     #[tokio::test]
     async fn a6_a_share_redemption_seeds_the_context() {
         let fake = FakeJev::new();
