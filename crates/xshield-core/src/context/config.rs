@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::advanced::{Advanced, AdvancedDto};
+use super::objects::{ObjectMap, ObjectMapDto};
 
 const NAME_MAX: usize = 64;
 const HOSTS_MAX: usize = 16;
@@ -37,6 +38,9 @@ pub enum ConfigError {
     /// `advanced` holds an out of range number, an invalid or too short word, a
     /// synonym group that is not two different words, or too many entries.
     Advanced,
+    /// `objects` names an undeclared or malformed kind, repeats a position, or
+    /// holds more entries than the object map allows.
+    Objects,
 }
 
 impl std::fmt::Display for ConfigError {
@@ -50,6 +54,7 @@ impl std::fmt::Display for ConfigError {
             Self::Entries => "SITE_CONFIG_ENTRIES_INVALID",
             Self::Bypass => "SITE_CONFIG_BYPASS_INVALID",
             Self::Advanced => "SITE_CONFIG_ADVANCED_INVALID",
+            Self::Objects => "SITE_CONFIG_OBJECTS_INVALID",
         })
     }
 }
@@ -171,6 +176,8 @@ pub struct SiteSpec {
     on_jev_unavailable: OnJevUnavailable,
     #[serde(skip_serializing_if = "Advanced::is_empty")]
     advanced: Advanced,
+    #[serde(skip_serializing_if = "ObjectMap::is_empty")]
+    objects: ObjectMap,
 }
 
 #[derive(Deserialize)]
@@ -191,6 +198,10 @@ struct SiteSpecDto {
     // positional form of a struct, and reject `null` outright.
     #[serde(default)]
     advanced: Option<serde_json::Value>,
+    // The object map is read as a raw value too, so that its own errors are
+    // reported as `SITE_CONFIG_OBJECTS_INVALID` and not as a malformed site.
+    #[serde(default)]
+    objects: Option<serde_json::Value>,
 }
 
 impl TryFrom<SiteSpecDto> for SiteSpec {
@@ -232,6 +243,16 @@ impl TryFrom<SiteSpecDto> for SiteSpec {
             }
             Some(_) => return Err(ConfigError::Malformed),
         };
+        let objects = match dto.objects {
+            None | Some(serde_json::Value::Null) => ObjectMap::default(),
+            Some(section @ serde_json::Value::Object(_)) => {
+                let section: ObjectMapDto =
+                    serde_json::from_value(section).map_err(|_| ConfigError::Objects)?;
+                ObjectMap::try_from(section)?
+            }
+            // A JSON array would be read as the positional form of the struct.
+            Some(_) => return Err(ConfigError::Objects),
+        };
         let hosts = dto
             .hosts
             .iter()
@@ -247,6 +268,7 @@ impl TryFrom<SiteSpecDto> for SiteSpec {
             mode: dto.mode,
             on_jev_unavailable: dto.on_jev_unavailable,
             advanced,
+            objects,
         })
     }
 }
@@ -313,6 +335,12 @@ impl SiteSpec {
     #[must_use]
     pub fn advanced(&self) -> &Advanced {
         &self.advanced
+    }
+
+    /// The site's object map (the object-map design note); empty before learning.
+    #[must_use]
+    pub fn objects(&self) -> &ObjectMap {
+        &self.objects
     }
 
     /// The entry pattern that covers `path`, as configured.
@@ -543,5 +571,41 @@ mod tests {
         // The stored form is the struct's own layout and must re-validate.
         let again: SiteSpec = serde_json::from_str(&text).unwrap();
         assert_eq!(site, again);
+    }
+
+    #[test]
+    fn the_object_map_is_validated_as_its_own_section() {
+        let with = |objects: &str| {
+            MINIMAL.replace(
+                "\"entries\"",
+                &format!("\"objects\": {objects}, \"entries\""),
+            )
+        };
+        let text = with(
+            r#"{"classes":[{"id":"doctor","name":"医生"}],
+                "slots":[{"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"}]}"#,
+        );
+        let site = SiteSpec::from_json(&text).unwrap();
+        assert_eq!(
+            site.objects().class_of("GET /doctor/{id} path[1]"),
+            Some("doctor")
+        );
+        let again: SiteSpec = serde_json::from_str(&serde_json::to_string(&site).unwrap()).unwrap();
+        assert_eq!(again.objects(), site.objects());
+        // A position of an undeclared kind, a repeated position, and a section
+        // that is not an object are each refused as the objects section.
+        for objects in [
+            r#"{"classes":[],"slots":[{"key":"GET /d path[1]","class":"doctor","source":"admin"}]}"#,
+            r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+                {"key":"GET /d path[1]","class":"doctor","source":"admin"},
+                {"key":"GET /d path[1]","class":"doctor","source":"rule"}]}"#,
+            "[]",
+        ] {
+            assert_eq!(
+                SiteSpec::from_json(&with(objects)).unwrap_err(),
+                ConfigError::Objects,
+                "{objects}"
+            );
+        }
     }
 }

@@ -169,6 +169,7 @@ impl From<ConfigError> for ApiError {
             ConfigError::Entries => ("SITE_CONFIG_ENTRIES_INVALID", Some("entries")),
             ConfigError::Bypass => ("SITE_CONFIG_BYPASS_INVALID", Some("bypass")),
             ConfigError::Advanced => ("SITE_CONFIG_ADVANCED_INVALID", Some("advanced")),
+            ConfigError::Objects => ("SITE_CONFIG_OBJECTS_INVALID", Some("objects")),
         };
         let error = Self::new(StatusCode::BAD_REQUEST, code);
         match field {
