@@ -1,9 +1,10 @@
 // The change history of a site (docs/06 6.4.9): every version with its kind, its note and what it changed against
 // the version before. Two versions can be compared (the address keeps the pair as `diff=a..b`); a version can be
-// read in full, rolled back to, or used to find the requests it judged.
+// read in full, rolled back to, or used to find the requests it judged. The full text of a version opens in a row of
+// its own under its summary, across the whole table, so its lines are kept and it scrolls sideways instead.
 
 import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useVersions } from "../../api/queries.ts";
 import type { ChangeKind, SiteDetail, SiteSpec, SiteVersion } from "../../api/types.ts";
 import { useSetSearch } from "../../app/scope.ts";
@@ -123,7 +124,7 @@ export function HistoryTab({ site, diff, onRollback }: Props) {
       </section>
 
       <div className="tbl-wrap">
-        <table className="tbl" aria-label="版本历史">
+        <table className="tbl history-tbl" aria-label="版本历史">
           <thead>
             <tr>
               <th scope="col">版本</th>
@@ -139,53 +140,68 @@ export function HistoryTab({ site, diff, onRollback }: Props) {
             {list.map((item) => {
               const before = specOf(item.version - 1);
               const expanded = open === item.version && item.spec !== null;
+              const fullId = `history-full-${item.version}`;
               return (
-                <tr key={item.version}>
-                  <td className="tnum">
-                    v{item.version}
-                    {item.version === site.version ? <span className="pill"> 当前</span> : null}
-                  </td>
-                  <td className="tnum">{fmtLocalDateTime(Date.parse(item.changed_at))}</td>
-                  <td>
-                    {KIND_LABEL[item.change]}
-                    {item.rollback_of !== null ? `（回到 v${item.rollback_of}）` : ""}
-                  </td>
-                  <td>
-                    {item.note ? <div>{item.note}</div> : null}
-                    <div className="small muted">{summaryOf(item, before)}</div>
-                  </td>
-                  <td>
-                    <div className="row" style={{ justifyContent: "flex-end", flexWrap: "wrap" }}>
-                      {item.spec !== null ? (
-                        <button
-                          type="button"
-                          className="linkbtn"
-                          aria-expanded={expanded}
-                          onClick={() => setOpen(expanded ? null : item.version)}
+                <Fragment key={item.version}>
+                  <tr>
+                    <td className="tnum">
+                      v{item.version}
+                      {item.version === site.version ? <span className="pill"> 当前</span> : null}
+                    </td>
+                    <td className="tnum">{fmtLocalDateTime(Date.parse(item.changed_at))}</td>
+                    <td>
+                      {KIND_LABEL[item.change]}
+                      {item.rollback_of !== null ? `（回到 v${item.rollback_of}）` : ""}
+                    </td>
+                    <td className="history-note">
+                      {item.note ? <div>{item.note}</div> : null}
+                      <div className="small muted">{summaryOf(item, before)}</div>
+                    </td>
+                    <td>
+                      <div className="history-actions">
+                        {item.spec !== null ? (
+                          <button
+                            type="button"
+                            className="linkbtn history-act-full"
+                            aria-expanded={expanded}
+                            aria-controls={expanded ? fullId : undefined}
+                            onClick={() => setOpen(expanded ? null : item.version)}
+                          >
+                            {expanded ? "收起全文" : "查看全文"}
+                          </button>
+                        ) : null}
+                        {item.spec !== null && item.version !== site.version ? (
+                          <button
+                            type="button"
+                            className="btn history-act-rollback"
+                            onClick={() => onRollback(item)}
+                          >
+                            以此版本回滚…
+                          </button>
+                        ) : null}
+                        <Link
+                          to="/requests"
+                          search={{ site: site.name, q: `version:${item.version}` }}
+                          className="linkbtn history-act-request"
                         >
-                          {expanded ? "收起全文" : "查看全文"}
-                        </button>
-                      ) : null}
-                      {item.spec !== null && item.version !== site.version ? (
-                        <button type="button" className="btn" onClick={() => onRollback(item)}>
-                          以此版本回滚…
-                        </button>
-                      ) : null}
-                      <Link
-                        to="/requests"
-                        search={{ site: site.name, q: `version:${item.version}` }}
-                        className="linkbtn"
-                      >
-                        查看用此版本判定的请求
-                      </Link>
-                    </div>
-                    {expanded && item.spec !== null ? (
-                      <pre className="codeblock" style={{ marginTop: 8 }}>
-                        {specToYaml(item.spec)}
-                      </pre>
-                    ) : null}
-                  </td>
-                </tr>
+                          查看用此版本判定的请求
+                        </Link>
+                      </div>
+                    </td>
+                  </tr>
+                  {expanded && item.spec !== null ? (
+                    <tr className="history-full">
+                      <td colSpan={5}>
+                        <section id={fullId} aria-label={`v${item.version} 全文`}>
+                          {/* biome-ignore lint/a11y/noNoninteractiveTabindex: a block that scrolls must be reachable by keyboard */}
+                          <pre className="codeblock nowrap history-yaml" tabIndex={0}>
+                            {specToYaml(item.spec)}
+                          </pre>
+                        </section>
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
               );
             })}
           </tbody>
