@@ -19,14 +19,33 @@
 产品未上线前，有些库是用 `initdb` 挂载或手动 `psql` 建好基线表的，它们没有迁移记录。新版控制台会在 `0001` 处报 `already exists` 并退出，事务回滚，库里的内容不变。两种处理方式：
 
 - 库里没有要保留的数据：删除数据卷（`docker compose down -v` 会删除卷里的全部数据），让新版控制台重建。
-- 要保留数据：确认库结构是由 `migrations/0001_v4_baseline.sql` 建出的，然后补记这一条迁移，再启动控制台。先启动一次新版控制台，让它创建 `_sqlx_migrations` 并在 `0001` 处失败（这是预期的），然后执行：
+- 要保留数据：按下面 1 到 4 步补记这一条迁移，每一步都在仓库根目录执行。库是 Compose 容器时，把 `psql`、`pg_dump`、`createdb`、`dropdb` 换成 `docker compose exec -T postgres …`（用 `-U` 指定用户），并把 `-f 文件` 换成 `< 文件`。
+
+**1. 启动一次新版控制台。** 它会在 `0001` 处失败并退出，这是预期的；失败前它已经建好 `_sqlx_migrations` 表。确认：`psql "$XSHIELD_DATABASE_URL" -c '\dt _sqlx_migrations'`。由 Compose 自动重启时，表建好后即可停掉重启循环。
+
+**2. 核对结构。** 用 0001 在临时库里建表，再比较五张基线表。分区不参与比较，运行时会建 `decision_log` 的每日分区。
+
+```sh
+DB=<控制台使用的库名>
+T="-t site_configs -t site_config_history -t decision_log -t edge_status -t jev_prompts"
+createdb xshield_check && psql -d xshield_check -v ON_ERROR_STOP=1 -f migrations/0001_v4_baseline.sql
+for d in xshield_check "$DB"; do
+  pg_dump -s --no-owner --no-privileges $T "$d" | grep -v '^\\\(un\)\?restrict ' > "$d.sql"
+done
+test -s xshield_check.sql && test -s "$DB.sql" && diff xshield_check.sql "$DB.sql" && echo "结构一致"
+dropdb xshield_check
+```
+
+最后只应看到“结构一致”。`diff` 有输出就是有差异；`pg_dump` 出错时输出文件为空，`test -s` 会拦住这种假通过。`pg_dump` 每次都会输出不同的 `\restrict` 行，所以要过滤掉。有差异（例如库里还有 v3 的表或列）就不要补记，改用第一种办法。
+
+**3. 补记这一条迁移。**
 
 ```sh
 checksum=$(sha384sum migrations/0001_v4_baseline.sql | cut -d' ' -f1)  # macOS: shasum -a 384 ...
 psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (1, 'v4 baseline', true, decode('$checksum', 'hex'), 0)"
 ```
 
-之后再启动控制台，它只会检查已记录的迁移，不会再执行基线。
+**4. 再启动控制台。** 它只检查已记录的迁移，不会再执行基线。日志应无错误；`SELECT version, description, success FROM _sqlx_migrations` 应为 `1 | v4 baseline | t`。如果 0001 的校验和与记录不一致，控制台会拒绝启动，不会静默通过。
 
 ## 4.3 验收场景
 
