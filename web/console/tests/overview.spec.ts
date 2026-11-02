@@ -104,6 +104,8 @@ test("the default fixtures list five rows, most serious first", async ({ page })
   await expect(rows.nth(2)).toContainText("警告");
   await expect(rows.nth(3)).toContainText("在队列压力下丢弃了 6 条绕过记录");
   await expect(rows.nth(3)).toContainText("提示");
+  // A hint is marked with a ringed i, as the prototype draws it (docs/06 6.5.3 keeps ● for 正常).
+  await expect(rows.nth(3).getByText("i", { exact: true })).toHaveCount(1);
   await expect(rows.nth(4)).toContainText("juice 有 2 条调优建议：登记入口 1、加入绕过 1");
   await expect(rows.nth(4)).toContainText("提示");
 });

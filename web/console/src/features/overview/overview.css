@@ -41,6 +41,22 @@
   color: var(--ink);
 }
 
+/* A hint is a ringed i, as the prototype draws it. It is neutral, so the filled dot stays for 正常. */
+.ov-mark-ring {
+  display: inline-flex;
+  width: 1.33em;
+  height: 1.33em;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  font-size: 0.83em;
+  font-style: normal;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: 0.05em;
+}
+
 /* The mark carries the green; the words stay in ink (docs/06 6.5.3). */
 .ov-ok-mark {
   color: var(--ok);
