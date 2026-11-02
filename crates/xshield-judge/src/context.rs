@@ -130,6 +130,8 @@ pub struct Source<'a> {
 pub struct Origin {
     /// Field name it appeared under.
     pub field: String,
+    /// The position in the response (see [`ResponseValue::at`]); empty when unknown.
+    pub at: String,
     /// The request that returned it, for example `GET /api/patients`.
     pub request: String,
     /// That request's id as a number; 0 for values learned before a restart.
@@ -146,16 +148,15 @@ pub struct Seen {
 }
 
 impl Seen {
-    /// Adds an origin. The same field from the same request is one origin: the
-    /// first sighting is kept and a repeat changes nothing (docs/07 section
-    /// 7.7.1). Only `(field, request)` decides a repeat, so the state's
-    /// `seen_as` stays the same however often a list is fetched.
+    /// Adds an origin. The same field at the same position of the same request
+    /// is one origin: the first sighting is kept and a repeat changes nothing
+    /// (docs/07 section 7.7.1). `(field, position, request)` decides a repeat,
+    /// so the state's `seen_as` stays the same however often a list is fetched,
+    /// while one field name at two positions of a response is two origins.
     fn note(&mut self, origin: Origin) {
-        if self
-            .origins
-            .iter()
-            .any(|known| known.field == origin.field && known.request == origin.request)
-        {
+        if self.origins.iter().any(|known| {
+            known.field == origin.field && known.at == origin.at && known.request == origin.request
+        }) {
             return;
         }
         if self.origins.len() == SOURCES_MAX {
@@ -424,6 +425,7 @@ impl SessionContext {
             }
             let origin = Origin {
                 field: value.field.clone(),
+                at: value.at.clone(),
                 request: source.request.to_owned(),
                 request_id: source.request_id,
                 at_ms: source.at_ms,
@@ -664,6 +666,7 @@ mod tests {
 
     fn response(field: &str, value: &str) -> ResponseValue {
         ResponseValue {
+            at: field.to_owned(),
             field: field.to_owned(),
             value: value.to_owned(),
         }
@@ -811,6 +814,7 @@ mod tests {
         let shown_as = |field: &str| Seen {
             origins: vec![Origin {
                 field: field.into(),
+                at: String::new(),
                 request: "GET /x".into(),
                 request_id: 0,
                 at_ms: 0,
@@ -1041,5 +1045,26 @@ mod tests {
     #[test]
     fn labels_never_expose_more_than_eight_bytes() {
         assert_eq!(label(&[0xab; 16]), "abababababababab");
+    }
+
+    #[test]
+    fn one_field_at_two_positions_is_two_origins_and_a_repeat_is_not_one_more() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let session = store.session(key.mac("session", b"cookie"), 0);
+        let response = |position: &str| ResponseValue {
+            field: "doc_id".into(),
+            value: "5".into(),
+            at: position.into(),
+        };
+        session.remember(&key, &at("GET /api/records/7"), &[response("doc_id")]);
+        session.remember(
+            &key,
+            &at("GET /api/records/7"),
+            &[response("attachments[].doc_id")],
+        );
+        assert_eq!(session.lookup(&key, "5").unwrap().origins.len(), 2);
+        session.remember(&key, &at("GET /api/records/7"), &[response("doc_id")]);
+        assert_eq!(session.lookup(&key, "5").unwrap().origins.len(), 2);
     }
 }

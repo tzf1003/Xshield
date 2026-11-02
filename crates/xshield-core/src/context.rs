@@ -11,6 +11,6 @@ pub use advanced::Advanced;
 pub use config::{ConfigError, Mode, OnJevUnavailable, PathPattern, SessionCredential, SiteSpec};
 pub use log::{Conclusion, ContextKind, DecisionPath, DecisionRecord, JevRecord, Outcome};
 pub use trace::{
-    FieldCount, ObservationSummary, Observed, Skip, Timing, Trace, TraceEntry, TraceRecent,
-    TraceSession, TraceSource, TraceValue,
+    FieldCount, ObjectFrom, ObservationSummary, Observed, SHAPE_FIELDS_MAX, ShapeField, Skip,
+    Timing, Trace, TraceEntry, TraceRecent, TraceSession, TraceSource, TraceValue,
 };

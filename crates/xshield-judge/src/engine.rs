@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use xshield_core::context::{
     Conclusion, ContextKind, DecisionPath, DecisionRecord, FieldCount, JevRecord, Mode,
-    ObservationSummary, Observed, OnJevUnavailable, Outcome, SessionCredential, SiteSpec, Skip,
-    Trace, TraceSession,
+    ObservationSummary, Observed, OnJevUnavailable, Outcome, SessionCredential, ShapeField,
+    SiteSpec, Skip, Trace, TraceSession,
 };
 
 use crate::context::{
@@ -16,12 +16,13 @@ use crate::context::{
     Source, label, request_number, request_text, site_synonym,
 };
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX};
+use crate::slots::{request_slot, route_template};
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
 };
 use crate::trace::{entry_trace, recent_trace, redacted_query, value_entry};
 use crate::values::{
-    ExtractedRequest, ResponseValue, extract_request, extract_response, json_unescape,
+    ExtractedRequest, ResponseValue, extract_request, extract_response_facts, json_unescape,
     percent_decode,
 };
 
@@ -136,7 +137,12 @@ impl Limiter {
 struct Inner {
     store: ContextStore,
     limiter: Limiter,
+    /// The last structure reported per route: route digest to structure digest.
+    shapes: HashMap<Digest16, Digest16>,
 }
+
+/// Routes whose structure is remembered; the memory starts again when full.
+const SHAPES_MAX: usize = 4_096;
 
 /// The judge: one per gateway process.
 pub struct Judge<J: JevPort> {
@@ -225,6 +231,7 @@ impl<J: JevPort> Judge<J> {
             inner: Mutex::new(Inner {
                 store: ContextStore::new(),
                 limiter: Limiter::default(),
+                shapes: HashMap::new(),
             }),
         }
     }
@@ -401,6 +408,7 @@ impl<J: JevPort> Judge<J> {
                 &ranked,
                 request.credential,
                 tuning.secret_words,
+                request_slot(request.method, request.path, &value.at),
             ));
         }
         trace.values = shown;
@@ -609,17 +617,11 @@ impl<J: JevPort> Judge<J> {
         if !(success || issuing_redirect) {
             return summary;
         }
-        let mut values = Vec::new();
-        if success {
-            match (observation.unread, response_kind(observation.content_type)) {
-                (Some(reason), _) => summary.skip = Some(reason),
-                (None, Some(kind)) => {
-                    summary.observed = kind;
-                    values = extract_response(observation.content_type, observation.body);
-                }
-                (None, None) => summary.skip = Some(Skip::ContentType),
-            }
-        }
+        let (values, shape) = if success {
+            read_body(&mut summary, observation)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         summary.values = values.len();
         summary.fields = field_counts(&values);
 
@@ -639,6 +641,15 @@ impl<J: JevPort> Judge<J> {
             None
         };
         let mut inner = self.lock();
+        if success && matches!(summary.observed, Observed::Json) {
+            summary.shape = shape_if_new(
+                &mut inner.shapes,
+                &self.key,
+                observation.method,
+                observation.path,
+                shape,
+            );
+        }
         // The new-value count is the one of the first context the response
         // reaches: the address (a sign-up page) or the session.
         let mut new_values = None;
@@ -879,6 +890,55 @@ fn response_kind(content_type: Option<&str>) -> Option<Observed> {
     } else {
         None
     }
+}
+
+/// Reads the body of a successful response: its values and, for JSON, its
+/// structure. Says in `summary` why a body was not read.
+fn read_body(
+    summary: &mut ObservationSummary,
+    observation: &Observation<'_>,
+) -> (Vec<ResponseValue>, Vec<ShapeField>) {
+    match (observation.unread, response_kind(observation.content_type)) {
+        (Some(reason), _) => summary.skip = Some(reason),
+        (None, Some(kind)) => {
+            summary.observed = kind;
+            let facts = extract_response_facts(observation.content_type, observation.body);
+            return (facts.values, facts.shape);
+        }
+        (None, None) => summary.skip = Some(Skip::ContentType),
+    }
+    (Vec::new(), Vec::new())
+}
+
+/// The structure to report for a route: `Some` when it is new or differs from
+/// the one last reported, `None` when it repeats. Only digests are kept.
+fn shape_if_new(
+    shapes: &mut HashMap<Digest16, Digest16>,
+    key: &ContextKey,
+    method: &str,
+    path: &str,
+    shape: Vec<ShapeField>,
+) -> Option<Vec<ShapeField>> {
+    let route = key.mac(
+        "shape-route",
+        format!("{method} {}", route_template(path)).as_bytes(),
+    );
+    let mut text = String::new();
+    for field in &shape {
+        text.push_str(&field.path);
+        text.push('\0');
+        text.push_str(&field.kind);
+        text.push('\n');
+    }
+    let signature = key.mac("shape", text.as_bytes());
+    if shapes.get(&route) == Some(&signature) {
+        return None;
+    }
+    if shapes.len() >= SHAPES_MAX {
+        shapes.clear();
+    }
+    shapes.insert(route, signature);
+    Some(shape)
 }
 
 /// The most frequent field names of a response with their counts. No values.
@@ -2535,5 +2595,67 @@ mod tests {
             Judge::<FakeJev>::credential_from(&header, Some("SID=x"), Some("Bearer t")),
             Some("Bearer t")
         );
+    }
+
+    #[test]
+    fn a_response_structure_is_reported_when_it_is_new_or_changes() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let first = judge.observe(&site, &list_response("alice", 0));
+        let shape = first
+            .shape
+            .expect("the first structure of a route is reported");
+        assert!(
+            shape
+                .iter()
+                .any(|field| field.path == "items[].id" && field.kind == "string")
+        );
+        assert!(
+            judge
+                .observe(&site, &list_response("alice", 1))
+                .shape
+                .is_none()
+        );
+        // Values change, the structure does not: nothing new to report.
+        let other_values = Observation {
+            body: br#"{"items":[{"id":"8","name":"C","age":3}]}"#,
+            ..list_response("alice", 2)
+        };
+        assert!(judge.observe(&site, &other_values).shape.is_none());
+        // A new field is a new structure, reported again.
+        let changed = Observation {
+            body: br#"{"items":[{"id":"7","name":"A","age":8,"ward":3}]}"#,
+            ..list_response("alice", 3)
+        };
+        assert!(judge.observe(&site, &changed).shape.is_some());
+    }
+
+    #[tokio::test]
+    async fn trace_values_name_their_position_and_the_position_they_were_seen_at() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(&site, &list_response("alice", 0));
+        let verdict = judge
+            .judge(&site, &get("/api/patients/7", None, Some("alice"), 1_000))
+            .await;
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7")
+            .expect("the id is recorded");
+        assert_eq!(
+            value.slot.as_deref(),
+            Some("GET /api/patients/{id} path[2]")
+        );
+        assert!(value.verified);
+        assert_eq!(
+            value.sources[0].slot.as_deref(),
+            Some("GET /api/patients items[].id")
+        );
+        assert_eq!(value.object, None);
     }
 }
