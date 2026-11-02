@@ -6,7 +6,8 @@
 //!
 //! Both sides of a comparison reduce to kind words. What an origin showed a
 //! value as: the field's own name (`ProductId` names a product), a bare `id`'s
-//! parent object (`Products.id`), or the path that returned it. What a request
+//! parent object (`Products.id`), or with no parent the route word nearest the
+//! end of the path that returned it. What a request
 //! uses a value as: its key's name (a bare `id` nested in a named object travels
 //! as `Object.id`), for a path segment the route word just before it, and for a
 //! key with no name the route word nearest the end of the path. A site may also
@@ -168,8 +169,8 @@ pub fn declares(shown: Shown<'_>, rules: &Rules) -> bool {
 
 /// The kinds an origin shows a value as: the declared kind of its field when a
 /// declaration names it, else the field's own name. A bare `id` takes the kind
-/// of its parent (`Products.id`), and a bare top-level `id` the kind of the
-/// request that returned it.
+/// of its parent (`Products.id`). With no parent it takes the route word nearest
+/// the end of the request that returned it, the object that request addresses.
 fn shown_kinds(shown: Shown<'_>, rules: &Rules) -> Vec<String> {
     if let Some(kind) = declared_for(&rules.fields, shown.field, request_path(shown.request)) {
         return vec![kind.to_owned()];
@@ -180,7 +181,7 @@ fn shown_kinds(shown: Shown<'_>, rules: &Rules) -> Vec<String> {
         words = kind_words(parent);
     }
     if words.is_empty() {
-        words = kind_words(request_path(shown.request));
+        words = object_kinds(request_path(shown.request));
     }
     words
 }
@@ -216,6 +217,28 @@ fn route_kinds(path: &str, before: Option<usize>) -> Vec<String> {
         .rev()
         .map(|segment| kind_words(segment))
         .find(|words| !words.is_empty())
+        .unwrap_or_else(|| kind_words(path))
+}
+
+/// Words that name an action on a path's objects, not an object: a search
+/// returns the objects it names, so `/rest/products/search` lists products.
+const ACTION_WORDS: [&str; 6] = ["search", "list", "find", "query", "filter", "lookup"];
+
+/// The kinds a response's bare id takes from the request that returned it: the
+/// route word nearest the end of the path that names an object, skipping action
+/// words, else the whole path's words.
+fn object_kinds(path: &str) -> Vec<String> {
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    segments
+        .iter()
+        .rev()
+        .map(|segment| kind_words(segment))
+        .find(|words| {
+            !words.is_empty()
+                && !words
+                    .iter()
+                    .all(|word| ACTION_WORDS.contains(&word.as_str()))
+        })
         .unwrap_or_else(|| kind_words(path))
 }
 
@@ -416,5 +439,47 @@ mod tests {
             },
             &rules
         ));
+    }
+
+    #[test]
+    fn a_bare_id_in_a_response_takes_the_route_word_at_the_end() {
+        let rules = Rules::default();
+        // Doctor 7's file list shows bare ids, and they are files, not doctors.
+        let files = Shown {
+            field: "id",
+            request: "GET /api/doctors/7/files",
+        };
+        let doctor_path = Used {
+            value: "9",
+            path: "/api/doctors/9",
+            key: None,
+            segment: Some(2),
+        };
+        assert!(!affinity(files, doctor_path, &rules));
+        let file_path = Used {
+            value: "9",
+            path: "/api/files/9",
+            key: None,
+            segment: Some(2),
+        };
+        assert!(affinity(files, file_path, &rules));
+        // A doctor list's bare ids are still doctors.
+        let doctors = Shown {
+            field: "id",
+            request: "GET /api/doctors",
+        };
+        assert!(affinity(doctors, doctor_path, &rules));
+        // A search returns the objects it names, so its bare ids are products.
+        let search = Shown {
+            field: "id",
+            request: "GET /rest/products/search",
+        };
+        let basket_product = Used {
+            value: "9",
+            path: "/api/BasketItems/9",
+            key: Some("ProductId"),
+            segment: None,
+        };
+        assert!(affinity(search, basket_product, &rules));
     }
 }
