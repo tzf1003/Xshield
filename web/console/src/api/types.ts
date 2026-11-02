@@ -92,11 +92,22 @@ export interface ApiName {
 
 /** A route rule covered the path, but the name could not be read. Treated as an unknown interface. */
 export interface ApiUnknown {
-  /** Reason code from the gateway, e.g. `repeated`, `body_not_json` (mapped in vocab). */
-  unknown: string;
-  /** Where the problem was, e.g. `X-Service-Method`; shown after the reason when present. */
-  detail?: string;
+  /** Why the name could not be read; mapped to words in vocab. */
+  unknown: UnknownApiReason;
+  /** The source that went wrong, e.g. `header.X-Service-Method`; absent for `route_subpath`. */
+  source?: string;
 }
+
+/** Reason codes agreed with the interface-name backend (8 codes; body encryption counts as `body_not_json`). */
+export type UnknownApiReason =
+  | "missing"
+  | "repeated"
+  | "conflict"
+  | "invalid_name"
+  | "body_unsupported"
+  | "body_not_json"
+  | "body_too_large"
+  | "route_subpath";
 
 export type ApiInfo = ApiName | ApiUnknown;
 
@@ -114,6 +125,8 @@ export interface RequestRow {
   logical_path: string;
   /** Interface name from the site's route rules; null when no rule covers the path. */
   api: ApiInfo | null;
+  /** Header names of the request, lowercase, no values, at most 64. */
+  request_headers?: string[];
   /** Redacted query string, at most 2 KiB. */
   query: string | null;
   status: number | null;
@@ -911,8 +924,10 @@ export interface RequestFilters {
   status?: string;
   /** Matches the logical path (`path:` in the filter bar); without route rules it is the URL path. */
   path?: string;
-  /** Interface name: a name, or `unknown` for requests whose name could not be read (`api:`). */
+  /** Case-sensitive substring of the interface name (`api:`). */
   api?: string;
+  /** Requests whose interface name could not be read: a reason code, or `any` (`api:unknown`). */
+  api_unknown?: UnknownApiReason | "any";
   /** Requests with a value of this object class (`object:`). */
   object?: string;
   session?: string;
