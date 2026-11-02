@@ -3,7 +3,20 @@
 // a suggestion to a draft, and how a value reads in words. Pure functions: no React, no requests.
 
 import { parseDocument } from "yaml";
-import type { Advanced, SessionCredential, SiteSpec, SuggestionAction } from "../../api/types.ts";
+import type {
+  Advanced,
+  LearningSettings,
+  ObjectsSpec,
+  SessionCredential,
+  SiteSpec,
+  SuggestionAction,
+} from "../../api/types.ts";
+import {
+  declarationKey,
+  learningText,
+  parseLearning,
+  parseObjects,
+} from "../../lib/objects-validate.ts";
 import { isRecord } from "../../lib/storage.ts";
 import { parseSiteText } from "../../lib/yaml.ts";
 import { PARAM_INFO } from "../../lib/vocab.ts";
@@ -227,6 +240,8 @@ export function normalizeSpec(raw: unknown): Check<SiteSpec> {
   if (!unavailable.ok) return unavailable;
   const advanced = advancedOf(raw.advanced);
   if (!advanced.ok) return advanced;
+  const objects = parseObjects(raw.objects);
+  if (!objects.ok) return fail(objects.message);
   const spec: SiteSpec = {
     name: name.value,
     hosts: hosts.value,
@@ -238,6 +253,7 @@ export function normalizeSpec(raw: unknown): Check<SiteSpec> {
   if (mode.value !== undefined) spec.mode = mode.value;
   if (unavailable.value !== undefined) spec.on_jev_unavailable = unavailable.value;
   if (advanced.value !== undefined) spec.advanced = advanced.value;
+  if (objects.value !== undefined) spec.objects = objects.value;
   return { ok: true, value: spec };
 }
 
@@ -279,6 +295,7 @@ const CONFLICT_LABELS: Record<string, string> = {
   "advanced.session_calls_per_minute": "会话调用上限",
   "advanced.address_calls_per_minute": "地址调用上限",
   "advanced.allow_cache_minutes": "放行缓存时长",
+  "objects.learning": "学习设置",
 };
 
 /**
@@ -342,6 +359,25 @@ export function rebaseSpec(
     (pair) => `${pair[0]}|${pair[1]}`,
   );
   if (synonyms.length > 0) advanced.synonyms = synonyms;
+  const learning = pick<LearningSettings | undefined>(
+    "objects.learning",
+    base.objects?.learning,
+    mine.objects?.learning,
+    latest.objects?.learning,
+  );
+  const declarations = mergeList(
+    base.objects?.field_kinds ?? [],
+    mine.objects?.field_kinds ?? [],
+    latest.objects?.field_kinds ?? [],
+    declarationKey,
+  );
+  const objects: ObjectsSpec | undefined =
+    learning === undefined && declarations.length === 0
+      ? undefined
+      : {
+          ...(learning === undefined ? {} : { learning }),
+          ...(declarations.length === 0 ? {} : { field_kinds: declarations }),
+        };
   const spec: SiteSpec = {
     name: latest.name,
     hosts: mergeList(base.hosts, mine.hosts, latest.hosts, (host) => host),
@@ -357,6 +393,7 @@ export function rebaseSpec(
       latest.on_jev_unavailable,
     ),
     advanced: Object.keys(advanced).length > 0 ? advanced : undefined,
+    objects,
   };
   return { spec, conflicts };
 }
@@ -371,6 +408,10 @@ const VALUE_UNITS: Record<string, string> = {
 /** A configuration value in words, for the conflict choices and the change summaries. */
 export function valueText(field: string, value: unknown): string {
   if (value === undefined || value === null) return "默认";
+  if (field === "objects.learning") {
+    const learning = parseLearning(value);
+    return learning.ok ? learningText(learning.value) : "无法显示";
+  }
   if (field === "session" && isRecord(value)) {
     if (typeof value.cookie === "string") return `Cookie ${value.cookie}`;
     if (typeof value.header === "string") return `请求头 ${value.header}`;

@@ -2,6 +2,7 @@
 // human-readable changes for the version history and the save dialog (docs/06 6.4.9).
 
 import type { SiteSpec } from "../api/types.ts";
+import { objectChanges } from "./objects-validate.ts";
 import { orderSpec, specToYaml } from "./yaml.ts";
 
 export type LineOp = { op: "eq" | "add" | "del"; text: string };
@@ -136,6 +137,7 @@ export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null)
   );
   for (const pair of synDiff.added) changes.push(`同义词 ＋${pair}`);
   for (const pair of synDiff.removed) changes.push(`同义词 －${pair}`);
+  changes.push(...objectChanges(before.objects, after.objects));
   return changes;
 }
 
