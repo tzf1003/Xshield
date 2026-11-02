@@ -93,8 +93,10 @@
       "method": "GET",
       "host": "juice.example.com",
       "path": "/api/Products",
-      "logical_path": "/api/Products",
-      "api": null,
+      "logical_path": "/api/Products/unknown_api",
+      "api": {
+        "unknown": "route_subpath"
+      },
       "query": null,
       "status": 200,
       "decision_path": "fast_allow",
@@ -288,8 +290,14 @@
       "method": "GET",
       "host": "emr.example.com",
       "path": "/api/home",
-      "logical_path": "/api/home",
-      "api": null,
+      "logical_path": "/api/home/dashboard.HomeService/getStats",
+      "api": {
+        "name": "dashboard.HomeService/getStats",
+        "from": [
+          "header.X-Service-Id",
+          "header.X-Service-Method"
+        ]
+      },
       "query": null,
       "status": 200,
       "decision_path": "fast_allow",
@@ -489,8 +497,11 @@
       "method": "GET",
       "host": "emr.example.com",
       "path": "/api/patients",
-      "logical_path": "/api/patients",
-      "api": null,
+      "logical_path": "/api/patients/unknown_api",
+      "api": {
+        "unknown": "repeated",
+        "source": "header.X-Service-Method"
+      },
       "query": null,
       "status": 200,
       "decision_path": "fast_allow",
@@ -759,8 +770,14 @@
       "method": "GET",
       "host": "emr.example.com",
       "path": "/api/home",
-      "logical_path": "/api/home",
-      "api": null,
+      "logical_path": "/api/home/dashboard.HomeService/listNotices",
+      "api": {
+        "name": "dashboard.HomeService/listNotices",
+        "from": [
+          "header.X-Service-Id",
+          "header.X-Service-Method"
+        ]
+      },
       "query": null,
       "status": 200,
       "decision_path": "fast_allow",
@@ -780,8 +797,13 @@
       "method": "POST",
       "host": "emr.example.com",
       "path": "/login",
-      "logical_path": "/login",
-      "api": null,
+      "logical_path": "/login/auth.LoginService/login",
+      "api": {
+        "name": "auth.LoginService/login",
+        "from": [
+          "body.method"
+        ]
+      },
       "query": null,
       "status": 200,
       "decision_path": "fast_allow",

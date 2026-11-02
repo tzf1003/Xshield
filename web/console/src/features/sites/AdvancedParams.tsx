@@ -7,9 +7,10 @@ import type { Advanced, ImpactChange, SiteSpec } from "../../api/types.ts";
 import { useEvidence, useInsights, useSystem } from "../../api/queries.ts";
 import { fmtInt, fmtMs } from "../../lib/format.ts";
 import type { FieldIssue } from "../../lib/site-validate.ts";
-import { IMPACT_INFO, PARAM_INFO } from "../../lib/vocab.ts";
+import { IMPACT_INFO, OBJECT_TEXT, PARAM_INFO } from "../../lib/vocab.ts";
 import { Histogram } from "../../ui/Charts.tsx";
 import { ErrorBar, Loading } from "../../ui/Page.tsx";
+import { SynonymMigrateDialog } from "./objects/SynonymMigrateDialog.tsx";
 import { TagInput } from "./TagInput.tsx";
 import {
   customAdvanced,
@@ -166,11 +167,13 @@ function SynonymsItem({
   builtins,
   problems,
   onCommit,
+  onMigrate,
 }: {
   pairs: Array<[string, string]>;
   builtins: Array<[string, string]>;
   problems: string[];
   onCommit: (pairs: Array<[string, string]>) => void;
+  onMigrate: () => void;
 }) {
   const [rows, setRows] = useState<PairRow[]>(() => pairs.map(([a, b]) => newRow(a, b)));
   const update = (next: PairRow[]) => {
@@ -181,6 +184,11 @@ function SynonymsItem({
     <section className="adv-item" aria-label={PARAM_INFO.synonyms.label}>
       <div className="adv-head">
         <span className="adv-name">同义词</span>
+        {pairs.length > 0 ? (
+          <button type="button" className="linkbtn" onClick={onMigrate}>
+            {OBJECT_TEXT.fromSynonyms}
+          </button>
+        ) : null}
       </div>
       <div className="small muted">内置</div>
       <div className="taglist">
@@ -280,6 +288,7 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
   const evidence = useEvidence(name, true);
   const insights = useInsights(name);
   const [epoch, setEpoch] = useState(0);
+  const [migrateOpen, setMigrateOpen] = useState(false);
   const defaults = system.data?.params.site_overridable;
   const advanced = spec.advanced;
   const labels = customAdvanced(advanced);
@@ -329,7 +338,15 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
             className="linkbtn"
             onClick={() => {
               setEpoch((value) => value + 1);
-              onChange(withAdvanced(spec, undefined));
+              // The declared field kinds are kept: they are the object map's, not a judging parameter.
+              onChange(
+                withAdvanced(
+                  spec,
+                  advanced?.field_kinds === undefined
+                    ? undefined
+                    : { field_kinds: advanced.field_kinds },
+                ),
+              );
             }}
           >
             全部恢复默认
@@ -527,7 +544,22 @@ export function AdvancedParams({ name, spec, onChange, issues, warnings, impact 
         builtins={defaults?.synonyms ?? BUILTIN_SYNONYMS}
         problems={issueFor("synonyms")}
         onCommit={(pairs) => commit({ synonyms: pairs })}
+        onMigrate={() => setMigrateOpen(true)}
       />
+
+      {migrateOpen ? (
+        <SynonymMigrateDialog
+          site={name}
+          working={spec}
+          onClose={() => setMigrateOpen(false)}
+          onApply={(next) => {
+            // The groups are gone from the draft: the synonym rows remount to read the new list.
+            onChange(next);
+            setEpoch((value) => value + 1);
+            setMigrateOpen(false);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

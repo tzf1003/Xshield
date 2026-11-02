@@ -9,6 +9,7 @@ import { useSaveSite, useValidate } from "../../api/queries.ts";
 import type { SiteSpec } from "../../api/types.ts";
 import { useSetSearch } from "../../app/scope.ts";
 import { validateSpec } from "../../lib/site-validate.ts";
+import { OBJECT_TEXT } from "../../lib/vocab.ts";
 import { specToYaml } from "../../lib/yaml.ts";
 import { Card, Loading, PageHead } from "../../ui/Page.tsx";
 import { ConfigForm, type FormGroup } from "./ConfigForm.tsx";
@@ -23,7 +24,7 @@ import "./sites.css";
 const STEPS: ReadonlyArray<{ title: string; groups: readonly FormGroup[] }> = [
   { title: "基本信息", groups: ["basics"] },
   { title: "会话凭证", groups: ["session"] },
-  { title: "入口与绕过", groups: ["entries", "bypass"] },
+  { title: "接口名、入口与绕过", groups: ["routes", "entries", "bypass"] },
   { title: "确认", groups: ["mode"] },
 ];
 
@@ -46,6 +47,8 @@ export function SiteWizardPage() {
     mode: "observe",
   }));
   const [yamlBroken, setYamlBroken] = useState(false);
+  // The object map is optional at creation (console design 3.6): the new site can open on its map instead.
+  const [openObjects, setOpenObjects] = useState(false);
   const issues = validateSpec(spec);
   const localOk = issues.errors.length === 0;
   const settled = useDebounced(spec, 600);
@@ -84,7 +87,11 @@ export function SiteWizardPage() {
       {
         onSuccess: (site) => {
           writeCreated(site.name, site.version, site.mode);
-          void navigate({ to: "/sites/$name", params: { name: site.name } });
+          void navigate({
+            to: "/sites/$name",
+            params: { name: site.name },
+            search: openObjects ? { tab: "objects" } : {},
+          });
         },
       },
     );
@@ -145,6 +152,7 @@ export function SiteWizardPage() {
                   key={group}
                   group={group}
                   mode="create"
+                  site={null}
                   spec={spec}
                   saved={null}
                   onChange={setSpec}
@@ -167,6 +175,20 @@ export function SiteWizardPage() {
               ) : null}
               {step === LAST_STEP ? (
                 <div className="notice soft">高级判定参数全部使用默认值，创建后可调整。</div>
+              ) : null}
+              {step === LAST_STEP ? (
+                <div className="stack-tight">
+                  <div className="field-label">{OBJECT_TEXT.wizard.title}</div>
+                  <div className="small muted">{OBJECT_TEXT.wizard.text}</div>
+                  <label className="row small">
+                    <input
+                      type="checkbox"
+                      checked={openObjects}
+                      onChange={(event) => setOpenObjects(event.target.checked)}
+                    />
+                    {OBJECT_TEXT.wizard.open}
+                  </label>
+                </div>
               ) : null}
             </Card>
           )}

@@ -2,14 +2,23 @@
 // model call: the reason comes from the decision path and the outcome adds what happens next.
 
 import type {
+  ApiInfo,
   DecisionPath,
   JevAccess,
   JevAttack,
   JevRecord,
   Outcome,
   Trace,
+  TraceSource,
   TraceValue,
 } from "../api/types.ts";
+import {
+  apiValueLocations,
+  byMapNote,
+  classMismatch,
+  isNameValue,
+  unknownTitle,
+} from "./api-name.ts";
 import { clip } from "./format.ts";
 import { shortRequestId } from "./ids.ts";
 
@@ -21,6 +30,8 @@ export type ExplainInput = {
   context?: "session" | "address" | null;
   trace: Trace;
   jev: JevRecord | null;
+  /** The request's interface name (or the reason it has none); names are not checked values. */
+  api?: ApiInfo | null;
 };
 
 const FAILURE_REASON: Record<string, string> = {
@@ -75,9 +86,24 @@ function offendingValue(values: TraceValue[]): TraceValue | undefined {
   return values.find((value) => !value.inert && value.seen && !value.verified);
 }
 
+/** The values Jev checks: not inert, and not the interface name itself (design 4.2). */
+function checkedValues(input: ExplainInput): TraceValue[] {
+  const names = apiValueLocations(input.api);
+  return (input.trace.values ?? []).filter((value) => !value.inert && !isNameValue(value, names));
+}
+
+/** What the session showed of a value that Jev found out of place: another class, or a response field. */
+function historyOf(value: TraceValue | undefined, source: TraceSource | undefined): string {
+  if (value && source && classMismatch(value.object, source)) {
+    return `只以 ${source.object} 出现过，现在用作 ${value.object}`;
+  }
+  return source
+    ? `没有以同类对象出现过，只以 ${source.field} 出现在 ${source.request} 的响应里`
+    : "从未出现过";
+}
+
 function reasonOf(input: ExplainInput): string {
   const { trace, jev } = input;
-  const values = trace.values ?? [];
   switch (input.decision_path) {
     case "bypass":
       return `命中绕过规则 ${trace.bypass ?? ""}，没有判定，直接转发。`;
@@ -88,10 +114,9 @@ function reasonOf(input: ExplainInput): string {
     case "no_session":
       return "请求没有会话凭证，路径也不是入口。";
     case "fast_allow": {
-      const needed = values.filter((value) => !value.inert).length;
-      return needed > 0
-        ? `${needed} 个需核验的值都已核验，没有调用 Jev。`
-        : "请求里没有需要核验的值，没有调用 Jev。";
+      const checked = checkedValues(input);
+      if (checked.length === 0) return "请求里没有需要核验的值，没有调用 Jev。";
+      return `${checked.length} 个需核验的值都已核验${byMapNote(checked)}，没有调用 Jev。`;
     }
     case "cached_allow":
       return trace.cache_source
@@ -100,19 +125,17 @@ function reasonOf(input: ExplainInput): string {
     case "jev_allow":
       return `Jev 判定访问有依据（ALLOW ${percentOf(jev?.access, "ALLOW")}）、内容无攻击（BENIGN ${percentOf(jev?.attack, "BENIGN")}）。`;
     case "jev_deny": {
+      const checked = checkedValues(input);
       const attackTop = topOf<JevAttack>(jev?.attack ?? null);
       if (attackTop === "ATTACK") {
-        const target = values.find((value) => !value.inert);
+        const target = checked[0];
         const where = target ? `${locationWord(target.at)} ${target.at} 的值` : "请求值";
         return `Jev 判定为攻击（ATTACK ${percentOf(jev?.attack, "ATTACK")}）：${where}含 \`${clip(target?.value ?? "", 24)}\`。`;
       }
-      const value = offendingValue(values);
+      const value = offendingValue(checked);
       const source = value?.sources[0];
       const place = value ? `${locationWord(value.at)}${clip(value.value, 24)}` : "请求的值";
-      const history = source
-        ? `没有以同类对象出现过，只以 ${source.field} 出现在 ${source.request} 的响应里`
-        : "从未出现过";
-      return `Jev 判定越权（DENY ${percentOf(jev?.access, "DENY")}）：${place} 在这个会话里${history}。`;
+      return `Jev 判定越权（DENY ${percentOf(jev?.access, "DENY")}）：${place} 在这个会话里${historyOf(value, source)}。`;
     }
     case "jev_unavailable": {
       if (!jev) return "Jev 不可用，没有调用 Jev。";
@@ -159,7 +182,10 @@ export function explainRecord(input: ExplainInput): string {
   const upstream = input.trace.upstream_error
     ? `源站${SOURCE_REASON[input.trace.upstream_error] ?? "出错"}，网关返回 ${input.status ?? "—"}。`
     : "";
-  return [reason, action, upstream].filter((part) => part.length > 0).join("");
+  // An unknown interface is never an entry and never bypassed, which the reason below depends on.
+  const named = input.api ?? null;
+  const unknownLine = named !== null && "unknown" in named ? `${unknownTitle(named)}。` : "";
+  return [unknownLine, reason, action, upstream].filter((part) => part.length > 0).join("");
 }
 
 export function jevAnswerTop(jev: JevRecord | null): {

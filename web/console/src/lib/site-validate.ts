@@ -2,11 +2,19 @@
 // can point at the field that is wrong. The server remains the authority: its error codes are
 // still shown when a save is refused. Messages here never echo more than the field name.
 
-import type { Advanced, SiteSpec } from "../api/types.ts";
-import { parsePattern } from "./patterns.ts";
+import type { Advanced, RouteRule, SiteSpec } from "../api/types.ts";
+import { ruleFor, splitSource } from "./logical-path.ts";
+import { type ParsedPattern, parsePattern } from "./patterns.ts";
 import { isSiteName } from "./ids.ts";
 
-export type FieldGroup = "basics" | "session" | "entries" | "bypass" | "mode" | "advanced";
+export type FieldGroup =
+  | "basics"
+  | "session"
+  | "routes"
+  | "entries"
+  | "bypass"
+  | "mode"
+  | "advanced";
 
 export type FieldIssue = { group: FieldGroup; field: string; message: string };
 
@@ -214,6 +222,7 @@ export function shapeIssues(input: unknown): FieldIssue[] {
       text("session", "header", session.header, false);
     }
   }
+  issues.push(...routeShapeIssues(input.routes));
   const advanced = input.advanced;
   if (!skip("advanced", "advanced", advanced, false, true)) {
     if (!isMap(advanced)) add("advanced", "advanced", "advanced 要写成键值");
@@ -282,6 +291,8 @@ export function validateSpec(input: unknown): { errors: FieldIssue[]; warnings: 
   }
   errors.push(...validateRules("entries", spec.entries, 1));
   errors.push(...validateRules("bypass", spec.bypass ?? [], 0));
+  errors.push(...validateRoutes(spec.routes ?? []));
+  warnings.push(...unreachableRules(spec));
   for (const raw of spec.entries) {
     const parsed = parsePattern(raw);
     if (
@@ -331,5 +342,161 @@ function validateRules(
       issues.push({ group, field: `${group}[${index}]`, message: parsed.reason });
     }
   });
+  return issues;
+}
+
+// ------------------------------------------------------------------ interface-name rules (header-routes-design 2, 3)
+
+const ROUTE_KINDS: readonly string[] = ["header", "query", "body"];
+/** The gateway reads at most this many rules (site.rs, validate_route_set). */
+const ROUTE_MAX = 256;
+const QUERY_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+const BODY_KEY = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** The shape of the rules, checked before any of their values are read (the same order as shapeIssues). */
+function routeShapeIssues(value: unknown): FieldIssue[] {
+  const issues: FieldIssue[] = [];
+  const add = (field: string, message: string): void => {
+    issues.push({ group: "routes", field, message });
+  };
+  if (value === undefined) return issues;
+  if (value === null) {
+    add("routes", "routes 写了键却没有值");
+    return issues;
+  }
+  if (!Array.isArray(value)) {
+    add("routes", "routes 要写成规则列表");
+    return issues;
+  }
+  const rules: unknown[] = value;
+  rules.forEach((rule, index) => {
+    const at = `routes[${index}]`;
+    if (!isMap(rule)) {
+      add(at, "每条规则要写成 path 和 name_from 两个键");
+      return;
+    }
+    if (typeof rule.path !== "string") {
+      add(`${at}.path`, rule.path === undefined ? "缺少必填字段 path" : "path 要写成文本");
+    }
+    const names: unknown = rule.name_from;
+    if (!Array.isArray(names)) {
+      add(
+        `${at}.name_from`,
+        names === undefined ? "缺少必填字段 name_from" : "name_from 要写成列表",
+      );
+      return;
+    }
+    const segments: unknown[] = names;
+    segments.forEach((segment, position) => {
+      const list: unknown = segment;
+      const ok = Array.isArray(list) && list.every((item: unknown) => typeof item === "string");
+      if (!ok)
+        add(`${at}.name_from[${position}]`, "每一段要写成位置列表，例如 [header.X-Service-Id]");
+    });
+  });
+  return issues;
+}
+
+/** The checks of the rules: the path, the segments and their locations, and overlaps with an earlier rule. */
+function validateRoutes(routes: RouteRule[]): FieldIssue[] {
+  const issues: FieldIssue[] = [];
+  const add = (field: string, message: string): void => {
+    issues.push({ group: "routes", field, message });
+  };
+  if (routes.length > ROUTE_MAX) add("routes", `接口名规则最多 ${ROUTE_MAX} 条`);
+  const parsedAll = routes.map((rule) => parsePattern(rule.path));
+  routes.forEach((rule, index) => {
+    const at = `routes[${index}]`;
+    const parsed = parsedAll[index];
+    if (parsed && !parsed.ok) add(`${at}.path`, parsed.reason);
+    else if (parsed?.ok && parsed.value.literal.endsWith("/")) {
+      // The gateway refuses a route whose path, before a trailing `*`, ends in `/` (Route::parse).
+      add(
+        `${at}.path`,
+        rule.path.endsWith("*")
+          ? "前缀路径的 * 前面不能是 /，去掉这个 /（例如 /api* 而不是 /api/*）"
+          : "路径不能以 / 结尾",
+      );
+    }
+    if (rule.name_from.length === 0) add(`${at}.name_from`, "接口名至少一段");
+    if (rule.name_from.length > 4) add(`${at}.name_from`, "接口名最多 4 段");
+    rule.name_from.forEach((group, position) => {
+      const field = `${at}.name_from[${position}]`;
+      if (group.length === 0) add(field, `第 ${position + 1} 段至少写一个位置`);
+      const seen = new Set<string>();
+      for (const source of group) {
+        const problem = sourceProblem(source);
+        if (problem !== null) add(field, problem);
+        const key = locationKey(source);
+        if (seen.has(key)) add(field, `第 ${position + 1} 段的位置不能重复`);
+        seen.add(key);
+      }
+    });
+    if (parsed?.ok) {
+      const mine = parsed.value;
+      const clash = parsedAll
+        .slice(0, index)
+        .findIndex((other) => other.ok && patternsOverlap(mine, other.value));
+      if (clash >= 0) add(`${at}.path`, `与第 ${clash + 1} 条规则的路径重叠`);
+    }
+  });
+  return issues;
+}
+
+/** Whether some path matches both patterns: equal exact paths, or a prefix that the other path starts with. */
+function patternsOverlap(a: ParsedPattern, b: ParsedPattern): boolean {
+  if (!a.prefix && !b.prefix) return a.literal === b.literal;
+  if (!a.prefix) return a.literal.startsWith(b.literal);
+  if (!b.prefix) return b.literal.startsWith(a.literal);
+  return a.literal.startsWith(b.literal) || b.literal.startsWith(a.literal);
+}
+
+/** What is wrong with one location, or null. Each kind has its own name rules (header-routes-design 3). */
+function sourceProblem(source: string): string | null {
+  const { kind, name } = splitSource(source);
+  if (!ROUTE_KINDS.includes(kind)) return "来源只能是请求头、查询参数或正文字段";
+  if (name.length === 0) return "名称不能为空";
+  if (name.length > 64) return "名称最长 64 个字符";
+  if (kind === "header") {
+    return validToken(name) ? null : "请求头名只能含 HTTP 头名的字符：字母、数字和 - _ . 等";
+  }
+  if (kind === "query") {
+    return QUERY_NAME.test(name) ? null : "参数名只能含字母、数字、. _ -，最长 64 个字符";
+  }
+  if (/[[\]]/.test(name)) return "正文字段不支持数组下标，批量调用按未知接口处理";
+  return name.split(".").every((part) => BODY_KEY.test(part))
+    ? null
+    : "正文字段写成 a.b.c，每段只能含字母、数字、_ 和 -";
+}
+
+/** Two locations of one segment are the same when the gateway reads the same thing (header names fold case). */
+function locationKey(source: string): string {
+  const { kind, name } = splitSource(source);
+  return kind === "header" ? `header.${name.toLowerCase()}` : source;
+}
+
+/**
+ * Entries and bypass rules that name an exact path a route rule now covers. Their requests are named by the
+ * rule from now on, so the rule no longer hits them: a warning, not a save error (header-routes-design 2).
+ */
+function unreachableRules(spec: SiteSpec): FieldIssue[] {
+  const routes = spec.routes ?? [];
+  if (routes.length === 0) return [];
+  const issues: FieldIssue[] = [];
+  const lists: Array<["entries" | "bypass", string[]]> = [
+    ["entries", spec.entries],
+    ["bypass", spec.bypass ?? []],
+  ];
+  for (const [group, rules] of lists) {
+    rules.forEach((raw, index) => {
+      const parsed = parsePattern(raw);
+      if (!parsed.ok || parsed.value.prefix || ruleFor(routes, raw) === null) return;
+      const message =
+        group === "entries"
+          ? "入口不再命中：这条路径有接口名规则，请求按逻辑路径判定，要改写为逻辑路径才能命中"
+          : "绕过不再命中：这条路径有接口名规则，请求按逻辑路径判定，要改写为逻辑路径才能命中";
+      issues.push({ group, field: `${group}[${index}]`, message });
+    });
+  }
   return issues;
 }

@@ -1,7 +1,8 @@
 // Differences between two site configurations: a line diff for the YAML text, and a list of
 // human-readable changes for the version history and the save dialog (docs/06 6.4.9).
 
-import type { SiteSpec } from "../api/types.ts";
+import type { RouteRule, SiteSpec } from "../api/types.ts";
+import { declarationChanges, objectChanges } from "./objects-validate.ts";
 import { orderSpec, specToYaml } from "./yaml.ts";
 
 export type LineOp = { op: "eq" | "add" | "del"; text: string };
@@ -78,6 +79,26 @@ function setDiff(before: string[], after: string[]): { added: string[]; removed:
   };
 }
 
+/** Route rules by path: a rule added or removed, or one whose interface-name sources changed. */
+function routeChanges(before: RouteRule[], after: RouteRule[]): string[] {
+  const left = new Map(before.map((rule): [string, RouteRule] => [rule.path, rule]));
+  const right = new Map(after.map((rule): [string, RouteRule] => [rule.path, rule]));
+  const changes: string[] = [];
+  for (const rule of after) {
+    if (!left.has(rule.path)) changes.push(`接口名规则 ＋1：${rule.path}`);
+  }
+  for (const rule of before) {
+    if (!right.has(rule.path)) changes.push(`接口名规则 －1：${rule.path}`);
+  }
+  for (const rule of after) {
+    const old = left.get(rule.path);
+    if (old && JSON.stringify(old.name_from) !== JSON.stringify(rule.name_from)) {
+      changes.push(`接口名规则 改动：${rule.path}`);
+    }
+  }
+  return changes;
+}
+
 /** Human-readable changes, e.g. `入口 ＋1：/rest/admin/application-configuration`. */
 export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null): string[] {
   if (!before && after) return ["创建站点"];
@@ -90,6 +111,7 @@ export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null)
   const bypass = setDiff(before.bypass ?? [], after.bypass ?? []);
   for (const rule of bypass.added) changes.push(`绕过 ＋1：${rule}`);
   for (const rule of bypass.removed) changes.push(`绕过 －1：${rule}`);
+  changes.push(...routeChanges(before.routes ?? [], after.routes ?? []));
   if (before.hosts.join(",") !== after.hosts.join(",")) {
     changes.push(`Host ${before.hosts.join("、")} → ${after.hosts.join("、")}`);
   }
@@ -136,6 +158,8 @@ export function semanticChanges(before: SiteSpec | null, after: SiteSpec | null)
   );
   for (const pair of synDiff.added) changes.push(`同义词 ＋${pair}`);
   for (const pair of synDiff.removed) changes.push(`同义词 －${pair}`);
+  changes.push(...declarationChanges(before.advanced?.field_kinds, after.advanced?.field_kinds));
+  changes.push(...objectChanges(before.objects, after.objects));
   return changes;
 }
 

@@ -212,3 +212,83 @@ test("a custom window names its bounds, and 清除 returns the range to 24 hours
   await expect(page).not.toHaveURL(/since=|until=/);
   await expect(page.getByText(/^时间窗/)).toHaveCount(0);
 });
+
+// Two rule rows of the requests fixture (design 4.1): a name that a rule read, and a name that could not
+// be read. Both are judged and in the default list.
+const NAMED = "req_01a1973d7630773798b4592bb8ca5fde";
+const UNKNOWN = "req_01a1973204807054a82075e6b298fb37";
+
+function conditionBox(page: Page): Locator {
+  return page.getByRole("textbox", { name: "筛选条件" });
+}
+
+test("the path column adds the interface name after ›, and the hover says where it came from", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto("/requests");
+  const via = page.locator(`#row-${NAMED} .rq-via`);
+  await expect(via).toHaveText("› dashboard.HomeService/getStats");
+  await expect(via).toHaveAttribute("title", "接口名来自请求头 X-Service-Id、X-Service-Method");
+});
+
+test("a name that could not be read reads 未知接口 after the path, and the hover gives the reason", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto("/requests");
+  const via = page.locator(`#row-${UNKNOWN} .rq-via`);
+  await expect(via).toHaveText("› 未知接口");
+  await expect(via).toHaveAttribute(
+    "title",
+    "未知接口：X-Service-Method 出现了多次，按未知接口处理（不算入口、不走绕过）",
+  );
+});
+
+test("api:unknown and api: name the rows, and object: names the class of a value", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto("/requests");
+  const condition = conditionBox(page);
+
+  await condition.fill("api:unknown");
+  await condition.press("Enter");
+  await expect(page).toHaveURL(/q=api(%3A|:)unknown/);
+  await expect(listRows(page)).toHaveCount(2);
+  await expect(page.locator(`#row-${UNKNOWN}`)).toBeVisible();
+
+  await condition.fill("api:dashboard.HomeService/getStats");
+  await condition.press("Enter");
+  await expect(page).toHaveURL(/api(%3A|:)dashboard/);
+  await expect(listRows(page)).toHaveCount(1);
+  await expect(page.locator(`#row-${NAMED}`)).toBeVisible();
+
+  await condition.fill("object:basket");
+  await condition.press("Enter");
+  await expect(page).toHaveURL(/object(%3A|:)basket/);
+  await expect(listRows(page)).toHaveCount(1);
+  await expect(page.locator(`#row-${IDS.basket}`)).toBeVisible();
+});
+
+test("a link's interface name moves into the condition text, and the address keeps the condition only", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto("/requests?api=dashboard.HomeService/getStats");
+  await expect(conditionBox(page)).toHaveValue("api:dashboard.HomeService/getStats");
+  await expect(page).toHaveURL(/q=api(%3A|:)dashboard/);
+  await expect(page).not.toHaveURL(/[?&]api=/);
+  await expect(listRows(page)).toHaveCount(1);
+});
+
+test("只看这个路径 names the logical path, which the path condition then matches", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto("/requests");
+  await page.getByRole("button", { name: `操作：${NAMED}` }).click();
+  await page.getByRole("menuitem", { name: "只看这个路径" }).click();
+  await expect(conditionBox(page)).toHaveValue("path:/api/home/dashboard.HomeService/getStats");
+  await expect(listRows(page)).toHaveCount(1);
+});

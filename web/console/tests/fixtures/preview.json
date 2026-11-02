@@ -36,6 +36,57 @@
         "old_ms": 2000,
         "new_ms": 1000
       }
+    },
+    {
+      "kind": "api_split",
+      "count": 9812,
+      "top": [
+        [
+          "POST",
+          "/weixin/wx/mp/wx361163d21a65f679/gateway",
+          9812
+        ]
+      ],
+      "sample": "req_01a19728dcc071aab225b9e0f5d7b63f"
+    },
+    {
+      "kind": "entry_unreachable",
+      "count": 41,
+      "top": [
+        [
+          "POST",
+          "/rest/user/login",
+          41
+        ]
+      ]
+    },
+    {
+      "kind": "new_fast_allow",
+      "count": 158,
+      "top": [
+        [
+          "GET",
+          "/rest/products/search",
+          158
+        ]
+      ],
+      "sample": "req_01a1973ed5c0732b8f29804d7fc746d3"
+    },
+    {
+      "kind": "back_to_jev",
+      "count": 14,
+      "top": [
+        [
+          "GET",
+          "/docs/{id}",
+          14
+        ]
+      ],
+      "sample": "req_01a1973940107ebea1af2c54ce635f38"
+    },
+    {
+      "kind": "cache_by_api",
+      "count": 0
     }
   ],
   "patterns": {

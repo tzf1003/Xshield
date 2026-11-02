@@ -28,6 +28,7 @@ import type {
   TimelineRow,
   ValidateResult,
 } from "../../src/api/types.ts";
+import { bootstrapAnswer, learnAnswer, objectSlotAnswer, objectsAnswer } from "./mock-objects.ts";
 import {
   DAY_MS,
   evidence,
@@ -275,6 +276,35 @@ const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     (m, _c, s) => siteOr(s, m, (site) => ok(insightsFor(site))),
   ],
   ["GET", /^\/api\/sites\/([^/]+)\/evidence$/, (m, _c, s) => siteOr(s, m, () => ok(evidence))],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects$/,
+    (m, c, s) => siteOr(s, m, (site) => objectsAnswer(site.name, c.params, s)),
+  ],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects\/bootstrap$/,
+    (m, _c, s) => siteOr(s, m, (site) => bootstrapAnswer(site.name)),
+  ],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects\/slots\/([^/]+)$/,
+    (m, _c, s) =>
+      siteOr(s, m, (site) => objectSlotAnswer(site.name, decodeURIComponent(m[2] ?? ""), s)),
+  ],
+  [
+    "POST",
+    /^\/api\/sites\/([^/]+)\/objects\/slots\/([^/]+)\/(dismiss|ambiguous)$/,
+    (m, _c, s) =>
+      siteOr(s, m, (site) =>
+        learnAnswer(
+          site.name,
+          decodeURIComponent(m[2] ?? ""),
+          m[3] === "dismiss" ? "dismiss" : "ambiguous",
+          s,
+        ),
+      ),
+  ],
   ["GET", /^\/api\/status$/, () => ok(status)],
   ["GET", /^\/api\/system$/, () => ok(system)],
 ];
@@ -348,7 +378,11 @@ function matchRows(params: URLSearchParams, includeHidden: boolean): RequestRow[
   const requestId = params.get("request_id");
   const client = params.get("client");
   const method = params.get("method");
+  // `path` matches the logical path, which starts with the real path (design 4.1).
   const path = params.get("path");
+  const api = params.get("api");
+  const apiUnknown = params.get("api_unknown");
+  const object = params.get("object");
   const status = params.get("status");
   const hasJev = params.get("has_jev") === "true";
   const jevAccess = params.get("jev_access");
@@ -367,7 +401,12 @@ function matchRows(params: URLSearchParams, includeHidden: boolean): RequestRow[
     if (requestId !== null && row.request_id !== requestId) return false;
     if (client !== null && row.client !== client) return false;
     if (method !== null && row.method !== method) return false;
-    if (path !== null && !pathMatches(row.path, path)) return false;
+    if (path !== null && !pathMatches(row.logical_path, path)) return false;
+    if (api !== null && (row.api === null || !("name" in row.api) || row.api.name !== api)) {
+      return false;
+    }
+    if (apiUnknown !== null && !unknownApiMatches(row, apiUnknown)) return false;
+    if (object !== null && !hasObject(row, object)) return false;
     if (status !== null && !statusMatches(row.status, status)) return false;
     if (hasJev && row.jev === null) return false;
     if (jevAccess !== null && row.jev?.access !== jevAccess) return false;
@@ -387,6 +426,18 @@ function matchRows(params: URLSearchParams, includeHidden: boolean): RequestRow[
 /** `path` is exact, or a prefix when it ends with `*` (7.9.3). */
 function pathMatches(actual: string, pattern: string): boolean {
   return pattern.endsWith("*") ? actual.startsWith(pattern.slice(0, -1)) : actual === pattern;
+}
+
+/** `api:unknown` (`any`) keeps the rows whose name could not be read; a reason code keeps those with it. */
+function unknownApiMatches(row: RequestRow, reason: string): boolean {
+  if (row.api === null || !("unknown" in row.api)) return false;
+  return reason === "any" || row.api.unknown === reason;
+}
+
+/** `object:` keeps the rows whose sample record has a value of that class (design 4.2). */
+function hasObject(row: RequestRow, object: string): boolean {
+  const detail = FIXTURE_DETAILS.get(row.request_id);
+  return (detail?.trace.values ?? []).some((value) => value.object === object);
 }
 
 function statusMatches(actual: number | null, pattern: string): boolean {
@@ -557,7 +608,7 @@ function jevFromSummary(row: RequestRow): JevRecord | null {
             entry: { matched: false },
             session: { age_seconds: 0, entries_passed: [] },
             recent: [],
-            request: { method: row.method, path: row.path, values: [] },
+            request: { method: row.method, path: row.logical_path, values: [] },
           }),
     prompt: prompt.id,
     model: "typesafe-ai/jev",

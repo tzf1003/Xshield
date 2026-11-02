@@ -1,0 +1,169 @@
+{
+  "counts": {
+    "classes": 4,
+    "pending": 41,
+    "proposed": 7,
+    "confirmed": 86,
+    "ambiguous": 3,
+    "suspended": 1
+  },
+  "agent_configured": false,
+  "classes": [
+    {
+      "id": "doctor",
+      "name": "医生",
+      "description": "出诊的医生。值在预约、排班、医生详情之间流动。",
+      "origin": "rule",
+      "fields": ["name", "title", "department"],
+      "slot_count": 14,
+      "uses_24h": 382,
+      "routes": ["/doctor/{id}", "/api/doctors/{id}/files/{id}"]
+    },
+    {
+      "id": "document",
+      "name": "文档",
+      "description": "病历和附件所属的文档。",
+      "origin": "admin",
+      "fields": ["title", "doc_name"],
+      "slot_count": 9,
+      "uses_24h": 214,
+      "routes": ["/docs/{id}"]
+    },
+    {
+      "id": "patient",
+      "name": "患者",
+      "description": "就诊的患者，可按手机号或姓名查找。",
+      "origin": "rule",
+      "fields": ["name", "phone"],
+      "slot_count": 21,
+      "uses_24h": 956,
+      "routes": ["/api/patients/{id}"]
+    },
+    {
+      "id": "appointment",
+      "name": "预约",
+      "description": "一次挂号。",
+      "origin": "admin",
+      "fields": ["slot", "date"],
+      "slot_count": 8,
+      "uses_24h": 143,
+      "routes": ["/api/appointments/{id}"]
+    }
+  ],
+  "slots": [
+    {
+      "id": "s1",
+      "side": "response",
+      "key": "GET /api/doctors [].id",
+      "class": "doctor",
+      "state": "confirmed",
+      "source": "rule",
+      "basis": "名字明确 · 31 会话 · 0 拒绝",
+      "last_seen": "2026-11-01T13:16:00Z"
+    },
+    {
+      "id": "s2",
+      "side": "response",
+      "key": "GET /api/appointments [].doc_id",
+      "class": "doctor",
+      "state": "proposed",
+      "source": "rule",
+      "basis": "流向 87% · 23 会话 · 0 拒绝",
+      "last_seen": "2026-11-01T13:15:00Z"
+    },
+    {
+      "id": "s3",
+      "side": "request",
+      "key": "GET /doctor/{id} path[1]",
+      "class": "doctor",
+      "state": "suspended",
+      "source": "admin",
+      "basis": "快速放行后源站 404 比例 18%",
+      "last_seen": "2026-11-01T13:10:00Z"
+    },
+    {
+      "id": "s4",
+      "side": "response",
+      "key": "GET /api/patients [].id",
+      "class": "patient",
+      "state": "confirmed",
+      "source": "rule",
+      "basis": "名字明确 · 44 会话 · 0 拒绝",
+      "last_seen": "2026-11-01T13:12:00Z"
+    },
+    {
+      "id": "s5",
+      "side": "request",
+      "key": "GET /api/patients/{id} path[2]",
+      "class": "patient",
+      "state": "confirmed",
+      "source": "rule",
+      "basis": "路径参数 · 38 会话 · 0 拒绝",
+      "last_seen": "2026-11-01T13:05:00Z"
+    },
+    {
+      "id": "s6",
+      "side": "request",
+      "key": "POST /api/schedule query.doc",
+      "class": null,
+      "state": "pending",
+      "source": "rule",
+      "basis": "学习中 · 6 次 · 2 会话",
+      "last_seen": "2026-11-01T12:40:00Z"
+    },
+    {
+      "id": "s7",
+      "side": "response",
+      "key": "GET /api/docs [].id",
+      "class": "document",
+      "state": "proposed",
+      "source": "rule",
+      "basis": "名字是缩写 · 12 会话 · 0 拒绝",
+      "last_seen": "2026-11-01T13:00:00Z"
+    },
+    {
+      "id": "s8",
+      "side": "response",
+      "key": "GET /api/appointments [].patient_id",
+      "class": "patient",
+      "state": "ambiguous",
+      "source": "agent",
+      "basis": "有歧义，交给 Jev",
+      "last_seen": "2026-11-01T11:00:00Z"
+    },
+    {
+      "id": "s9",
+      "side": "request",
+      "key": "GET /api/records/{id} query.doc_id",
+      "class": "doctor",
+      "state": "confirmed",
+      "source": "admin",
+      "basis": "管理员声明 · 9 会话 · 0 拒绝",
+      "last_seen": null
+    },
+    {
+      "id": "s10",
+      "side": "response",
+      "key": "GET /api/records/{id} attachments[].doc_id",
+      "class": "document",
+      "state": "proposed",
+      "source": "rule",
+      "basis": "流向 92% · 6 会话 · 0 拒绝",
+      "last_seen": "2026-10-31T20:30:00Z"
+    }
+  ],
+  "events": [
+    {
+      "kind": "auto_pause",
+      "at": "2026-11-01T13:10:00Z",
+      "text": "GET /doctor/{id} path[1]，快速放行后源站 404 比例从 1% 升到 18%",
+      "version": null
+    },
+    {
+      "kind": "auto_tighten",
+      "at": "2026-11-01T06:00:00Z",
+      "text": "自动收紧了 2 个位置",
+      "version": 12
+    }
+  ]
+}

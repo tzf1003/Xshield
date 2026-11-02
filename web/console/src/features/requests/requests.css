@@ -13,6 +13,11 @@
   min-width: 0;
 }
 
+/* The interface name after the path, set off by `›` in the secondary colour (design 4.1). */
+.rq-via {
+  color: var(--ink-2);
+}
+
 .rq-method,
 .rq-sub,
 .rq-sub-site,

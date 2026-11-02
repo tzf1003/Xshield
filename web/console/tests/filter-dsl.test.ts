@@ -68,3 +68,46 @@ test("serialising and parsing again gives the same parameters", () => {
     assert.deepEqual(again.params, params, text);
   }
 });
+
+test("the interface name and the object class are conditions of their own", () => {
+  const parsed = parseFilter("path:/weixin/* api:saveBuriedPointList object:doctor api:unknown");
+  assert.deepEqual(parsed.errors, []);
+  assert.deepEqual(parsed.params, {
+    path: "/weixin/*",
+    api: "saveBuriedPointList",
+    object: "doctor",
+    api_unknown: "any",
+  });
+});
+
+test("api:unknown may name one reason code, and the code is checked", () => {
+  assert.deepEqual(parseFilter("api:unknown:repeated").params, { api_unknown: "repeated" });
+  const bad = parseFilter("api:unknown:bogus");
+  assert.equal(bad.errors.length, 1);
+  assert.match(bad.errors[0]?.message ?? "", /未知接口原因无效：bogus/);
+  // Written twice, the unknown-name condition is a repeated key, whatever its reason.
+  const twice = parseFilter("api:unknown api:unknown:repeated");
+  assert.match(twice.errors[0]?.message ?? "", /只能出现一次/);
+});
+
+test("a malformed interface name or class id says why it is not valid", () => {
+  const parsed = parseFilter("api: object:doc,tor api:a:b");
+  assert.equal(parsed.errors.length, 3);
+  assert.equal(parsed.errors[0]?.message, "接口名为 1 到 64 个字符，只能用字母、数字、. _ - /");
+  assert.equal(parsed.errors[1]?.message, "类别 id 为 1 到 64 个字母、数字、_ 或 -");
+});
+
+test("the interface and object conditions serialise and parse back to the same parameters", () => {
+  const cases: Record<string, string>[] = [
+    { api: "bus.buriedPointService/saveBuriedPointList", path: "/weixin/*" },
+    { api_unknown: "any", object: "doctor" },
+    { api_unknown: "invalid_name", api: "save", decision_path: "jev_deny" },
+  ];
+  for (const params of cases) {
+    const text = serializeFilter(params);
+    const again = parseFilter(text);
+    assert.deepEqual(again.errors, [], text);
+    assert.deepEqual(again.params, params, text);
+  }
+  assert.equal(serializeFilter({ api_unknown: "any" }), "api:unknown");
+});

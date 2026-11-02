@@ -67,9 +67,13 @@
             "field": "quantity",
             "request": "GET /rest/basket/1",
             "request_id": "req_01a1973698607cce885df41a7ec7609b",
-            "at_millis": 1793538300000
+            "at_millis": 1793538300000,
+            "object": "count",
+            "object_from": "map"
           }
-        ]
+        ],
+        "object": "basket",
+        "object_from": "map"
       }
     ],
     "session": {
@@ -199,7 +203,7 @@
     "upstream_error": null
   },
   "jev": {
-    "state": "{\"entry\":{\"matched\":false},\"session\":{\"age_seconds\":2046,\"entries_passed\":[\"/rest/user/login\",\"/api/Products\",\"/rest/products/search\"]},\"recent\":[{\"method\":\"GET\",\"path\":\"/rest/user/whoami\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products/12\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/products/search\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products/12\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/user/whoami\",\"status\":200},{\"method\":\"POST\",\"path\":\"/api/Feedbacks\",\"status\":413},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200}],\"request\":{\"method\":\"GET\",\"path\":\"/rest/basket/6\",\"values\":[{\"at\":\"path[2]\",\"kind\":\"reference\",\"value\":\"6\",\"seen_as\":[\"quantity @ GET /rest/basket/1\"]}]}}",
+    "state": "{\"entry\":{\"matched\":false},\"session\":{\"age_seconds\":2046,\"entries_passed\":[\"/rest/user/login\",\"/api/Products\",\"/rest/products/search\"]},\"recent\":[{\"method\":\"GET\",\"path\":\"/rest/user/whoami\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products/12\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/products/search\",\"status\":200},{\"method\":\"GET\",\"path\":\"/api/Products/12\",\"status\":200},{\"method\":\"GET\",\"path\":\"/rest/user/whoami\",\"status\":200},{\"method\":\"POST\",\"path\":\"/api/Feedbacks\",\"status\":413},{\"method\":\"GET\",\"path\":\"/rest/basket/1\",\"status\":200}],\"request\":{\"method\":\"GET\",\"path\":\"/rest/basket/6\",\"values\":[{\"at\":\"path[2]\",\"kind\":\"reference\",\"object\":\"basket\",\"value\":\"6\",\"seen_as\":[\"quantity @ GET /rest/basket/1\"]}]}}",
     "prompt": "jq_5c2e81d07a4b9f13",
     "model": "typesafe-ai/jev",
     "route": "gateway",

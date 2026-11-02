@@ -2,6 +2,8 @@
 // serialising are inverse operations for every valid input: tests/filter-dsl.test.ts checks the
 // round trip. Keys in one term are "or"ed by commas; different keys are "and"ed by spaces.
 
+import type { UnknownApiReason } from "../api/types.ts";
+
 export type FilterParams = Record<string, string>;
 
 export type FilterError = { term: string; index: number; message: string };
@@ -32,12 +34,42 @@ const FAILURES = [
   "JEV_CALL_LIMIT",
 ];
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+/** The reason codes of unknown interface names (types.ts), as `api:unknown:<code>` takes them. */
+const UNKNOWN_REASONS: readonly UnknownApiReason[] = [
+  "missing",
+  "repeated",
+  "conflict",
+  "invalid_name",
+  "body_unsupported",
+  "body_not_json",
+  "body_too_large",
+  "route_subpath",
+];
+/** An interface name, or a part of one: letters, digits, `.`, `_`, `-` and `/`, at most 64 characters. */
+const API_NAME_PATTERN = /^[A-Za-z0-9._/-]{1,64}$/;
+/** An object class id, such as `doctor`. */
+const CLASS_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function isUnknownReason(value: string): value is UnknownApiReason {
+  return UNKNOWN_REASONS.some((reason) => reason === value);
+}
+
+/** A name the `api:` condition may hold. `unknown` alone is the condition for unknown names, so it is not one. */
+export function isApiName(value: string): boolean {
+  return API_NAME_PATTERN.test(value) && value !== "unknown";
+}
+
+export function isClassId(value: string): boolean {
+  return CLASS_ID_PATTERN.test(value);
+}
 
 /** Key names the bar accepts, in the order the "＋条件" menu lists them. */
 export const FILTER_KEYS = [
   "outcome",
   "decision",
   "path",
+  "api",
+  "object",
   "method",
   "status",
   "session",
@@ -55,11 +87,13 @@ export const FILTER_KEYS = [
 
 export type FilterKey = (typeof FILTER_KEYS)[number];
 
-/** DSL key to the API query parameter it fills. */
+/** DSL key to the API query parameter it fills. `api:unknown` fills `api_unknown` instead (see parseKeyed). */
 const API_NAME: Record<FilterKey, string> = {
   outcome: "outcome",
   decision: "decision_path",
   path: "path",
+  api: "api",
+  object: "object",
   method: "method",
   status: "status",
   session: "session",
@@ -75,9 +109,10 @@ const API_NAME: Record<FilterKey, string> = {
   site: "site",
 };
 
-const DSL_KEY: Record<string, FilterKey> = Object.fromEntries(
-  FILTER_KEYS.map((key) => [API_NAME[key], key] as const),
-);
+const DSL_KEY: Record<string, FilterKey> = {
+  ...Object.fromEntries(FILTER_KEYS.map((key) => [API_NAME[key], key] as const)),
+  api_unknown: "api",
+};
 
 function listOf(value: string, allowed: string[]): string | null {
   const items = value.split(",");
@@ -113,6 +148,23 @@ function parseKeyed(
       if (!value.startsWith("/")) return { error: "路径必须以 / 开头" };
       if (value.length > 256) return { error: "路径过长" };
       return { name: "path", value };
+    }
+    case "api": {
+      if (value === "unknown") return { name: "api_unknown", value: "any" };
+      if (value.startsWith("unknown:")) {
+        const reason = value.slice("unknown:".length);
+        return isUnknownReason(reason)
+          ? { name: "api_unknown", value: reason }
+          : { error: `未知接口原因无效：${reason}（可用值：${UNKNOWN_REASONS.join("、")}）` };
+      }
+      return isApiName(value)
+        ? { name: "api", value }
+        : { error: "接口名为 1 到 64 个字符，只能用字母、数字、. _ - /" };
+    }
+    case "object": {
+      return isClassId(value)
+        ? { name: "object", value }
+        : { error: "类别 id 为 1 到 64 个字母、数字、_ 或 -" };
     }
     case "method": {
       const upper = value.toUpperCase();
@@ -261,6 +313,11 @@ export function parseFilter(input: string): ParsedFilter {
 export function serializeFilter(params: FilterParams): string {
   const terms: string[] = [];
   for (const key of FILTER_KEYS) {
+    if (key === "api" && params.api_unknown) {
+      // `api:` also writes the unknown-name condition, which is `api:unknown` for any reason.
+      const reason = params.api_unknown;
+      terms.push(reason === "any" ? "api:unknown" : `api:unknown:${reason}`);
+    }
     const name = API_NAME[key];
     const value = params[name];
     if (value === undefined || value === "") continue;
