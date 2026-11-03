@@ -1,8 +1,25 @@
-// Data for the overview spec (docs/06 6.4.2). Each builder starts from the shared fixtures and changes
-// only what its warning reads, so a spec states the condition it tests and nothing else.
+// Data for the overview and the bell specs (docs/06 6.3.2, 6.4.2). Each builder starts from the shared fixtures
+// and changes only what its warning reads, so a spec states the condition it tests and nothing else.
 
+import { expect, type Locator, type Page } from "@playwright/test";
 import type { GatewayProblem, SiteSummary, StatusResponse } from "../../src/api/types.ts";
 import { sitesList, status } from "./fixtures.ts";
+
+/** The bell of the top bar, which holds the "需要处理" rows on every page (docs/06 6.3.2). */
+export function bell(page: Page): Locator {
+  return page.getByRole("button", { name: /^需要处理/ });
+}
+
+/** The bell's panel, a region named 需要处理. */
+export function bellPanel(page: Page): Locator {
+  return page.getByRole("region", { name: "需要处理" });
+}
+
+/** Opens the bell and waits for its panel. A click on an open bell closes it, so open it once per page load. */
+export async function openBell(page: Page): Promise<void> {
+  await bell(page).click();
+  await expect(bellPanel(page)).toBeVisible();
+}
 
 /** Every gateway instance online, no problem listed, and Jev healthy. */
 export function healthyStatus(): StatusResponse {

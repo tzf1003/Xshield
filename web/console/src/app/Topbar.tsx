@@ -1,8 +1,10 @@
 // The top bar (docs/06 6.3.2): site scope, the search entry (⌘K), the time range, the two status
-// lights and the user menu. Every control writes to the URL, so the scope survives navigation.
+// lights, the bell of the "需要处理" rows and the user menu. Every control writes to the URL, so the scope
+// survives navigation.
 
 import { Select } from "antd";
 import { useSites } from "../api/queries.ts";
+import { AttentionBell } from "../features/overview/AttentionBell.tsx";
 import { DEFAULT_RANGE, PRESETS, type RangeParam } from "../lib/time-range.ts";
 import { RANGE_LABEL } from "../lib/vocab.ts";
 import { Lights } from "./Lights.tsx";
@@ -71,6 +73,7 @@ export function Topbar({ onOpenPalette, onCustomRange }: Props) {
         style={{ width: 128 }}
       />
       <Lights />
+      <AttentionBell />
       <UserMenu />
     </header>
   );

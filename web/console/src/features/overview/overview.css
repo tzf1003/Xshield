@@ -80,6 +80,102 @@
   text-decoration: none;
 }
 
+/* ------------------------------------------------------------------ the bell and the summary line (docs/06 6.3.2) */
+
+.ov-bell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ov-bell:hover,
+.ov-bell[aria-expanded="true"] {
+  border-color: var(--border);
+  background: var(--sunken);
+}
+
+.ov-bell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A count is a tint of its level with that level's mark; the number stays in ink (docs/06 6.5.3). */
+.ov-bell-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.ov-bell-serious {
+  background: color-mix(in srgb, #d03b3b 14%, transparent);
+}
+
+.ov-bell-warn {
+  background: color-mix(in srgb, #fab219 16%, transparent);
+}
+
+.ov-bell-hint {
+  background: var(--accent-weak);
+}
+
+.ov-attn-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  overflow: auto;
+}
+
+.ov-attn-panel:focus {
+  outline: none;
+}
+
+.ov-attn-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ov-attn-head .small {
+  font-weight: 400;
+}
+
+/* The overview's one line for the list: the words are in ink, the mark carries the level. */
+.ov-attn-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 13px;
+  color: var(--ink);
+}
+
 /* ------------------------------------------------------------------ hourly chart */
 
 .ov-trend {

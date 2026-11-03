@@ -9,6 +9,7 @@ import { MODEL_TEXT } from "../src/lib/vocab.ts";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
 import { system, systemModels } from "./helpers/fixtures.ts";
 import { reply, servedRequests } from "./helpers/mock-api.ts";
+import { bellPanel, openBell } from "./helpers/overview.ts";
 import { useFixtures } from "./helpers/trace.ts";
 
 const JEV_PATH = "/api/system/models/jev";
@@ -341,7 +342,7 @@ test("a console configuration can go back to the environment, after a confirmati
   expect(callsTo(page, "DELETE", JEV_PATH).at(-1)?.query).toBe("expected_version=14");
 });
 
-test("a gateway that has not loaded the saved version is named on the card and in the overview", async ({
+test("a gateway that has not loaded the saved version is named on the card and in the bell", async ({
   page,
 }) => {
   const warning = MODEL_TEXT.attentionNotLoaded(14, "edge-2", "密钥无法解密");
@@ -351,9 +352,11 @@ test("a gateway that has not loaded the saved version is named on the card and i
   await expect(jev.getByText("edge-2 仍在用第 13 版：密钥无法解密")).toBeVisible();
   await expect(jev.getByText(warning)).toBeVisible();
 
+  // The overview's line says there is one; the bell of the top bar names it.
   await page.goto("/");
-  await expect(page.getByText(warning).first()).toBeVisible();
-  await page.getByRole("link", { name: MODEL_TEXT.attentionAction }).first().click();
+  await openBell(page);
+  await expect(bellPanel(page).getByText(warning)).toBeVisible();
+  await bellPanel(page).getByRole("link", { name: MODEL_TEXT.attentionAction }).first().click();
   await expect(page).toHaveURL(/tab=models/);
 });
 

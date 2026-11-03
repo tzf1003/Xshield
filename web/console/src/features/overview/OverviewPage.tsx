@@ -1,11 +1,12 @@
 // The overview at "/" (docs/06 6.4.2): in thirty seconds, whether everything is normal and what needs
-// handling. The sections read the status, the sites, the summary, the hourly series and the latest
-// blocks; each one shows its own loading, empty and error states.
+// handling. The rows of "需要处理" are in the bell of the top bar (6.3.2); the overview says in one line
+// whether there are any. The sections read the status, the sites, the summary, the hourly series and the
+// latest blocks; each one shows its own loading, empty and error states.
 
 import { useScope } from "../../app/scope.ts";
 import { RANGE_LABEL } from "../../lib/vocab.ts";
 import { PageHead } from "../../ui/Page.tsx";
-import { NeedsAttention } from "./NeedsAttention.tsx";
+import { AttentionSummary } from "./AttentionSummary.tsx";
 import { RecentBlocks } from "./RecentBlocks.tsx";
 import { SitesCard } from "./SitesCard.tsx";
 import { SummaryTiles } from "./SummaryTiles.tsx";
@@ -21,7 +22,7 @@ export function OverviewPage() {
     <>
       <PageHead title="总览" sub={`${siteText} · ${windowText}`} />
       <section className="ov-section">
-        <NeedsAttention />
+        <AttentionSummary />
       </section>
       <section className="ov-section">
         <SummaryTiles scope={scope} />

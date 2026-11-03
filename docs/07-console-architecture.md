@@ -805,7 +805,7 @@ CREATE TABLE jev_prompts (
 
 ### 7.9.13 状态灯与配置生效
 
-`GET /api/status` 是顶栏两个状态灯和总览“需要处理”共用的轻量接口，只读 `edge_status`、`site_configs` 和最近 5 分钟的 Jev 记录，每 15 秒轮询一次：
+`GET /api/status` 是顶栏两个状态灯和顶栏铃铛的“需要处理”共用的轻量接口，只读 `edge_status`、`site_configs` 和最近 5 分钟的 Jev 记录，每 15 秒轮询一次：
 
 ```json
 {
@@ -920,7 +920,7 @@ web/console/src/
 | 请求列表 | `['requests', filters]` | `staleTime` 10 s；实时模式每 2 s 用 `since_millis = 最新 at_millis − 60 s` 重新拉取，按 `request_id` 去重后插到顶部（7.9.3），10 分钟无操作自动停止 |
 | 请求详情 | `['request', id]` | 记录不会再变，`staleTime: Infinity`；列表行悬停 150 ms 预取 |
 | 计数、统计 | `['counts', filters]`、`['stats', …]` | 30 s |
-| 网关与 Jev 状态 | `['status']` | 每 15 s 轮询 `/api/status`（顶栏状态灯、总览“需要处理”）；`['system']`、`['jev-status']` 只在系统页、Jev 页读取 |
+| 网关与 Jev 状态 | `['status']` | 每 15 s 轮询 `/api/status`（顶栏状态灯、顶栏铃铛的“需要处理”）；`['system']`、`['jev-status']` 只在系统页、Jev 页读取 |
 | 站点、版本 | `['sites']`、`['site', name]`、`['versions', name]` | 保存后失效；保存后每 1 s 轮询 `['site', name]` 直到 `rollout` 显示全部在线网关已加载新版本，最长 30 s（7.9.13） |
 | 参数证据 | `['evidence', name]` | 60 s，只在打开“高级”分组时请求 |
 | 指令全文 | `['prompt', id]` | `Infinity` |
