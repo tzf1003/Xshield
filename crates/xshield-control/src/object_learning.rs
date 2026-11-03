@@ -3,10 +3,11 @@
 //! site's cursor, counts the votes and refusals of the request positions, and
 //! writes the state of each position the rules judged: a proposal for a position
 //! the map does not know, or a confirmed position whose evidence now points at
-//! other kinds (suspended). An administrator confirms a proposal. This pass never
-//! changes a site configuration, and the judge does not read its states yet. A site
-//! turns the pass off, or sets how much evidence a proposal needs, with its
-//! `objects.learning` settings.
+//! other kinds (suspended). An administrator confirms a proposal. The pass changes a
+//! site configuration in one way only: with `auto_pause` on, a suspended position
+//! that the map declares is paused, as one new configuration version. The judge reads
+//! the paused entries from that configuration. A site turns the pass off, or sets how
+//! much evidence a proposal needs, with its `objects.learning` settings.
 
 use std::collections::BTreeSet;
 
@@ -18,7 +19,7 @@ use xshield_core::context::learning::{
 };
 use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec};
 use xshield_postgres::object_learning_store::{self as store, Cursor, Judgement, LearnedState};
-use xshield_postgres::site_spec_store;
+use xshield_postgres::site_spec_store::{self, Change};
 
 use crate::params::DAY_MILLIS;
 
@@ -128,6 +129,7 @@ async fn learn_site(
     }
     store::prune_evidence(pool, site, oldest_day).await?;
     rejudge_proposals(pool, spec, generation, oldest_day, today, now_millis).await?;
+    pause_drifted(pool, site, generation).await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
     store::prune_retired(pool, site, today.saturating_sub(KEEP_RETIRED_DAYS)).await?;
     Ok(())
@@ -184,6 +186,65 @@ async fn rejudge_proposals(
     Ok(())
 }
 
+/// Pauses the suspended positions the site's map declares, when the site has `auto_pause` on.
+/// The pauses are one new configuration version, written over the configuration the site holds
+/// now and recorded as an automatic change, so the judge stops using the positions with the next
+/// configuration load. A position the map does not declare has no entry to pause: it stays
+/// suspended for an administrator to decide. A site that has moved on since the pass began gets
+/// no write; so does a write that finds a newer version. The positions stay suspended until they
+/// are paused, so the next pass tries again.
+async fn pause_drifted(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+) -> Result<(), store::LearningStoreError> {
+    let record = match site_spec_store::get(pool, site).await {
+        Ok(Some(record)) if record.created_at == generation => record,
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            eprintln!("xshield-control: automatic pause skipped for site {site}, {error}");
+            return Ok(());
+        }
+    };
+    let map = record.spec.objects();
+    if !map.learning().auto_pause {
+        return Ok(());
+    }
+    let keys: Vec<String> = store::positions(pool, site)
+        .await?
+        .into_iter()
+        .filter(|row| row.state == "suspended")
+        .map(|row| row.slot)
+        .filter(|slot| map.declared_class_of(slot).is_some() && !map.is_paused(slot))
+        .collect();
+    let Some(first) = keys.first() else {
+        return Ok(());
+    };
+    let note = format!(
+        "学习任务自动暂停了 {} 个位置：{first} 等，证据已转向其他类别",
+        keys.len()
+    );
+    let paused = record
+        .spec
+        .clone()
+        .with_objects(map.clone().with_paused(&keys));
+    // A write refused by a newer version, or to a site that is gone, writes nothing; the
+    // positions stay suspended, so the next pass tries again.
+    let outcome = site_spec_store::write(
+        pool,
+        site,
+        &paused,
+        record.version,
+        Change::AutoPause,
+        Some(&note),
+    )
+    .await;
+    if let Err(error) = outcome {
+        eprintln!("xshield-control: automatic pause skipped for site {site}, {error}");
+    }
+    Ok(())
+}
+
 /// The state the rules give a position: a confirmed position is confirmed or
 /// suspended by its evidence, and an unknown position is proposed when the rules
 /// can tell its kind. `None` when the evidence says nothing yet.
@@ -208,11 +269,12 @@ fn thresholds_of(learning: &LearningSettings) -> Thresholds {
 
 fn decide(slot: &str, evidence: &Evidence, map: &ObjectMap, today: u64) -> Option<Decision> {
     let thresholds = thresholds_of(map.learning());
-    if let Some(class) = map.class_of(slot) {
+    if let Some(class) = map.declared_class_of(slot) {
         // A confirmed position is judged by its votes alone. Refusals without a vote in
         // the window leave its state as it is, and its last vote ages toward retirement.
+        // A paused position stays suspended until an administrator confirms it again.
         let last_day = evidence.last_day()?;
-        let state = if contradicts(class, evidence, map, thresholds) {
+        let state = if map.is_paused(slot) || contradicts(class, evidence, map, thresholds) {
             LearnedState::Suspended
         } else {
             LearnedState::Confirmed
@@ -330,6 +392,14 @@ mod tests {
 
     fn cursor_at(at_millis: i64, id: i64) -> Cursor {
         Cursor { at_millis, id }
+    }
+
+    #[test]
+    fn a_paused_position_stays_suspended_while_its_evidence_agrees() {
+        let paused = map().with_paused(&[SLOT.to_owned()]);
+        let decision = decide(SLOT, &evidence(20, 5, DOCTOR_FROM), &paused, 10).unwrap();
+        assert_eq!(decision.state, LearnedState::Suspended);
+        assert_eq!(decision.class, "doctor");
     }
 
     #[test]
@@ -703,6 +773,156 @@ mod pass_tests {
                 .await
                 .expect("count the evidence");
         assert_eq!((evidence, proposed(&pool).await), (0, 0));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    /// A clinic site that declares `GET /doctor/{id} path[1]` a doctor and `GET /api/docs [].id` a
+    /// document, with the learning settings `learning` (null for the defaults).
+    fn clinic_declaring_both(learning: serde_json::Value) -> SiteSpec {
+        let mut objects = serde_json::json!({
+            "classes": [{"id": "doctor", "name": "医生"}, {"id": "document", "name": "文档"}],
+            "slots": [
+                {"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"},
+                {"key": "GET /api/docs [].id", "class": "document", "source": "admin"}
+            ]
+        });
+        if !learning.is_null() {
+            objects["learning"] = learning;
+        }
+        let spec = serde_json::json!({
+            "name": "clinic",
+            "hosts": ["clinic.example.com"],
+            "origin": "http://10.0.0.5:8080",
+            "session": {"cookie": "SESSIONID"},
+            "entries": ["/login"],
+            "objects": objects
+        });
+        SiteSpec::from_json(&spec.to_string()).expect("test spec")
+    }
+
+    /// One decision row of `GET /doctor/7` made `1 + index / 5` days before `now`, whose value the
+    /// origin showed as a document: the evidence of the position points at another kind.
+    async fn record_document_source(pool: &PgPool, index: i64, now: i64) {
+        let trace = serde_json::json!({
+            "v": 1,
+            "values_truncated": false,
+            "values": [{
+                "at": "path[1]",
+                "value": "7",
+                "kind": "reference",
+                "inert": false,
+                "seen": true,
+                "verified": true,
+                "slot": "GET /doctor/{id} path[1]",
+                "sources": [{
+                    "field": "id",
+                    "request": "GET /api/docs",
+                    "slot": "GET /api/docs [].id"
+                }]
+            }],
+            "timing": {"judge_ms": 1}
+        });
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace)
+             VALUES ($1, $2, 'clinic', 'edge-1', 'clinic.example.com', '10.0.0.1', $3,
+                'GET', '/doctor/7', 200, 'fast_allow', 'allowed', $4)",
+        )
+        .bind(now - (1 + index / 5) * DAY_MILLIS)
+        .bind(format!("req_{index:032x}"))
+        .bind(format!("s{}", index % 5))
+        .bind(trace)
+        .execute(pool)
+        .await
+        .expect("insert a decision row");
+    }
+
+    #[tokio::test]
+    async fn a_suspended_declared_position_is_paused_by_one_new_version() {
+        let Some((admin, pool, name)) = scratch("auto_pause").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic_declaring_both(serde_json::Value::Null), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record_document_source(&pool, index, now).await;
+        }
+        learn_once(&pool, now).await;
+        let record = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        assert_eq!(record.version, 2);
+        assert!(record.spec.objects().is_paused("GET /doctor/{id} path[1]"));
+        // The paused entry stays declared, so the position keeps its kind for the learning task.
+        assert_eq!(
+            record
+                .spec
+                .objects()
+                .declared_class_of("GET /doctor/{id} path[1]"),
+            Some("doctor")
+        );
+        let history = site_spec_store::history(&pool, "clinic", None, 10)
+            .await
+            .expect("read the history");
+        assert_eq!(history[0].change, Change::AutoPause);
+        assert!(
+            history[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("自动暂停"))
+        );
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM object_positions
+             WHERE site = 'clinic' AND slot = 'GET /doctor/{id} path[1]'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("the position is judged");
+        assert_eq!(state, "suspended");
+        // A later pass finds the position paused already, and writes no further version.
+        learn_once(&pool, now + 60 * 60_000).await;
+        let again = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        assert_eq!(again.version, 2);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn with_auto_pause_off_a_suspended_position_is_only_marked() {
+        let Some((admin, pool, name)) = scratch("auto_pause_off").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        let learning = serde_json::json!({"auto_pause": false});
+        site_spec_store::create(&pool, &clinic_declaring_both(learning), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record_document_source(&pool, index, now).await;
+        }
+        learn_once(&pool, now).await;
+        // The position is suspended for an administrator to decide, and the configuration is kept.
+        let record = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        assert_eq!(record.version, 1);
+        assert!(!record.spec.objects().is_paused("GET /doctor/{id} path[1]"));
+        let state: String = sqlx::query_scalar(
+            "SELECT state FROM object_positions
+             WHERE site = 'clinic' AND slot = 'GET /doctor/{id} path[1]'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("the position is judged");
+        assert_eq!(state, "suspended");
         drop_scratch(admin, pool, name).await;
     }
 

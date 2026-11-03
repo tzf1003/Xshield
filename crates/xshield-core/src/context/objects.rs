@@ -71,6 +71,17 @@ pub struct ObjectSlot {
     pub class: String,
     /// Where the entry came from.
     pub source: SlotSource,
+    /// Paused: the entry stays, so the position keeps its kind and the learning task
+    /// knows it, but the judge does not use the kind. The position is judged by its name
+    /// until an administrator writes the entry back without the flag. Absent means not
+    /// paused.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub paused: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The learning settings of a site (`objects.learning`, console design 3.5). A key
@@ -177,9 +188,9 @@ pub struct ObjectMap {
     slots: Vec<ObjectSlot>,
     /// The learning settings. The default when the site sets none.
     learning: LearningSettings,
-    /// Position key to kind id, built once when the map is validated.
+    /// Position key to its place in `slots`, built once when the map is validated.
     #[serde(skip)]
-    index: BTreeMap<String, String>,
+    index: BTreeMap<String, usize>,
 }
 
 impl ObjectMap {
@@ -208,10 +219,42 @@ impl ObjectMap {
         &self.slots
     }
 
-    /// The kind of object a position carries, when the map confirms one.
+    /// The kind of object a position carries, when the map confirms one and does not
+    /// pause it. The judge and the learning task compare kinds through this.
     #[must_use]
     pub fn class_of(&self, key: &str) -> Option<&str> {
-        self.index.get(key).map(String::as_str)
+        self.slot(key)
+            .filter(|slot| !slot.paused)
+            .map(|slot| slot.class.as_str())
+    }
+
+    /// The kind an entry declares for a position, paused or not.
+    #[must_use]
+    pub fn declared_class_of(&self, key: &str) -> Option<&str> {
+        self.slot(key).map(|slot| slot.class.as_str())
+    }
+
+    /// Whether the map has an entry for the position and that entry is paused.
+    #[must_use]
+    pub fn is_paused(&self, key: &str) -> bool {
+        self.slot(key).is_some_and(|slot| slot.paused)
+    }
+
+    /// The map with the entries of `keys` paused. A key the map does not declare, and an
+    /// entry already paused, change nothing. The index stays valid: keys and places do not move.
+    #[must_use]
+    pub fn with_paused(mut self, keys: &[String]) -> Self {
+        for slot in &mut self.slots {
+            if keys.contains(&slot.key) {
+                slot.paused = true;
+            }
+        }
+        self
+    }
+
+    /// The entry of a position, paused or not.
+    fn slot(&self, key: &str) -> Option<&ObjectSlot> {
+        self.index.get(key).and_then(|&place| self.slots.get(place))
     }
 }
 
@@ -237,10 +280,10 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
             }
         }
         let mut index = BTreeMap::new();
-        for slot in &dto.slots {
+        for (place, slot) in dto.slots.iter().enumerate() {
             if !valid_key(&slot.key)
                 || !ids.contains_key(slot.class.as_str())
-                || index.insert(slot.key.clone(), slot.class.clone()).is_some()
+                || index.insert(slot.key.clone(), place).is_some()
             {
                 return Err(ConfigError::Objects);
             }
@@ -344,6 +387,32 @@ mod tests {
         let back: ObjectMap = serde_json::from_str(&text).unwrap();
         assert_eq!(back, map);
         assert_eq!(back.class_of("GET /doctor/{id} path[1]"), Some("doctor"));
+    }
+
+    #[test]
+    fn a_paused_position_keeps_its_entry_but_not_its_kind() {
+        let text = VALID.replace(
+            r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"}"#,
+            r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin", "paused": true}"#,
+        );
+        let paused = map(&text).unwrap();
+        assert_eq!(paused.class_of("GET /doctor/{id} path[1]"), None);
+        assert_eq!(
+            paused.declared_class_of("GET /doctor/{id} path[1]"),
+            Some("doctor")
+        );
+        assert!(paused.is_paused("GET /doctor/{id} path[1]"));
+        assert!(!paused.is_paused("GET /api/appointments [].doc_id"));
+        assert_eq!(
+            paused.class_of("GET /api/appointments [].doc_id"),
+            Some("doctor")
+        );
+        // The flag is written only when it is set, and reads back the same.
+        let written = serde_json::to_string(&paused).unwrap();
+        assert!(written.contains(r#""paused":true"#), "{written}");
+        assert_eq!(map(&written).unwrap(), paused);
+        let plain = serde_json::to_string(&map(VALID).unwrap()).unwrap();
+        assert!(!plain.contains("paused"), "{plain}");
     }
 
     #[test]
