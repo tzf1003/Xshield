@@ -1,604 +1,505 @@
 #!/usr/bin/env python3
-"""Isolated PostgreSQL + real gateway regression for an intentionally IDOR-prone origin."""
+"""Runs the docs/04 section 4.3 acceptance scenarios against the real xshield-edge.
 
-import json
+The lab runs in this process and a child edge process, with no Docker and no
+database, and never calls a model:
+- tests/security-lab/idor_origin.py: an EMR origin with no object authorization;
+- tests/security-lab/fake_jev.py: a scripted Jev endpoint with fixed answers;
+- xshield-edge, configured from a sites file written here (XSHIELD_EDGE_SITES_FILE).
+
+Each check compares the status the client received, whether the origin served
+the request, and the decision record the edge wrote for that request ID. Where
+a scenario expects a refusal, the origin is also asked directly to show that the
+refused object really is reachable, so the refusal is the edge's doing.
+
+Usage: python3 scripts/test_idor_lab.py [--only A2,C4]
+Exit status is 1 when any check fails. CARGO_TARGET_DIR moves the build output.
+"""
+
+from __future__ import annotations
+
 import argparse
-import hashlib
-import hmac
+import http.client
+import json
 import os
-import re
 import secrets
 import socket
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
-import uuid
+import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
-
+from threading import Lock, Thread
+from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
-# Honour CARGO_TARGET_DIR so builds can live outside the repository (large disk).
+sys.path.insert(0, str(ROOT / "tests/security-lab"))
+
+from fake_jev import FakeJev  # noqa: E402
+from idor_origin import PASSWORD, EmrOrigin  # noqa: E402
+
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
-EDGE = TARGET / "debug/xshield-gateway"
-MODEL_EVAL = TARGET / "debug/xshield-model-eval"
-FINGERPRINT_KEY = "7" * 64
-LABELS = ROOT / "tests/security-lab/independent_labels.json"
-SCENARIOS = {
-    "orders": {"origin": "http://127.0.0.1:53001", "host": "idor.lab",
-               "site_id": "site_idor", "login": "/login", "list": "/orders",
-               "detail": "/orders/", "collection": "orders", "resource_key": "id",
-               "own": "order-a", "other": "order-b", "bearer": "lab-token-alice",
-               "action": "orders.open", "read_operation": "orders.read",
-               "list_operation": "orders.list", "resource_type": "order",
-               "path_parameter": "order_id", "view_profile": "customer_detail",
-               "seed": "idor_seed.sql", "cases": ("own_order", "cross_order")},
-    "invoices": {"origin": "http://127.0.0.1:53002", "host": "invoice.lab",
-                 "site_id": "site_invoice", "login": "/session", "list": "/invoices",
-                 "detail": "/invoices/", "collection": "invoices", "resource_key": "ref",
-                 "own": "invoice-100", "other": "invoice-200",
-                 "bearer": "invoice-token-alice", "action": "invoices.open",
-                 "read_operation": "invoices.read", "list_operation": "invoices.list",
-                 "resource_type": "invoice", "path_parameter": "invoice_id",
-                 "view_profile": "billing_detail", "seed": "invoice_seed.sql",
-                 "cases": ("own_invoice", "cross_invoice")},
-}
+EDGE = TARGET / ("debug/xshield-edge.exe" if os.name == "nt" else "debug/xshield-edge")
+# A lab-only key for the context hashes; nothing outside this run uses it.
+CONTEXT_KEY_HEX = "5b" * 32
+ENTRIES = ["/login", "/api/home", "/api/patients", "/share/*"]
 
 
-def load_independent_labels():
-    raw = LABELS.read_bytes()
-    digest = hashlib.sha256(raw).hexdigest()
-    frozen = os.environ.get("XSHIELD_LAB_LABEL_SHA256")
-    if frozen is not None and frozen != digest:
-        raise RuntimeError("cross-site label file changed during evaluation")
-    return json.loads(raw), digest
+@dataclass(frozen=True)
+class Expect:
+    """What one request must produce."""
+
+    status: int
+    path: str  # decision_path, docs/07 section 7.4
+    outcome: str  # allowed, blocked, would_block or unjudged
+    origin: bool  # whether the origin served the request
+    failure: str | None = None  # jev.failure code, when one is expected
 
 
-def source_history(db_name, db_env, source_request_id, spec):
-    if not re.fullmatch(r"req_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-                        source_request_id or ""):
-        raise AssertionError("source request ID missing or malformed")
-    query = f"""
-        SELECT json_build_object(
-          'source_request_id', e.source_request_id,
-          'source_evidence_ref', e.response_evidence_id,
-          'action_id', a.source_action_ref,
-          'mapping_revision', a.mapping_revision,
-          'subject_ref', b.principal_ref,
-          'grant_count', (SELECT count(*) FROM xshield.resource_grants g
-             WHERE g.tenant_id=a.tenant_id AND g.site_id=a.site_id
-               AND g.action_ref=a.action_ref AND g.status='active'
-               AND g.expires_at > clock_timestamp())
+@dataclass
+class Reply:
+    status: int
+    request_id: str | None
+    headers: list[tuple[str, str]]
+    body: bytes
+
+    def json(self) -> dict:
+        return json.loads(self.body) if self.body else {}
+
+
+@dataclass
+class Sent:
+    reply: Reply
+    record: dict | None
+    served: bool
+
+
+def login_form(user: str) -> dict:
+    """A login body. The csrf field is a fresh token, as a real login form sends,
+    so identical logins are judged each time instead of served from the allow cache."""
+    return {"username": user, "password": PASSWORD, "csrf": secrets.token_hex(8)}
+
+
+def site_specs(origin_port: int) -> list[dict]:
+    """The lab sites. Each variant of docs/04 section 4.3 gets its own host."""
+    base = {"origin": f"http://127.0.0.1:{origin_port}", "session": {"cookie": "SID"},
+            "entries": ENTRIES, "mode": "enforce"}
+
+    def site(name: str, host: str, **changes: object) -> dict:
+        return {"name": name, "hosts": [host], **base, **changes}
+
+    fast_timeout = {"jev_timeout_ms": 100}
+    return [
+        site("emr", "emr.lab"),
+        site("observe", "observe.lab", mode="observe"),
+        site("deny-when-down", "deny.lab", advanced=fast_timeout),
+        site("allow-when-down", "allow.lab", on_jev_unavailable="allow", advanced=fast_timeout),
+        site("limited", "limit.lab", advanced={"session_calls_per_minute": 2}),
+    ]
+
+
+class Edge:
+    """A running xshield-edge child process and the decision records it writes."""
+
+    def __init__(self, sites_file: Path, jev_url: str, port: int) -> None:
+        env = {key: value for key, value in os.environ.items() if not key.startswith("XSHIELD_")}
+        env.update({
+            "XSHIELD_EDGE_LISTEN_PORTS": str(port),
+            "XSHIELD_EDGE_SITES_FILE": str(sites_file),
+            "XSHIELD_CONTEXT_KEY_HEX": CONTEXT_KEY_HEX,
+            "XSHIELD_JEV_ROUTE": "direct",
+            "XSHIELD_JEV_API_KEY": "lab-only-key",
+            "XSHIELD_JEV_ENDPOINT": jev_url,
+        })
+        self.port = port
+        self.lock = Lock()
+        self.records: list[dict] = []
+        self.stderr: list[str] = []
+        self.process = subprocess.Popen(
+            [str(EDGE)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
-        FROM xshield.ui_actions a
-        JOIN xshield.response_evidence e ON e.tenant_id=a.tenant_id
-          AND e.site_id=a.site_id AND e.response_evidence_id=a.response_evidence_id
-        JOIN xshield.auth_bindings b ON b.tenant_id=a.tenant_id
-          AND b.site_id=a.site_id AND b.binding_id=a.binding_id
-        WHERE a.tenant_id='tenant_lab' AND a.site_id='{spec["site_id"]}'
-          AND e.source_request_id='{source_request_id}'
-          AND a.status='active' AND a.expires_at > clock_timestamp()
-          AND e.status='verified' AND e.expires_at > clock_timestamp()
-          AND b.status='active' AND b.absolute_expires_at > clock_timestamp();
-    """
-    lines = subprocess.check_output(["psql", "-X", "-At", "-d", db_name, "-c", query],
-                                    env=db_env, text=True).strip().splitlines()
-    if len(lines) != 1:
-        raise AssertionError(f"expected one source-chain row, found {len(lines)}")
-    facts = json.loads(lines[0])
-    assert facts["subject_ref"] == "principal_alice"
-    assert facts["action_id"] == spec["action"] and facts["mapping_revision"] == "mapping-r1"
-    assert facts["grant_count"] == 1
-    return facts
-
-
-def write_private_json(path, payload):
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-        json.dump(payload, output, ensure_ascii=False, separators=(",", ":"))
-        output.write("\n")
-
-
-def active_grant_count(db_name, db_env, facts, resource, spec):
-    canonical = b"\0".join((b"xshield-resource-v1", b"tenant_lab",
-                            spec["site_id"].encode(), spec["resource_type"].encode(),
-                            resource.encode())) + b"\0"
-    digest = hmac.new(bytes.fromhex(FINGERPRINT_KEY), canonical, hashlib.sha256).hexdigest()
-    query = f"""
-        SELECT count(*) FROM xshield.resource_grants g
-        JOIN xshield.ui_actions a ON a.tenant_id=g.tenant_id AND a.site_id=g.site_id
-          AND a.action_ref=g.action_ref AND a.binding_id=g.binding_id
-          AND a.auth_epoch=g.auth_epoch
-        JOIN xshield.auth_bindings b ON b.tenant_id=a.tenant_id AND b.site_id=a.site_id
-          AND b.binding_id=a.binding_id
-        WHERE g.tenant_id='tenant_lab' AND g.site_id='{spec["site_id"]}'
-          AND a.source_request_id='{facts["source_request_id"]}'
-          AND a.source_action_ref='{spec["action"]}'
-          AND b.principal_ref='principal_alice' AND b.status='active'
-          AND g.resource_type='{spec["resource_type"]}'
-          AND g.operation_id='{spec["read_operation"]}'
-          AND g.view_id='{spec["view_profile"]}'
-          AND encode(g.resource_key_hmac,'hex')='{digest}'
-          AND g.status='active' AND g.expires_at > clock_timestamp()
-          AND a.status='active' AND a.expires_at > clock_timestamp();
-    """
-    return int(subprocess.check_output(["psql", "-X", "-At", "-d", db_name, "-c", query],
-                                       env=db_env, text=True).strip())
-
-
-def write_jev_fixtures(directory, facts, action_resource, attempts, spec, db_name, db_env, independent):
-    directory.mkdir(mode=0o700, parents=False, exist_ok=False)
-    source = {
-        "provenance": "operator_supplied_offline",
-        "source_kind": "response_evidence",
-        "source_evidence_ref": facts["source_evidence_ref"],
-        "source_request_id": facts["source_request_id"],
-        "action_id": facts["action_id"],
-        "action_subject_ref": facts["subject_ref"],
-        "action_resource_ref": action_resource,
-        "mapping_revision": facts["mapping_revision"],
-    }
-    site_labels = independent["sites"][spec["name"]]
-    assert site_labels["site_id"] == spec["site_id"]
-    assert tuple(label["case"] for label in site_labels["labels"]) == spec["cases"]
-    assert [label["requested_resource_ref"] for label in site_labels["labels"]] == [spec["own"], spec["other"]]
-    assert [label["expected_choice"] for label in site_labels["labels"]] == ["ALLOW", "DENY"]
-    for label_row in site_labels["labels"]:
-        label = label_row["case"]
-        resource = label_row["requested_resource_ref"]
-        count = active_grant_count(db_name, db_env, facts, resource, spec)
-        if count != (1 if resource == action_resource else 0):
-            raise RuntimeError(f"unexpected active grant count for {label}: {count}")
-        grant = "active" if count == 1 else "missing"
-        payload = {
-            "schema_version": 1, "approval_ref": "lab-review-required-r1",
-            "model_revision": "jev-1.13.0", "policy_revision": "lab-r1",
-            "prompt_revision": "lab-idor-r1",
-            "untrusted_content": f"GET {spec['detail']}{resource}",
-            "auth_facts": {"provenance": "operator_supplied_offline",
-                           "subject_ref": facts["subject_ref"],
-                           "requested_resource_ref": resource,
-                           "current_grant": grant,
-                           "source_request_id": facts["source_request_id"],
-                           "attempt_request_id": attempts[label]},
-            "page_evidence": source,
-            "question": {"type": "choice",
-                         "instructions": "Assess whether the requested resource matches the observed action and current grant. Choose UNKNOWN if evidence is insufficient.",
-                         "criteria": {"ALLOW": "The provided action and current grant support this resource.",
-                                      "DENY": "The resource lacks the required grant or action match.",
-                                      "NONE": "No applicable order request.",
-                                      "UNKNOWN": "Evidence does not establish a decision."}},
-        }
-        path = directory / f"{label}_review_required.json"
-        write_private_json(path, payload)
-        print(json.dumps({"fixture": str(path), "label_case": label,
-                          "source_evidence_ref": facts["source_evidence_ref"]}))
-    write_private_json(directory / "labels.json",
-                       {"source_request_id": facts["source_request_id"],
-                        "dataset_id": independent["dataset_id"],
-                        "site_id": spec["site_id"],
-                        "labels": [{**row, "attempt_request_id": attempts[row["case"]]}
-                                   for row in site_labels["labels"]]})
-
-
-def evaluate_jev_lab(work, db_name, db_env, database_url, fixture_dir, spec):
-    if not MODEL_EVAL.is_file():
-        raise RuntimeError("build xshield-model-eval before running Jev lab")
-    route = os.environ.get("XSHIELD_JEV_ROUTE", "gateway")
-    secret_name = "XSHIELD_JEV_API_KEY" if route == "direct" else "AI_GATEWAY_API_KEY"
-    if not os.environ.get(secret_name):
-        raise RuntimeError(f"{secret_name} is required for the Jev lab")
-    db_command(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-d", db_name, "-c",
-                "INSERT INTO xshield.model_evaluation_admission_scopes "
-                "(tenant_id,site_id,policy_revision,max_active_calls,lease_seconds,configured_at) "
-                f"VALUES ('tenant_lab','{spec['site_id']}','lab-r1',1,45,"
-                "date_trunc('milliseconds',clock_timestamp()))"], db_env)
-    evidence_root = work / "jev-evidence"
-    journal_root = work / "jev-journal"
-    evidence_root.mkdir(mode=0o700)
-    journal_root.mkdir(mode=0o700)
-    model_env = db_env.copy()
-    model_env[secret_name] = os.environ[secret_name]
-    model_env.update({
-        "XSHIELD_DATABASE_URL": database_url,
-        "XSHIELD_JEV_ROUTE": route,
-        "XSHIELD_TENANT_ID": "tenant_lab",
-        "XSHIELD_SITE_ID": spec["site_id"],
-        "XSHIELD_EVIDENCE_ROOT": str(evidence_root),
-        "XSHIELD_EVIDENCE_KEY_ID": "jev-lab-evidence-r1",
-        "XSHIELD_EVIDENCE_KEY_HEX": secrets.token_hex(32),
-        "XSHIELD_EVIDENCE_MAX_TOTAL_BYTES": str(32 * 1024 * 1024),
-        "XSHIELD_MODEL_JOURNAL_DIRECTORY": str(journal_root),
-        "XSHIELD_JOURNAL_KEY_ID": "jev-lab-journal-r1",
-        "XSHIELD_JOURNAL_KEY_HEX": secrets.token_hex(32),
-        "XSHIELD_AUDIT_MAX_BYTES": str(16 * 1024 * 1024),
-    })
-    reports = []
-    for label in spec["cases"]:
-        input_path = fixture_dir / f"{label}_review_required.json"
-        valid = subprocess.run([str(MODEL_EVAL), "--validate-input", str(input_path)],
-                               capture_output=True, text=True, env=model_env, timeout=10)
-        if valid.returncode or valid.stdout.strip() != "MODEL_INPUT_VALID":
-            raise RuntimeError(f"Jev lab input validation failed for {label}")
-        invocation = subprocess.run([str(MODEL_EVAL), "--approved-input", str(input_path)],
-                                    capture_output=True, text=True, env=model_env, timeout=30)
+        Thread(target=self._read_stdout, daemon=True).start()
+        Thread(target=self._read_stderr, daemon=True).start()
         try:
-            report = json.loads(invocation.stdout)
-        except ValueError as error:
-            raise RuntimeError(f"Jev lab produced no receipt for {label}") from error
-        print(json.dumps({"case": label, "status": report.get("status"),
-                          "reason_code": report.get("reason_code"),
-                          "model_call_id": report.get("model_call_id")}))
-        if invocation.returncode or report.get("status") != "success":
-            raise RuntimeError(f"Jev evaluation failed for {label}: {report.get('reason_code')}")
-        reports.append({"case": label, "report": report})
-        request_id = report.get("request_id", "")
-        if not re.fullmatch(r"req_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
-                            request_id):
-            raise RuntimeError(f"Jev receipt has invalid request ID for {label}")
-        catalog_sql = (
-            "SELECT count(*), count(*) FILTER (WHERE classification='RESTRICTED' "
-            "AND status='active') FROM xshield.artifact_catalog "
-            f"WHERE tenant_id='tenant_lab' AND site_id='{spec['site_id']}' "
-            f"AND request_id='{request_id}'"
-        )
-        counts = subprocess.check_output(["psql", "-X", "-At", "-F", "|", "-d", db_name,
-                                          "-c", catalog_sql], env=db_env, text=True).strip()
-        if counts != "4|4":
-            raise RuntimeError(f"Jev catalog barrier failed for {label}: {counts}")
-    lease_counts = subprocess.check_output(
-        ["psql", "-X", "-At", "-F", "|", "-d", db_name, "-c",
-         "SELECT count(*) FILTER (WHERE status='released'), "
-         "count(*) FILTER (WHERE status='active') "
-         "FROM xshield.model_evaluation_admission_leases "
-         f"WHERE tenant_id='tenant_lab' AND site_id='{spec['site_id']}'"],
-        env=db_env, text=True).strip()
-    if lease_counts != "2|0" or not any(journal_root.glob("segment-*.xja")):
-        raise RuntimeError("Jev admission release or terminal journal unavailable")
-    reports_path = work / "jev-reports.json"
-    write_private_json(reports_path, reports)
-    score_env = model_env.copy()
-    score_env["XSHIELD_LAB_REPORTS_FILE"] = str(reports_path)
-    score_env["XSHIELD_LAB_LABELS_FILE"] = str(fixture_dir / "labels.json")
-    score_env["XSHIELD_LAB_SITE_ID"] = spec["site_id"]
-    score_env.pop("XSHIELD_JEV_API_KEY", None)
-    score = subprocess.run(["cargo", "test", "-p", "xshield-worker",
-                            "--test", "jev_idor_lab", "--", "--ignored", "--nocapture"],
-                           cwd=ROOT, capture_output=True, text=True, env=score_env, timeout=120)
-    print(score.stdout[-4000:])
-    if score.returncode:
-        raise RuntimeError("Jev lab scoring failed; inspect test diagnostics")
-    decisions = []
-    for line in score.stdout.splitlines():
-        if line.startswith("JEV_LAB_SCORE "):
-            decisions.append(json.loads(line.removeprefix("JEV_LAB_SCORE ")))
-    if len(decisions) != len(spec["cases"]):
-        raise RuntimeError("Jev lab scoring output incomplete")
-    return decisions
+            self._wait_listening()
+        except Exception:
+            self.stop()  # never leave a half-started edge running
+            raise
 
+    def _read_stdout(self) -> None:
+        for line in self.process.stdout:  # one JSON decision record per line
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            with self.lock:
+                self.records.append(record)
 
-def request(url, method="GET", headers=None):
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url, data=b"" if method == "POST" else None,
-                                                          method=method, headers=headers or {}), timeout=5) as response:
-            return response.status, response.read(), dict(response.headers)
-    except urllib.error.HTTPError as error:
-        return error.code, error.read(), dict(error.headers)
+    def _read_stderr(self) -> None:
+        for line in self.process.stderr:
+            with self.lock:
+                self.stderr.append(line.rstrip())
 
-
-def port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def db_command(args, env):
-    subprocess.run(args, check=True, env=env, stdout=subprocess.DEVNULL)
-
-
-def credentials(user, base, spec):
-    status, body, headers = request(base + spec["login"], "POST", {"Host": spec["host"], "X-Lab-User": user})
-    assert status == 200, (status, body)
-    payload = json.loads(body)
-    cookie = headers.get("Set-Cookie", "").split(";", 1)[0]
-    assert cookie.startswith("__Host-xshield_sid="), headers
-    return {"Host": spec["host"], "Cookie": cookie,
-            "Authorization": "Bearer " + payload["access_token"]}
-
-
-def outcome(base, path, headers):
-    status, body, response_headers = request(base + path, headers=headers)
-    try:
-        decoded = json.loads(body)
-    except ValueError:
-        decoded = {}
-    return status, decoded, response_headers.get("X-Xshield-Request-Id")
-
-
-def summarize_observations(reports, evaluated):
-    observations = [row for report in reports for row in report["observations"]]
-    if len({row["edge_request_id"] for row in observations}) != len(observations):
-        raise RuntimeError("live edge request identities are not unique")
-    if len({report["site_id"] for report in reports}) != len(reports):
-        raise RuntimeError("cross-site evaluation repeated one scope")
-    edge_scores = {"benign_allowed": 0, "benign_denied": 0,
-                   "malicious_denied": 0, "malicious_allowed": 0,
-                   "edge_error": 0}
-    for row in observations:
-        if row["origin_status"] != 200:
-            raise RuntimeError("origin baseline did not expose the fixed object")
-        if row["truth_class"] not in ("benign", "malicious"):
-            raise RuntimeError("independent label class is invalid")
-        category = row["truth_class"]
-        if row["expected_choice"] != ("ALLOW" if category == "benign" else "DENY"):
-            raise RuntimeError("independent label decision conflicts with fixture truth")
-        if row["edge_status"] == 200:
-            outcome_name = "allowed"
-        elif 400 <= row["edge_status"] < 500:
-            outcome_name = "denied"
-        else:
-            edge_scores["edge_error"] += 1
-            continue
-        edge_scores[f"{category}_{outcome_name}"] += 1
-    scores = {"false_allow": 0, "false_deny": 0, "abstain": 0, "unavailable": 0,
-              "correct_allow": 0, "correct_deny": 0}
-    if evaluated:
-        for row in observations:
-            actual = row["model_choice"]
-            expected = row["expected_choice"]
-            if actual is None:
-                scores["unavailable"] += 1
-            elif actual in ("UNKNOWN", "NONE"):
-                scores["abstain"] += 1
-            elif actual not in ("ALLOW", "DENY") or expected not in ("ALLOW", "DENY"):
-                raise RuntimeError("model choice or label is invalid")
-            elif actual == expected:
-                scores["correct_allow" if actual == "ALLOW" else "correct_deny"] += 1
-            else:
-                scores["false_allow" if actual == "ALLOW" else "false_deny"] += 1
-    model_edge_consistent = None
-    if evaluated:
-        model_edge_consistent = all(
-            (row["model_choice"] == "ALLOW" and row["edge_status"] == 200)
-            or (row["model_choice"] == "DENY" and row["edge_status"] >= 400)
-            for row in observations
-        )
-    return {"dataset_id": "xshield_lab_cross_site_r1",
-                      "mode": "live_jev_verified_against_edge" if evaluated else "edge_only",
-                      "site_count": len(reports), "sample_count": len(observations),
-                      "edge_scores": edge_scores,
-                      "jev_scores": scores if evaluated else None,
-                      "model_edge_consistent": model_edge_consistent,
-                      "model_influenced_edge": False,
-                      "observations": observations}
-
-
-def run_all(args, label_digest):
-    if args.jev_fixtures_dir is not None:
-        raise RuntimeError("--jev-fixtures-dir requires one --scenario")
-    reports = []
-    for name in SCENARIOS:
-        command = [sys.executable, __file__, "--scenario", name]
-        if args.evaluate_jev:
-            command.append("--evaluate-jev")
-        child_env = os.environ.copy()
-        child_env["XSHIELD_LAB_LABEL_SHA256"] = label_digest
-        child = subprocess.run(command, capture_output=True, text=True, timeout=240, env=child_env)
-        if child.returncode:
-            print(child.stdout[-3000:])
-            raise RuntimeError(f"{name} lab failed: {child.stderr[-1000:]}")
-        lines = [line.removeprefix("LAB_RESULT ") for line in child.stdout.splitlines()
-                 if line.startswith("LAB_RESULT ")]
-        if len(lines) != 1:
-            raise RuntimeError(f"{name} lab result unavailable")
-        reports.append(json.loads(lines[0]))
-        _, observed_digest = load_independent_labels()
-        if observed_digest != label_digest:
-            raise RuntimeError("cross-site label file changed during evaluation")
-    summary = summarize_observations(reports, args.evaluate_jev)
-    summary["label_sha256"] = label_digest
-    if args.evaluate_jev:
-        report_dir = ROOT / "target/xshield-security-lab"
-        report_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        report_path = report_dir / f"live-jev-{uuid.uuid4().hex}.json"
-        summary["report_path"] = str(report_path)
-        write_private_json(report_path, summary)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--jev-fixtures-dir", type=Path,
-                        help="Create private, review-required Jev inputs from the lab ledger")
-    parser.add_argument("--evaluate-jev", action="store_true",
-                        help="Run real TypeSafe Jev shadow calls and score encrypted records")
-    parser.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="orders")
-    args = parser.parse_args()
-    independent, label_digest = load_independent_labels()
-    if args.scenario == "all":
-        run_all(args, label_digest)
-        return
-    spec = {"name": args.scenario, **SCENARIOS[args.scenario]}
-    origin = spec["origin"]
-    if not EDGE.is_file():
-        raise SystemExit("build edge first: cargo build -p xshield-gateway --bin xshield-gateway")
-    for _ in range(100):
-        try:
-            if request(origin + "/health")[0] == 200:
+    def _wait_listening(self) -> None:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if self.process.poll() is not None:
                 break
-        except (OSError, TimeoutError):
-            pass
-        time.sleep(0.1)
-    else:
-        raise RuntimeError(f"{args.scenario} origin did not become ready")
-    own_direct_status, own_direct_body, _ = request(
-        origin + spec["detail"] + spec["own"],
-        headers={"Authorization": "Bearer " + spec["bearer"]})
-    assert own_direct_status == 200 and json.loads(own_direct_body)["owner"] == "alice"
-    status, direct, _ = request(origin + spec["detail"] + spec["other"],
-                                headers={"Authorization": "Bearer " + spec["bearer"]})
-    assert status == 200 and json.loads(direct)["owner"] == "bob", "fixture must exhibit IDOR"
-    db_name = "xshield_lab_" + uuid.uuid4().hex[:16]
-    db_env = os.environ.copy()
-    db_env.pop("XSHIELD_JEV_API_KEY", None)
-    # Defaults match the development Compose database; XSHIELD_LAB_PG* point the
-    # lab at another PostgreSQL (CI service, local server). An empty password
-    # means trust authentication.
-    pg_user = os.getenv("XSHIELD_LAB_PGUSER", "xshield_dev")
-    pg_password = os.getenv("XSHIELD_LAB_PGPASSWORD", "xshield_dev")
-    pg_host = os.getenv("XSHIELD_LAB_PGHOST", "127.0.0.1")
-    pg_port = os.getenv("XSHIELD_LAB_PGPORT", "55432")
-    db_env.update({"PGHOST": pg_host, "PGPORT": pg_port, "PGUSER": pg_user})
-    if pg_password:
-        db_env["PGPASSWORD"] = pg_password
-    else:
-        db_env.pop("PGPASSWORD", None)
-    credentials_part = f"{pg_user}:{pg_password}" if pg_password else pg_user
-    db_command(["createdb", db_name], db_env)
-    try:
-        for migration in sorted((ROOT / "migrations").glob("*.sql")):
-            db_command(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-d", db_name, "-f", str(migration)], db_env)
-        db_command(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-d", db_name,
-                    "-f", str(ROOT / "tests/security-lab" / spec["seed"])], db_env)
-        with tempfile.TemporaryDirectory(prefix=f"xshield-{args.scenario}-lab-") as directory:
-            work = Path(directory)
-            listen = port()
-            config = {
-                "listen": f"127.0.0.1:{listen}",
-                "origin": {"address": origin.removeprefix("http://"),
-                           "server_name": spec["host"], "tls": False},
-                "tenant_id": "tenant_lab", "site_id": spec["site_id"], "policy_revision": "lab-r1",
-                "audit": {"directory": str(work / "audit"), "key_id": "journal-lab-r1",
-                          "producer_id": "edge-lab", "max_bytes": 1048576,
-                          "high_watermark_bytes": 786432, "segment_max_bytes": 262144},
-                "identity_store": {"max_connections": 2, "acquire_timeout_ms": 2000},
-                "site_policy": {"waf": {"enabled": True, "blocked_query_fragments": ["' or 1=1--"],
-                                        "max_cookie_bytes": 8192}},
-                "operations": [
-                    {"operation_id": "auth.login", "method": "POST", "path": spec["login"],
-                     "admission": "AUTH_ENTRY", "response": {"mode": "BUFFERED_JSON", "max_bytes": 512,
-                     "auth_binding": {"success_status": 200, "principal_pointer": "/identity/id",
-                                      "authorization_context_pointer": "/identity/authorization_context",
-                                      "bearer_pointer": "/access_token", "credential_ttl_seconds": 1800,
-                                      "session_ttl_seconds": 3600}}},
-                    {"operation_id": spec["list_operation"], "method": "GET", "path": spec["list"],
-                     "admission": "AUTHENTICATED_ROOT", "response": {"mode": "BUFFERED_JSON", "max_bytes": 1024,
-                     "resource_grant": {"success_status": 200, "items_pointer": spec["list"],
-                                        "resource_pointer": "/" + spec["resource_key"],
-                                        "action_ref_field": "_xshield_action_ref",
-                                        "target_operation_id": spec["read_operation"], "target_mapping_revision": "mapping-r1",
-                                        "ttl_seconds": 900, "max_items": 10, "max_active_grants": 100}}},
-                    {"operation_id": spec["read_operation"], "method": "GET",
-                     "path": spec["detail"] + "{" + spec["path_parameter"] + "}",
-                     "admission": "UI_ACTION_REQUIRED", "source_action": spec["action"],
-                     "resource_type": spec["resource_type"], "view_profile": spec["view_profile"],
-                     "resource_path_parameter": spec["path_parameter"]},
-                ],
-            }
-            config_path = work / "gateway.json"
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            edge_env = db_env.copy()
-            edge_env.update({
-                "XSHIELD_CONFIG": str(config_path), "XSHIELD_PUBLIC_HOSTS": spec["host"],
-                "XSHIELD_EDGE_LISTEN_PORTS": f"127.0.0.1:{listen}",
-                "XSHIELD_JOURNAL_KEY_HEX": "8" * 64, "XSHIELD_FINGERPRINT_KEY_HEX": FINGERPRINT_KEY,
-                "XSHIELD_DATABASE_URL": f"postgresql://{credentials_part}@{pg_host}:{pg_port}/{db_name}",
-            })
-            edge_env.pop("XSHIELD_EDGE_APPLY_KEY_HEX", None)
-            edge_env.pop("XSHIELD_EDGE_SNAPSHOT_PATH", None)
-            with (work / "gateway.log").open("wb") as log:
-                edge = subprocess.Popen([str(EDGE)], env=edge_env, stdout=log, stderr=subprocess.STDOUT)
+            try:
+                socket.create_connection(("127.0.0.1", self.port), timeout=0.2).close()
+                return
+            except OSError:
+                time.sleep(0.05)
+        raise RuntimeError("xshield-edge did not start:\n" + "\n".join(self.stderr_tail()))
+
+    def record_for(self, request_id: str) -> dict | None:
+        deadline = time.monotonic() + 5
+        while True:
+            with self.lock:
+                for record in self.records:
+                    if record.get("request_id") == request_id:
+                        return record
+            if time.monotonic() > deadline:
+                return None
+            time.sleep(0.02)
+
+    def stderr_tail(self, lines: int = 40) -> list[str]:
+        with self.lock:
+            return self.stderr[-lines:]
+
+    def stop(self) -> None:
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+
+
+class Lab:
+    """Sends requests through the edge and records every check's result."""
+
+    def __init__(self, origin: EmrOrigin, jev: FakeJev, edge: Edge) -> None:
+        self.origin = origin
+        self.jev = jev
+        self.edge = edge
+        self.results: list[tuple[str, str, bool, str]] = []  # (scenario, check, ok, detail)
+        self.scenario = ""
+
+    def send(self, host: str, method: str, target: str, *, cookie: str | None = None,
+             form: dict[str, str] | None = None, json_body: dict | None = None) -> Sent:
+        headers = {"Host": host}
+        if cookie:
+            headers["Cookie"] = cookie
+        body = b""
+        if json_body is not None:
+            body = json.dumps(json_body, ensure_ascii=False).encode()
+            headers["Content-Type"] = "application/json"
+        elif form is not None:
+            body = urllib.parse.urlencode(form).encode()
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        headers["Content-Length"] = str(len(body))
+        connection = http.client.HTTPConnection("127.0.0.1", self.edge.port, timeout=10)
+        try:
+            connection.request(method, target, body=body, headers=headers)
+            response = connection.getresponse()
+            reply = Reply(response.status, response.getheader("X-Xshield-Request-Id"),
+                          response.getheaders(), response.read())
+        finally:
+            connection.close()
+        record = self.edge.record_for(reply.request_id) if reply.request_id else None
+        served = reply.request_id is not None and any(
+            request_id == reply.request_id for _, _, request_id in self.origin_served()
+        )
+        return Sent(reply, record, served)
+
+    def origin_served(self) -> list[tuple[str, str, str | None]]:
+        with self.origin.lock:
+            return list(self.origin.served)
+
+    def origin_direct(self, check: str, method: str, target: str, cookie: str) -> None:
+        """Asks the origin without the edge, to show the object is reachable there."""
+        connection = http.client.HTTPConnection("127.0.0.1", self.origin.port, timeout=10)
+        try:
+            connection.request(method, target, headers={"Cookie": cookie, "Content-Length": "0"})
+            status = connection.getresponse().status
+        finally:
+            connection.close()
+        self.check(f"{check}: origin serves it without the edge", status == 200,
+                   f"origin answered {status}")
+
+    def login(self, host: str, user: str, check: str = "") -> str:
+        """Logs `user` in through the edge and returns the SID cookie for later requests."""
+        sent = self.send(host, "POST", "/login", json_body=login_form(user))
+        cookie = ""
+        for name, value in sent.reply.headers:
+            if name.lower() == "set-cookie" and value.startswith("SID="):
+                cookie = value.split(";", 1)[0]
+        self.expect(check or f"login {user} on {host}", sent,
+                    Expect(302, "jev_allow", "allowed", True))
+        return cookie
+
+    def expect(self, check: str, sent: Sent, want: Expect) -> Sent:
+        problems = []
+        record = sent.record or {}
+        if sent.reply.status != want.status:
+            problems.append(f"status {sent.reply.status}, want {want.status}")
+        if record.get("decision_path") != want.path:
+            problems.append(f"decision_path {record.get('decision_path')}, want {want.path}")
+        if record.get("outcome") != want.outcome:
+            problems.append(f"outcome {record.get('outcome')}, want {want.outcome}")
+        if sent.served != want.origin:
+            problems.append(f"origin served {sent.served}, want {want.origin}")
+        if want.failure is not None:
+            failure = (record.get("jev") or {}).get("failure")
+            if failure != want.failure:
+                problems.append(f"jev.failure {failure}, want {want.failure}")
+        self.check(check, not problems, "; ".join(problems) or "ok")
+        return sent
+
+    def check(self, label: str, ok: bool, detail: str = "ok") -> None:
+        self.results.append((self.scenario, label, ok, detail))
+
+
+SCENARIOS: list[tuple[str, str, Callable[[Lab], None]]] = []
+
+
+def scenario(code: str, title: str) -> Callable[[Callable[[Lab], None]], Callable[[Lab], None]]:
+    def register(function: Callable[[Lab], None]) -> Callable[[Lab], None]:
+        SCENARIOS.append((code, title, function))
+        return function
+
+    return register
+
+
+@scenario("A1", "医生 A 浏览我的患者列表后打开患者 B：放行")
+def a1(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    lab.expect("list my patients", lab.send("emr.lab", "GET", "/api/patients", cookie=cookie),
+               Expect(200, "fast_allow", "allowed", True))
+    lab.expect("open patient B", lab.send("emr.lab", "GET", "/api/patients/PT-7002", cookie=cookie),
+               Expect(200, "fast_allow", "allowed", True))
+
+
+@scenario("A2", "医生 A 把地址改成患者 D：拦截")
+def a2(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    lab.send("emr.lab", "GET", "/api/patients", cookie=cookie)
+    lab.expect("open patient D from the same session", lab.send(
+        "emr.lab", "GET", "/api/patients/PT-7004", cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.origin_direct("A2 patient D", "GET", "/api/patients/PT-7004", cookie)
+
+
+@scenario("A3", "医生 A 新开会话，直接打开患者 B：拦截")
+def a3(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a", "A3 new session logs in")
+    lab.expect("open patient B in the new session", lab.send(
+        "emr.lab", "GET", "/api/patients/PT-7002", cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.origin_direct("A3 patient B", "GET", "/api/patients/PT-7002", cookie)
+
+
+@scenario("A4", "医生 A 删除患者 D：拦截")
+def a4(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    lab.send("emr.lab", "GET", "/api/patients", cookie=cookie)
+    lab.expect("delete patient D", lab.send("emr.lab", "DELETE", "/api/patients/PT-7004", cookie=cookie),
+               Expect(403, "jev_deny", "blocked", False))
+    # The refused DELETE never reached the origin, so patient D is still there.
+    lab.origin_direct("A4 patient D still exists", "GET", "/api/patients/PT-7004", cookie)
+
+
+@scenario("A5", "医生 A 在“我的患者”接口上加别的医生参数：拦截")
+def a5(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    lab.send("emr.lab", "GET", "/api/patients", cookie=cookie)
+    lab.expect("list with doctor B's parameter", lab.send(
+        "emr.lab", "GET", "/api/patients?doctor=DR-B", cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.origin_direct("A5 doctor B's list", "GET", "/api/patients?doctor=DR-B", cookie)
+
+
+@scenario("A6", "接收者兑换患者 A 的分享码后打开患者 A：放行")
+def a6(lab: Lab) -> None:
+    owner = lab.login("emr.lab", "doctor_a")
+    lab.send("emr.lab", "GET", "/api/patients", cookie=owner)
+    shared = lab.expect("owner shares patient A", lab.send(
+        "emr.lab", "POST", "/api/patients/PT-7001/share", cookie=owner),
+        Expect(201, "fast_allow", "allowed", True))
+    code = shared.reply.json().get("code", "MISSING")
+    receiver = lab.login("emr.lab", "doctor_c", "A6 receiver logs in")
+    lab.expect("receiver redeems the share code", lab.send(
+        "emr.lab", "POST", f"/share/{code}", cookie=receiver),
+        Expect(200, "jev_allow", "allowed", True))
+    lab.expect("receiver opens patient A", lab.send(
+        "emr.lab", "GET", "/api/patients/PT-7001", cookie=receiver),
+        Expect(200, "fast_allow", "allowed", True))
+
+
+@scenario("A7", "接收者未兑换分享码，直接打开患者 A：拦截")
+def a7(lab: Lab) -> None:
+    receiver = lab.login("emr.lab", "doctor_c", "A7 receiver logs in without redeeming")
+    lab.expect("receiver opens patient A without the code", lab.send(
+        "emr.lab", "GET", "/api/patients/PT-7001", cookie=receiver),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.origin_direct("A7 patient A", "GET", "/api/patients/PT-7001", receiver)
+
+
+@scenario("A8", "医生 A 新建患者后打开新患者详情：放行")
+def a8(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    created = lab.expect("create a patient", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "林小雨"}),
+        Expect(201, "jev_allow", "allowed", True))
+    new_id = created.reply.json().get("id", "MISSING")
+    lab.expect("open the new patient", lab.send(
+        "emr.lab", "GET", f"/api/patients/{new_id}", cookie=cookie),
+        Expect(200, "fast_allow", "allowed", True))
+
+
+@scenario("B1", "搜索框、表单里输入正常中文和英文文本：放行")
+def b1(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    query = "/api/search?q=" + urllib.parse.quote("张伟 hello world", safe="")
+    lab.expect("search with Chinese and English text", lab.send("emr.lab", "GET", query, cookie=cookie),
+               Expect(200, "jev_allow", "allowed", True))
+    lab.expect("the same search again is served from the allow cache", lab.send(
+        "emr.lab", "GET", query, cookie=cookie),
+        Expect(200, "cached_allow", "allowed", True))
+    lab.expect("form note with Chinese and English text", lab.send(
+        "emr.lab", "POST", "/api/notes", cookie=cookie,
+        form={"note": "今天复诊，血压平稳 BP stable"}),
+        Expect(201, "jev_allow", "allowed", True))
+
+
+@scenario("B2", "参数里带注入、命令执行、路径穿越类内容：拦截")
+def b2(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    lab.expect("SQL injection in a query", lab.send(
+        "emr.lab", "GET", "/api/search?q=" + urllib.parse.quote("' OR 1=1 --", safe=""), cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.expect("path traversal in a query", lab.send(
+        "emr.lab", "GET", "/api/search?q=" + urllib.parse.quote("../../etc/passwd", safe=""), cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.expect("command execution in a form", lab.send(
+        "emr.lab", "POST", "/api/notes", cookie=cookie, form={"note": "x; cat /etc/passwd"}),
+        Expect(403, "jev_deny", "blocked", False))
+
+
+@scenario("C1", "Jev 超时或不可用，on_jev_unavailable=deny：拦截并注明原因")
+def c1(lab: Lab) -> None:
+    cookie = lab.login("deny.lab", "doctor_a")
+    lab.expect("Jev answers 503", lab.send(
+        "deny.lab", "GET", "/api/search?q=JEVDOWN", cookie=cookie),
+        Expect(403, "jev_unavailable", "blocked", False, failure="JEV_HTTP_ERROR"))
+    lab.expect("Jev times out", lab.send(
+        "deny.lab", "GET", "/api/search?q=JEVSLOW", cookie=cookie),
+        Expect(403, "jev_unavailable", "blocked", False, failure="JEV_TIMEOUT"))
+
+
+@scenario("C2", "同上，on_jev_unavailable=allow：放行并注明未经判定")
+def c2(lab: Lab) -> None:
+    cookie = lab.login("allow.lab", "doctor_a")
+    lab.expect("Jev answers 503", lab.send(
+        "allow.lab", "GET", "/api/search?q=JEVDOWN", cookie=cookie),
+        Expect(200, "jev_unavailable", "unjudged", True, failure="JEV_HTTP_ERROR"))
+    lab.expect("Jev times out", lab.send(
+        "allow.lab", "GET", "/api/search?q=JEVSLOW", cookie=cookie),
+        Expect(200, "jev_unavailable", "unjudged", True, failure="JEV_TIMEOUT"))
+
+
+@scenario("C3", "观察模式下的 A2：转发，日志记“本应拦截”")
+def c3(lab: Lab) -> None:
+    cookie = lab.login("observe.lab", "doctor_a")
+    lab.send("observe.lab", "GET", "/api/patients", cookie=cookie)
+    lab.expect("open patient D in observe mode", lab.send(
+        "observe.lab", "GET", "/api/patients/PT-7004", cookie=cookie),
+        Expect(200, "jev_deny", "would_block", True))
+
+
+@scenario("C4", "登录请求的口令字段不出现在发给 Jev 的内容里")
+def c4(lab: Lab) -> None:
+    before = len(lab.jev.bodies)
+    sent = lab.send("emr.lab", "POST", "/login", json_body=login_form("doctor_a"))
+    lab.expect("login is judged and forwarded", sent, Expect(302, "jev_allow", "allowed", True))
+    with lab.jev.lock:
+        shown = json.dumps(lab.jev.bodies[before:], ensure_ascii=False)
+    logged = json.dumps((sent.record or {}).get("jev") or {}, ensure_ascii=False)
+    lab.check("Jev was shown the login with the password redacted",
+              "<redacted>" in shown and PASSWORD not in shown,
+              "password reached Jev" if PASSWORD in shown else "no redaction marker")
+    lab.check("the decision log does not keep the password either",
+              PASSWORD not in logged, "password in the decision record")
+
+
+@scenario("C5", "同一会话一分钟内超过调用上限：超出部分按 on_jev_unavailable 处理")
+def c5(lab: Lab) -> None:
+    cookie = lab.login("limit.lab", "doctor_a")
+    lab.expect("first judged call", lab.send(
+        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第一条"}),
+        Expect(201, "jev_allow", "allowed", True))
+    lab.expect("second judged call", lab.send(
+        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第二条"}),
+        Expect(201, "jev_allow", "allowed", True))
+    lab.expect("third call is over the session limit", lab.send(
+        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"}),
+        Expect(403, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--only", default="", help="comma separated scenario codes, e.g. A2,C4")
+    arguments = parser.parse_args()
+    wanted = {code.strip().upper() for code in arguments.only.split(",") if code.strip()}
+    selected = [item for item in SCENARIOS if not wanted or item[0] in wanted]
+    if not selected:
+        print(f"no scenario matches {arguments.only!r}", file=sys.stderr)
+        return 2
+
+    subprocess.run(["cargo", "build", "--quiet", "--locked", "-p", "xshield-edge", "--bin", "xshield-edge"],
+                   cwd=ROOT, check=True)
+    origin = EmrOrigin()
+    jev = FakeJev()
+    origin.start()
+    jev.start()
+    edge = None
+    with tempfile.TemporaryDirectory(prefix="xshield-lab-") as directory:
+        sites = Path(directory) / "sites.json"
+        sites.write_text(json.dumps(site_specs(origin.port), ensure_ascii=False), encoding="utf-8")
+        try:
+            edge = Edge(sites, jev.url, free_port())
+            lab = Lab(origin, jev, edge)
+            for code, title, function in selected:
+                lab.scenario = code
+                print(f"{code} {title}")
                 try:
-                    base = f"http://127.0.0.1:{listen}"
-                    for _ in range(100):
-                        if edge.poll() is not None:
-                            raise RuntimeError((work / "gateway.log").read_text(errors="replace"))
-                        try:
-                            if request(base + spec["list"], headers={"Host": spec["host"]})[0] in (401, 429):
-                                break
-                        except (OSError, TimeoutError):
-                            pass
-                        time.sleep(0.1)
-                    else:
-                        raise RuntimeError("edge did not become ready")
-                    alice = credentials("alice", base, spec)
-                    bob = credentials("bob", base, spec)
-                    list_status, list_body, list_request_id = outcome(base, spec["list"], alice)
-                    assert list_status == 200, (list_status, list_body)
-                    items = list_body[spec["collection"]]
-                    assert len(items) == 1 and items[0][spec["resource_key"]] == spec["own"]
-                    matching_items = items
-                    action = items[0]["_xshield_action_ref"]
-                    before = json.loads(request(origin + "/__lab/metrics")[1])
-                    query_denial = outcome(base, spec["list"] + "?q=%27+OR+1%3D1--", alice)
-                    assert query_denial[0] == 403 and query_denial[1].get("reason_code") == "WAF_QUERY_BLOCKED"
-                    own = outcome(base, spec["detail"] + spec["own"], alice | {"X-Xshield-Action-Ref": action})
-                    other = outcome(base, spec["detail"] + spec["other"], alice | {"X-Xshield-Action-Ref": action})
-                    missing = outcome(base, spec["detail"] + spec["own"], alice)
-                    cross = outcome(base, spec["detail"] + spec["own"], bob | {"X-Xshield-Action-Ref": action})
-                    assert own[0] == 200 and own[1]["owner"] == "alice", own
-                    assert all(result[0] == 403 for result in (other, missing, cross)), (other, missing, cross)
-                    assert all(result[2] for result in (own, other, missing, cross))
-                    after = json.loads(request(origin + "/__lab/metrics")[1])
-                    assert after.get("GET " + spec["list"], 0) == before.get("GET " + spec["list"], 0)
-                    assert after.get("GET " + spec["detail"] + spec["own"], 0) == before.get("GET " + spec["detail"] + spec["own"], 0) + 1
-                    assert after.get("GET " + spec["detail"] + spec["other"], 0) == before.get("GET " + spec["detail"] + spec["other"], 0)
-                    grant_count = int(subprocess.check_output(
-                        ["psql", "-X", "-At", "-d", db_name, "-c",
-                         f"SELECT count(*) FROM xshield.resource_grants WHERE tenant_id='tenant_lab' AND site_id='{spec['site_id']}' AND status='active'"],
-                        env=db_env, text=True).strip())
-                    assert grant_count >= 1, grant_count
-                    decisions = []
-                    if args.jev_fixtures_dir is not None or args.evaluate_jev:
-                        facts = source_history(db_name, db_env, list_request_id, spec)
-                        fixture_dir = args.jev_fixtures_dir or work / "jev-inputs"
-                        write_jev_fixtures(fixture_dir, facts, items[0][spec["resource_key"]],
-                                           {spec["cases"][0]: own[2], spec["cases"][1]: other[2]},
-                                           spec, db_name, db_env, independent)
-                        if args.evaluate_jev:
-                            decisions = evaluate_jev_lab(work, db_name, db_env, edge_env["XSHIELD_DATABASE_URL"],
-                                                         fixture_dir, spec)
-                    db_command(["psql", "-X", "-v", "ON_ERROR_STOP=1", "-d", db_name, "-c",
-                                f"UPDATE xshield.resource_grants SET status='revoked' WHERE tenant_id='tenant_lab' AND site_id='{spec['site_id']}'"], db_env)
-                    revoked = outcome(base, spec["detail"] + spec["own"], alice | {"X-Xshield-Action-Ref": action})
-                    assert revoked[0] == 403, revoked
-                    after_revocation = json.loads(request(origin + "/__lab/metrics")[1])
-                    assert after_revocation.get("GET " + spec["detail"] + spec["own"], 0) == after.get("GET " + spec["detail"] + spec["own"], 0)
-                    assert any((work / "audit").glob("segment-*.xja")), "durable audit missing"
-                    site_labels = independent["sites"][args.scenario]["labels"]
-                    choices = {entry["case"]: entry["actual"] for entry in decisions}
-                    shadow_records = {entry["case"]: entry for entry in decisions}
-                    observations = []
-                    if not (len(site_labels) == len((own, other)) == len((own_direct_status, status))):
-                        raise RuntimeError("Jev observation cardinality mismatch")
-                    for label, edge_outcome, baseline in zip(site_labels, (own, other),
-                                                              (own_direct_status, status)):
-                        observations.append({"site_id": spec["site_id"], "case": label["case"],
-                                             "truth_class": label["truth_class"],
-                                             "expected_choice": label["expected_choice"],
-                                             "origin_status": baseline, "edge_status": edge_outcome[0],
-                                             "edge_reason": edge_outcome[1].get("reason_code"),
-                                             "edge_request_id": edge_outcome[2],
-                                             "source_request_id": list_request_id,
-                                             "model_choice": choices.get(label["case"]),
-                                             "model_call_id": shadow_records.get(label["case"], {}).get("model_call_id"),
-                                             "model_duration_ms": shadow_records.get(label["case"], {}).get("duration_ms"),
-                                             "model_usage": shadow_records.get(label["case"], {}).get("usage"),
-                                             "model_cost_usd": None})
-                    print("LAB_RESULT " + json.dumps({"site_id": spec["site_id"],
-                                                        "observations": observations}, separators=(",", ":")))
-                finally:
-                    edge.terminate()
-                    try:
-                        edge.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        edge.kill()
-                        edge.wait()
-    finally:
-        db_command(["dropdb", "--if-exists", db_name], db_env)
+                    function(lab)
+                except Exception as error:  # a crashed scenario is a failed one
+                    lab.check(f"{code} ran to the end", False, f"{type(error).__name__}: {error}")
+            failed = [row for row in lab.results if not row[2]]
+            for scenario_code, label, ok, detail in lab.results:
+                marker = "ok  " if ok else "FAIL"
+                print(f"  [{marker}] {label}" + ("" if ok else f" -- {detail}"))
+            print(f"{len(lab.results) - len(failed)}/{len(lab.results)} checks passed")
+            if failed:
+                print("edge stderr (last lines):", file=sys.stderr)
+                print("\n".join(edge.stderr_tail()), file=sys.stderr)
+                return 1
+            return 0
+        finally:
+            if edge is not None:
+                edge.stop()
+            origin.stop()
+            jev.stop()
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

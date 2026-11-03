@@ -20,11 +20,6 @@
       "detail": ""
     },
     {
-      "name": "json:tests/security-lab/independent_labels.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
       "name": "json:tests/site-config/auth-transition-flow.json",
       "passed": true,
       "detail": ""
@@ -1316,6 +1311,11 @@
     },
     {
       "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:tests/security-lab/README.md:../../docs/04-deployment-testing.md",
       "passed": true,
       "detail": ""
     },

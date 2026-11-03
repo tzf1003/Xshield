@@ -1,3 +1,5 @@
+# Optional real-traffic source for manual observation runs against xshield-edge (docs/04 4.5.1).
+# The acceptance lab (scripts/test_idor_lab.py) runs without Docker and does not use this file.
 name: xshield-security-lab
 
 services:
@@ -7,26 +9,6 @@ services:
       - "127.0.0.1:53000:3000"
     environment:
       NODE_ENV: unsafe
-    restart: unless-stopped
-    networks: [lab]
-
-  idor-origin:
-    image: python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
-    command: ["python", "/app/idor_origin.py"]
-    ports:
-      - "127.0.0.1:53001:8080"
-    volumes:
-      - ./tests/security-lab/idor_origin.py:/app/idor_origin.py:ro
-    restart: unless-stopped
-    networks: [lab]
-
-  invoice-origin:
-    image: python:3.12-alpine@sha256:4c47124a8391cb7a9f571164147d154777cf012a4ece5f86097130d7a4478111
-    command: ["python", "/app/invoice_origin.py"]
-    ports:
-      - "127.0.0.1:53002:8080"
-    volumes:
-      - ./tests/security-lab/invoice_origin.py:/app/invoice_origin.py:ro
     restart: unless-stopped
     networks: [lab]
 
