@@ -324,6 +324,27 @@ impl ObjectMap {
         self
     }
 
+    /// The map with the acceptance judgement of a request position set: whether normal traffic
+    /// sends public sources to it, and how sure the learning is. The entry keeps its kind and
+    /// its paused flag. `None` when the map does not declare the key, or when the entry carries
+    /// a `tier`, since an entry carries one judgement at most.
+    #[must_use]
+    pub fn with_accepts_public(
+        mut self,
+        key: &str,
+        accepts_public: bool,
+        reliability: Reliability,
+    ) -> Option<Self> {
+        let place = *self.index.get(key)?;
+        let slot = self.slots.get_mut(place)?;
+        if slot.tier.is_some() {
+            return None;
+        }
+        slot.accepts_public = Some(accepts_public);
+        slot.reliability = Some(reliability);
+        Some(self)
+    }
+
     /// The tier a response position is confirmed with, when the map confirms one and does
     /// not pause the entry. The judge and the acceptance learning read tiers through this.
     #[must_use]
@@ -665,6 +686,35 @@ mod judgement_tests {
             .find(|slot| slot.key == "GET /api/search [].id")
             .expect("the entry stays");
         assert_eq!(entry.tier, Some(Tier::Public));
+    }
+
+    #[test]
+    fn an_acceptance_judgement_goes_on_a_request_entry_without_a_tier() {
+        let judged = map(JUDGED);
+        let key = "DELETE /api/patients/{id} path[1]";
+        let set = judged
+            .clone()
+            .with_accepts_public(key, true, Reliability::High)
+            .expect("a declared request entry takes the judgement");
+        assert_eq!(set.accepts_public_of(key), Some(true));
+        assert_eq!(set.reliability_of(key), Some(Reliability::High));
+        assert_eq!(set.tier_of(key), None);
+        let written = ObjectMap::try_from(ObjectMapDto::from(set)).expect("the map stays valid");
+        assert_eq!(written.accepts_public_of(key), Some(true));
+
+        assert!(
+            judged
+                .clone()
+                .with_accepts_public("GET /api/search [].id", true, Reliability::High)
+                .is_none(),
+            "an entry with a tier carries no acceptance judgement"
+        );
+        assert!(
+            judged
+                .with_accepts_public("GET /api/unknown [].id", true, Reliability::High)
+                .is_none(),
+            "an undeclared key takes nothing"
+        );
     }
 }
 

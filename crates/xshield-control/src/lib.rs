@@ -262,6 +262,14 @@ fn object_routes() -> Router<Arc<ControlState>> {
             "/api/sites/{name}/objects/slots/{id}/ambiguous",
             post(object_map::ambiguous),
         )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}/judgement/confirm",
+            post(object_map::confirm_judgement),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}/judgement/dismiss",
+            post(object_map::dismiss_judgement),
+        )
         .route("/api/sites/{name}/objects/events", get(object_map::events))
         .route(
             "/api/sites/{name}/objects/events/{id}/ack",
