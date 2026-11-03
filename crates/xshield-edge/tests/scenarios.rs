@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use pingora::prelude::Opt;
 use serde_json::{Value, json};
-use xshield_core::context::trace::{TRACE_BYTES_MAX, TRACE_PATH_BYTES_MAX};
+use xshield_core::context::trace::{TRACE_BYTES_MAX, TRACE_NAME_BYTES_MAX, TRACE_PATH_BYTES_MAX};
 use xshield_core::context::{DecisionPath, DecisionRecord, Outcome, SiteSpec, Skip};
 use xshield_edge::proxy::EdgeProxy;
 use xshield_edge::server::build_server;
@@ -666,6 +666,50 @@ fn d2_long_request_paths_stay_out_of_the_rows_that_follow() {
             .iter()
             .all(|request| request.path.len() <= TRACE_PATH_BYTES_MAX),
         "every recent path is cut"
+    );
+}
+
+#[test]
+fn d3_a_long_key_keeps_the_values_of_its_request() {
+    // One key of 40 KB sits among a few ordinary values. Cut to its bound, the key
+    // and its location leave the values in the row.
+    let long = "k".repeat(40 * 1024);
+    let body = format!(r#"{{"{long}": "d3-value", "items": ["d3-a", "d3-b"]}}"#);
+    let reply = call(
+        "observe.test",
+        "POST",
+        "/api/notes?who=d3",
+        Some("s-d3"),
+        body.as_bytes(),
+    );
+    let row = record(&reply);
+    assert!(!row.trace.values_truncated, "the values are kept");
+    assert!(
+        !row.trace.values.is_empty(),
+        "the request's values are in the row"
+    );
+    assert!(
+        row.trace.values.iter().all(|value| {
+            value.at.len() <= TRACE_NAME_BYTES_MAX
+                && value
+                    .key
+                    .as_deref()
+                    .is_none_or(|key| key.len() <= TRACE_NAME_BYTES_MAX)
+        }),
+        "every location and key is cut"
+    );
+    assert!(
+        row.trace
+            .values
+            .iter()
+            .any(|value| value.at_len.is_some_and(|len| len > TRACE_NAME_BYTES_MAX)),
+        "the cut location keeps the length it had"
+    );
+    let encoded = serde_json::to_vec(&row.trace).expect("the trace encodes");
+    assert!(
+        encoded.len() <= TRACE_BYTES_MAX,
+        "the written trace is {} bytes",
+        encoded.len()
     );
 }
 

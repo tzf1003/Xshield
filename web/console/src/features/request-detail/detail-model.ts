@@ -22,7 +22,13 @@ import type {
   TraceValue,
   ValueKind,
 } from "../../api/types.ts";
-import { type AlignedValue, alignRecent, alignValues, seenAsAligned } from "../../lib/align.ts";
+import {
+  type AlignedValue,
+  alignRecent,
+  alignValues,
+  sameName,
+  seenAsAligned,
+} from "../../lib/align.ts";
 import {
   apiFromWords,
   apiValueLocations,
@@ -121,9 +127,10 @@ export type Alignment = { aligned: true; sent: AlignedValue[] } | { aligned: fal
 
 /**
  * The check of docs/07 7.5.2: the non-inert trace values and the state's values pair up by index. Each
- * pair must have the same location, and the state's `seen_as` must match the sources in order (see
- * `seenAsAligned`). The state's recent and entry lists may not be longer than the trace's. When it fails,
- * the views show the state alone and no source links.
+ * pair must have the same location (a name the trace cut to 256 bytes still matches the state's full name,
+ * see `sameName`), and the state's `seen_as` must match the sources in order (see `seenAsAligned`). The
+ * state's recent and entry lists may not be longer than the trace's. When it fails, the views show the
+ * state alone and no source links.
  */
 export function alignState(state: JevState, trace: Trace): Alignment {
   const sent = alignValues(trace.values ?? []);
@@ -134,7 +141,7 @@ export function alignState(state: JevState, trace: Trace): Alignment {
     const stateValue = theirs[index];
     return (
       stateValue !== undefined &&
-      stateValue.at === item.value.at &&
+      sameName(stateValue.at, item.value.at) &&
       seenAsAligned(stateValue.seen_as, item.value.sources, trimmed)
     );
   });
@@ -152,6 +159,8 @@ export type SentRow = {
   /** Position in `trace.values`; null when the row comes from the state alone. */
   traceIndex: number | null;
   at: string;
+  /** The original length in bytes of `at`, when the trace cut the location (a 已裁剪 row). */
+  atLen: number | null;
   kind: ValueKind;
   value: string;
   seen: boolean;
@@ -174,6 +183,7 @@ function rowFromTrace(jevIndex: number, traceIndex: number, value: TraceValue): 
     jevIndex,
     traceIndex,
     at: value.at,
+    atLen: value.at_len ?? null,
     kind: value.kind,
     value: value.value,
     seen: value.seen,
@@ -204,6 +214,7 @@ export function sentRows(
       jevIndex,
       traceIndex: null,
       at: item.at,
+      atLen: null,
       kind: item.kind ?? "reference",
       value: item.value,
       seen: item.seen_as.length > 0,
@@ -219,6 +230,28 @@ export function sentRows(
   return alignValues(trace.values ?? []).map((item) =>
     rowFromTrace(item.jevIndex, item.traceIndex, item.value),
   );
+}
+
+/**
+ * The note above the values table: the record was trimmed to fit 16 KiB (`trimmed`), or the request was
+ * not read in full (`values_truncated`). Null when the values are complete. A cleared record has no rows,
+ * so its note is the only thing the table shows.
+ */
+export function valuesNotice(trace: Trace): string | null {
+  const cleared =
+    trace.trimmed === true && trace.values_truncated === true && (trace.values ?? []).length === 0;
+  const notes: string[] = [];
+  if (trace.trimmed === true) {
+    notes.push(
+      cleared
+        ? "已裁剪：为满足 16 KiB 上限，这条记录的值被清空"
+        : "已裁剪：为满足 16 KiB 上限，这条记录的部分内容被去掉了",
+    );
+  }
+  if (trace.values_truncated === true && !cleared) {
+    notes.push("请求体未结构化或值数达到上限，只拆出了部分值");
+  }
+  return notes.length === 0 ? null : `${notes.join("。")}。`;
 }
 
 // ------------------------------------------------------------------ the session tab

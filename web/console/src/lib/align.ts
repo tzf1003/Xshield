@@ -3,6 +3,41 @@
 
 import type { EntryPass, RecentAccess, TraceSource, TraceValue } from "../api/types.ts";
 
+/** The longest location or key name the trace keeps, in bytes (docs/07 7.4.3). */
+export const TRACE_NAME_BYTES_MAX = 256;
+
+/** The UTF-8 size of one code point. */
+function utf8Size(code: number): number {
+  if (code < 0x80) return 1;
+  if (code < 0x800) return 2;
+  if (code < 0x10000) return 3;
+  return 4;
+}
+
+/**
+ * `text` cut to at most `max` UTF-8 bytes, on a character boundary: the rule the judge uses for names
+ * (`cut` in xshield-judge's trace). The longest prefix that fits is kept.
+ */
+export function clipBytes(text: string, max: number): string {
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const size = utf8Size(char.codePointAt(0) ?? 0);
+    if (bytes + size > max) break;
+    bytes += size;
+    end += char.length;
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * Whether a state's location and a trace's location are the same name. The trace cuts a name longer than
+ * the limit, so both sides are cut the same way before they are compared.
+ */
+export function sameName(stateAt: string, traceAt: string): boolean {
+  return clipBytes(stateAt, TRACE_NAME_BYTES_MAX) === clipBytes(traceAt, TRACE_NAME_BYTES_MAX);
+}
+
 export type AlignedValue = { jevIndex: number; traceIndex: number; value: TraceValue };
 
 /** `state.request.values[i]` is the i-th non-inert trace value, in extraction order. */

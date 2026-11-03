@@ -16,8 +16,8 @@ import { isSiteName } from "../../lib/ids.ts";
 import { API_LABEL, VALUE_KIND_LABEL } from "../../lib/vocab.ts";
 import { Empty, Notice } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
-import { REDACTED, secretMatchOf } from "./detail-model.ts";
-import { ClassTag, keyed, SourceWithClass, useFlash, ValueText } from "./parts.tsx";
+import { REDACTED, secretMatchOf, valuesNotice } from "./detail-model.ts";
+import { ClassTag, CutName, keyed, SourceWithClass, useFlash, ValueText } from "./parts.tsx";
 
 /** At most this many source tags per value; the rest are counted (docs/06 6.4.4). */
 const SOURCE_TAGS = 3;
@@ -50,7 +50,9 @@ export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number 
       ?.scrollIntoView({ block: "center" });
   }, [hl]);
 
+  const notice = valuesNotice(detail.trace);
   if (values.length === 0) {
+    if (notice !== null) return <Notice>{notice}</Notice>;
     return (
       <Empty title="这个请求没有拆出请求值">
         <div className="small">只有进入判定的请求才会拆出请求值；绕过和未知站点的请求不拆。</div>
@@ -87,9 +89,7 @@ export function ValuesTable({ detail, hl }: { detail: RequestDetail; hl: number 
 
   return (
     <div className="rd-values" ref={containerRef}>
-      {detail.trace.values_truncated ? (
-        <Notice>请求体未结构化或超过 64 KiB 解析上限，只拆出了部分值。</Notice>
-      ) : null}
+      {notice !== null ? <Notice>{notice}</Notice> : null}
       <div className="rd-valuebar">
         <input
           type="search"
@@ -215,6 +215,7 @@ function ValueRow({
       <tr className={classes.join(" ")} data-trace-index={nested ? undefined : traceIndex}>
         <td className="mono rd-clip" title={value.at}>
           <SafeText text={value.at} query={query} />
+          <CutName atLen={value.at_len} />
         </td>
         <td className="mono rd-clip">
           {value.key === null ? (

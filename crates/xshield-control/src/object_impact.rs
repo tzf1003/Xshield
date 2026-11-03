@@ -434,6 +434,7 @@ mod tests {
     fn value(at: &str, verified: bool, sources: Vec<TraceSource>) -> TraceValue {
         TraceValue {
             at: at.to_owned(),
+            at_len: None,
             key: None,
             value: "7".to_owned(),
             len: None,
