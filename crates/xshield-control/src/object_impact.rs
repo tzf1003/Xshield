@@ -22,9 +22,10 @@ use xshield_core::{
         LONG_VALUE_CHARS, Rules, Shown, Used, declaration_reads, declared_kind_of, name_kind_of,
         path_segment, shown_as,
     },
-    path_template::position_template,
+    path_template::{is_templatable, position_template},
 };
-use xshield_postgres::decision_stats::{self, Scope, SlotRow};
+use xshield_judge::slots::request_place;
+use xshield_postgres::decision_stats::{self, Reach, Scope, SlotRow};
 
 use crate::{
     error::ApiResult,
@@ -55,8 +56,8 @@ pub(crate) async fn changes(
     if moved.is_empty() {
         return Ok((Vec::new(), true));
     }
-    let slots: Vec<String> = moved.slots.iter().cloned().collect();
-    let (rows, complete) = decision_stats::window_rows(pool, scope, &slots, &moved.fields).await?;
+    let (rows, complete) =
+        decision_stats::window_rows(pool, scope, &moved.reach(), &moved.fields).await?;
     let shifted = moves_of(&rows, &moved, &Reading::of(current), &Reading::of(proposed));
     let changes = [
         shifted.new_fast_allow.change(NEW_FAST_ALLOW),
@@ -68,14 +69,18 @@ pub(crate) async fn changes(
     Ok((changes, complete))
 }
 
-/// What a draft moves: the positions whose kind or pause changes, and the field names whose
-/// `advanced.field_kinds` declarations differ.
+/// What a draft moves: the positions whose kind or pause changes, the field names whose
+/// `advanced.field_kinds` declarations differ, and whether the draft changes whether the site
+/// judges public access.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Moved {
     /// The request and response positions the judge reads a different kind for.
     slots: BTreeSet<String>,
     /// The field names of the declarations the draft adds, removes or changes.
     fields: Vec<String>,
+    /// Whether the site starts or stops judging public access. Then the judge places the values
+    /// of every path the map cannot template differently, so every decision of the window is read.
+    judging: bool,
 }
 
 impl Moved {
@@ -93,11 +98,29 @@ impl Moved {
         Self {
             slots: moved_positions(current, proposed),
             fields: fields.into_iter().collect(),
+            judging: current.objects().judges_public_access()
+                != proposed.objects().judges_public_access(),
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.slots.is_empty() && self.fields.is_empty()
+        self.slots.is_empty() && self.fields.is_empty() && !self.judging
+    }
+
+    /// The part of the window the draft can move (see [`Reach`]): the positions it names, the
+    /// declared positions whose `{id}` segments may govern a value recorded at another spelling,
+    /// and every decision when it changes whether the site judges public access.
+    fn reach(&self) -> Reach {
+        let covered: BTreeSet<(String, String)> = self
+            .slots
+            .iter()
+            .filter_map(|key| covering_of(key))
+            .collect();
+        Reach {
+            slots: self.slots.iter().cloned().collect(),
+            covered: covered.into_iter().collect(),
+            every: self.judging,
+        }
     }
 
     /// Whether the judge reads a value of a decision differently under the draft: its position,
@@ -140,6 +163,24 @@ fn moved_positions(current: &SiteSpec, proposed: &SiteSpec) -> BTreeSet<String> 
         .collect()
 }
 
+/// The method and location of a declared position whose route template has an `{id}` segment.
+/// Such a position may govern a value that the trace records at another spelling of its segment,
+/// such as a slug id, a `;` parameter or an escaped slash. `None` for a literal template.
+fn covering_of(key: &str) -> Option<(String, String)> {
+    let (method, rest) = key.split_once(' ')?;
+    let (template, location) = rest.rsplit_once(' ')?;
+    template
+        .split('/')
+        .any(|segment| segment == "{id}")
+        .then(|| (method.to_owned(), location.to_owned()))
+}
+
+/// The route template of a position key: `/api/patients/{id}` for `DELETE /api/patients/{id} path[2]`.
+fn template_of(key: &str) -> Option<&str> {
+    let (_, rest) = key.split_once(' ')?;
+    rest.rsplit_once(' ').map(|(template, _)| template)
+}
+
 /// How the judge reads one position of a configuration: its kind, its tier judgement (with how sure
 /// the map is of it), and its public-source setting (docs/07 section 7.4.7).
 #[derive(Debug, PartialEq, Eq)]
@@ -173,6 +214,35 @@ impl<'a> Reading<'a> {
             spec,
             rules: Rules::of(spec.advanced()),
         }
+    }
+
+    /// Whether the judge gives no request of this path a fast allow under this configuration: the
+    /// site judges public access, and no template can place the path (docs/07 section 7.4.7).
+    fn unplaceable(&self, row: &SlotRow) -> bool {
+        self.spec.objects().judges_public_access() && !is_templatable(&row.path)
+    }
+
+    /// The position the judge gives a request value under this configuration, and whether the
+    /// value is unplaced: no declared position governs it on a path that cannot be placed.
+    fn placed(&self, row: &SlotRow, value: &TraceValue) -> (String, bool) {
+        let place = request_place(self.spec.objects(), &row.method, &row.path, &value.at);
+        let unplaced = !value.inert && self.unplaceable(row) && place.key.is_none();
+        (place.slot(&row.method, &row.path, &value.at), unplaced)
+    }
+
+    /// The route template a decision is grouped under: the template of the declared position that
+    /// governs one of its values, else the template its path names.
+    fn route(&self, row: &SlotRow, values: &[TraceValue]) -> String {
+        values
+            .iter()
+            .filter(|value| !value.inert)
+            .find_map(|value| {
+                request_place(self.spec.objects(), &row.method, &row.path, &value.at)
+                    .key
+                    .and_then(template_of)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| position_template(&row.path))
     }
 
     /// Whether a request value is verified at position `slot`: one place that showed the
@@ -233,8 +303,9 @@ struct Verdict {
 }
 
 /// The shift of one decision, if it has one. A value is judged again when the draft touches it
-/// (see [`Moved::touches`]); every other value keeps the verdict the trace recorded. A value
-/// whose trace kept no place for it keeps its recorded verdict too.
+/// (see [`Moved::touches`]) or places it differently; every other value keeps the verdict the
+/// trace recorded. A value that no position governs is unverified where the site judges public
+/// access, and so is every value of a path no template can place (docs/07 section 7.4.7).
 fn shift(
     row: &SlotRow,
     values: &[TraceValue],
@@ -242,27 +313,43 @@ fn shift(
     current: &Reading<'_>,
     next: &Reading<'_>,
 ) -> Option<Verdict> {
-    let mut verified_now = true;
-    let mut verified_next = true;
-    // The first value that verifies now and stops verifying under the draft, with its position.
-    let mut lost: Option<(&TraceValue, String)> = None;
+    let mut verified_now = !current.unplaceable(row);
+    let mut verified_next = !next.unplaceable(row);
+    // The first value that verifies now and stops verifying under the draft, with its position
+    // under the draft, and whether the draft places it differently.
+    let mut lost: Option<(&TraceValue, String, bool)> = None;
     for value in values.iter().filter(|value| !value.inert) {
-        let slot = request_slot(row, value);
+        // Where the judge places the value now, and under the draft. The draft changes the value's
+        // placement when either differs; the trace's own position is not compared, because a trace
+        // written before a declaration was judged may name another spelling of the same position.
+        let (before, unplaced_before) = current.placed(row, value);
+        let (slot, unplaced) = next.placed(row, value);
+        let placed_differently = before != slot || unplaced_before != unplaced;
         verified_now &= value.verified;
-        let verified = if moved.touches(value, &slot) && !value.sources.is_empty() {
+        let verified = if unplaced {
+            false
+        } else if (placed_differently
+            || moved.touches(value, &before)
+            || moved.touches(value, &slot))
+            && !value.sources.is_empty()
+        {
             next.verifies(row, value, &slot)
         } else {
             value.verified
         };
         if value.verified && !verified && lost.is_none() {
-            lost = Some((value, slot));
+            lost = Some((value, slot, placed_differently));
         }
         verified_next &= verified;
     }
     match row.decision_path.as_str() {
         FAST_ALLOW if verified_now && !verified_next => Some(Verdict {
             shift: Shift::BackToJev,
-            kinds: lost.and_then(|(value, slot)| kinds_of(row, value, &slot, current, next)),
+            // A value the draft places differently, or a path it no longer places at all, is
+            // explained by the placement, not by a name's kind.
+            kinds: lost
+                .filter(|(_, _, placed_differently)| !placed_differently && !next.unplaceable(row))
+                .and_then(|(value, slot, _)| kinds_of(row, value, &slot, current, next)),
         }),
         decision if JEV_CALLS.contains(&decision) && !verified_now && verified_next => {
             Some(Verdict {
@@ -299,18 +386,6 @@ fn kinds_of(
     Some((name, object.to_owned()))
 }
 
-/// The position of a request value: the trace's own, or the one the gateway gives it.
-fn request_slot(row: &SlotRow, value: &TraceValue) -> String {
-    value.slot.clone().unwrap_or_else(|| {
-        format!(
-            "{} {} {}",
-            row.method,
-            position_template(&row.path),
-            value.at
-        )
-    })
-}
-
 /// The requests that each change kind moves.
 #[derive(Default)]
 struct Moves {
@@ -326,16 +401,13 @@ fn moves_of(rows: &[SlotRow], moved: &Moved, current: &Reading<'_>, next: &Readi
         let Ok(values) = serde_json::from_str::<Vec<TraceValue>>(&row.values) else {
             continue;
         };
-        match shift(row, &values, moved, current, next) {
-            Some(Verdict {
-                shift: Shift::NewFastAllow,
-                ..
-            }) => found.new_fast_allow.add(row, None),
-            Some(Verdict {
-                shift: Shift::BackToJev,
-                kinds,
-            }) => found.back_to_jev.add(row, kinds),
-            None => {}
+        let Some(verdict) = shift(row, &values, moved, current, next) else {
+            continue;
+        };
+        let route = next.route(row, &values);
+        match verdict.shift {
+            Shift::NewFastAllow => found.new_fast_allow.add(row, None, route),
+            Shift::BackToJev => found.back_to_jev.add(row, verdict.kinds, route),
         }
     }
     found
@@ -353,11 +425,11 @@ struct Groups {
 }
 
 impl Groups {
-    fn add(&mut self, row: &SlotRow, kinds: Option<(String, String)>) {
+    fn add(&mut self, row: &SlotRow, kinds: Option<(String, String)>, route: String) {
         self.count += 1;
         let (requests, _) = self
             .routes
-            .entry((row.method.clone(), position_template(&row.path)))
+            .entry((row.method.clone(), route))
             .or_insert_with(|| (0, row.request_id.clone()));
         *requests += 1;
         if let Some(pair) = kinds {
@@ -694,9 +766,13 @@ mod tests {
 
     #[test]
     fn a_request_spelled_another_way_is_read_at_the_position_it_names() {
+        let current = tiered("public", false, "admin", "high");
         let spelled = method_row("DELETE", "jev_deny", "/api/patients/%37005/");
         let attempt = value("path[2]", false, Vec::new());
-        assert_eq!(request_slot(&spelled, &attempt), DELETE_SLOT);
+        assert_eq!(
+            Reading::of(&current).placed(&spelled, &attempt).0,
+            DELETE_SLOT
+        );
     }
 
     #[test]
@@ -895,11 +971,11 @@ mod tests {
         let mut groups = Groups::default();
         let mut first = row("fast_allow", "/doctor/7");
         first.request_id = "req_small".to_owned();
-        groups.add(&first, None);
+        groups.add(&first, None, "/doctor/{id}".to_owned());
         let mut big = row("fast_allow", "/api/records/3");
         big.request_id = "req_big".to_owned();
         for _ in 0..3 {
-            groups.add(&big, None);
+            groups.add(&big, None, "/api/records/{id}".to_owned());
         }
         let change = groups.change(BACK_TO_JEV).expect("requests are counted");
         assert_eq!(change.kind, BACK_TO_JEV);
@@ -926,9 +1002,9 @@ mod tests {
         let b = row("fast_allow", "/doctor/8");
         let c = row("fast_allow", "/doctor/9");
         let pair = |name: &str, object: &str| Some((name.to_owned(), object.to_owned()));
-        groups.add(&a, pair("doctor", "document"));
-        groups.add(&b, pair("doctor", "document"));
-        groups.add(&c, pair("doc", "doctor"));
+        groups.add(&a, pair("doctor", "document"), "/doctor/{id}".to_owned());
+        groups.add(&b, pair("doctor", "document"), "/doctor/{id}".to_owned());
+        groups.add(&c, pair("doc", "doctor"), "/doctor/{id}".to_owned());
         let change = groups.change(BACK_TO_JEV).expect("requests are counted");
         assert_eq!(
             change.detail,
@@ -937,6 +1013,380 @@ mod tests {
                 name_kind: "doctor".to_owned(),
                 object_kind: "document".to_owned(),
             })
+        );
+    }
+
+    /// The search that shows every session a patient at a public tier, beside the entries `extra`
+    /// of the map. Its position is classed, so a value it shows is a patient.
+    const SEARCH_SLOT: &str = "GET /api/search results[].id";
+
+    /// A map of patients: the public search, and the entries `extra`, each written with a comma.
+    fn patients(extra: &str) -> SiteSpec {
+        spec(&format!(
+            r#"{{"classes":[{{"id":"patient","name":"患者"}}],"slots":[{{"key":"{SEARCH_SLOT}","class":"patient","source":"admin","tier":"public","reliability":"high"}}{extra}]}}"#
+        ))
+    }
+
+    /// A DELETE of a patient at a declared id, closed to public sources. It makes the site judge
+    /// public access.
+    const CLOSED_DELETE: &str = r#"{"key":"DELETE /api/patients/{id} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"}"#;
+
+    /// A note written to a patient at a declared id, open to public sources.
+    const OPEN_NOTE: &str = r#"{"key":"POST /api/notes/{id} path[2]","class":"patient","source":"admin","accepts_public":true,"reliability":"high"}"#;
+
+    /// A position that no other test's request reaches, which a draft may add.
+    const OTHER: &str = r#"{"key":"GET /api/other path[1]","class":"patient","source":"admin"}"#;
+
+    /// A path that no template can place: its canonical spelling is longer than the templates take.
+    fn long_path() -> String {
+        format!("/api/patients/{}", "a".repeat(300))
+    }
+
+    /// The origin of a value that the search showed.
+    fn seen_in_search() -> Vec<TraceSource> {
+        vec![origin("id", "GET /api/search", SEARCH_SLOT)]
+    }
+
+    #[test]
+    fn a_fast_allow_of_a_slug_id_goes_back_to_jev_once_a_closed_declared_id_governs_it() {
+        // Nothing declares the DELETE today, so the slug id is an undeclared route and the search
+        // sighting proves it. The draft declares the DELETE closed to public sources: its `{id}`
+        // governs the slug id (docs/07 section 7.4.7), and the sighting no longer proves it.
+        let current = patients("");
+        let proposed = patients(&format!(",{CLOSED_DELETE}"));
+        let delete = method_row("DELETE", "fast_allow", "/api/patients/PT-7004");
+        let seen = [value("path[2]", true, seen_in_search())];
+        assert_eq!(
+            verdict_under(&current, &proposed, &delete, &seen),
+            Some(Verdict {
+                shift: Shift::BackToJev,
+                kinds: None,
+            })
+        );
+        // A Jev call on the same slug id, which the sighting never proved, stays a call.
+        let called = method_row("DELETE", "jev_allow", "/api/patients/PT-7004");
+        let unproved = [value("path[2]", false, seen_in_search())];
+        assert_eq!(shift_under(&current, &proposed, &called, &unproved), None);
+    }
+
+    #[test]
+    fn removing_a_closed_declared_id_lets_the_sighting_prove_a_slug_id_delete_again() {
+        // The judge recorded the value at the declared position, which the draft removes.
+        let current = patients(&format!(",{CLOSED_DELETE}"));
+        let proposed = patients("");
+        let attempt = method_row("DELETE", "jev_deny", "/api/patients/PT-7004");
+        let placed = [TraceValue {
+            slot: Some(DELETE_SLOT.to_owned()),
+            ..value("path[2]", false, seen_in_search())
+        }];
+        assert_eq!(
+            shift_under(&current, &proposed, &attempt, &placed),
+            Some(Shift::NewFastAllow)
+        );
+    }
+
+    #[test]
+    fn a_fast_allow_of_a_path_no_template_places_goes_back_to_jev_once_the_site_judges_public_access()
+     {
+        // Another position gets a public-access judgement, so the site judges public access. The
+        // judge no longer fast-allows a path that no template can place (docs/07 section 7.4.7).
+        let long = long_path();
+        let current = patients("");
+        let proposed = patients(&format!(",{OPEN_NOTE}"));
+        let allowed = method_row("GET", "fast_allow", &long);
+        let seen = [value("path[2]", true, seen_in_search())];
+        assert_eq!(
+            verdict_under(&current, &proposed, &allowed, &seen),
+            Some(Verdict {
+                shift: Shift::BackToJev,
+                kinds: None,
+            })
+        );
+        // A Jev call on it is unplaced where the site judges public access, so it stays a call.
+        let called = method_row("GET", "jev_allow", &long);
+        let unplaced = [TraceValue {
+            unplaced: true,
+            ..value("path[2]", false, seen_in_search())
+        }];
+        assert_eq!(shift_under(&current, &proposed, &called, &unplaced), None);
+    }
+
+    #[test]
+    fn a_call_on_an_unplaced_path_becomes_a_fast_allow_once_the_site_stops_judging_public_access() {
+        let long = long_path();
+        let current = patients(&format!(",{OPEN_NOTE}"));
+        let proposed = patients("");
+        let called = method_row("GET", "jev_allow", &long);
+        let unplaced = [TraceValue {
+            unplaced: true,
+            ..value("path[2]", false, seen_in_search())
+        }];
+        assert_eq!(
+            shift_under(&current, &proposed, &called, &unplaced),
+            Some(Shift::NewFastAllow)
+        );
+    }
+
+    #[test]
+    fn a_slug_id_is_grouped_under_the_declared_route_it_moves_under() {
+        let current = patients("");
+        let proposed = patients(&format!(",{CLOSED_DELETE}"));
+        let moved = Moved::of(&current, &proposed);
+        let values = [value("path[2]", true, seen_in_search())];
+        let rows = [SlotRow {
+            values: serde_json::to_string(&values).expect("the values serialize"),
+            ..method_row("DELETE", "fast_allow", "/api/patients/PT-7004")
+        }];
+        let found = moves_of(
+            &rows,
+            &moved,
+            &Reading::of(&current),
+            &Reading::of(&proposed),
+        );
+        assert_eq!(found.back_to_jev.count, 1);
+        assert_eq!(
+            found.back_to_jev.routes.keys().collect::<Vec<_>>(),
+            vec![&("DELETE".to_owned(), "/api/patients/{id}".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_trace_written_before_a_declaration_is_judged_by_the_placement_it_has_now() {
+        // The declared id already governs the slug id, and the draft only adds an unrelated position.
+        // A trace that names the slug id at its own spelling, as one written before the declaration
+        // was judged does, keeps its verdict: the placement is the same under both configurations.
+        let current = patients(&format!(",{OPEN_NOTE},{CLOSED_DELETE}"));
+        let proposed = patients(&format!(",{OPEN_NOTE},{CLOSED_DELETE},{OTHER}"));
+        let delete = method_row("DELETE", "fast_allow", "/api/patients/PT-7004");
+        let seen = [value("path[2]", true, seen_in_search())];
+        assert_eq!(shift_under(&current, &proposed, &delete, &seen), None);
+    }
+
+    #[test]
+    fn a_declared_id_covers_a_position_and_its_template_is_the_route() {
+        assert_eq!(
+            covering_of(DELETE_SLOT),
+            Some(("DELETE".to_owned(), "path[2]".to_owned()))
+        );
+        assert_eq!(covering_of(SEARCH_SLOT), None);
+        assert_eq!(template_of(DELETE_SLOT), Some("/api/patients/{id}"));
+    }
+
+    /// The trace of one request value that the search showed, recorded at `slot`, as the decision
+    /// log keeps it.
+    fn logged_trace(value: &str, verified: bool, slot: &str) -> String {
+        format!(
+            r#"[{{"at":"path[2]","value":"{value}","kind":"reference","inert":false,"seen":true,"verified":{verified},"sources":[{{"field":"id","request":"GET /api/search","request_id":"req_search","at_millis":1,"slot":"{SEARCH_SLOT}"}}],"slot":"{slot}"}}]"#
+        )
+    }
+
+    /// Writes `rows` (request id, decision, method, path and trace) into the database as the
+    /// decisions of `site` on `day_start`, after clearing the site. Needs the migrations applied.
+    async fn write_window(
+        pool: &PgPool,
+        site: &str,
+        day_start: i64,
+        rows: &[(&str, &str, &str, String, String)],
+    ) {
+        use crate::test_support::ensure_days;
+
+        ensure_days(pool, &[day_start]).await;
+        sqlx::query("DELETE FROM decision_log WHERE site = $1")
+            .bind(site)
+            .execute(pool)
+            .await
+            .expect("clear the test site");
+        for (index, (request_id, decision, method, path, trace)) in rows.iter().enumerate() {
+            let offset = i64::try_from(index).expect("a few rows");
+            sqlx::query(
+                "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client,
+                    method, path, decision_path, outcome, trace)
+                 VALUES ($1, $2, $3, 'edge-test', 'host', 'client', $4, $5, $6, 'allowed', $7::jsonb)",
+            )
+            .bind(day_start + 1_000 + offset)
+            .bind(*request_id)
+            .bind(site)
+            .bind(*method)
+            .bind(path.as_str())
+            .bind(*decision)
+            .bind(format!(r#"{{"values":{trace}}}"#))
+            .execute(pool)
+            .await
+            .expect("insert a decision");
+        }
+    }
+
+    /// The window of a declared closed id, run through the database, where the site already judges
+    /// public access through another position: the slug id the declared id now governs is judged
+    /// again, and the decisions the declaration does not govern are left alone. Needs the migrations
+    /// applied to `XSHIELD_DATABASE_URL`.
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_closed_declared_id_moves_the_window_slug_ids_it_governs() {
+        const SITE: &str = "impact-declared-id";
+        let url = std::env::var("XSHIELD_DATABASE_URL").expect("XSHIELD_DATABASE_URL");
+        let pool = PgPool::connect(&url).await.expect("connect");
+        let day_start = 4_102_531_200_000_i64;
+        write_window(
+            &pool,
+            SITE,
+            day_start,
+            &[
+                // The sighting proved this delete, recorded at the spelling of its path.
+                (
+                    "req_slug_back",
+                    "fast_allow",
+                    "DELETE",
+                    "/api/patients/PT-7004".to_owned(),
+                    logged_trace("PT-7004", true, "DELETE /api/patients/PT-7004 path[2]"),
+                ),
+                // The closed declared id refuses this slug id already, so the Jev call stays.
+                (
+                    "req_slug_jev",
+                    "jev_deny",
+                    "DELETE",
+                    "/api/patients/PT-7005".to_owned(),
+                    logged_trace("PT-7005", false, DELETE_SLOT),
+                ),
+                // A route the draft does not touch.
+                (
+                    "req_plain",
+                    "fast_allow",
+                    "GET",
+                    "/api/records/3".to_owned(),
+                    logged_trace("3", true, "GET /api/records/{id} path[2]"),
+                ),
+            ],
+        )
+        .await;
+        // The site judges public access through the note already, so the draft does not change
+        // that, and the window is read by the positions it names.
+        let current = patients(&format!(",{OPEN_NOTE}"));
+        let proposed = patients(&format!(",{OPEN_NOTE},{CLOSED_DELETE}"));
+        let scope = Scope {
+            site: Some(SITE.to_owned()),
+            since_millis: day_start,
+            until_millis: day_start + 86_400_000 - 1,
+        };
+        let (found, complete) = changes(&pool, &scope, &current, &proposed)
+            .await
+            .expect("the window reads");
+        assert!(complete);
+        let summary: Vec<(&str, i64, Option<&str>)> = found
+            .iter()
+            .map(|change| (change.kind.as_str(), change.count, change.sample.as_deref()))
+            .collect();
+        assert_eq!(summary, vec![(BACK_TO_JEV, 1, Some("req_slug_back"))]);
+        assert_eq!(
+            found[0].top,
+            Some(vec![(
+                "DELETE".to_owned(),
+                "/api/patients/{id}".to_owned(),
+                1
+            )])
+        );
+    }
+
+    /// The window of a draft that starts judging public access, run through the database. A slug
+    /// id that the declared id now governs, and a path no template can place, are judged again; a
+    /// Jev call that the closed declared id already refuses, and a route the draft does not touch,
+    /// are left alone. Needs the migrations applied to `XSHIELD_DATABASE_URL`.
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_draft_that_judges_public_access_moves_the_window_decisions_it_places_differently() {
+        use crate::test_support::ensure_days;
+
+        const SITE: &str = "impact-placement";
+        let url = std::env::var("XSHIELD_DATABASE_URL").expect("XSHIELD_DATABASE_URL");
+        let pool = PgPool::connect(&url).await.expect("connect");
+        // A day of its own, the day after the others in 2100, that no other test writes to.
+        let day_start = 4_102_531_200_000_i64;
+        ensure_days(&pool, &[day_start]).await;
+        sqlx::query("DELETE FROM decision_log WHERE site = $1")
+            .bind(SITE)
+            .execute(&pool)
+            .await
+            .expect("clear the test site");
+        let long = long_path();
+        let rows = [
+            // The sighting proved this delete, which the trace recorded at the spelling of its path.
+            (
+                "req_slug_back",
+                "fast_allow",
+                "DELETE",
+                "/api/patients/PT-7004".to_owned(),
+                logged_trace("PT-7004", true, "DELETE /api/patients/PT-7004 path[2]"),
+            ),
+            // The same sighting proved a request on a path no template can place.
+            (
+                "req_long_back",
+                "fast_allow",
+                "GET",
+                long.clone(),
+                logged_trace("aaaaaaaa", true, &format!("GET {long} path[2]")),
+            ),
+            // The closed declared id refuses this slug id already, so the Jev call stays.
+            (
+                "req_slug_jev",
+                "jev_deny",
+                "DELETE",
+                "/api/patients/PT-7005".to_owned(),
+                logged_trace("PT-7005", false, DELETE_SLOT),
+            ),
+            // A route the draft does not touch.
+            (
+                "req_plain",
+                "fast_allow",
+                "GET",
+                "/api/records/3".to_owned(),
+                logged_trace("3", true, "GET /api/records/{id} path[2]"),
+            ),
+        ];
+        for (index, (request_id, decision, method, path, trace)) in rows.into_iter().enumerate() {
+            let offset = i64::try_from(index).expect("four rows");
+            sqlx::query(
+                "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client,
+                    method, path, decision_path, outcome, trace)
+                 VALUES ($1, $2, $3, 'edge-test', 'host', 'client', $4, $5, $6, 'allowed', $7::jsonb)",
+            )
+            .bind(day_start + 1_000 + offset)
+            .bind(request_id)
+            .bind(SITE)
+            .bind(method)
+            .bind(path)
+            .bind(decision)
+            .bind(format!(r#"{{"values":{trace}}}"#))
+            .execute(&pool)
+            .await
+            .expect("insert a decision");
+        }
+
+        let current = patients("");
+        let proposed = patients(&format!(",{CLOSED_DELETE}"));
+        let scope = Scope {
+            site: Some(SITE.to_owned()),
+            since_millis: day_start,
+            until_millis: day_start + 86_400_000 - 1,
+        };
+        let (found, complete) = changes(&pool, &scope, &current, &proposed)
+            .await
+            .expect("the window reads");
+        assert!(complete);
+        let summary: Vec<(&str, i64, Option<&str>)> = found
+            .iter()
+            .map(|change| (change.kind.as_str(), change.count, change.sample.as_deref()))
+            .collect();
+        assert_eq!(summary, vec![(BACK_TO_JEV, 2, Some("req_slug_back"))]);
+        assert_eq!(
+            found[0].top,
+            Some(vec![
+                ("DELETE".to_owned(), "/api/patients/{id}".to_owned(), 1),
+                ("GET".to_owned(), long, 1),
+            ])
+        );
+        assert_eq!(
+            found[0].detail,
+            Some(ChangeDetailBody::Approximate { approximate: true })
         );
     }
 

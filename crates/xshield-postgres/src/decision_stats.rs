@@ -6,7 +6,7 @@
 //! limit says so with `complete == false`, so the console can show that it was
 //! computed over the most recent rows only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::{AssertSqlSafe, PgPool, Postgres, QueryBuilder, Row};
 
@@ -844,20 +844,34 @@ pub struct SlotRow {
     pub role: Option<String>,
 }
 
-/// The decisions of `scope` that were fast-allowed or called Jev, and whose trace names one of
-/// `slots` as a request position or as the position a value was seen at, or mentions one of
-/// `fields` as a name. A name matches in any case and with any number of `_` or `-` between its
-/// letters, so `doc_id` also finds `docId` and `doc__id`: the match is a superset, and the caller
-/// checks each value exactly. Newest first, at most [`SLOT_SCAN_LIMIT`]. Returns the rows and
-/// whether they are all of the window. A trace written before positions were recorded has no
-/// `slot` and is not found.
+/// The trace positions a draft can move, and the decisions that name them (docs/07 section 7.9.10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reach {
+    /// The positions a request value is recorded at, or a place that showed one.
+    pub slots: Vec<String>,
+    /// The method and location of each declared position whose route template has an `{id}`
+    /// segment. The judge places a value at such a position even when the trace records the value
+    /// at its own spelling, such as a slug id (docs/07 section 7.4.7), so the trace may name a
+    /// position the draft does not.
+    pub covered: Vec<(String, String)>,
+    /// Whether every decision of the window is read: the draft changes whether the site judges
+    /// public access, so the judge places the values of any path the map cannot template anew.
+    pub every: bool,
+}
+
+/// The decisions of `scope` that were fast-allowed or called Jev, and that `reach` can move, or
+/// that mention one of `fields` as a name. A name matches in any case and with any number of `_`
+/// or `-` between its letters, so `doc_id` also finds `docId` and `doc__id`: the match is a
+/// superset, and the caller checks each value exactly. Newest first, at most [`SLOT_SCAN_LIMIT`].
+/// Returns the rows and whether they are all of the window. A trace written before positions were
+/// recorded has no `slot`, so it is found through `reach.covered` or `reach.every` only.
 ///
 /// # Errors
 /// Returns [`sqlx::Error`] when the query fails.
 pub async fn window_rows(
     pool: &PgPool,
     scope: &Scope,
-    slots: &[String],
+    reach: &Reach,
     fields: &[String],
 ) -> Result<(Vec<SlotRow>, bool), sqlx::Error> {
     let mut query = QueryBuilder::<Postgres>::new(
@@ -870,19 +884,39 @@ pub async fn window_rows(
     query.push(
         " AND decision_path IN ('fast_allow', 'jev_allow', 'jev_deny', 'jev_unavailable')
           AND jsonb_typeof(trace -> 'values') = 'array'
-          AND (EXISTS (
+          AND (",
+    );
+    if reach.every {
+        query.push("TRUE");
+    } else {
+        query.push(
+            "EXISTS (
               SELECT 1 FROM jsonb_array_elements(trace -> 'values') AS v
               WHERE v ->> 'slot' = ANY(",
-    );
-    query.push_bind(slots.to_vec());
-    query.push(
-        ") OR EXISTS (
+        );
+        query.push_bind(reach.slots.clone());
+        query.push(
+            ") OR EXISTS (
                   SELECT 1 FROM jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
                   WHERE s ->> 'slot' = ANY(",
-    );
-    query.push_bind(slots.to_vec());
-    // Closes the `ANY`, the inner `EXISTS` and the outer one; the name test goes in the group.
-    query.push(")))");
+        );
+        query.push_bind(reach.slots.clone());
+        // Closes the `ANY`, the inner `EXISTS` and the outer one.
+        query.push(")))");
+        if !reach.covered.is_empty() {
+            let (methods, locations) = covered_arrays(&reach.covered);
+            query.push(" OR (method = ANY(");
+            query.push_bind(methods);
+            query.push(
+                ") AND EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(trace -> 'values') AS w
+                  WHERE w ->> 'at' = ANY(",
+            );
+            query.push_bind(locations);
+            // Closes the `ANY`, the `EXISTS` and the methods' group.
+            query.push(")))");
+        }
+    }
     if let Some(pattern) = name_pattern(fields) {
         query.push(" OR (trace -> 'values')::text ~* ");
         query.push_bind(pattern);
@@ -904,6 +938,19 @@ pub async fn window_rows(
         });
     }
     Ok((out, complete))
+}
+
+/// The distinct methods and locations of `covered`, as the two arrays the window query matches.
+fn covered_arrays(covered: &[(String, String)]) -> (Vec<String>, Vec<String>) {
+    let methods: BTreeSet<String> = covered.iter().map(|(method, _)| method.clone()).collect();
+    let locations: BTreeSet<String> = covered
+        .iter()
+        .map(|(_, location)| location.clone())
+        .collect();
+    (
+        methods.into_iter().collect(),
+        locations.into_iter().collect(),
+    )
 }
 
 /// The case-insensitive pattern of the spellings of `names`: each name's letters in order, with
