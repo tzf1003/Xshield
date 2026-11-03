@@ -533,6 +533,40 @@ def a11(lab: Lab) -> None:
     lab.check("the origin lost the patient", gone, f"{shown_id} still there")
 
 
+@scenario("A12", "医生 A 搜到医生 B 的患者 D（慢速 id PT-7004）后删除：拦截（越权尝试，按声明的 {id} 位置判定）")
+def a12(lab: Lab) -> None:
+    # Patient D has a slug id, so the DELETE of it names no numeric id. The declared {id} position of
+    # DELETE is what places it: before that position covered slug ids, the DELETE was taken for an
+    # undeclared, open route, and the search's sighting of patient D verified it.
+    cookie_a = lab.login("emr.lab", "doctor_a", "A12 doctor A logs in")
+    query = "/api/search?q=" + urllib.parse.quote("患者 D", safe="")
+    found = lab.expect("doctor A searches for patient D by name", lab.send(
+        "emr.lab", "GET", query, cookie=cookie_a), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the search shows doctor B's patient D by its slug id", "PT-7004" in shown, f"ids {shown}")
+    # The search is public, so the sighting proves nothing for a delete of a position that takes no
+    # public source. The slug id is judged as that position, so Jev sees an attempt and denies it.
+    denied = lab.expect("doctor A deletes patient D by the slug id the search showed", lab.send(
+        "emr.lab", "DELETE", "/api/patients/PT-7004", cookie=cookie_a),
+        Expect(403, "jev_deny", "blocked", False))
+    traced = traced_value(denied.record, "PT-7004")
+    lab.check("the trace places the slug id at the declared position and names the attempt",
+              traced.get("attempt") == "over_privilege"
+              and traced.get("slot") == "DELETE /api/patients/{id} path[2]"
+              and traced.get("public_access") == {"accepts": False, "reliability": "high"}
+              and (traced.get("sources") or [{}])[0].get("tier") == "public",
+              f"trace value {traced}")
+    asked = judged_value(judged_request(lab, "DELETE", "/api/patients/PT-7004"), "PT-7004")
+    lab.check("Jev was shown the slug id as an attempt, with the search's tier",
+              asked.get("attempt") == "over_privilege"
+              and any("(tier public, reliability high)" in seen for seen in asked.get("seen_as", [])),
+              f"Jev value {asked}")
+    with lab.origin.lock:
+        kept = "PT-7004" in lab.origin.patients
+    lab.check("the origin kept patient D", kept, "PT-7004 is gone")
+    lab.origin_direct("A12 patient D", "GET", "/api/patients/PT-7004", cookie_a)
+
+
 @scenario("B1", "搜索框、表单里输入正常中文和英文文本：放行")
 def b1(lab: Lab) -> None:
     cookie = lab.login("emr.lab", "doctor_a")
