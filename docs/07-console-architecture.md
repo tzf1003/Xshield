@@ -213,12 +213,13 @@ GET /api/patients ──响应里出现 id=7──┐
 | `refused` | 网关自己回的错误码：`unauthenticated`、`forbidden`、`body_not_inspectable`、`unknown_site` |
 | `values[]` | 请求里拆出的**全部**值，按提取顺序，含惰性值（`inert: true`）；最多 200 个（`REQUEST_VALUES_MAX`） |
 | `values[].kind` | `reference` / `route` / `input`，与 `state` 里的 `kind` 同一函数（`values::value_kind`） |
+| `values[].at`、`key`、`slot` | 位置、键名和位置标识超过 256 字节（`TRACE_NAME_BYTES_MAX`）时截到 256 字节，不切断字符；`values[].at_len` 记截断前的 `at` 长度（字节），只用于显示“已裁剪”，判定不看它。来源的字段名和请求不截，因为 `seen_as` 要逐字相同 |
 | `values[].seen` / `verified` | 会话里见过这个值 / 网关已按同类对象核验（快速放行的依据） |
 | `values[].sources[]` | 最多 3 个来源，顺序与 `state` 里的 `seen_as` 相同（最相关的在前，[7.5.2](#752-state-与追溯信息的对齐)）；`request_id`、`at_millis` 正常情况下都有（上下文随网关重启清空，[7.3.2](#732-追溯链路)），只有导入的旧格式记录和测试数据可能为 null；同一 `(field, request)` 再次出现时保留最早的那次（[7.7.1](#771-会话上下文增加请求-id)） |
 | `values[].public_access` | 请求位置在对象表里的公共来源设定（[7.9.16](#7916-对象表的档位与可靠性w3)），形如 `{ "accepts": false, "reliability": "high" }`；位置没有 `accepts_public` 时不写 |
 | `values[].attempt` | `over_privilege`：尝试越权。值只由公共档响应展示过，请求位置不接受公共来源，所以不快速放行、不查缓存，交 Jev 并要求 DENY（[01 1.4](01-request-flow.md#14-判定步骤) 第 4 步）。没有时不写 |
 | `values[].sources[].tier` / `reliability` | 来源响应位置的档位和可靠性，与 `state` 里 `seen_as` 括号中的文字对应；位置没有标档位时不写 |
-| `values_truncated` | 请求体未结构化、超过 64 KiB 解析上限或值数到上限（即 `ExtractedRequest::truncated`），或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4） |
+| `values_truncated` | 请求体未结构化或值数到上限（即 `ExtractedRequest::truncated`），或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4）。网关只拆 48 KiB 以内的请求体（`REQUEST_BODY_MAX`）：更大的请求在网关直接 413 拒绝、不拆值，所以体积不是这里的原因 |
 | `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条），其中的请求路径超过 256 字节时截到 256 字节（`TRACE_PATH_BYTES_MAX`）；`known_values` 是会话已见值数量 |
 | `session.identity` | 站点声明了身份位置且会话已见身份时才有：`user`、`org` 为键控哈希标签，`role` 为角色标签，规则见 [7.9.15](#7915-对象表的身份位置w1)。没有身份位置的站点不写这一段 |
 >| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
@@ -328,7 +329,7 @@ GET /api/patients ──响应里出现 id=7──┐
 - `state.entry` 只有 `matched`（布尔值），没有规则原文：命中的是哪条入口规则只在 `trace.entry`，结构化视图的“入口”一行以 `trace.entry` 为准。`state` 里的值也没有 `key` 字段，字段名取 `trace.values[].key`。
 - `seen_as` 是该值全部来源按相关度排序（`Seen::ranked`）后反过来取前 N 个，最相关的在前，N 由裁剪级别决定（[7.5.3](#753-裁剪级别)）。`trace.values[].sources` 必须用同一个函数、同一个顺序生成，对齐才是按下标而不是按内容猜。
 
-**对不上时不猜**：`align.ts` 先校验非惰性值个数等于 `state.request.values` 长度，且每个下标上的 `at` 相同；每个值的 `seen_as` 不比 `sources` 长（`trace.trimmed` 为真时来源可能已被减到 1 个，只比较公共前缀，多出的 `seen_as` 条目没有来源链接），且 `seen_as[j]` 逐字等于 `` `${sources[j].field} @ ${sources[j].request}` ``（网关生成 `seen_as` 的格式，`engine.rs`）——只比个数会放过次序互换，要求等长又会让裁剪过的正常记录失去来源链接；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
+**对不上时不猜**：`align.ts` 先校验非惰性值个数等于 `state.request.values` 长度，且每个下标上的 `at` 相同（两边都截到 256 字节再比，`sameName`，因为追溯里超长的 `at` 已被截断，见 7.4.3）；每个值的 `seen_as` 不比 `sources` 长（`trace.trimmed` 为真时来源可能已被减到 1 个，只比较公共前缀，多出的 `seen_as` 条目没有来源链接），且 `seen_as[j]` 逐字等于 `` `${sources[j].field} @ ${sources[j].request}` ``（网关生成 `seen_as` 的格式，`engine.rs`）——只比个数会放过次序互换，要求等长又会让裁剪过的正常记录失去来源链接；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
 
 实现要求：`build_state` 的输入和输出不变，新增一个单元测试固定一组输入的 `state` 字节（黄金样本），并断言 `state` 不含 `req_`；另一个测试用同一组输入生成 `trace`，断言按上面的规则能对齐，并覆盖脱敏值、被截断的长值、数组元素共享同一个 `at` 三种情形。
 
