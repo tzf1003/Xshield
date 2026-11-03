@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 对象表显示并编辑声明位置的判断（[docs/06](docs/06-console-ui.md) 6.4.10，[docs/07](docs/07-console-architecture.md) 7.9.16）：位置行显示身份、归属、接受公共来源与可靠性，位置抽屉可改，改动随草稿保存；学习提出的判断提议列在表上方，确认经对话框写入一个新版本，驳回让同一判断不再提议。请求详情显示会话身份和来源的档位，并把只由公共响应展示过的值标为“尝试越权”；就绪检查新增尝试越权的请求数。保存对象表不再丢失身份等新字段：同一位置两边都改动时逐项合并，学习任务写入的暂停保留。
 - 对象表学习新增响应位置的档位提议（[docs/07](docs/07-console-architecture.md) 7.9.16）：学习按各单位在窗口内见到的值（响应指纹；站点声明用户身份时按用户计，否则按会话）判断位置是 `public`、`self` 还是 `admin`，并给出可靠性。证据存入 `object_response_evidence`，提议存入 `object_tier_judgements`（迁移 0010，只由控制面写入，7 天窗口）。管理员在 `POST …/judgement/confirm` 确认后，`tier` 与 `reliability` 写入站点配置，成功保存为一个新版本；`…/judgement/dismiss` 驳回后同一档位不再提议。`org` 与学习代理的档位判断留待后续。判定侧只用可靠性为 `high` 的档位收紧（[docs/07](docs/07-console-architecture.md#747-档位在判定中的使用) 7.4.7）。
 - 放行缓存按会话是否为管理员分开（[docs/01](docs/01-request-flow.md) 1.4 步骤 5）：管理员的角色变化后，之前的 Jev 放行不再直接复用，同一请求交给 Jev 重新判断。
 - 判定按规范拼写定位对象表的位置：`/api/patients/7005/`、`/api/patients//7005` 与 `/api/patients/%37005` 是同一个位置，对象表的 `key` 只接受规范拼写（[docs/07](docs/07-console-architecture.md#747-档位在判定中的使用) 7.4.7）。非规范写法的请求，判定记录里的位置改为规范位置；没有标档位的站点，判定不变。

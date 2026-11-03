@@ -705,6 +705,75 @@ export const OBJECT_SOURCE_LABEL: Record<ObjectSource, string> = {
  * The learning agent in words (console design 3.1 to 3.4 and 7). A code the console does not know is shown in
  * brackets as itself, so nothing is lost.
  */
+/** The judgements a declared position carries (docs/07 7.9.15, 7.9.16): what each identity, tier and reliability means,
+ *  as the object map and the request detail show it. Names are short; descriptions go in titles. */
+export const OBJECT_JUDGEMENT = {
+  identity: {
+    user: { name: "用户", desc: "源站响应里这个位置是本会话的用户 ID（控制面只存键控哈希）" },
+    org: { name: "机构", desc: "源站响应里这个位置是本会话的机构或租户（只存键控哈希）" },
+    role: { name: "角色", desc: "源站响应里这个位置是本会话的角色，例如 admin" },
+  },
+  tier: {
+    self: { name: "自身", desc: "展示的是本会话用户自己的对象" },
+    org: { name: "机构", desc: "展示的是本机构的对象" },
+    admin: { name: "管理", desc: "只有管理员会话能拿到 2xx，展示的是管理范围的对象" },
+    public: { name: "公共", desc: "许多用户都能看到的对象，例如搜索结果、商品目录、评论作者" },
+  },
+  reliability: {
+    high: { name: "高", desc: "证据充分、几乎所有单位一致。只有“高”的判断会让判定收紧" },
+    medium: { name: "中", desc: "证据足够提议，但不够让判定收紧" },
+    low: { name: "低", desc: "证据不足，不提议；未填写可靠性按低处理" },
+  },
+  accepts: {
+    yes: { name: "接受公共来源", desc: "正常流量里，这个请求位置的值常常来自公共响应" },
+    no: { name: "不接受公共来源", desc: "正常流量里，这个请求位置几乎不接受公共响应的值" },
+  },
+  field: {
+    identity: "身份",
+    tier: "归属",
+    reliability: "可靠性",
+  },
+  attempt: {
+    tag: "尝试越权",
+    desc: "这个值只由公共响应展示过，而请求位置不接受公共来源。判定不快速放行，交 Jev，指令要求拒绝",
+  },
+  identityRow: "会话身份",
+  editor: {
+    title: "判断",
+    none: "未判断",
+    needClass: "先确认这个位置的类别，再设置判断",
+    paused: "暂停中的位置保留判断但不使用，恢复后生效",
+    identity: "身份（源站响应里的本会话身份）",
+    tier: "归属（这个响应展示的对象）",
+    accepts: "接受公共来源（这个请求位置）",
+    reliability: "可靠性",
+    reliabilityUnset: "未填写，按低处理",
+    identityOff: "有身份的位置不带归属",
+    unchanged: "没有改动",
+    apply: "应用到草稿…",
+    note: (key: string) => `修改了位置 ${key} 的判断`,
+  },
+  panel: {
+    title: (count: number) => `判断提议 ${count}`,
+    lead: "学习根据流量提出的判断。确认后站点保存一个新版本，判定开始使用它；驳回后同一判断不再提议。",
+    confirm: "确认…",
+    dismiss: "驳回",
+    dirtyDraft: "草稿里有未保存的改动。先保存或放弃，再确认",
+    confirmTitle: "确认这条判断？",
+    confirmBody: (key: string, words: string) =>
+      `位置 ${key} 将被判为：${words}。确认后站点保存一个新版本，判定开始使用它。`,
+    confirmOk: "确认并保存版本",
+    cancel: "取消",
+    confirmed: "已确认。站点保存了一个新版本，判定开始使用它",
+    dismissed: "已驳回，同一判断不再提议，除非规则转到另一个判断",
+  },
+  readiness: {
+    attempts: (count: string) =>
+      `尝试越权 ${count} 个请求：切换拦截后这些请求交 Jev 判定并要求拒绝`,
+    attemptsNone: "没有尝试越权的请求",
+  },
+};
+
 export const OBJECT_AGENT_TEXT = {
   name: "学习代理",
   status: {
@@ -823,6 +892,9 @@ export const OBJECT_AGENT_TEXT = {
     AGENT_BUDGET_USED: "今天的上限已用完",
     SLOT_STATE_CONFLICT: "这个位置的状态已经变了，请刷新",
     NO_SAMPLE: "现在没有等待的位置",
+    JUDGEMENT_CHANGED: "这条提议已经变了，请看最新的提议后再确认",
+    JUDGEMENT_NOT_FOUND: "这条提议已经不在了，列表已刷新",
+    SLOT_NOT_JUDGED: "身份位置没有归属或接受公共来源的判断",
   } satisfies Record<string, string>,
 } as const;
 
@@ -1183,6 +1255,9 @@ export const DECLARE_TEXT = {
   classNameEmpty: "类别名不能为空",
   classNameLong: "类别名最多 32 个字符",
   slotDuplicate: (key: string) => `位置 ${key} 在对象表里已经有一条`,
+  judgementConflict: (index: number) =>
+    `对象表第 ${index} 个位置同时带了归属和接受公共来源，一个位置只能带一种`,
+  reliabilityAlone: (index: number) => `对象表第 ${index} 个位置只有可靠性，没有归属或接受公共来源`,
   slotClassUnknown: (key: string, cls: string) => `位置 ${key} 的类别 ${cls} 还没有声明`,
   slotKeyFormat: "位置的格式不对：应为“方法 /路径 位置”",
   slotKeyLong: "位置键最多 256 个字节",

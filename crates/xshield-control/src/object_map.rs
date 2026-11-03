@@ -26,7 +26,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use xshield_core::{
     context::{
-        ObjectMap, ObjectSlot, Reliability, SiteSpec, SlotSource, Tier,
+        IdentityRole, ObjectMap, ObjectSlot, Reliability, SiteSpec, SlotSource, Tier,
         learning::{Evidence, RETIRE_DAYS, WINDOW_DAYS, day_of, observe},
     },
     kind::{NameReason, NameSource, Rules, request_name, response_name},
@@ -187,6 +187,10 @@ struct SlotRow {
     /// How sure the learning is of the judgement the position carries.
     #[serde(skip_serializing_if = "Option::is_none")]
     reliability: Option<Reliability>,
+    /// The identity a declared response position states about the session: `user`, `org` or
+    /// `role`. Absent for an ordinary position, and for every learned one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<IdentityRole>,
 }
 
 /// Why a position is suspended, and what the rules judge it by now: `suspension`.
@@ -215,6 +219,18 @@ struct SuspensionBody {
 struct PreviousBody {
     class: Option<String>,
     source: Option<Origin>,
+    /// The identity the entry carried before the pause, so a restore brings it back. Absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<IdentityRole>,
+    /// The tier the entry carried before the pause. Absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<Tier>,
+    /// The acceptance the entry carried before the pause. Absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accepts_public: Option<bool>,
+    /// How sure the learning was of the judgement the entry carried before the pause. Absent when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reliability: Option<Reliability>,
     /// When an administrator confirmed the entry. The configuration does not record it, so null.
     confirmed_at: Option<String>,
     /// Who confirmed the entry. The configuration does not record it, so null.
@@ -1258,15 +1274,18 @@ async fn suspension_of(
         version: pause.map(|event| event.version),
         event_id: pause.map(|event| event.id.clone()),
         reason: pause.and_then(|event| event.reason.clone()),
-        previous: pause.map(|event| PreviousBody {
-            class: event.before.class.clone(),
-            source: event
-                .before
-                .entry
-                .as_ref()
-                .map(|entry| Origin::from(entry.source)),
-            confirmed_at: None,
-            confirmed_by: None,
+        previous: pause.map(|event| {
+            let entry = event.before.entry.as_ref();
+            PreviousBody {
+                class: event.before.class.clone(),
+                source: entry.map(|entry| Origin::from(entry.source)),
+                identity: entry.and_then(|entry| entry.identity),
+                tier: entry.and_then(|entry| entry.tier),
+                accepts_public: entry.and_then(|entry| entry.accepts_public),
+                reliability: entry.and_then(|entry| entry.reliability),
+                confirmed_at: None,
+                confirmed_by: None,
+            }
         }),
         fallback: fallback_of(&row.key, map, &rules),
         evidence_now: evidence
@@ -1767,6 +1786,7 @@ fn declared_row(slot: &ObjectSlot, learned: Option<&PositionRow>) -> SlotRow {
         tier: slot.tier,
         accepts_public: slot.accepts_public,
         reliability: slot.reliability,
+        identity: slot.identity,
     }
 }
 
@@ -1819,6 +1839,7 @@ fn learned_row(row: &PositionRow, view: &AgentView) -> ApiResult<SlotRow> {
         tier: None,
         accepts_public: None,
         reliability: None,
+        identity: None,
     })
 }
 
@@ -2723,6 +2744,7 @@ mod tests {
             tier: None,
             accepts_public: None,
             reliability: None,
+            identity: None,
         }
     }
 
@@ -2789,6 +2811,10 @@ mod tests {
         let previous = PreviousBody {
             class: Some("doctor".to_owned()),
             source: Some(Origin::Admin),
+            identity: None,
+            tier: None,
+            accepts_public: None,
+            reliability: None,
             confirmed_at: None,
             confirmed_by: None,
         };
@@ -2899,6 +2925,35 @@ mod tests {
             },
         );
         assert_eq!(confirmed.class_of(NEW), Some("document"));
+    }
+
+    #[test]
+    fn a_declared_identity_is_listed_with_its_role_and_carries_no_tier() {
+        let slot = ObjectSlot {
+            key: "GET /api/home doctor.id".to_owned(),
+            class: "doctor".to_owned(),
+            source: SlotSource::Admin,
+            paused: false,
+            identity: Some(IdentityRole::User),
+            tier: None,
+            accepts_public: None,
+            reliability: None,
+        };
+        let row = serde_json::to_value(declared_row(&slot, None)).expect("serialize the row");
+        assert_eq!(row["identity"], "user");
+        assert!(
+            row.get("tier").is_none(),
+            "an identity position carries no tier: {row}"
+        );
+        let plain = ObjectSlot {
+            identity: None,
+            ..slot
+        };
+        let row = serde_json::to_value(declared_row(&plain, None)).expect("serialize the row");
+        assert!(
+            row.get("identity").is_none(),
+            "an ordinary position lists no identity: {row}"
+        );
     }
 
     #[test]

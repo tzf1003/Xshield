@@ -16,6 +16,7 @@ import type {
   ModelsState,
   ModelWrite,
   ObjectEventsFilter,
+  ObjectJudgementConfirmation,
   ObjectsFilter,
   SiteSpec,
   SiteWriteBody,
@@ -503,6 +504,34 @@ export function useAckEvent() {
     onSettled: (_result, _error, args) => {
       void client.invalidateQueries({ queryKey: ["objects", args.name] });
       void client.invalidateQueries({ queryKey: ["object-events", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
+    },
+  });
+}
+
+/** Confirms a proposed judgement (docs/07 7.9.16). The confirmation writes one new version of the site, so the site and
+ *  its versions are read again as well as the object map. A refused proposal (409) is read again too. */
+export function useConfirmJudgement() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; id: string; body: ObjectJudgementConfirmation }) =>
+      api.confirmJudgement(args.name, args.id, args.body),
+    onSettled: (_result, _error, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
+      void client.invalidateQueries({ queryKey: keys.site(args.name) });
+      void client.invalidateQueries({ queryKey: keys.versions(args.name) });
+    },
+  });
+}
+
+/** Dismisses a proposed judgement. Learning state only: no site version is written. */
+export function useDismissJudgement() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; id: string }) => api.dismissJudgement(args.name, args.id),
+    onSettled: (_result, _error, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
       void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
     },
   });

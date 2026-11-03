@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { FieldKindDeclaration, LearningSettings, SiteSpec } from "../src/api/types.ts";
+import type {
+  FieldKindDeclaration,
+  LearningSettings,
+  ObjectSlotEntry,
+  SiteSpec,
+} from "../src/api/types.ts";
 import { canonical, semanticChanges } from "../src/lib/diff.ts";
 import { normalizeSpec, parseSpecText, rebaseSpec } from "../src/features/sites/spec-model.ts";
 import { orderSpec, specToJson, specToYaml } from "../src/lib/yaml.ts";
@@ -113,4 +118,60 @@ test("a field kind declared in a draft is added to the newer version", () => {
   const latest: SiteSpec = { ...site, entries: [...site.entries, "/api/new"] };
   const { spec } = rebaseSpec(site, mine, latest);
   assert.deepEqual(spec.advanced?.field_kinds, [...declared, added]);
+});
+
+// A position's judgement is part of the position (docs/07 7.9.16). The learning task pauses positions on its own and
+// writes a version of its own, so a save can rebase over a version that paused the position the draft gave a judgement.
+const doctorPosition: ObjectSlotEntry = {
+  key: "GET /api/doctors [].id",
+  class: "doctor",
+  source: "admin",
+};
+
+test("an identity the draft gave a position survives a newer version that paused the same position", () => {
+  const mine: SiteSpec = {
+    ...site,
+    objects: { ...site.objects, slots: [{ ...doctorPosition, identity: "user" }] },
+  };
+  const latest: SiteSpec = {
+    ...site,
+    objects: { ...site.objects, slots: [{ ...doctorPosition, paused: true }] },
+  };
+  const { spec, conflicts } = rebaseSpec(site, mine, latest);
+  assert.deepEqual(conflicts, []);
+  assert.deepEqual(spec.objects?.slots, [{ ...doctorPosition, identity: "user", paused: true }]);
+});
+
+test("a judgement the draft gave a position is kept beside the newer version's other positions", () => {
+  const judged: ObjectSlotEntry = { ...doctorPosition, tier: "org", reliability: "high" };
+  const docs: ObjectSlotEntry = { key: "GET /api/docs [].id", class: "document", source: "rule" };
+  const mine: SiteSpec = { ...site, objects: { ...site.objects, slots: [judged] } };
+  const latest: SiteSpec = {
+    ...site,
+    objects: { ...site.objects, slots: [doctorPosition, docs] },
+  };
+  const { spec } = rebaseSpec(site, mine, latest);
+  assert.deepEqual(spec.objects?.slots, [judged, docs]);
+});
+
+test("a judgement the draft cleared stays cleared when the newer version paused the position", () => {
+  const judged: ObjectSlotEntry = { ...doctorPosition, identity: "user" };
+  const base: SiteSpec = { ...site, objects: { ...site.objects, slots: [judged] } };
+  const mine: SiteSpec = { ...site, objects: { ...site.objects, slots: [doctorPosition] } };
+  const latest: SiteSpec = {
+    ...site,
+    objects: { ...site.objects, slots: [{ ...judged, paused: true }] },
+  };
+  const { spec } = rebaseSpec(base, mine, latest);
+  assert.deepEqual(spec.objects?.slots, [{ ...doctorPosition, paused: true }]);
+});
+
+test("a pause the newer version wrote is kept when the draft did not touch the position", () => {
+  const mine: SiteSpec = { ...site, entries: [...site.entries, "/api/draft"] };
+  const latest: SiteSpec = {
+    ...site,
+    objects: { ...site.objects, slots: [{ ...doctorPosition, paused: true }] },
+  };
+  const { spec } = rebaseSpec(site, mine, latest);
+  assert.deepEqual(spec.objects?.slots, [{ ...doctorPosition, paused: true }]);
 });

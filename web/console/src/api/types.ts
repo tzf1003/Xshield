@@ -180,6 +180,10 @@ export interface TraceSource {
   object?: string;
   /** `map` when `object` comes from a confirmed object-map entry; absent when name inference was used. */
   object_from?: "map";
+  /** The tier the map gives the response position (7.9.16); absent when the map gives none. */
+  tier?: ObjectTier;
+  /** How sure the map is of `tier`; absent when `tier` is. */
+  reliability?: ObjectReliability;
 }
 
 export interface TraceValue {
@@ -206,6 +210,13 @@ export interface TraceValue {
   object?: string;
   /** `map` when `object` comes from a confirmed object-map entry; absent otherwise. */
   object_from?: "map";
+  /**
+   * What the request position says of public sources (7.4.7): `accepts` false marks a position that takes no value
+   * from a public response, with how sure the map is. Absent when the map gives no such entry.
+   */
+  public_access?: { accepts: boolean; reliability: ObjectReliability };
+  /** `over_privilege` when the value is an attempt to act on an object the session has no right to (7.4.7). */
+  attempt?: "over_privilege";
   /** Composite value (a split value, e.g. `body.who#2` in `body.who`): the parts, each checked on its own. Later PR. */
   parts?: TraceValue[];
   /** How this value was split into parts, e.g. `按 # 拆成 3 段`. Later PR. */
@@ -229,6 +240,11 @@ export interface RecentAccess {
 export interface TraceSession {
   age_seconds: number;
   known_values: number;
+  /**
+   * Who the session was when the decision was made, as the site's identity positions said (7.9.15). Each is a label
+   * of a keyed hash (16 hex digits) or, for `role`, the role's label. Absent when the site declares none.
+   */
+  identity?: { user?: string; org?: string; role?: string };
   /**
    * Up to 16, written for Jev records only (aligned with `state.session.entries_passed`). Absent on a
    * record that made no Jev call, such as a fast or cached allow (trace.rs `TraceSession`).
@@ -623,7 +639,24 @@ export interface ObjectSlotEntry {
   class: string;
   source: ObjectSource;
   paused?: boolean;
+  /** Response position: the identity the response states about the session (docs/07 7.9.15). */
+  identity?: ObjectIdentity;
+  /** Response position: whose objects it shows (docs/07 7.9.16). */
+  tier?: ObjectTier;
+  /** Request position: whether normal traffic sends public sources to it. `false` rarely does. */
+  accepts_public?: boolean;
+  /** How sure the learning is of `tier` or `accepts_public`. Absent counts as `low`. */
+  reliability?: ObjectReliability;
 }
+
+/** The identity a response position states about the session (`identity`, docs/07 7.9.15). */
+export type ObjectIdentity = "user" | "org" | "role";
+
+/** Whose objects a response position shows (`tier`, docs/07 7.9.16). */
+export type ObjectTier = "self" | "org" | "admin" | "public";
+
+/** How sure the learning is of a judgement (`reliability`, docs/07 7.9.16). */
+export type ObjectReliability = "high" | "medium" | "low";
 
 /**
  * The object map section (object-map design 1). The learning settings, the classes and the confirmed positions are
@@ -840,6 +873,8 @@ export interface Readiness {
   jev_timeout_ratio: number | null;
   /** Requests that cited a value learned from a "would block" response (7.4.6). */
   after_would_block_refs: number;
+  /** Requests whose values were attempts to act on another user's object (7.4.7). */
+  attempts: number;
   on_jev_unavailable: OnJevUnavailable;
 }
 
@@ -1383,7 +1418,54 @@ export interface ObjectSlotRow {
   agent_status: ObjectAgentStatus | null;
   /** Only while the position is suspended (state `suspended`); null otherwise. */
   suspension: ObjectSuspension | null;
+  /** A declared identity position: the identity it states (docs/07 7.9.15). Absent otherwise. */
+  identity?: ObjectIdentity;
+  /** A declared response position: whose objects it shows (docs/07 7.9.16). Absent otherwise. */
+  tier?: ObjectTier;
+  /** A declared request position: whether it takes public sources. Absent otherwise. */
+  accepts_public?: boolean;
+  /** How sure the learning is of the judgement the position carries. Absent when it carries none. */
+  reliability?: ObjectReliability;
 }
+
+/** A proposal waiting for an administrator (`judgements`, docs/07 7.9.16): the judgement the rules give a declared position. */
+export interface ObjectJudgementBase {
+  /** The declared position's id, which the confirm and dismiss actions take. */
+  id: string;
+  key: string;
+  /** How sure the rules are. Only `medium` and `high` are proposed. */
+  reliability: ObjectReliability;
+  /** RFC 3339 UTC of the last evidence, or null. */
+  last_seen: string | null;
+}
+
+/** A request position's proposal: whether normal traffic sends public sources to it, and what the rules counted. */
+export interface ObjectAcceptanceJudgement extends ObjectJudgementBase {
+  accepts_public: boolean;
+  /** Votes counted (one per session per day). */
+  votes: number;
+  sessions: number;
+  /** The share of the votes sent from public positions, in thousandths. */
+  public_per_mille: number;
+}
+
+/** A response position's proposal: whose objects it shows, and what the rules counted. */
+export interface ObjectTierJudgement extends ObjectJudgementBase {
+  tier: ObjectTier;
+  /** The units (sessions, or users when the site declares identity) the judgement counts. */
+  units: number;
+  /** The distinct values among them. */
+  seen_values: number;
+  /** The share of values, in thousandths, that agree with the tier. */
+  agreement_per_mille: number;
+}
+
+export type ObjectJudgement = ObjectAcceptanceJudgement | ObjectTierJudgement;
+
+/** The body of a confirmation: the judgement the administrator saw, which must be the proposal's own. */
+export type ObjectJudgementConfirmation =
+  | { accepts_public: boolean; reliability: ObjectReliability }
+  | { tier: ObjectTier; reliability: ObjectReliability };
 
 /** Why a position is paused, and what the judge does with it now (console design 3.2, 6 D). */
 export interface ObjectSuspension {
@@ -1394,10 +1476,14 @@ export interface ObjectSuspension {
   version: number | null;
   event_id: string | null;
   reason: ObjectReason | null;
-  /** The confirmed entry before the pause. */
+  /** The confirmed entry before the pause. Its judgement comes back with a restore; absent when it carried none. */
   previous: {
     class: string | null;
     source: ObjectSource;
+    identity?: ObjectIdentity;
+    tier?: ObjectTier;
+    accepts_public?: boolean;
+    reliability?: ObjectReliability;
     confirmed_at: string | null;
     confirmed_by: string | null;
   } | null;
@@ -1467,6 +1553,8 @@ export interface ObjectsResponse {
   agent_configured: boolean;
   classes: ObjectClass[];
   slots: ObjectSlotRow[];
+  /** The judgements the rules propose for declared positions and no administrator has answered yet (docs/07 7.9.16). */
+  judgements: ObjectJudgement[];
   /** The automatic changes of the last 30 days, newest first; the banner and the list show the open ones. */
   events: ObjectEvent[];
   features: ObjectFeatures;

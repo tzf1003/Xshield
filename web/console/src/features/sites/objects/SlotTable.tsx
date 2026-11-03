@@ -4,6 +4,7 @@
 
 import type { ObjectClass, ObjectSlotRow, ObjectState } from "../../../api/types.ts";
 import {
+  OBJECT_JUDGEMENT,
   OBJECT_SIDE_INFO,
   OBJECT_SOURCE_LABEL,
   OBJECT_STATE_INFO,
@@ -11,6 +12,7 @@ import {
   percentOf,
 } from "../../../lib/vocab.ts";
 import { SafeText } from "../../../ui/SafeText.tsx";
+import { judgementWords } from "../../../lib/judgement.ts";
 import { classNameOf, seenText } from "./objects-model.ts";
 
 /** A state as a tag: the icon and the name, with the state's meaning as its title. */
@@ -23,6 +25,18 @@ export function StateTag({ state }: { state: ObjectState }) {
       </span>
       {info.name}
     </span>
+  );
+}
+
+/** The judgement a declared position carries, in words under its class: its identity, its tier and reliability, or its
+ *  acceptance of public sources (docs/07 7.9.15, 7.9.16). Nothing for a position that carries none. */
+export function JudgementLine({ row }: { row: ObjectSlotRow }) {
+  const words = judgementWords(row);
+  if (words === null) return null;
+  return (
+    <div className="small muted obj-judge-line" title={OBJECT_JUDGEMENT.editor.title}>
+      <SafeText text={words} />
+    </div>
   );
 }
 
@@ -109,9 +123,13 @@ export function SlotTable({ rows, classes, selected, now, onOpen }: Props) {
                     <>
                       <SafeText text={classNameOf(classes, row.class)} />{" "}
                       <StateTag state={row.state} />
+                      <JudgementLine row={row} />
                     </>
                   ) : (
-                    <PausedCell row={row} classes={classes} />
+                    <>
+                      <PausedCell row={row} classes={classes} />
+                      <JudgementLine row={row} />
+                    </>
                   )}
                 </td>
                 <td className="keep">{OBJECT_SOURCE_LABEL[row.source]}</td>

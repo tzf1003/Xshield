@@ -13,7 +13,8 @@ import { alignValues } from "../../lib/align.ts";
 import { apiValueLocations, classMismatch, isNameValue } from "../../lib/api-name.ts";
 import { countHits } from "../../lib/highlight.ts";
 import { isSiteName } from "../../lib/ids.ts";
-import { API_LABEL, VALUE_KIND_LABEL } from "../../lib/vocab.ts";
+import { judgementWords } from "../../lib/judgement.ts";
+import { API_LABEL, OBJECT_JUDGEMENT, VALUE_KIND_LABEL } from "../../lib/vocab.ts";
 import { Empty, Notice } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
 import { REDACTED, secretMatchOf, valuesNotice } from "./detail-model.ts";
@@ -210,6 +211,9 @@ function ValueRow({
   if (nested) classes.push("rd-part");
   const checkedMark = (done: boolean) => (name || composite ? "–" : done ? "✓" : "–");
   const mismatch = value.sources.find((source) => classMismatch(value.object, source));
+  // An attempt (docs/07 7.4.7): the value only public responses showed, used where the position takes no public source.
+  const attempt = value.attempt === "over_privilege";
+  const access = value.public_access;
   return (
     <>
       <tr className={classes.join(" ")} data-trace-index={nested ? undefined : traceIndex}>
@@ -238,6 +242,11 @@ function ValueRow({
               />
             </span>
           )}
+          {attempt ? (
+            <span className="tag tag-blocked" title={OBJECT_JUDGEMENT.attempt.desc}>
+              {OBJECT_JUDGEMENT.attempt.tag}
+            </span>
+          ) : null}
         </td>
         <td>
           {name ? API_LABEL.name : VALUE_KIND_LABEL[value.kind]}
@@ -291,6 +300,19 @@ function ValueRow({
             <span className="rd-mismatch-text hint-warn">
               <span aria-hidden="true">!</span>
               {` ${API_LABEL.mismatch}：${mismatch.object ?? ""} ≠ ${value.object ?? ""}`}
+            </span>
+          </td>
+        </tr>
+      ) : null}
+      {attempt ? (
+        <tr className="rd-mismatch rd-attempt">
+          <td colSpan={9}>
+            <span className="rd-mismatch-text hint-bad">
+              <span aria-hidden="true">▲</span>
+              {` ${OBJECT_JUDGEMENT.attempt.tag}：${OBJECT_JUDGEMENT.attempt.desc}`}
+              {access === undefined
+                ? null
+                : ` · 请求位置：${judgementWords({ accepts_public: access.accepts, reliability: access.reliability })}`}
             </span>
           </td>
         </tr>
