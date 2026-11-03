@@ -1232,11 +1232,23 @@ export interface ObjectsResponse {
   features: ObjectFeatures;
   /** The learning task: the last run, the next one, and the agent's day and waiting positions (console design 5.2). */
   learning_run: ObjectLearningState;
+  /** When a learning pass last ran, and the automatic changes of the last week (console design 2.1). */
+  learning_status: ObjectLearningStatus;
   /** Whether the model's last call gave an answer: `ok`, `failing`, or `unknown`. */
   agent_health: ObjectAgentHealth;
 }
 
 export type ObjectAgentHealth = "ok" | "failing" | "unknown";
+
+/** The learning task's automatic changes as the learning settings show them (console design 2.1). */
+export interface ObjectLearningStatus {
+  /** RFC 3339 UTC of the last pass, or null when no pass has run yet. */
+  last_pass_at: string | null;
+  /** Automatic tightenings of the last seven days, counted over the last 20 automatic versions. */
+  auto_tighten_7d: number;
+  /** Automatic pauses of the last seven days, counted over the same versions. */
+  auto_pause_7d: number;
+}
 
 /** The learning task as the status bar shows it (console design 3.2). */
 export interface ObjectLearningState {

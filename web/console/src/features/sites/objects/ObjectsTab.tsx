@@ -364,8 +364,7 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
           agentHealth={data.agent_health}
           features={data.features}
           learning={data.learning_run}
-          events={data.events}
-          now={now}
+          status={data.learning_status}
           onOpenEvents={(kind) => {
             setLearningOpen(false);
             setSearch({ objevents: "open", objkind: kind }, true);
