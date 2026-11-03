@@ -33,8 +33,8 @@ pub const KEY_MAX: usize = 256;
 const CLASS_ID_MIN: usize = 3;
 const CLASS_ID_MAX: usize = 24;
 /// Longest display name and description, in characters.
-const NAME_MAX: usize = 32;
-const DESCRIPTION_MAX: usize = 200;
+pub(crate) const NAME_MAX: usize = 32;
+pub(crate) const DESCRIPTION_MAX: usize = 200;
 
 /// One kind of object (the object-map design note, section 1, "类别").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,12 +116,12 @@ pub struct LearningThresholds {
     pub sessions: u32,
 }
 
-/// The learning agent's settings. The agent is not built yet, so it stays off.
+/// The learning agent's settings. The agent answers the positions the rules cannot decide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LearningAgent {
-    /// Ask the agent about positions the rules cannot decide. Only true once an
-    /// agent is configured, so a site may not switch it on before then.
+    /// Ask the agent about positions the rules cannot decide. The control plane asks only
+    /// when an agent model is configured, so a site may switch it on before then and wait.
     pub enabled: bool,
     /// Most questions the agent may be asked in a day.
     pub daily_limit: u32,
@@ -308,18 +308,17 @@ impl From<ObjectMap> for ObjectMapDto {
 }
 
 /// The learning settings a site may hold. The thresholds are at least one and at most
-/// [`THRESHOLD_MAX`], the agent's daily limit at most [`AGENT_DAILY_MAX`]. The agent
-/// may not be switched on: none is built yet, so nothing would answer its questions.
+/// [`THRESHOLD_MAX`], the agent's daily limit at most [`AGENT_DAILY_MAX`]. Whether the
+/// agent has a model to ask is the control plane's to say, so a site may switch it on.
 fn valid_learning(learning: &LearningSettings) -> bool {
     (1..=THRESHOLD_MAX).contains(&learning.thresholds.uses)
         && (1..=THRESHOLD_MAX).contains(&learning.thresholds.sessions)
         && learning.agent.daily_limit <= AGENT_DAILY_MAX
-        && !learning.agent.enabled
 }
 
 /// `lower-case` letters only, 3 to 24 bytes, as the kind rules of the
 /// field-kind declarations use.
-fn valid_class_id(id: &str) -> bool {
+pub(crate) fn valid_class_id(id: &str) -> bool {
     (CLASS_ID_MIN..=CLASS_ID_MAX).contains(&id.len())
         && id.bytes().all(|byte| byte.is_ascii_lowercase())
 }
@@ -456,12 +455,12 @@ mod tests {
             r#"{"learning":{"thresholds":{"uses":10001}}}"#.to_owned(),
             r#"{"learning":{"thresholds":{"sessions":-1}}}"#.to_owned(),
             r#"{"learning":{"agent":{"daily_limit":100001}}}"#.to_owned(),
-            // the agent is not built yet, so a site may not switch it on
-            r#"{"learning":{"agent":{"enabled":true}}}"#.to_owned(),
         ];
         for text in refused {
             assert!(map(&text).is_err(), "should be refused: {text}");
         }
+        // the agent may be switched on: the control plane decides whether it has a model to ask
+        assert!(map(r#"{"learning":{"agent":{"enabled":true}}}"#).is_ok());
     }
 
     #[test]

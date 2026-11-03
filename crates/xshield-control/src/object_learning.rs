@@ -3,11 +3,13 @@
 //! site's cursor, counts the votes and refusals of the request positions, and
 //! writes the state of each position the rules judged: a proposal for a position
 //! the map does not know, or a confirmed position whose evidence now points at
-//! other kinds (suspended). An administrator confirms a proposal. The pass changes a
+//! other kinds (suspended). Where the rules cannot name a kind, the learning agent
+//! answers (`object_agent`). An administrator confirms a proposal. The pass changes a
 //! site configuration in one way only: with `auto_pause` on, a suspended position
 //! that the map declares is paused, as one new configuration version. The judge reads
 //! the paused entries from that configuration. A site turns the pass off, or sets how
-//! much evidence a proposal needs, with its `objects.learning` settings.
+//! much evidence a proposal needs and how many questions the agent may ask, with its
+//! `objects.learning` settings.
 
 use std::collections::BTreeSet;
 
@@ -18,9 +20,14 @@ use xshield_core::context::learning::{
     kind_share, observe, propose,
 };
 use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec};
-use xshield_postgres::object_learning_store::{self as store, Cursor, Judgement, LearnedState};
-use xshield_postgres::site_spec_store::{self, Change};
+use xshield_postgres::object_agent_store::{self as runs, CALLS_KEEP_DAYS, Trigger};
+use xshield_postgres::object_learning_store::{
+    self as store, Cursor, Judgement, LearnedState, Source,
+};
+use xshield_postgres::site_spec_store::{self, Change, SiteRecord};
 
+use crate::agent_model::AgentModel;
+use crate::object_agent::{self, Place, Run};
 use crate::params::DAY_MILLIS;
 
 /// Decision rows this old are read. Newer rows may still be on their way from a gateway.
@@ -30,9 +37,26 @@ const BATCH_ROWS: i64 = 5_000;
 /// Batches read per site in one pass. A site still behind resumes at its cursor next time.
 const BATCHES_PER_PASS: usize = 20;
 
-/// Runs one learning pass over every site at `now_millis`. A site that fails is
-/// logged, and the other sites still run.
+/// Runs one learning pass over every site at `now_millis`, the hourly one. The agent
+/// asks the configured model, when there is one. A site that fails is logged, and the
+/// other sites still run.
 pub async fn learn_once(pool: &PgPool, now_millis: i64) {
+    let model = crate::agent_model::configured(pool).await;
+    learn_all(
+        pool,
+        now_millis,
+        model.as_ref().map(|model| model as &dyn AgentModel),
+        Trigger::Scheduled,
+    )
+    .await;
+}
+
+pub(crate) async fn learn_all(
+    pool: &PgPool,
+    now_millis: i64,
+    model: Option<&dyn AgentModel>,
+    trigger: Trigger,
+) {
     let records = match site_spec_store::list(pool).await {
         Ok(records) => records,
         Err(error) => {
@@ -41,13 +65,72 @@ pub async fn learn_once(pool: &PgPool, now_millis: i64) {
         }
     };
     for record in &records {
-        if let Err(error) = learn_site(pool, &record.spec, record.created_at, now_millis).await {
+        if let Err(error) = run_site(
+            pool,
+            &record.spec,
+            record.created_at,
+            now_millis,
+            model,
+            trigger,
+        )
+        .await
+        {
             eprintln!(
                 "xshield-control: object learning failed for site {}: {error}",
                 record.spec.name()
             );
         }
     }
+}
+
+/// Runs one site's learning now, on the administrator's request, as the hourly pass does.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub(crate) async fn run_manual(
+    pool: &PgPool,
+    record: &SiteRecord,
+) -> Result<(), store::LearningStoreError> {
+    let model = crate::agent_model::configured(pool).await;
+    run_site(
+        pool,
+        &record.spec,
+        record.created_at,
+        crate::params::now_millis(),
+        model.as_ref().map(|model| model as &dyn AgentModel),
+        Trigger::Manual,
+    )
+    .await
+}
+
+/// Runs one site's learning once and keeps its run record: when it started, what it did,
+/// and why it failed, if it did. A run of a site replaced by another configuration in the
+/// meantime records nothing.
+async fn run_site(
+    pool: &PgPool,
+    spec: &SiteSpec,
+    generation: DateTime<Utc>,
+    now_millis: i64,
+    model: Option<&dyn AgentModel>,
+    trigger: Trigger,
+) -> Result<(), store::LearningStoreError> {
+    let site = spec.name();
+    let Some(run_id) = runs::start_run(pool, site, generation, trigger, now_millis).await? else {
+        return Ok(());
+    };
+    let mut run = Run::new(model, Some(run_id));
+    let result = learn_site(pool, spec, generation, now_millis, &mut run).await;
+    let error = result.as_ref().err().map(ToString::to_string);
+    runs::finish_run(
+        pool,
+        run_id,
+        &run.counts,
+        error.as_deref(),
+        crate::params::now_millis(),
+    )
+    .await?;
+    runs::prune_runs(pool, site).await?;
+    result
 }
 
 /// Reads one site's decision log from its cursor up to the lag horizon, batch by
@@ -66,6 +149,7 @@ async fn learn_site(
     spec: &SiteSpec,
     generation: DateTime<Utc>,
     now_millis: i64,
+    run: &mut Run<'_>,
 ) -> Result<(), store::LearningStoreError> {
     let site = spec.name();
     if !spec.objects().learning().auto_learn {
@@ -117,7 +201,15 @@ async fn learn_site(
             let evidence = store::load_evidence(pool, site, &slots, oldest_day).await?;
             for slot in &slots {
                 if let Some(evidence) = evidence.get(slot) {
-                    judge(pool, spec, generation, slot, evidence, today, now_millis).await?;
+                    let place = Place {
+                        spec,
+                        generation,
+                        slot,
+                        evidence,
+                        today,
+                        now_millis,
+                    };
+                    settle_and_judge(run, pool, &place).await?;
                 }
             }
         }
@@ -128,43 +220,96 @@ async fn learn_site(
         }
     }
     store::prune_evidence(pool, site, oldest_day).await?;
-    rejudge_proposals(pool, spec, generation, oldest_day, today, now_millis).await?;
+    runs::prune_calls(pool, site, today.saturating_sub(CALLS_KEEP_DAYS)).await?;
+    rejudge_proposals(run, pool, spec, generation, oldest_day, today, now_millis).await?;
+    let requested = runs::requested_slots(pool, site).await?;
+    if !requested.is_empty() {
+        let evidence = store::load_evidence(pool, site, &requested, oldest_day).await?;
+        let empty = Evidence::default();
+        for slot in &requested {
+            let evidence = evidence.get(slot).unwrap_or(&empty);
+            let place = Place {
+                spec,
+                generation,
+                slot,
+                evidence,
+                today,
+                now_millis,
+            };
+            settle_and_judge(run, pool, &place).await?;
+        }
+    }
     pause_drifted(pool, site, generation).await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
     store::prune_retired(pool, site, today.saturating_sub(KEEP_RETIRED_DAYS)).await?;
     Ok(())
 }
 
+/// Settles one position: the learning agent first, when the rules cannot decide it, and
+/// the rules otherwise. See `object_agent::settle`.
+async fn settle_and_judge(
+    run: &mut Run<'_>,
+    pool: &PgPool,
+    place: &Place<'_>,
+) -> Result<(), store::LearningStoreError> {
+    if object_agent::settle(run, pool, place).await? {
+        return Ok(());
+    }
+    judge(run, pool, place).await
+}
+
 /// Writes the state the rules give one position. When the rules give it no proposal,
 /// an earlier proposal of the position is withdrawn.
 async fn judge(
+    run: &mut Run<'_>,
     pool: &PgPool,
-    spec: &SiteSpec,
-    generation: DateTime<Utc>,
-    slot: &str,
-    evidence: &Evidence,
-    today: u64,
-    now_millis: i64,
+    place: &Place<'_>,
 ) -> Result<(), store::LearningStoreError> {
-    let Some(decision) = decide(slot, evidence, spec.objects(), today) else {
-        return store::withdraw_proposal(pool, spec.name(), generation, slot, now_millis).await;
+    let Some(decision) = decide(
+        place.slot,
+        place.evidence,
+        place.spec.objects(),
+        place.today,
+    ) else {
+        return store::withdraw_proposal(
+            pool,
+            place.spec.name(),
+            place.generation,
+            place.slot,
+            place.now_millis,
+        )
+        .await;
     };
+    if decision.state == LearnedState::Proposed
+        && !object_agent::was_proposed(pool, place.spec.name(), place.slot).await?
+    {
+        run.counts.proposals = run.counts.proposals.saturating_add(1);
+    }
     let judgement = Judgement {
-        slot,
+        slot: place.slot,
         state: decision.state,
         class: &decision.class,
         votes: decision.votes,
         sessions: decision.sessions,
         share_per_mille: decision.share_per_mille,
         last_day: decision.last_day,
+        source: Source::Rule,
     };
-    store::put_judgement(pool, spec.name(), generation, &judgement, now_millis).await
+    store::put_judgement(
+        pool,
+        place.spec.name(),
+        place.generation,
+        &judgement,
+        place.now_millis,
+    )
+    .await
 }
 
 /// Judges every proposal of the site again. The window has moved on and refusals may
 /// have arrived since a proposal was made, so a proposal the rules no longer make is
 /// withdrawn, and one that still stands keeps its place with its current counts.
 async fn rejudge_proposals(
+    run: &mut Run<'_>,
     pool: &PgPool,
     spec: &SiteSpec,
     generation: DateTime<Utc>,
@@ -181,7 +326,15 @@ async fn rejudge_proposals(
     let empty = Evidence::default();
     for slot in &slots {
         let evidence = evidence.get(slot).unwrap_or(&empty);
-        judge(pool, spec, generation, slot, evidence, today, now_millis).await?;
+        let place = Place {
+            spec,
+            generation,
+            slot,
+            evidence,
+            today,
+            now_millis,
+        };
+        settle_and_judge(run, pool, &place).await?;
     }
     Ok(())
 }
@@ -259,7 +412,7 @@ struct Decision {
 }
 
 /// The thresholds a site's learning settings give the rules. The share is the design's own.
-fn thresholds_of(learning: &LearningSettings) -> Thresholds {
+pub(crate) fn thresholds_of(learning: &LearningSettings) -> Thresholds {
     Thresholds {
         votes: learning.thresholds.uses,
         sessions: learning.thresholds.sessions,
@@ -447,12 +600,12 @@ mod tests {
 /// (`XSHIELD_TEST_DATABASE_BASE_URL`, a server URL without a database name) and
 /// return at once without one, as the migration tests do.
 #[cfg(test)]
-mod pass_tests {
+pub(crate) mod pass_tests {
     use super::*;
     use crate::MIGRATOR;
     use sqlx::{AssertSqlSafe, PgPool};
 
-    async fn scratch(tag: &str) -> Option<(PgPool, PgPool, String)> {
+    pub(crate) async fn scratch(tag: &str) -> Option<(PgPool, PgPool, String)> {
         let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL").ok()?;
         let admin = PgPool::connect(&format!("{base}/postgres"))
             .await
@@ -473,7 +626,7 @@ mod pass_tests {
         Some((admin, pool, name))
     }
 
-    async fn drop_scratch(admin: PgPool, pool: PgPool, name: String) {
+    pub(crate) async fn drop_scratch(admin: PgPool, pool: PgPool, name: String) {
         pool.close().await;
         sqlx::query(AssertSqlSafe(format!("DROP DATABASE {name}")))
             .execute(&admin)
@@ -488,7 +641,7 @@ mod pass_tests {
     }
 
     /// The clinic site with the learning settings `learning`, or the defaults when null.
-    fn clinic_with(learning: serde_json::Value) -> SiteSpec {
+    pub(crate) fn clinic_with(learning: serde_json::Value) -> SiteSpec {
         let mut objects = serde_json::json!({
             "classes": [{"id": "doctor", "name": "医生"}],
             "slots": [{"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "admin"}]
@@ -509,7 +662,7 @@ mod pass_tests {
 
     /// Partitions for the days the test rows fall on. The pass reads from its
     /// cursor, so rows must exist before the first pass.
-    async fn partitions(pool: &PgPool, now: i64) {
+    pub(crate) async fn partitions(pool: &PgPool, now: i64) {
         let days: Vec<i64> = (0..=5).map(|days| now - days * DAY_MILLIS).collect();
         crate::test_support::ensure_days(pool, &days).await;
     }
