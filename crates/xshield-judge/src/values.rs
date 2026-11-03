@@ -10,6 +10,10 @@ use serde_json::Value;
 use xshield_core::context::{SHAPE_FIELDS_MAX, ShapeField};
 use xshield_core::kind::kind_words;
 
+// The field and location rules are shared with the control plane's impact preview,
+// so both read them from `xshield_core::kind`.
+pub use xshield_core::kind::{is_id_like, path_segment};
+
 /// Longest value kept; longer scalars are not object references.
 pub const VALUE_MAX_CHARS: usize = 128;
 /// Most values taken from one response.
@@ -78,18 +82,6 @@ pub struct ResponseFacts {
 
 /// The longest response position kept, in bytes.
 const AT_MAX: usize = 128;
-
-/// Whether a field name reads like an object identifier.
-#[must_use]
-pub fn is_id_like(field: &str) -> bool {
-    let lower = field.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "id" | "uuid" | "guid" | "pk" | "key" | "ref" | "link"
-    ) || ["id", "_id", "no", "num", "code", "uuid", "ref"]
-        .iter()
-        .any(|suffix| lower.ends_with(suffix))
-}
 
 /// What a request value is for the access question: `reference` where an
 /// object reference would sit (an id-like path segment, or a field whose name
@@ -206,13 +198,6 @@ fn inert_value(key: Option<&str>, value: &str) -> bool {
             (is_word(value) || is_date(value)) && !is_id_like(key) && !is_identity_key(key)
         }
     }
-}
-
-/// The index of the path segment a value sits in, from its location: `path[2]`
-/// is segment 2 among the non-empty segments. `None` for any other location.
-#[must_use]
-pub fn path_segment(at: &str) -> Option<usize> {
-    at.strip_prefix("path[")?.strip_suffix(']')?.parse().ok()
 }
 
 /// Percent-decodes `text`; `plus` also maps `+` to a space (query and forms).

@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
-use xshield_core::kind::{Rules, Shown, Used, affinity, declares, names_kind, shows_kind};
+use xshield_core::kind::{Rules, Shown, Used, affinity, declares, shown_as};
 
 use crate::values::{ResponseValue, is_id_like};
 
@@ -26,8 +26,9 @@ pub const RECENT_MAX: usize = 50;
 pub const IDLE_MAX_MS: u64 = 24 * 60 * 60 * 1000;
 /// Most sessions held at once.
 pub const SESSIONS_MAX: usize = 20_000;
-/// Values at least this long are specific enough to fast-allow when seen.
-pub const LONG_VALUE_CHARS: usize = 8;
+/// Values at least this long are specific enough to fast-allow when seen (the rule lives in
+/// `xshield_core::kind`, where the impact preview reads it too).
+pub use xshield_core::kind::LONG_VALUE_CHARS;
 /// Default time a positive judgement is reused, in minutes (docs/01 section
 /// 1.4 step 5). A site may change it with `advanced.allow_cache_minutes`.
 pub const CACHE_MINUTES: u32 = 10;
@@ -238,14 +239,14 @@ impl Seen {
     ) -> bool {
         let long = used.value.chars().count() >= LONG_VALUE_CHARS;
         self.origins.iter().any(|origin| {
-            let shown = as_shown(origin);
-            let identifier = is_id_like(&origin.field) || declares(shown, rules);
-            match (request_object, origin_object(origin)) {
-                (Some(wanted), Some(kind)) => wanted == kind,
-                (None, Some(kind)) => names_kind(used, rules, kind),
-                (Some(wanted), None) => identifier && (long || shows_kind(shown, rules, wanted)),
-                (None, None) => identifier && (long || affinity(shown, used, rules)),
-            }
+            shown_as(
+                used,
+                as_shown(origin),
+                request_object,
+                origin_object(origin),
+                rules,
+                long,
+            )
         })
     }
 

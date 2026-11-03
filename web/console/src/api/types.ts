@@ -1065,7 +1065,12 @@ export type ObjectsFilter = {
   state?: ObjectState;
   class?: string;
   q?: string;
+  source?: ObjectSource;
+  agent?: ObjectAgentFilter;
 };
+
+/** The agent's filters of the position table, offered with the agent on (console design 3.5). */
+export type ObjectAgentFilter = "waiting" | "failed";
 
 export interface ObjectCounts {
   classes: number;
@@ -1134,6 +1139,8 @@ export interface ObjectSlotRow {
   dismissed: boolean;
   /** Whether the saved configuration still has this position's entry, so the judge still uses it (console design 6 D). */
   in_effect: boolean;
+  /** The learning agent's status of a learned request position, or null when it has none. */
+  agent_status: ObjectAgentStatus | null;
   /** Only while the position is suspended (state `suspended`); null otherwise. */
   suspension: ObjectSuspension | null;
 }
@@ -1213,12 +1220,6 @@ export interface ObjectFeatures {
 }
 
 /** When the learning task last ran, and how often it tightened or paused in the last 7 days. */
-export interface LearningStatus {
-  last_pass_at: string | null;
-  auto_tighten_7d: number;
-  auto_pause_7d: number;
-}
-
 /** `GET /api/sites/{name}/objects`: counts of the whole map, the classes, and the slots the filter matches. */
 export interface ObjectsResponse {
   counts: ObjectCounts;
@@ -1229,8 +1230,65 @@ export interface ObjectsResponse {
   /** The automatic changes of the last 30 days, newest first; the banner and the list show the open ones. */
   events: ObjectEvent[];
   features: ObjectFeatures;
-  learning_status: LearningStatus;
+  /** The learning task: the last run, the next one, and the agent's day and waiting positions (console design 5.2). */
+  learning_run: ObjectLearningState;
+  /** Whether the model's last call gave an answer: `ok`, `failing`, or `unknown`. */
+  agent_health: ObjectAgentHealth;
 }
+
+export type ObjectAgentHealth = "ok" | "failing" | "unknown";
+
+/** The learning task as the status bar shows it (console design 3.2). */
+export interface ObjectLearningState {
+  last: ObjectRun | null;
+  /** RFC 3339 UTC: the next scheduled run, or null when automatic learning is off. */
+  next_at: string | null;
+  running: boolean;
+  agent_today: { used: number; limit: number };
+  /** Positions waiting for the agent. */
+  agent_waiting: number;
+  /** Positions whose latest call gave no usable answer. */
+  agent_failed: number;
+}
+
+/** One learning run of a site (console design 3.3). */
+export interface ObjectRun {
+  id: number;
+  /** RFC 3339 UTC. */
+  at: string;
+  trigger: "scheduled" | "manual";
+  duration_ms: number | null;
+  proposals: number;
+  tightened: number;
+  paused: number;
+  agent: { asked: number; answered: number; failed: number; skipped: number };
+  /** The run's failure, as the server words it; null for a run that finished. */
+  error: string | null;
+}
+
+/** One question the agent was asked in a run: its answer, and the position it was about. */
+export interface ObjectRunCall extends ObjectAgent {
+  id: number;
+  /** The position's key. */
+  key: string;
+  /** The console's id of the position, when the site keeps one. */
+  position: string | null;
+  votes: number;
+  latency_ms: number;
+}
+
+/** `GET …/objects/runs/{id}`: the run and its calls. */
+export interface ObjectRunDetail extends ObjectRun {
+  calls: ObjectRunCall[];
+}
+
+/** `GET …/objects/runs`: the newest runs of a site. */
+export interface ObjectRunsResponse {
+  runs: ObjectRun[];
+}
+
+/** `GET …/objects/agent-sample`: the question for one waiting position, as the agent gets it. Never values. */
+export type ObjectAgentInput = unknown;
 
 /** Where a position's values travel: the other end of each flow, with its share and evidence. */
 export interface ObjectFlow {
@@ -1258,15 +1316,41 @@ export interface ObjectFormat {
   rest: string | null;
 }
 
-/** The agent's conclusion for a position; its reason is model output and is rendered as text only. */
-export interface ObjectAgentVerdict {
-  /** A class id, `new` or `ambiguous`. */
-  choice: string;
-  /** 0 to 1. */
-  confidence: number;
-  /** The evidence the verdict cites, e.g. `f1`, `endpoint_shape`. */
+/** The learning agent's status for a position (console design 5.2). */
+export type ObjectAgentStatus = "queued" | "skipped_budget" | "answered" | "failed";
+
+/** A class the agent proposed that does not exist yet. */
+export interface ObjectNewClass {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/**
+ * The learning agent's answer and state for a position. The reason and the new class's words are model output and
+ * are rendered as text only.
+ */
+export interface ObjectAgent {
+  status: ObjectAgentStatus;
+  /** RFC 3339 UTC: when the agent was last asked, or null. */
+  asked_at: string | null;
+  /** The model's name, or null when no call was made. Never the key. */
+  model: string | null;
+  attempts: number;
+  /** A class id, `new`, `ambiguous`, or null when there is no answer. */
+  choice: string | null;
+  new_class: ObjectNewClass | null;
+  /** 0 to 1, or null when there is no answer. */
+  confidence: number | null;
+  /** The evidence the answer cites, e.g. `f1`, `endpoint_shape`. */
   cites: string[];
-  reason: string;
+  reason: string | null;
+  /** The class the rules gave, when they disagreed with the answer. */
+  rule_choice: string | null;
+  /** Why no answer was usable, e.g. `timeout`, `not_json`; null when there was an answer. */
+  failure: string | null;
+  /** The question as the agent was given it: positions, flows and candidates, no values. */
+  input: unknown;
 }
 
 export interface ObjectHistoryEntry {
@@ -1288,8 +1372,8 @@ export interface ObjectSlotDetail extends ObjectSlotRow {
   format?: ObjectFormat;
   /** Only when the class depends on a condition (later PR), e.g. `由 query.by 决定：id 为患者`. */
   condition?: string;
-  /** Only when the agent was asked about this position. */
-  agent?: ObjectAgentVerdict;
+  /** The learning agent's answer and state, when it was asked about this position or is waiting for it. */
+  agent: ObjectAgent | null;
   history: ObjectHistoryEntry[];
   /** Effects of confirming the proposal, in the impact preview's shape. */
   impact: ImpactChange[];
@@ -1304,8 +1388,8 @@ export interface BootstrapCandidate {
   side: ObjectSide;
   /** Proposed class id, e.g. `doctor`. */
   kind: string;
-  /** Proposed name in words, e.g. `医生`. */
-  name: string;
+  /** Proposed name in words, e.g. `医生`. Null while the map has no class for `kind` yet: the kind stands in for it. */
+  name: string | null;
   reason: { code: NameReasonCode; word: string | null; field: string | null };
   /** Requests and sessions of the position in the window. */
   uses: number;

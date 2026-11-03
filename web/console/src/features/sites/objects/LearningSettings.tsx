@@ -1,23 +1,41 @@
-// The learning settings of a site's object map (console design 3.5): what learns on its own, what tightens by itself,
-// the agent and its daily cap, the thresholds, and the automatic pause. They are part of the site's configuration:
-// a change goes through the save dialog and makes a new version. The agent is greyed out with its reason when no
-// model is configured.
+// The learning settings of a site's object map (console design 3.1 and 3.5): what learns on its own, what tightens by
+// itself, the learning agent with its state and its daily cap, the thresholds, and the automatic pause. They are part of
+// the site's configuration: a change goes through the save dialog and makes a new version. The agent's switch stays off
+// while no model is configured, but an agent that is on can always be switched off; its line shows what the agent waits
+// for and offers the sample of what it is given.
 
 import { Drawer, Switch } from "antd";
-import type { LearningStatus, ObjectEventKind, ObjectFeatures } from "../../../api/types.ts";
+import { type ReactNode, useState } from "react";
+import type {
+  LearningSettings as Learning,
+  ObjectAgentHealth,
+  ObjectEvent,
+  ObjectEventKind,
+  ObjectFeatures,
+  ObjectLearningState,
+  SiteSpec,
+} from "../../../api/types.ts";
 import { hm } from "../../../features/system/clock.ts";
-import { useState } from "react";
-import type { LearningSettings as Learning, SiteSpec } from "../../../api/types.ts";
 import { effectiveLearning } from "../../../lib/objects-validate.ts";
-import { OBJECT_TEXT } from "../../../lib/vocab.ts";
+import { OBJECT_AGENT_TEXT, OBJECT_TEXT } from "../../../lib/vocab.ts";
+import { AgentSampleDialog } from "./AgentSampleDialog.tsx";
+import { ModelsLink } from "./ModelsLink.tsx";
+import { weekCount } from "./objects-agent.ts";
 import { withLearning } from "./objects-model.ts";
 
 type Props = {
+  /** The site's name: the sample of the agent's question is read for it. */
+  site: string;
   working: SiteSpec;
+  /** A model is configured: its address, its name and its key are all there (console design 3.1). */
   agentConfigured: boolean;
+  agentHealth: ObjectAgentHealth;
   /** What the gateway runs now: a part it does not run yet still saves, and its line says so. */
   features: ObjectFeatures;
-  status: LearningStatus;
+  learning: ObjectLearningState;
+  /** The automatic changes the map lists: the counts of the last week come from them. */
+  events: readonly ObjectEvent[];
+  now: number;
   /** Opens the list of automatic changes filtered to one kind (the counts in the status lines link to it). */
   onOpenEvents: (kind: ObjectEventKind) => void;
   onClose: () => void;
@@ -25,6 +43,7 @@ type Props = {
 };
 
 const text = OBJECT_TEXT.learning;
+const agentText = OBJECT_AGENT_TEXT.settings;
 
 /**
  * Whether the drawer can save a change. The gateway takes `objects.learning` since #124; set it to false to show the
@@ -33,10 +52,10 @@ const text = OBJECT_TEXT.learning;
 export const LEARNING_SAVE_READY = true;
 
 /**
- * Whether the drawer can turn the agent on. The learning agent is not on the gateway yet, and the gateway refuses
- * `agent.enabled: true` until it is, so the switch stays off.
+ * Whether the drawer can turn the agent on. The gateway refuses `agent.enabled: true` while no model is configured, so
+ * the switch stays off then; with the switch off no model is needed, and an agent that is on can always be switched off.
  */
-export const AGENT_SAVE_READY = false;
+export const AGENT_SAVE_READY = true;
 
 function sameLearning(a: Learning, b: Learning): boolean {
   return (
@@ -81,18 +100,21 @@ function NumberField({
 }
 
 export function LearningSettings({
+  site,
   working,
   agentConfigured,
+  agentHealth,
   features,
-  status,
+  learning,
+  events,
+  now,
   onOpenEvents,
   onClose,
   onApply,
 }: Props) {
-  const passAt = status.last_pass_at === null ? NaN : Date.parse(status.last_pass_at);
-  const lastPass = Number.isNaN(passAt) ? text.status.never : text.status.schedule(hm(passAt));
   const saved = effectiveLearning(working.objects?.learning);
   const [value, setValue] = useState<Learning>(saved);
+  const [sampleOpen, setSampleOpen] = useState(false);
   const editable = LEARNING_SAVE_READY;
   const changed = !sameLearning(value, saved);
   // The gateway's ranges (objects.learning in #124): thresholds 1 to 10000, the daily cap 0 to 100000.
@@ -107,8 +129,42 @@ export function LearningSettings({
     value.agent.daily_limit >= 0 &&
     value.agent.daily_limit <= 100000;
   const canSave = editable && changed && countsOk;
-  const agentReady = AGENT_SAVE_READY && agentConfigured;
-  const agentOn = agentReady && value.agent.enabled;
+  const agentOn = value.agent.enabled;
+  const canTurnOn = AGENT_SAVE_READY && agentConfigured;
+  const agentSwitchDisabled = !editable || (!agentOn && !canTurnOn);
+
+  const last = learning.last;
+  const lastPass =
+    last === null ? text.status.never : text.status.schedule(hm(Date.parse(last.at)));
+  const next = learning.next_at === null ? null : hm(Date.parse(learning.next_at));
+  const tightened = weekCount(events, "auto_tighten", now);
+  const paused = weekCount(events, "auto_pause", now);
+
+  // The agent's state under its switch (console design 3.1): no model, a failing model, or the positions it waits for.
+  const agentNotes: ReactNode[] = [];
+  if (!agentConfigured) {
+    agentNotes.push(
+      <span key="model" className="field-warn">
+        {agentText.noModel} · <ModelsLink>{agentText.configure}</ModelsLink>
+      </span>,
+    );
+  } else if (agentHealth === "failing") {
+    agentNotes.push(
+      <span key="model" className="field-warn">
+        {agentText.failingModel} · <ModelsLink>{agentText.viewModel}</ModelsLink>
+      </span>,
+    );
+  }
+  if (agentConfigured && learning.agent_waiting > 0) {
+    agentNotes.push(
+      <span key="waiting">
+        {agentText.waiting(learning.agent_waiting)} ·{" "}
+        <button type="button" className="linkbtn" onClick={() => setSampleOpen(true)}>
+          {agentText.sample}
+        </button>
+      </span>,
+    );
+  }
 
   return (
     <Drawer open placement="right" size={460} onClose={onClose} title={text.title}>
@@ -143,7 +199,7 @@ export function LearningSettings({
           <span className="small muted">
             {lastPass} ·{" "}
             <button type="button" className="linkbtn" onClick={() => onOpenEvents("auto_tighten")}>
-              {text.status.tightened(status.auto_tighten_7d)}
+              {text.status.tightened(tightened)}
             </button>
             {features.auto_tighten ? null : (
               <span className="field-warn"> · {text.status.notApplied}</span>
@@ -156,30 +212,37 @@ export function LearningSettings({
           <Switch
             aria-label={text.agent.name}
             checked={agentOn}
-            disabled={!agentReady || !editable}
+            disabled={agentSwitchDisabled}
             checkedChildren={text.on}
             unCheckedChildren={text.off}
             onChange={(checked) =>
               setValue({ ...value, agent: { ...value.agent, enabled: checked } })
             }
           />
-          <span className="obj-learning-help">
-            {text.agent.help}
-            {agentReady
-              ? ""
-              : `。${agentConfigured ? text.agent.notReady : text.agent.unavailable}`}
-          </span>
-          <span className="small">{text.agent.daily}</span>
-          <NumberField
-            label={text.agent.daily}
-            value={value.agent.daily_limit}
-            min={0}
-            max={100000}
-            disabled={!agentOn || !editable}
-            onChange={(daily) =>
-              setValue({ ...value, agent: { ...value.agent, daily_limit: daily } })
-            }
-          />
+          <span className="obj-learning-help">{text.agent.help}</span>
+          {agentNotes.length === 0 ? null : (
+            <div className="obj-learning-wide small">{agentNotes}</div>
+          )}
+          {agentOn ? (
+            <div className="obj-learning-wide">
+              <span className="row small">
+                <span>{text.agent.daily}</span>
+                <NumberField
+                  label={text.agent.daily}
+                  value={value.agent.daily_limit}
+                  min={0}
+                  max={100000}
+                  disabled={!editable}
+                  onChange={(daily) =>
+                    setValue({ ...value, agent: { ...value.agent, daily_limit: daily } })
+                  }
+                />
+                <span>{agentText.dailyUnit}</span>
+                <span className="muted">{agentText.usage(learning.agent_today.used, next)}</span>
+              </span>
+              <span className="obj-learning-help">{agentText.hint}</span>
+            </div>
+          ) : null}
         </div>
 
         <div className="obj-learning-row">
@@ -223,7 +286,7 @@ export function LearningSettings({
           <span className="obj-learning-help">{text.autoPause.help}</span>
           <span className="small muted">
             <button type="button" className="linkbtn" onClick={() => onOpenEvents("auto_pause")}>
-              {text.status.paused(status.auto_pause_7d)}
+              {text.status.paused(paused)}
             </button>
             {features.auto_pause ? null : (
               <span className="field-warn"> · {text.status.notApplied}</span>
@@ -243,6 +306,7 @@ export function LearningSettings({
           </button>
         </div>
       </div>
+      {sampleOpen ? <AgentSampleDialog site={site} onClose={() => setSampleOpen(false)} /> : null}
     </Drawer>
   );
 }

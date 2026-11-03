@@ -76,5 +76,7 @@
       "kind": "back_to_jev",
       "count": 14
     }
-  ]
+  ],
+  "agent_status": null,
+  "agent": null
 }

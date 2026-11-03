@@ -9,14 +9,14 @@
 import { Link } from "@tanstack/react-router";
 import { Drawer } from "antd";
 import { useState } from "react";
-import { useAckEvent, useObjectSlot, useSlotLearning } from "../../../api/queries.ts";
+import { useAckEvent, useAskAgent, useObjectSlot, useSlotLearning } from "../../../api/queries.ts";
 import type {
   FieldKindDeclaration,
-  ObjectAgentVerdict,
   ObjectClass,
   ObjectConfigEntry,
   ObjectFeatures,
   ObjectFlow,
+  ObjectNewClass,
   ObjectSource,
   SiteSpec,
 } from "../../../api/types.ts";
@@ -33,14 +33,15 @@ import {
 import {
   DECLARE_TEXT,
   IMPACT_INFO,
+  OBJECT_AGENT_TEXT,
   OBJECT_SIDE_INFO,
   OBJECT_SOURCE_LABEL,
-  OBJECT_STATE_INFO,
   OBJECT_TEXT,
 } from "../../../lib/vocab.ts";
-import { ErrorBar, Kv, Loading, Notice } from "../../../ui/Page.tsx";
+import { ErrorBar, Loading, Notice } from "../../../ui/Page.tsx";
 import { RequestLink } from "../../../ui/RequestRef.tsx";
 import { SafeText } from "../../../ui/SafeText.tsx";
+import { AgentVerdict, type VerdictAction } from "./AgentVerdict.tsx";
 import { ClassPicker, NEW_CLASS } from "./ClassPicker.tsx";
 import {
   type ApplyOptions,
@@ -55,6 +56,7 @@ import {
   withoutDeclaration,
   withoutSlot,
 } from "./objects-model.ts";
+import { disagrees, refusalWord } from "./objects-agent.ts";
 import { PathSlotLabel } from "./PathSlotLabel.tsx";
 import { StateTag } from "./SlotTable.tsx";
 import { SuspensionSection } from "./SuspensionSection.tsx";
@@ -67,18 +69,20 @@ type Props = {
   working: SiteSpec;
   features: ObjectFeatures;
   now: number;
+  /** The agent is on in the saved configuration: a question is asked only then (console design 3.4). */
+  agentOn: boolean;
+  /** The agent's calls today against the site's daily limit. */
+  today: { used: number; limit: number };
+  /** RFC 3339 UTC: the next learning run, or null when automatic learning is off. */
+  nextAt: string | null;
   onClose: () => void;
   onApply: (spec: SiteSpec, options?: ApplyOptions) => void;
-  /** Opens the declaration dialog with this field and scope, to choose another class (field positions). */
-  onReclass: (field: string, scope: string) => void;
+  /**
+   * Opens the declaration dialog with this field and scope, to choose another class (field positions). A kind the agent
+   * proposed is passed as its id, so the dialog starts with it.
+   */
+  onReclass: (field: string, scope: string, kind?: string) => void;
 };
-
-/** The agent's choice in words: a class, a new class, or an ambiguous position. */
-function agentChoiceText(verdict: ObjectAgentVerdict, classes: readonly ObjectClass[]): string {
-  if (verdict.choice === "new") return OBJECT_TEXT.declare.kindNew;
-  if (verdict.choice === "ambiguous") return OBJECT_STATE_INFO.ambiguous.name;
-  return classNameOf(classes, verdict.choice);
-}
 
 /** The label of a path position: its parameter number, or its segment when that segment is not a parameter. */
 function pathLabelOf(path: PathSlot): string {
@@ -148,6 +152,9 @@ export function SlotDrawer({
   working,
   features,
   now,
+  agentOn,
+  today,
+  nextAt,
   onClose,
   onApply,
   onReclass,
@@ -155,9 +162,12 @@ export function SlotDrawer({
   const detail = useObjectSlot(site, slotId);
   const learning = useSlotLearning();
   const ack = useAckEvent();
+  const ask = useAskAgent();
   const [highlight, setHighlight] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
+  // Where a class picked here comes from: the administrator's own choice, or the agent's proposed new kind.
+  const [pickSource, setPickSource] = useState<ObjectSource>("admin");
   const [pickClass, setPickClass] = useState("");
   const [pickNewId, setPickNewId] = useState("");
   const [pickNewName, setPickNewName] = useState("");
@@ -261,7 +271,7 @@ export function SlotDrawer({
     const pickedClass = pickClass === NEW_CLASS ? pickNewId.trim().toLowerCase() : pickClass;
     const pickedName = pickClass === NEW_CLASS ? pickNewName.trim() : className(pickedClass);
     const pickEntry: ObjectConfigEntry | null =
-      picking && path !== null && pickedClass.length > 0 ? entryOf(pickedClass, "admin") : null;
+      picking && path !== null && pickedClass.length > 0 ? entryOf(pickedClass, pickSource) : null;
     const pickProblem = (): string | null => {
       if (pickEntry === null) return OBJECT_TEXT.pathParam.pickNote;
       if (pickClass === NEW_CLASS) {
@@ -333,8 +343,90 @@ export function SlotDrawer({
     };
     const reclass = () => {
       if (field !== null) onReclass(field, scope);
-      else setPicking((value) => !value);
+      else {
+        setPickSource("admin");
+        setPicking((value) => !value);
+      }
     };
+
+    // The learning agent's decisions (console design 3.4). A class is confirmed as the source that chose it. A kind the
+    // agent proposed opens the same dialog or picker as a reclassification, with the agent's id and name filled in.
+    const decidable = !paused && data.state !== "confirmed";
+    const confirmAs = (cls: string, source: ObjectSource) => {
+      const entry = entryOf(cls, source);
+      if (blockOf(entry) !== null) return;
+      commit(withEntryAndClass(entry));
+    };
+    const newKindOpen = (kind: ObjectNewClass) => {
+      setNotice(null);
+      if (field !== null) {
+        onReclass(field, scope, kind.id);
+        return;
+      }
+      setPickSource("agent");
+      setPickClass(NEW_CLASS);
+      setPickNewId(kind.id);
+      setPickNewName(kind.name);
+      setPicking(true);
+    };
+    const keepAmbiguous = () => {
+      setNotice(null);
+      if (data.state === "ambiguous") setNotice(OBJECT_AGENT_TEXT.keptAmbiguous);
+      else act("ambiguous");
+    };
+    const askAgain = () => {
+      setNotice(null);
+      ask.mutate(
+        { name: site, id: data.id },
+        { onSuccess: () => setNotice(OBJECT_AGENT_TEXT.askedQueued) },
+      );
+    };
+
+    const agent = data.agent;
+    const verdictActions: VerdictAction[] = [];
+    if (agent !== null && decidable && agent.choice !== null) {
+      const choice = agent.choice;
+      const ruleChoice = agent.rule_choice;
+      const disagreed = disagrees(agent);
+      if (disagreed && ruleChoice !== null) {
+        const ruleBlock = blockOf(entryOf(ruleChoice, "rule"));
+        verdictActions.push({
+          id: "rule",
+          label: OBJECT_AGENT_TEXT.confirmRule,
+          disabled: ruleBlock !== null,
+          title: ruleBlock ?? undefined,
+          onClick: () => confirmAs(ruleChoice, "rule"),
+        });
+      }
+      if (choice === "new") {
+        const kind = agent.new_class;
+        if (kind !== null) {
+          verdictActions.push({
+            id: "new",
+            label: OBJECT_AGENT_TEXT.newClassConfirm,
+            disabled: false,
+            onClick: () => newKindOpen(kind),
+          });
+        }
+      } else if (disagreed && choice !== "ambiguous") {
+        const agentBlock = blockOf(entryOf(choice, "agent"));
+        verdictActions.push({
+          id: "agent",
+          label: OBJECT_AGENT_TEXT.confirmAgent,
+          disabled: agentBlock !== null,
+          title: agentBlock ?? undefined,
+          onClick: () => confirmAs(choice, "agent"),
+        });
+      }
+      if (disagreed) {
+        verdictActions.push({
+          id: "keep",
+          label: OBJECT_AGENT_TEXT.keepAmbiguous,
+          disabled: learning.isPending,
+          onClick: keepAmbiguous,
+        });
+      }
+    }
 
     body = (
       <div className="stack">
@@ -453,44 +545,19 @@ export function SlotDrawer({
           </section>
         )}
 
-        {data.agent === undefined ? null : (
-          <section className="obj-section">
-            <div className="field-label">{OBJECT_TEXT.drawer.agent}</div>
-            <Kv
-              items={[
-                [
-                  OBJECT_TEXT.drawer.agentChoice,
-                  <SafeText key="choice" text={agentChoiceText(data.agent, classes)} />,
-                ],
-                [OBJECT_TEXT.drawer.agentConfidence, pct(data.agent.confidence)],
-                [
-                  OBJECT_TEXT.drawer.agentCites,
-                  <span key="cites" className="obj-ref-list">
-                    {data.agent.cites.map((cite) =>
-                      /^f[0-9]+$/.test(cite) ? (
-                        <button
-                          key={cite}
-                          type="button"
-                          className="linkbtn"
-                          onClick={() => setHighlight(cite)}
-                        >
-                          {cite}
-                        </button>
-                      ) : (
-                        <span key={cite} className="obj-code">
-                          <SafeText text={cite} />
-                        </span>
-                      ),
-                    )}
-                  </span>,
-                ],
-              ]}
-            />
-            <div className="small muted">{OBJECT_TEXT.drawer.agentReason}</div>
-            <div>
-              <SafeText text={data.agent.reason} />
-            </div>
-          </section>
+        {agent === null ? null : (
+          <AgentVerdict
+            agent={agent}
+            state={data.state}
+            classes={classes}
+            agentOn={agentOn}
+            today={today}
+            nextAt={nextAt}
+            asking={ask.isPending}
+            onAsk={askAgain}
+            onHighlight={setHighlight}
+            actions={verdictActions}
+          />
         )}
 
         <section className="obj-section">
@@ -599,6 +666,11 @@ export function SlotDrawer({
         {notice === null ? null : <Notice tone="info">{notice}</Notice>}
         {learning.isError ? <ErrorBar error={learning.error} /> : null}
         {ack.isError ? <ErrorBar error={ack.error} /> : null}
+        {ask.isError ? (
+          <div className="small field-warn">
+            {refusalWord(ask.error, OBJECT_AGENT_TEXT.askFailed)}
+          </div>
+        ) : null}
         {footReason === null ? null : <div className="small muted">{footReason}</div>}
         {inEffect ? (
           <div className="small muted">{OBJECT_TEXT.suspension.ambiguousAfterStop}</div>

@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::advanced::{Advanced, AdvancedDto};
-use super::objects::{ObjectMap, ObjectMapDto};
+use super::objects::{ObjectMap, ObjectMapDto, ObjectsIssue, ObjectsPlace};
 use super::route::{self, ROUTES_MAX, RequestView, Resolved, Route, overlaps};
 
 const NAME_MAX: usize = 64;
@@ -42,8 +42,8 @@ pub enum ConfigError {
     /// synonym group that is not two different words, or too many entries.
     Advanced,
     /// `objects` names an undeclared or malformed kind, repeats a position, or
-    /// holds more entries than the object map allows.
-    Objects,
+    /// holds more entries than the object map allows. The issue says which part.
+    Objects(ObjectsIssue),
 }
 
 impl std::fmt::Display for ConfigError {
@@ -58,7 +58,7 @@ impl std::fmt::Display for ConfigError {
             Self::Bypass => "SITE_CONFIG_BYPASS_INVALID",
             Self::Routes => "SITE_CONFIG_ROUTES_INVALID",
             Self::Advanced => "SITE_CONFIG_ADVANCED_INVALID",
-            Self::Objects => "SITE_CONFIG_OBJECTS_INVALID",
+            Self::Objects(_) => "SITE_CONFIG_OBJECTS_INVALID",
         })
     }
 }
@@ -274,12 +274,21 @@ impl TryFrom<SiteSpecDto> for SiteSpec {
         let objects = match dto.objects {
             None | Some(serde_json::Value::Null) => ObjectMap::default(),
             Some(section @ serde_json::Value::Object(_)) => {
-                let section: ObjectMapDto =
-                    serde_json::from_value(section).map_err(|_| ConfigError::Objects)?;
+                let section: ObjectMapDto = serde_json::from_value(section).map_err(|_| {
+                    ConfigError::Objects(ObjectsIssue {
+                        place: ObjectsPlace::Section,
+                        reason: None,
+                    })
+                })?;
                 ObjectMap::try_from(section)?
             }
             // A JSON array would be read as the positional form of the struct.
-            Some(_) => return Err(ConfigError::Objects),
+            Some(_) => {
+                return Err(ConfigError::Objects(ObjectsIssue {
+                    place: ObjectsPlace::Section,
+                    reason: None,
+                }));
+            }
         };
         let hosts = dto
             .hosts
@@ -516,6 +525,7 @@ fn valid_origin(origin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::objects::ObjectsReason;
     use super::*;
 
     const MINIMAL: &str = r#"{
@@ -670,17 +680,27 @@ mod tests {
         let again: SiteSpec = serde_json::from_str(&serde_json::to_string(&site).unwrap()).unwrap();
         assert_eq!(again.objects(), site.objects());
         // A position of an undeclared kind, a repeated position, and a section
-        // that is not an object are each refused as the objects section.
-        for objects in [
-            r#"{"classes":[],"slots":[{"key":"GET /d path[1]","class":"doctor","source":"admin"}]}"#,
-            r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+        // that is not an object are each refused as the objects section, and the
+        // refusal names the part that is wrong.
+        let refused = [
+            (
+                r#"{"classes":[],"slots":[{"key":"GET /d path[1]","class":"doctor","source":"admin"}]}"#,
+                ObjectsPlace::Slot(0),
+                Some(ObjectsReason::ClassUnknown),
+            ),
+            (
+                r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
                 {"key":"GET /d path[1]","class":"doctor","source":"admin"},
                 {"key":"GET /d path[1]","class":"doctor","source":"rule"}]}"#,
-            "[]",
-        ] {
+                ObjectsPlace::Slot(1),
+                Some(ObjectsReason::DuplicateKey),
+            ),
+            ("[]", ObjectsPlace::Section, None),
+        ];
+        for (objects, place, reason) in refused {
             assert_eq!(
                 SiteSpec::from_json(&with(objects)).unwrap_err(),
-                ConfigError::Objects,
+                ConfigError::Objects(ObjectsIssue { place, reason }),
                 "{objects}"
             );
         }
