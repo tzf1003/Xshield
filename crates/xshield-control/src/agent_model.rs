@@ -14,6 +14,9 @@ use hyper_util::{
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use xshield_core::model::ModelEndpoint;
+use xshield_postgres::key_seal::KeySealer;
+use xshield_postgres::model_config_store::{self, ModelConfigError};
 use zeroize::Zeroizing;
 
 /// Most bytes of a reply read. An answer is one small JSON object.
@@ -61,13 +64,6 @@ impl ChatModel {
     ///
     /// # Errors
     /// Returns a reason when the endpoint, the key, the name or the timeout is unusable.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "built once the model configuration is read from the store"
-        )
-    )]
     pub fn new(
         base_url: &str,
         api_key: &str,
@@ -184,13 +180,34 @@ impl AgentModel for ChatModel {
 
 /// The learning agent's model as the console configured it, when one is configured and
 /// usable. The configuration is read from the control plane's store, so the pass never
-/// depends on environment variables.
-#[expect(
-    clippy::unused_async,
-    reason = "reads the store once the model configuration lands"
-)]
-pub async fn configured(_pool: &PgPool) -> Option<ChatModel> {
-    None
+/// depends on environment variables. A key that is stored but cannot be opened counts as
+/// not configured, as does a store that cannot be read; the models page reports both.
+pub async fn configured(pool: &PgPool, sealer: Option<&KeySealer>) -> Option<ChatModel> {
+    match model_config_store::load_agent(pool, sealer).await {
+        Ok(Some(endpoint)) => model_of(&endpoint),
+        Ok(None) | Err(ModelConfigError::KeyUnavailable | ModelConfigError::KeyUnreadable) => None,
+        Err(error) => {
+            eprintln!("xshield-control: reading the learning agent's model failed: {error}");
+            None
+        }
+    }
+}
+
+/// The client for one stored endpoint, or `None` when the stored values are not usable.
+fn model_of(endpoint: &ModelEndpoint) -> Option<ChatModel> {
+    let timeout = Duration::from_millis(u64::from(endpoint.timeout_ms));
+    match ChatModel::new(
+        &endpoint.base_url,
+        endpoint.api_key.expose(),
+        &endpoint.model,
+        timeout,
+    ) {
+        Ok(model) => Some(model),
+        Err(reason) => {
+            eprintln!("xshield-control: the learning agent's model is not usable: {reason}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +218,7 @@ mod tests {
         net::{TcpListener, TcpStream},
         sync::oneshot,
     };
+    use xshield_core::model::ApiKey;
 
     use super::*;
 
@@ -414,5 +432,21 @@ mod tests {
             refusal("https://example.com/v1", "key", "model", Duration::ZERO),
             Some("the model or the timeout is not usable")
         );
+    }
+
+    #[test]
+    fn a_stored_endpoint_builds_the_client_and_an_unusable_one_does_not() {
+        let endpoint = ModelEndpoint {
+            base_url: "https://example.com/v1".to_owned(),
+            model: "model".to_owned(),
+            api_key: ApiKey::new("sk-test-key").expect("a printable key"),
+            timeout_ms: 20_000,
+        };
+        assert!(model_of(&endpoint).is_some());
+        let plain = ModelEndpoint {
+            base_url: "http://example.com/v1".to_owned(),
+            ..endpoint
+        };
+        assert!(model_of(&plain).is_none());
     }
 }
