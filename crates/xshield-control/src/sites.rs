@@ -379,7 +379,7 @@ fn spec_from_body(body: &Value) -> ApiResult<SiteSpec> {
 }
 
 /// The optional `note` of a write, at most [`NOTE_MAX_CHARS`] characters.
-fn note_from(body: &Value) -> ApiResult<Option<String>> {
+pub(crate) fn note_from(body: &Value) -> ApiResult<Option<String>> {
     match body.get("note") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(note)) if note.is_empty() => Ok(None),
@@ -391,7 +391,7 @@ fn note_from(body: &Value) -> ApiResult<Option<String>> {
 }
 
 /// The `expected_version` of a write: the version the caller last read.
-fn expected_version(body: &Value) -> ApiResult<i64> {
+pub(crate) fn expected_version(body: &Value) -> ApiResult<i64> {
     body.get("expected_version")
         .and_then(Value::as_i64)
         .ok_or_else(|| ApiError::invalid_body("expected_version"))

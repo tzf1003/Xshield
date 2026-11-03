@@ -40,16 +40,20 @@ fn probabilities(options: [&str; 3], winner: &str) -> Value {
 
 #[async_trait]
 impl JevPort for ScriptedJev {
-    fn model(&self) -> &'static str {
-        "scripted"
+    fn model(&self) -> String {
+        "scripted".to_owned()
     }
 
-    fn route(&self) -> &'static str {
-        "scripted"
+    fn route(&self) -> String {
+        "scripted".to_owned()
     }
 
-    fn endpoint_host(&self) -> &'static str {
-        "scripted.test"
+    fn endpoint(&self) -> String {
+        "https://scripted.test/v1/systemone".to_owned()
+    }
+
+    fn endpoint_host(&self) -> String {
+        "scripted.test".to_owned()
     }
 
     fn default_timeout(&self) -> Duration {

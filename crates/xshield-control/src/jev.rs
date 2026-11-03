@@ -127,7 +127,8 @@ pub struct JevStatusBody {
 }
 
 /// The Jev configuration one gateway reports: its route, endpoint host name, model,
-/// default timeout and prompt id. A value it does not report is `null`.
+/// default timeout, prompt id, and where its settings came from (docs/03 section 3.3).
+/// A value it does not report is `null`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JevConfigBody {
     pub route: Option<String>,
@@ -135,6 +136,26 @@ pub struct JevConfigBody {
     pub model: Option<String>,
     pub default_timeout_ms: Option<i64>,
     pub prompt: Option<String>,
+    /// `console` or `env`. Left out of the JSON while the gateway has nothing loaded
+    /// (the console reads an absent key as `null`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_source: Option<String>,
+    /// The console version the gateway loaded; left out for the environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_version: Option<i64>,
+    /// The code of the newest load failure; the configuration in use keeps serving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
+    /// Whether the gateway's environment holds a usable Jev configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_available: Option<bool>,
+    /// The environment variable the gateway reads its key from, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_key_var: Option<String>,
+    /// The Jev variables that are set but have no effect while the console's
+    /// configuration is in use. Names only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_overridden: Vec<String>,
 }
 
 /// `GET /api/jev/stats`: calls, conclusions, failure codes, latency and confidence
@@ -362,8 +383,30 @@ pub(crate) fn reported_config(edge: &EdgeStatus) -> JevConfigBody {
         route: text("route"),
         endpoint_host: text("endpoint_host"),
         model: text("model"),
-        default_timeout_ms: edge.jev.get("default_timeout_ms").and_then(Value::as_i64),
+        // The gateway reports `timeout_ms`; the older name is still read.
+        default_timeout_ms: edge
+            .jev
+            .get("timeout_ms")
+            .or_else(|| edge.jev.get("default_timeout_ms"))
+            .and_then(Value::as_i64),
         prompt: text("prompt"),
+        config_source: text("config_source"),
+        config_version: edge.jev.get("config_version").and_then(Value::as_i64),
+        config_error: text("config_error"),
+        env_available: edge.jev.get("env_available").and_then(Value::as_bool),
+        env_key_var: text("env_key_var"),
+        env_overridden: edge
+            .jev
+            .get("env_overridden")
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 

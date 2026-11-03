@@ -16,9 +16,11 @@ use xshield_judge::context::{
 };
 use xshield_judge::engine::{ADDRESS_CALLS_PER_MINUTE, Judge, SESSION_CALLS_PER_MINUTE};
 use xshield_judge::jev::JevPort;
+use xshield_judge::slot::Source;
 use xshield_judge::state::{Prompt, STATE_BYTES_MAX};
 use xshield_judge::values::REQUEST_VALUES_MAX;
 
+use crate::jev_settings::{JevLoader, JevReport};
 use crate::proxy::REQUEST_BODY_MAX;
 use crate::sink::{Counters, Gap, QUEUE_CAPACITY};
 use crate::sites::{SiteStatus, SiteTable};
@@ -90,9 +92,15 @@ pub struct Beat {
     pub params: serde_json::Value,
 }
 
-/// Gathers the heartbeat content from the running process.
+/// Gathers the heartbeat content from the running process. `report` says where the
+/// Jev settings in use came from.
 #[must_use]
-pub fn gather<J: JevPort>(judge: &Judge<J>, sites: &SiteTable, counters: &Counters) -> Beat {
+pub fn gather<J: JevPort>(
+    judge: &Judge<J>,
+    sites: &SiteTable,
+    counters: &Counters,
+    report: &JevReport,
+) -> Beat {
     let jev = judge.jev();
     Beat {
         sites: sites.statuses(),
@@ -103,20 +111,22 @@ pub fn gather<J: JevPort>(judge: &Judge<J>, sites: &SiteTable, counters: &Counte
         dropped_bypass: counters.dropped_bypass(),
         write_errors: counters.write_errors(),
         gaps: counters.gaps(),
-        jev: jev_config(jev, judge.prompt().id()),
+        jev: jev_config(jev, judge.prompt().id(), report),
         params: params(jev.default_timeout()),
     }
 }
 
 /// Writes the heartbeat every [`HEARTBEAT_INTERVAL`], and at once after each
 /// site change. It also registers the instruction version, retrying each
-/// beat until that succeeds. Runs until the process exits.
+/// beat until that succeeds. The Jev part comes from `jev`. Runs until the
+/// process exits.
 pub async fn run<J: JevPort + 'static>(
     pool: PgPool,
     judge: Arc<Judge<J>>,
     sites: Arc<SiteTable>,
     counters: Counters,
     instance: Instance,
+    jev: Arc<JevLoader>,
 ) {
     let changed = sites.changed();
     let mut ticker = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -132,7 +142,7 @@ pub async fn run<J: JevPort + 'static>(
                 Err(error) => eprintln!("xshield-edge: prompt registration failed: {error}"),
             }
         }
-        let beat = gather(&judge, &sites, &counters);
+        let beat = gather(&judge, &sites, &counters, &jev.report());
         if let Err(error) = write_heartbeat(&pool, &instance, &beat).await {
             eprintln!("xshield-edge: heartbeat failed: {error}");
         }
@@ -199,15 +209,22 @@ pub async fn register_prompt(pool: &PgPool, prompt: &Prompt) -> Result<(), sqlx:
     .map(|_| ())
 }
 
-/// The Jev route, endpoint host, model, default timeout, and instruction id.
-/// No key is in it, and none is ever added.
-fn jev_config<J: JevPort>(jev: &J, prompt: &str) -> serde_json::Value {
+/// The Jev route, endpoint host, model, default timeout, instruction id, and
+/// where the settings came from (docs/03 section 3.3). No key is in it, and none
+/// is ever added.
+fn jev_config<J: JevPort>(jev: &J, prompt: &str, report: &JevReport) -> serde_json::Value {
     json!({
         "route": jev.route(),
         "endpoint_host": jev.endpoint_host(),
         "model": jev.model(),
         "timeout_ms": millis(jev.default_timeout()),
         "prompt": prompt,
+        "config_source": report.source.map(Source::as_str),
+        "config_version": report.version,
+        "config_error": report.error,
+        "env_available": report.env_available,
+        "env_key_var": report.env_key_var,
+        "env_overridden": report.env_overridden,
     })
 }
 
@@ -258,14 +275,17 @@ mod tests {
 
     #[async_trait]
     impl JevPort for Fake {
-        fn model(&self) -> &'static str {
-            "fake-model"
+        fn model(&self) -> String {
+            "fake-model".to_owned()
         }
-        fn route(&self) -> &'static str {
-            "fake"
+        fn route(&self) -> String {
+            "fake".to_owned()
         }
-        fn endpoint_host(&self) -> &'static str {
-            "jev.test"
+        fn endpoint(&self) -> String {
+            "https://jev.test/v1/systemone".to_owned()
+        }
+        fn endpoint_host(&self) -> String {
+            "jev.test".to_owned()
         }
         fn default_timeout(&self) -> Duration {
             Duration::from_millis(2000)
@@ -277,7 +297,7 @@ mod tests {
 
     #[test]
     fn the_jev_block_names_the_route_and_never_a_key() {
-        let config = jev_config(&Fake, "jq_0123456789abcdef");
+        let config = jev_config(&Fake, "jq_0123456789abcdef", &JevReport::default());
         assert_eq!(
             config,
             json!({
@@ -286,8 +306,32 @@ mod tests {
                 "model": "fake-model",
                 "timeout_ms": 2000,
                 "prompt": "jq_0123456789abcdef",
+                "config_source": null,
+                "config_version": null,
+                "config_error": null,
+                "env_available": false,
+                "env_key_var": null,
+                "env_overridden": [],
             })
         );
+    }
+
+    #[test]
+    fn the_jev_block_says_which_saved_version_serves_and_what_failed() {
+        let report = JevReport {
+            source: Some(Source::Console),
+            version: Some(6),
+            error: Some("MODEL_KEY_UNREADABLE".to_owned()),
+            env_available: true,
+            env_key_var: Some("AI_GATEWAY_API_KEY"),
+            env_overridden: vec!["AI_GATEWAY_API_KEY"],
+        };
+        let config = jev_config(&Fake, "jq_0123456789abcdef", &report);
+        assert_eq!(config["config_source"], "console");
+        assert_eq!(config["config_version"], 6);
+        assert_eq!(config["config_error"], "MODEL_KEY_UNREADABLE");
+        assert_eq!(config["env_available"], true);
+        assert_eq!(config["env_overridden"][0], "AI_GATEWAY_API_KEY");
     }
 
     #[test]
