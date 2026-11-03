@@ -21,9 +21,12 @@ use axum::{
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use xshield_core::context::{
-    ObjectSlot, SiteSpec, SlotSource,
-    learning::{RETIRE_DAYS, WINDOW_DAYS, day_of},
+use xshield_core::{
+    context::{
+        ObjectSlot, SiteSpec, SlotSource,
+        learning::{RETIRE_DAYS, WINDOW_DAYS, day_of, observe},
+    },
+    kind::{NameReason, NameSource, Rules, request_name, response_name},
 };
 use xshield_postgres::{
     object_learning_store::{self as store, Flow, JevFlow, PositionRow},
@@ -50,6 +53,14 @@ const EXAMPLES_MAX: i64 = 3;
 const EVENTS_DAYS: i64 = 30;
 /// Most automatic versions one object map response reads.
 const EVENTS_MAX: i64 = 20;
+/// Milliseconds in an hour.
+const HOUR_MILLIS: i64 = 3_600_000;
+/// Most decision rows the bootstrap candidates read, the newest first.
+const BOOTSTRAP_ROWS_MAX: i64 = 5_000;
+/// Most candidates the bootstrap list returns.
+const CANDIDATES_MAX: usize = 50;
+/// A kind word this short may be an abbreviation, and its candidate asks for a look.
+const SHORT_WORD: usize = 3;
 
 /// The learning state of a position, as the console names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -231,10 +242,13 @@ pub(crate) struct SlotBody {
     impact: Vec<Value>,
 }
 
-/// `GET /objects/bootstrap`: `BootstrapResponse`. The candidates are not read yet, so empty.
+/// `GET /objects/bootstrap`: `BootstrapResponse`.
 #[derive(Debug, Serialize)]
 pub(crate) struct BootstrapBody {
     window_hours: i64,
+    /// The decision records the site logged in the window, so an empty list can be told
+    /// apart from a site with no traffic.
+    records: i64,
     candidates: Vec<Value>,
 }
 
@@ -395,20 +409,128 @@ pub async fn ambiguous(
     changed_or_conflict(changed)
 }
 
-/// `GET /api/sites/{name}/objects/bootstrap`: the kinds the cold start can propose. The
-/// candidates are not read yet, so the list is empty.
+/// `GET /api/sites/{name}/objects/bootstrap`: the kinds the cold start can propose. The candidates
+/// are the positions the site's own decision records used in the window, whose names give a kind and
+/// which the configuration does not declare.
 ///
 /// # Errors
-/// `SITE_NOT_FOUND` for an unknown site.
+/// `SITE_NOT_FOUND` for an unknown site, and a 500 when a read of the decision log fails.
 pub async fn bootstrap(
     State(state): State<Arc<ControlState>>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<BootstrapBody>> {
-    site_of(&state, &name).await?;
+    let record = site_of(&state, &name).await?;
+    let since = now_millis().saturating_sub(BOOTSTRAP_WINDOW_HOURS.saturating_mul(HOUR_MILLIS));
+    let records = store::records_since(&state.pool, &name, since).await?;
+    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    for fact in store::recent_facts(&state.pool, &name, since, BOOTSTRAP_ROWS_MAX).await? {
+        for vote in observe(&fact).votes {
+            let session = vote.session;
+            for key in std::iter::once(vote.slot).chain(vote.from) {
+                tallies.entry(key).or_default().add(&session);
+            }
+        }
+    }
     Ok(Json(BootstrapBody {
         window_hours: BOOTSTRAP_WINDOW_HOURS,
-        candidates: Vec::new(),
+        records,
+        candidates: candidates_of(&record.spec, &tallies),
     }))
+}
+
+/// The uses a position has in the window: the votes that name it, and the sessions among them.
+#[derive(Debug, Default)]
+struct Tally {
+    uses: u32,
+    sessions: BTreeSet<String>,
+}
+
+impl Tally {
+    fn add(&mut self, session: &str) {
+        self.uses += 1;
+        self.sessions.insert(session.to_owned());
+    }
+}
+
+/// The candidates of the tallies: each position the configuration does not declare and whose name
+/// gives a kind, the most used first, at most [`CANDIDATES_MAX`].
+fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>) -> Vec<Value> {
+    let map = spec.objects();
+    let rules = Rules::of(spec.advanced());
+    let mut found: Vec<(u32, &str, Value)> = tallies
+        .iter()
+        .filter(|(key, _)| map.declared_class_of(key).is_none())
+        .filter_map(|(key, tally)| {
+            let (reason, side) = name_of(key, &rules)?;
+            let class = map
+                .classes()
+                .iter()
+                .find(|class| rules.relates(&reason.word, &class.id));
+            let short = class.is_none() && reason.word.len() <= SHORT_WORD;
+            let value = serde_json::json!({
+                "id": digest_id('c', key),
+                "key": key,
+                "side": side,
+                "kind": class.map_or(reason.word.as_str(), |class| class.id.as_str()),
+                "name": class.map(|class| class.name.as_str()),
+                "reason": {
+                    "code": reason_code(reason.source),
+                    "word": reason.word,
+                    "field": reason.field,
+                },
+                "uses": tally.uses,
+                "sessions": tally.sessions.len(),
+                "note": short.then_some("名字较短，可能是缩写，请确认类别"),
+                "conflict": null,
+            });
+            Some((tally.uses, key.as_str(), value))
+        })
+        .collect();
+    found.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+    found
+        .into_iter()
+        .take(CANDIDATES_MAX)
+        .map(|(_, _, value)| value)
+        .collect()
+}
+
+/// The name a position's kind comes from, and the side of the position. `None` when the name gives
+/// no kind, or the key is not a position this map reads.
+fn name_of(key: &str, rules: &Rules) -> Option<(NameReason, &'static str)> {
+    let mut parts = key.splitn(3, ' ');
+    let (method, route, location) = (parts.next()?, parts.next()?, parts.next()?);
+    match side_of_key(key) {
+        Side::Request => {
+            let reason = if let Some(index) = location
+                .strip_prefix("path[")
+                .and_then(|rest| rest.strip_suffix(']'))
+            {
+                request_name(route, None, index.parse().ok(), rules)?
+            } else {
+                let name = location
+                    .strip_prefix("query.")
+                    .or_else(|| location.strip_prefix("body."))?;
+                request_name(route, Some(name), None, rules)?
+            };
+            Some((reason, Side::Request.as_str()))
+        }
+        Side::Response => {
+            // A response field of an array is named by the field inside the array.
+            let field = location.rsplit("[].").next().unwrap_or(location);
+            let reason = response_name(field, &format!("{method} {route}"), rules)?;
+            Some((reason, Side::Response.as_str()))
+        }
+    }
+}
+
+/// The reason code the console shows for a name's source.
+fn reason_code(source: NameSource) -> &'static str {
+    match source {
+        NameSource::Field => "field_name",
+        NameSource::Parent => "parent_name",
+        NameSource::Endpoint => "endpoint_name",
+        NameSource::Route => "route_word",
+    }
 }
 
 /// The automatic changes of the last [`EVENTS_DAYS`] days, newest first: one event for each entry a
@@ -781,9 +903,15 @@ fn learned_row_id(id: &str) -> Option<i64> {
 
 /// The id of a declared position: `a` and the leading bytes of the digest of its key.
 fn declared_id(key: &str) -> String {
+    digest_id('a', key)
+}
+
+/// An id made of `prefix` and the leading bytes of the digest of a position key, so that it stays
+/// the same while the key does.
+fn digest_id(prefix: char, key: &str) -> String {
     let digest = Sha256::digest(key.as_bytes());
     let mut id = String::with_capacity(1 + 2 * DIGEST_BYTES);
-    id.push('a');
+    id.push(prefix);
     for byte in &digest[..DIGEST_BYTES] {
         id.push(char::from(HEX[usize::from(*byte >> 4)]));
         id.push(char::from(HEX[usize::from(*byte & 0x0f)]));
@@ -1152,6 +1280,56 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_candidates_name_the_positions_the_site_uses_and_does_not_declare() {
+        let spec = site_with_slots(
+            r#"{"key": "GET /api/notes [].author_id", "class": "doctor", "source": "admin"}"#,
+        );
+        let tally = |sessions: &[&str]| {
+            let mut tally = Tally::default();
+            for session in sessions {
+                tally.add(session);
+            }
+            tally
+        };
+        let tallies = BTreeMap::from([
+            ("GET /doctor/{id} path[1]".to_owned(), tally(&["a", "b"])),
+            ("GET /api/doctors [].id".to_owned(), tally(&["a", "b", "c"])),
+            ("GET /api/docs [].id".to_owned(), tally(&["a"])),
+            ("GET /api/notes [].author_id".to_owned(), tally(&["a"])),
+            ("GET /api/me [].name".to_owned(), tally(&["a"])),
+        ]);
+        let candidates = candidates_of(&spec, &tallies);
+        // The declared position and the field that names no kind are left out. The most used
+        // comes first.
+        assert_eq!(candidates.len(), 3);
+        let first = &candidates[0];
+        assert_eq!(first["key"], "GET /api/doctors [].id");
+        assert_eq!(first["side"], "response");
+        assert_eq!(first["kind"], "doctor");
+        assert_eq!(first["name"], "医生");
+        assert_eq!(first["reason"]["code"], "endpoint_name");
+        assert_eq!(first["reason"]["word"], "doctor");
+        assert_eq!(
+            (first["uses"].as_u64(), first["sessions"].as_u64()),
+            (Some(3), Some(3))
+        );
+        assert!(first["note"].is_null());
+        assert!(first["id"].as_str().is_some_and(|id| id.starts_with('c')));
+        let second = &candidates[1];
+        assert_eq!(second["key"], "GET /doctor/{id} path[1]");
+        assert_eq!(second["side"], "request");
+        assert_eq!(second["reason"]["code"], "route_word");
+        assert_eq!(second["kind"], "doctor");
+        // An abbreviation has no class of the site yet, so its candidate asks for a look.
+        let third = &candidates[2];
+        assert_eq!(
+            (third["kind"].as_str(), third["name"].is_null()),
+            (Some("doc"), true)
+        );
+        assert!(third["note"].is_string());
+    }
+
+    #[test]
     fn an_automatic_pause_event_names_its_entries_its_side_and_its_reason() {
         let entry = r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule"}"#;
         let before = site_with_slots(entry);
@@ -1401,6 +1579,83 @@ mod live_tests {
             .0;
         assert_eq!(candidates.window_hours, BOOTSTRAP_WINDOW_HOURS);
         assert!(candidates.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn bootstrap_counts_the_last_day_of_decisions_and_skips_declared_positions() {
+        let (state, name) = seeded_site("bootstrap").await;
+        let now = now_millis();
+        crate::test_support::ensure_days(&state.pool, &[now, now - 2 * DAY_MILLIS]).await;
+        let minutes_ago = |minutes: i64| now - minutes * 60_000;
+        // Three uses of the doctor position in the window, by two sessions, and one use a day
+        // older than the window, which counts for nothing.
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(5),
+            "req_boot_1",
+            "a",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_boot_r1")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(4),
+            "req_boot_2",
+            "b",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_boot_r2")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(3),
+            "req_boot_3",
+            "b",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_boot_r3")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            now - 2 * DAY_MILLIS,
+            "req_boot_4",
+            "c",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_boot_r4")]),
+        )
+        .await;
+        let body = bootstrap(State(Arc::clone(&state)), Path(name.clone()))
+            .await
+            .expect("bootstrap")
+            .0;
+        assert_eq!(body.records, 3);
+        // The response position the site declares is not a candidate; the doctor position is.
+        let keys: Vec<&str> = body
+            .candidates
+            .iter()
+            .filter_map(|candidate| candidate["key"].as_str())
+            .collect();
+        assert_eq!(keys, [SLOT]);
+        let candidate = &body.candidates[0];
+        assert_eq!(
+            (candidate["uses"].as_u64(), candidate["sessions"].as_u64()),
+            (Some(3), Some(2))
+        );
+        assert_eq!(
+            (
+                candidate["kind"].as_str(),
+                candidate["name"].as_str(),
+                candidate["reason"]["code"].as_str(),
+            ),
+            (Some("doctor"), Some("医生"), Some("route_word"))
+        );
+        assert!(candidate["note"].is_null());
     }
 
     #[tokio::test]

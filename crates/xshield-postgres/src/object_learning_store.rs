@@ -187,6 +187,53 @@ fn facts_of(row: &PgRow, at_millis: i64) -> Result<Option<DecisionFacts>, sqlx::
     }))
 }
 
+/// How many decision rows a site logged at or after `since_millis`.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn records_since(
+    pool: &PgPool,
+    site: &str,
+    since_millis: i64,
+) -> Result<i64, LearningStoreError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM decision_log WHERE site = $1 AND at_millis >= $2")
+            .bind(site)
+            .bind(since_millis)
+            .fetch_one(pool)
+            .await?;
+    Ok(count)
+}
+
+/// The newest decision rows of a site at or after `since_millis`, at most `limit` of them, read as
+/// facts. A row whose stored values this build does not read is left out.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn recent_facts(
+    pool: &PgPool,
+    site: &str,
+    since_millis: i64,
+    limit: i64,
+) -> Result<Vec<DecisionFacts>, LearningStoreError> {
+    let rows = sqlx::query(
+        "SELECT id, at_millis, session, status, decision_path, outcome, trace FROM decision_log
+         WHERE site = $1 AND at_millis >= $2
+         ORDER BY at_millis DESC, id DESC LIMIT $3",
+    )
+    .bind(site)
+    .bind(since_millis)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let mut facts = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let at_millis: i64 = row.try_get("at_millis")?;
+        facts.extend(facts_of(row, at_millis)?);
+    }
+    Ok(facts)
+}
+
 /// Records the votes and refusals of a batch of the site's `generation`. A position,
 /// session and UTC day is counted once: a repeat changes nothing, and the first vote
 /// keeps the response position it came from. Recording the same rows again is therefore
