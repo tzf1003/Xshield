@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use pingora::prelude::Opt;
 use serde_json::{Value, json};
+use xshield_core::context::trace::TRACE_BYTES_MAX;
 use xshield_core::context::{DecisionPath, DecisionRecord, Outcome, SiteSpec, Skip};
 use xshield_edge::proxy::EdgeProxy;
 use xshield_edge::server::build_server;
@@ -592,6 +593,34 @@ fn static_paths_are_forwarded_and_logged_as_bypass() {
     assert_eq!(row.status, Some(200));
     let response = row.trace.response.expect("the response summary");
     assert_eq!(response.skip, Some(Skip::Bypass));
+}
+
+#[test]
+fn d1_a_request_with_many_long_values_is_written_within_the_trace_limit() {
+    // Sixty values of 256 characters put the trace well over 16 KiB. The gateway
+    // trims it before it writes the row, and the rest of the row is untouched.
+    let values: Vec<String> = (0..60)
+        .map(|index| format!("{index:03}{}", "x".repeat(253)))
+        .collect();
+    let body = json!({ "items": values }).to_string();
+    let reply = call(
+        "observe.test",
+        "POST",
+        "/api/notes?who=d1",
+        Some("s-d1"),
+        body.as_bytes(),
+    );
+    assert_eq!(reply.status, 200);
+    let row = record(&reply);
+    assert!(row.trace.trimmed, "an oversized trace says it was trimmed");
+    let encoded = serde_json::to_vec(&row.trace).expect("the trace encodes");
+    assert!(
+        encoded.len() <= TRACE_BYTES_MAX,
+        "the written trace is {} bytes",
+        encoded.len()
+    );
+    assert!(row.trace.timing.total_ms.is_some(), "timing is set by then");
+    assert!(row.trace.response.is_some(), "the response was recorded");
 }
 
 #[test]
