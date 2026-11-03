@@ -217,6 +217,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values[].sources[]` | 最多 3 个来源，顺序与 `state` 里的 `seen_as` 相同（最相关的在前，[7.5.2](#752-state-与追溯信息的对齐)）；`request_id`、`at_millis` 正常情况下都有（上下文随网关重启清空，[7.3.2](#732-追溯链路)），只有导入的旧格式记录和测试数据可能为 null；同一 `(field, request)` 再次出现时保留最早的那次（[7.7.1](#771-会话上下文增加请求-id)） |
 | `values_truncated` | 请求体未结构化、超过 64 KiB 解析上限或值数到上限（即 `ExtractedRequest::truncated`），或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4） |
 | `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条）；`known_values` 是会话已见值数量 |
+| `session.identity` | 站点声明了身份位置且会话已见身份时才有：`user`、`org` 为键控哈希标签，`role` 为角色标签，规则见 [7.9.15](#7915-对象表的身份位置w1)。没有身份位置的站点不写这一段 |
 | `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
 | `timing` | `total_ms` 从收到请求头到响应写完；`judge_ms` 是判定耗时（含 Jev）；`origin_ms` 从发出上游请求到收到响应头 |
 | `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
@@ -871,6 +872,27 @@ CREATE TABLE jev_prompts (
 - 接口从不返回密钥本身。测试从控制台进程发出，不写判定日志，也不计入学习代理的每日上限。
 - 保存后网关在约 5 秒内加载，并在心跳里报告版本。控制台保存超过 60 秒、在线网关仍未加载这一版（或报告了失败码）时，状态灯列出 `jev_config_not_loaded` 问题（7.9.13）。
 - 本版接口不返回 `last_call`（两组），也不返回学习代理的 `health`、`usage`、`sites`；它们等学习代理和判定日志的数据接入后再补，界面在此之前不显示这些块。
+
+### 7.9.15 对象表的身份位置（W1）
+
+身份位置是对象表条目上的可选标记，说明一个**响应**位置携带的是本会话的谁：用户、机构或角色（[01.2](01-request-flow.md#12-会话与上下文)）。它复用对象表，不新增顶层配置。W1 只把身份写进判定记录；拦截与放行的用法由 W3、W4 定义。
+
+字段名（W1 定稿，W3 和 W4 按此引用；W3 只需写“站点声明了身份位置”）：
+
+| 位置 | 字段 | 取值 | 说明 |
+|---|---|---|---|
+| 站点配置 | `objects.slots[].identity` | `user`、`org`、`role`；省略即普通位置 | 只对响应位置生效，请求位置不读。`class` 仍必填：靶场的 `GET /api/home doctor.id` 声明为 `class: doctor` 且 `identity: user`。Rust：`IdentityRole::{User, Org, Role}`，`ObjectMap::identity_of` |
+| 判定记录 | `trace.session.identity.user`、`trace.session.identity.org` | 16 位十六进制标签 | 身份 id 的键控哈希标签，与 `session` 标签同一个上下文密钥，域分别为 `identity.user` 与 `identity.org`；不存 id 原文 |
+| 判定记录 | `trace.session.identity.role` | 角色标签 | 去首尾空白并转小写后，1–32 个 ASCII 字母、数字、`_`、`-`、`.`、`:`（`role_label`）；其他取值不算角色 |
+
+网关的规则（`xshield-judge`）：
+
+- 只读成功（2xx 且为 JSON）的响应，并且只记在发起请求的会话（凭证）上；客户端地址会话不记身份。
+- 同一个响应里，同一类身份的位置必须只有一个不同的取值；列表式的多个 id 不声明任何身份。
+- 会话发送过、源站并未展示给它的值（回声）不声明身份，与 `remember` 对回声的规则相同。这样登录请求里的用户名，不会因为源站原样返回而成为身份。
+- 每次身份响应都会更新对应的类别：换机构不重新登录，下一次身份响应即生效。
+- 暂停的条目不声明身份。确认或恢复条目的类别时保留它的身份。
+- 站点没有身份位置、或会话还没见过身份时，`trace.session` 不写 `identity`，判定与日志和之前一致。
 
 ### 7.9.16 对象表的档位与可靠性（W3）
 
