@@ -15,12 +15,12 @@ pub use advanced::Advanced;
 pub use config::{ConfigError, Mode, OnJevUnavailable, PathPattern, SessionCredential, SiteSpec};
 pub use log::{Conclusion, ContextKind, DecisionPath, DecisionRecord, JevRecord, Outcome};
 pub use objects::{
-    LearningSettings, ObjectClass, ObjectMap, ObjectSlot, ObjectsIssue, ObjectsPlace,
-    ObjectsReason, Reliability, SlotSource, Tier,
+    ADMIN_ROLE, IdentityRole, LearningSettings, ObjectClass, ObjectMap, ObjectSlot, ObjectsIssue,
+    ObjectsPlace, ObjectsReason, Reliability, SlotSource, Tier, role_label, tier_proves,
 };
 pub use route::{Api, Body, RequestView, Resolved, Route, UnknownReason, header_names};
 pub use trace::{
     Attempt, FINGERPRINT_SLOTS_MAX, FINGERPRINTS_PER_SLOT_MAX, FieldCount, ObjectFrom,
     ObservationSummary, Observed, PublicAccess, SHAPE_FIELDS_MAX, ShapeField, Skip, Timing, Trace,
-    TraceEntry, TraceRecent, TraceSession, TraceSource, TraceValue,
+    TraceEntry, TraceIdentity, TraceRecent, TraceSession, TraceSource, TraceValue,
 };

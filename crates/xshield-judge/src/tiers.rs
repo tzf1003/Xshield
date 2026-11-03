@@ -10,10 +10,12 @@
 //! attempt to act on an object the session has no right to. It goes to Jev marked
 //! as an attempt; the gateway never allows it on its own.
 //!
-//! A site without tiers is judged as it always was: every origin that shows the
+//! An administrator's listing proves a value to an administrator session only, as an
+//! ordinary response does; the session's role is read from its identity (docs/07 section
+//! 7.4.7). A site without tiers is judged as it always was: every origin that shows the
 //! value as the request's kind of object proves it.
 
-use xshield_core::context::{Attempt, ObjectMap, PublicAccess, Reliability, Tier};
+use xshield_core::context::{Attempt, ObjectMap, PublicAccess, Reliability, Tier, tier_proves};
 
 use crate::context::Origin;
 use crate::slots::origin_tier;
@@ -32,20 +34,21 @@ pub struct Judged {
 
 /// Judges one request value. `sources` is every origin the session has for the
 /// value, `shown` the origins that show it as the request's kind of object (see
-/// `Seen::shown_origins`), and `access` is what the map says of the request
-/// position.
+/// `Seen::shown_origins`), `access` is what the map says of the request position,
+/// and `admin` is whether the session is an administrator.
 #[must_use]
 pub fn judge(
     sources: &[&Origin],
     shown: &[&Origin],
     access: Option<PublicAccess>,
     objects: &ObjectMap,
+    admin: bool,
 ) -> Judged {
     let closed =
         access.is_some_and(|access| !access.accepts && access.reliability == Reliability::High);
     let verified = shown
         .iter()
-        .any(|origin| proves(origin_tier(objects, origin), closed));
+        .any(|origin| tier_proves(origin_tier(objects, origin), closed, admin));
     let public_only = closed
         && !sources.is_empty()
         && sources
@@ -54,23 +57,6 @@ pub fn judge(
     Judged {
         verified,
         attempt: public_only.then_some(Attempt::OverPrivilege),
-    }
-}
-
-/// Whether a response with this tier proves a right. A response the map does not
-/// classify proves it, as every response did before tiers, and so does an org
-/// response. A public response the map is sure of proves it unless the request
-/// position is closed to public sources; a public response the map is not sure of
-/// proves it, as before tiers. A self response never proves on its own: a learned
-/// self label only keeps a value from being tightened, and is never a reason to
-/// allow. An administrator's listing proves nothing here: the session's role comes
-/// with identity, and until the judge knows it, no session is known to be an
-/// administrator.
-fn proves(tier: Option<(Tier, Reliability)>, closed: bool) -> bool {
-    match tier {
-        Some((Tier::Own | Tier::Admin, _)) => false,
-        Some((Tier::Public, Reliability::High)) => !closed,
-        None | Some((Tier::Org | Tier::Public, _)) => true,
     }
 }
 
@@ -141,7 +127,7 @@ mod tests {
         let objects = map(TIERED);
         let search = sightings(&[SEARCH]);
         assert_eq!(
-            judge(&refs(&search), &refs(&search), CLOSED, &objects),
+            judge(&refs(&search), &refs(&search), CLOSED, &objects, false),
             Judged {
                 verified: false,
                 attempt: Some(Attempt::OverPrivilege),
@@ -158,7 +144,7 @@ mod tests {
             reliability: Reliability::High,
         });
         assert_eq!(
-            judge(&refs(&search), &refs(&search), accepts, &objects),
+            judge(&refs(&search), &refs(&search), accepts, &objects, false),
             Judged {
                 verified: true,
                 attempt: None,
@@ -176,7 +162,13 @@ mod tests {
             reliability: Reliability::Low,
         });
         assert_eq!(
-            judge(&refs(&search), &refs(&search), weak_position, &objects),
+            judge(
+                &refs(&search),
+                &refs(&search),
+                weak_position,
+                &objects,
+                false
+            ),
             Judged {
                 verified: true,
                 attempt: None,
@@ -185,7 +177,13 @@ mod tests {
         // A weak public sighting proves the value even where the position is closed.
         let weak_tier = sightings(&[SEARCH_LOW]);
         assert_eq!(
-            judge(&refs(&weak_tier), &refs(&weak_tier), CLOSED, &objects),
+            judge(
+                &refs(&weak_tier),
+                &refs(&weak_tier),
+                CLOSED,
+                &objects,
+                false
+            ),
             Judged {
                 verified: true,
                 attempt: None,
@@ -201,7 +199,7 @@ mod tests {
         let sources = sightings(&[SEARCH, UNTIERED]);
         let shown = sightings(&[SEARCH]);
         assert_eq!(
-            judge(&refs(&sources), &refs(&shown), CLOSED, &objects),
+            judge(&refs(&sources), &refs(&shown), CLOSED, &objects, false),
             Judged {
                 verified: false,
                 attempt: None,
@@ -215,7 +213,7 @@ mod tests {
         // Only the session's own record shows the value: it is not verified, so Jev decides.
         let own = sightings(&[OWN]);
         assert_eq!(
-            judge(&refs(&own), &refs(&own), CLOSED, &objects),
+            judge(&refs(&own), &refs(&own), CLOSED, &objects, false),
             Judged {
                 verified: false,
                 attempt: None,
@@ -224,7 +222,7 @@ mod tests {
         // Beside a public sighting, the own record keeps the value from being an attempt.
         let sources = sightings(&[SEARCH, OWN]);
         assert_eq!(
-            judge(&refs(&sources), &refs(&sources), CLOSED, &objects),
+            judge(&refs(&sources), &refs(&sources), CLOSED, &objects, false),
             Judged {
                 verified: false,
                 attempt: None,
@@ -237,7 +235,7 @@ mod tests {
         let objects = map(TIERED);
         let org = sightings(&[ORG]);
         assert_eq!(
-            judge(&refs(&org), &refs(&org), CLOSED, &objects),
+            judge(&refs(&org), &refs(&org), CLOSED, &objects, false),
             Judged {
                 verified: true,
                 attempt: None,
@@ -246,11 +244,11 @@ mod tests {
     }
 
     #[test]
-    fn an_administrator_listing_proves_nothing_here_and_is_no_attempt() {
+    fn an_administrator_listing_proves_nothing_to_another_session() {
         let objects = map(TIERED);
         let listing = sightings(&[ADMIN]);
         assert_eq!(
-            judge(&refs(&listing), &refs(&listing), CLOSED, &objects),
+            judge(&refs(&listing), &refs(&listing), CLOSED, &objects, false),
             Judged {
                 verified: false,
                 attempt: None,
@@ -259,10 +257,38 @@ mod tests {
     }
 
     #[test]
+    fn an_administrator_listing_proves_the_value_to_an_administrator_session() {
+        let objects = map(TIERED);
+        let listing = sightings(&[ADMIN]);
+        assert_eq!(
+            judge(&refs(&listing), &refs(&listing), CLOSED, &objects, true),
+            Judged {
+                verified: true,
+                attempt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_public_sighting_is_an_attempt_for_an_administrator_too() {
+        let objects = map(TIERED);
+        // The role is not a reason to allow: an administrator who only saw the patient in
+        // the public search is judged as anyone else is.
+        let search = sightings(&[SEARCH]);
+        assert_eq!(
+            judge(&refs(&search), &refs(&search), CLOSED, &objects, true),
+            Judged {
+                verified: false,
+                attempt: Some(Attempt::OverPrivilege),
+            }
+        );
+    }
+
+    #[test]
     fn a_value_no_response_showed_is_neither_proven_nor_an_attempt() {
         let objects = map(TIERED);
         assert_eq!(
-            judge(&[], &[], CLOSED, &objects),
+            judge(&[], &[], CLOSED, &objects, false),
             Judged {
                 verified: false,
                 attempt: None,
@@ -275,13 +301,13 @@ mod tests {
         let objects = map(TIERED);
         let untiered = sightings(&[UNTIERED]);
         assert_eq!(
-            judge(&refs(&untiered), &refs(&untiered), CLOSED, &objects),
+            judge(&refs(&untiered), &refs(&untiered), CLOSED, &objects, false),
             Judged {
                 verified: true,
                 attempt: None,
             }
         );
-        assert!(judge(&refs(&untiered), &refs(&untiered), None, &objects).verified);
+        assert!(judge(&refs(&untiered), &refs(&untiered), None, &objects, false).verified);
     }
 
     #[test]
@@ -291,7 +317,7 @@ mod tests {
         // value where the position is closed, and it is no attempt.
         let unrated = sightings(&[SEARCH_UNRATED]);
         assert_eq!(
-            judge(&refs(&unrated), &refs(&unrated), CLOSED, &objects),
+            judge(&refs(&unrated), &refs(&unrated), CLOSED, &objects, false),
             Judged {
                 verified: true,
                 attempt: None,
@@ -304,7 +330,7 @@ mod tests {
         let objects = map(TIERED);
         let own = sightings(&[OWN_UNRATED]);
         assert_eq!(
-            judge(&refs(&own), &refs(&own), CLOSED, &objects),
+            judge(&refs(&own), &refs(&own), CLOSED, &objects, false),
             Judged {
                 verified: false,
                 attempt: None,
@@ -313,7 +339,7 @@ mod tests {
         // Beside a public sighting it keeps the value from being an attempt, as a rated one does.
         let sources = sightings(&[SEARCH, OWN_UNRATED]);
         assert_eq!(
-            judge(&refs(&sources), &refs(&sources), CLOSED, &objects),
+            judge(&refs(&sources), &refs(&sources), CLOSED, &objects, false),
             Judged {
                 verified: false,
                 attempt: None,
@@ -336,7 +362,7 @@ mod tests {
         );
         let search = sightings(&[SEARCH]);
         assert_eq!(
-            judge(&refs(&search), &refs(&search), access, &objects),
+            judge(&refs(&search), &refs(&search), access, &objects, false),
             Judged {
                 verified: true,
                 attempt: None,

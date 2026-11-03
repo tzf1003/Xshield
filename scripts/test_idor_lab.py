@@ -60,6 +60,34 @@ EMR_OBJECTS = {
     ],
 }
 
+# The largest address budget the configuration accepts (docs/07 section 7.4.8).
+ADDRESS_BUDGET_MAX = 600
+
+# The identity site declares the doctor id of GET /api/home as the session's user (docs/07 7.9.15).
+# The other sites declare nothing, so their decision records carry no identity.
+IDENTITY_OBJECTS = {
+    "classes": [{"id": "doctor", "name": "医生"}],
+    "slots": [{"key": "GET /api/home doctor.id", "class": "doctor", "source": "admin", "identity": "user"}],
+}
+
+# The administrator site (docs/07 section 7.4.7). The administrator's search (tier admin) shows the
+# patients to administrator sessions only, so it proves a right to delete for them and no one else.
+# The public search still proves nothing for a delete, whoever runs it. The home page names the role.
+ADMIN_OBJECTS = {
+    "classes": [{"id": "patient", "name": "患者"}, {"id": "staff", "name": "员工"}],
+    "slots": [
+        {"key": "GET /api/search results[].id", "class": "patient", "source": "admin",
+         "tier": "public", "reliability": "high"},
+        {"key": "GET /api/admin/search results[].id", "class": "patient", "source": "admin",
+         "tier": "admin", "reliability": "high"},
+        {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "source": "admin",
+         "accepts_public": False, "reliability": "high"},
+        {"key": "POST /api/patients/{id}/notes path[2]", "class": "patient", "source": "admin",
+         "accepts_public": True, "reliability": "high"},
+        {"key": "GET /api/home role", "class": "staff", "source": "admin", "identity": "role"},
+    ],
+}
+
 
 @dataclass(frozen=True)
 class Expect:
@@ -105,14 +133,21 @@ def site_specs(origin_port: int) -> list[dict]:
         return {"name": name, "hosts": [host], **base, **changes}
 
     fast_timeout = {"jev_timeout_ms": 100}
-    return [
+    specs = [
         site("emr", "emr.lab", objects=EMR_OBJECTS),
         site("plain", "plain.lab"),
         site("observe", "observe.lab", mode="observe"),
         site("deny-when-down", "deny.lab", advanced=fast_timeout),
         site("allow-when-down", "allow.lab", on_jev_unavailable="allow", advanced=fast_timeout),
         site("limited", "limit.lab", advanced={"session_calls_per_minute": 2}),
+        site("identity", "identity.lab", objects=IDENTITY_OBJECTS),
+        site("admin", "admin.lab", objects=ADMIN_OBJECTS),
     ]
+    # Every lab login comes from the same loopback address, and the address budget counts all of
+    # them, so a long run would exhaust it and turn later logins into JEV_CALL_LIMIT. The lab tests
+    # the session limit (limit.lab), not the address one, so every site takes the largest budget.
+    return [{**spec, "advanced": {"address_calls_per_minute": ADDRESS_BUDGET_MAX,
+                                  **spec.get("advanced", {})}} for spec in specs]
 
 
 class Edge:
@@ -583,6 +618,137 @@ def c5(lab: Lab) -> None:
     lab.expect("third call is over the session limit", lab.send(
         "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"}),
         Expect(403, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+
+
+@scenario("W1", "声明了身份位置的站点：判定记录带会话的用户标签；换账号标签不同；未声明的站点不写身份")
+def w1(lab: Lab) -> None:
+    def identity_of(sent: Sent) -> dict:
+        session = ((sent.record or {}).get("trace") or {}).get("session") or {}
+        return session.get("identity") or {}
+
+    # The first identity response sets the session's user; the next judged request carries it.
+    cookie_a = lab.login("identity.lab", "doctor_a", "W1 doctor A logs in on the identity site")
+    lab.expect("W1 doctor A opens the home page", lab.send(
+        "identity.lab", "GET", "/api/home", cookie=cookie_a), Expect(200, "fast_allow", "allowed", True))
+    listed_a = lab.expect("W1 doctor A lists patients", lab.send(
+        "identity.lab", "GET", "/api/patients", cookie=cookie_a), Expect(200, "fast_allow", "allowed", True))
+    user_a = identity_of(listed_a).get("user", "")
+    lab.check("the decision record carries doctor A's user as a 16-digit keyed label",
+              len(user_a) == 16 and all(char in "0123456789abcdef" for char in user_a),
+              f"identity {identity_of(listed_a)}")
+    lab.check("the decision record keeps no doctor id",
+              "DR-A" not in json.dumps(listed_a.record, ensure_ascii=False), "DR-A is in the record")
+
+    cookie_b = lab.login("identity.lab", "doctor_b", "W1 doctor B logs in on the identity site")
+    lab.expect("W1 doctor B opens the home page", lab.send(
+        "identity.lab", "GET", "/api/home", cookie=cookie_b), Expect(200, "fast_allow", "allowed", True))
+    listed_b = lab.expect("W1 doctor B lists patients", lab.send(
+        "identity.lab", "GET", "/api/patients", cookie=cookie_b), Expect(200, "fast_allow", "allowed", True))
+    user_b = identity_of(listed_b).get("user", "")
+    lab.check("another account carries another user label", user_b != "" and user_b != user_a,
+              f"both {user_a!r} and {user_b!r}")
+
+    cookie_again = lab.login("identity.lab", "doctor_a", "W1 doctor A logs in again")
+    lab.expect("W1 doctor A opens the home page again", lab.send(
+        "identity.lab", "GET", "/api/home", cookie=cookie_again), Expect(200, "fast_allow", "allowed", True))
+    relisted = lab.expect("W1 doctor A lists patients again", lab.send(
+        "identity.lab", "GET", "/api/patients", cookie=cookie_again), Expect(200, "fast_allow", "allowed", True))
+    lab.check("the same account carries the same user label", identity_of(relisted).get("user") == user_a,
+              f"identity {identity_of(relisted)}")
+
+    plain = lab.login("emr.lab", "doctor_a", "W1 doctor A logs in on a site without identity")
+    unset = lab.expect("W1 the same list on a site without identity", lab.send(
+        "emr.lab", "GET", "/api/patients", cookie=plain), Expect(200, "fast_allow", "allowed", True))
+    lab.check("a site without identity positions writes no identity", not identity_of(unset),
+              f"identity {identity_of(unset)}")
+
+
+@scenario("W4a", "管理员在管理档搜索里搜到医生 B 的患者后删除：放行（管理档对管理员会话算正证）")
+def w4a(lab: Lab) -> None:
+    cookie_b = lab.login("emr.lab", "doctor_b", "W4a doctor B logs in")
+    shown_id = lab.expect("doctor B creates a patient the administrator will find", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "管理靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_admin = lab.login("admin.lab", "admin_root", "W4a the administrator logs in")
+    lab.expect("W4a the administrator opens the home page", lab.send(
+        "admin.lab", "GET", "/api/home", cookie=cookie_admin), Expect(200, "fast_allow", "allowed", True))
+    query = "/api/admin/search?q=" + urllib.parse.quote("管理靶患者", safe="")
+    found = lab.expect("the administrator searches the administrator listing", lab.send(
+        "admin.lab", "GET", query, cookie=cookie_admin), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the administrator listing shows doctor B's patient", shown_id in shown, f"ids {shown}")
+    deleted = lab.expect("the administrator deletes the patient the listing showed", lab.send(
+        "admin.lab", "DELETE", f"/api/patients/{shown_id}", cookie=cookie_admin),
+        Expect(200, "fast_allow", "allowed", True))
+    traced = traced_value(deleted.record, shown_id)
+    lab.check("the id is verified by the administrator tier and is no attempt",
+              traced.get("verified") is True and "attempt" not in traced, f"trace value {traced}")
+    with lab.origin.lock:
+        gone = shown_id not in lab.origin.patients
+    lab.check("the origin deleted the patient", gone, f"{shown_id} is still there")
+
+
+@scenario("W4b", "管理员没在管理档搜索里见过的患者，直接删除：拦截（角色不是放行理由）")
+def w4b(lab: Lab) -> None:
+    cookie_b = lab.login("emr.lab", "doctor_b", "W4b doctor B logs in")
+    hidden_id = lab.expect("doctor B creates a patient the administrator will not find", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "未搜靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_admin = lab.login("admin.lab", "admin_root", "W4b the administrator logs in")
+    lab.expect("W4b the administrator opens the home page", lab.send(
+        "admin.lab", "GET", "/api/home", cookie=cookie_admin), Expect(200, "fast_allow", "allowed", True))
+    lab.expect("W4b the administrator deletes the patient nobody showed", lab.send(
+        "admin.lab", "DELETE", f"/api/patients/{hidden_id}", cookie=cookie_admin),
+        Expect(403, "jev_deny", "blocked", False))
+    with lab.origin.lock:
+        kept = hidden_id in lab.origin.patients
+    lab.check("the origin kept the patient nobody showed", kept, f"{hidden_id} is gone")
+
+
+@scenario("W4c", "管理员在公共搜索里搜到医生 B 的患者后删除：拦截（公共档的见过不证明删除）")
+def w4c(lab: Lab) -> None:
+    cookie_b = lab.login("emr.lab", "doctor_b", "W4c doctor B logs in")
+    shown_id = lab.expect("doctor B creates a patient the public search will find", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "公搜靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_admin = lab.login("admin.lab", "admin_root", "W4c the administrator logs in")
+    lab.expect("W4c the administrator opens the home page", lab.send(
+        "admin.lab", "GET", "/api/home", cookie=cookie_admin), Expect(200, "fast_allow", "allowed", True))
+    query = "/api/search?q=" + urllib.parse.quote("公搜靶患者", safe="")
+    found = lab.expect("the administrator searches publicly", lab.send(
+        "admin.lab", "GET", query, cookie=cookie_admin), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the public search shows the patient to the administrator", shown_id in shown,
+              f"ids {shown}")
+    denied = lab.expect("the administrator deletes the patient the public search showed", lab.send(
+        "admin.lab", "DELETE", f"/api/patients/{shown_id}", cookie=cookie_admin),
+        Expect(403, "jev_deny", "blocked", False))
+    traced = traced_value(denied.record, shown_id)
+    lab.check("the public sighting is an attempt for the administrator too",
+              traced.get("attempt") == "over_privilege", f"trace value {traced}")
+
+
+@scenario("W4d", "管理员在管理档搜索里搜到患者后写备注（POST 子路径）：放行（备注位置接受公开来源）")
+def w4d(lab: Lab) -> None:
+    cookie_b = lab.login("emr.lab", "doctor_b", "W4d doctor B logs in")
+    shown_id = lab.expect("doctor B creates a patient the administrator will find", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "管理备注靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_admin = lab.login("admin.lab", "admin_root", "W4d the administrator logs in")
+    # The home page names the administrator's role, which the administrator listing needs.
+    lab.expect("W4d the administrator opens the home page", lab.send(
+        "admin.lab", "GET", "/api/home", cookie=cookie_admin), Expect(200, "fast_allow", "allowed", True))
+    query = "/api/admin/search?q=" + urllib.parse.quote("管理备注靶患者", safe="")
+    found = lab.expect("the administrator searches the administrator listing", lab.send(
+        "admin.lab", "GET", query, cookie=cookie_admin), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the administrator listing shows the patient", shown_id in shown, f"ids {shown}")
+    noted = lab.expect("the administrator writes a note on the patient the listing showed", lab.send(
+        "admin.lab", "POST", f"/api/patients/{shown_id}/notes", cookie=cookie_admin),
+        Expect(201, "fast_allow", "allowed", True))
+    traced = traced_value(noted.record, shown_id)
+    lab.check("the note's id is verified by the administrator tier and is no attempt",
+              traced.get("verified") is True and "attempt" not in traced, f"trace value {traced}")
 
 
 def main() -> int:

@@ -267,6 +267,7 @@ mod tests {
             class: class.to_owned(),
             source: SlotSource::Rule,
             paused: false,
+            identity: None,
             tier: None,
             accepts_public: None,
             reliability: None,

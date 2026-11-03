@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, JSON Schema and synthetic sample checks only. Not Rust behaviour (cargo test runs crates/xshield-core/tests/v4_samples.rs over the same samples), not WAF effectiveness and not model accuracy.",
   "passed": true,
-  "checks_total": 285,
-  "passed_count": 285,
+  "checks_total": 295,
+  "passed_count": 295,
   "checks": [
     {
       "name": "json:examples/sites-dev.json",
@@ -740,6 +740,31 @@
       "detail": ""
     },
     {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:CHANGELOG.md:docs/06-console-ui.md",
       "passed": true,
       "detail": ""
@@ -895,6 +920,11 @@
       "detail": ""
     },
     {
+      "name": "link:docs/01-request-flow.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/01-request-flow.md:02-jev.md",
       "passed": true,
       "detail": ""
@@ -975,6 +1005,16 @@
       "detail": ""
     },
     {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/03-admin-config-audit.md:05-v3-removal.md",
       "passed": true,
       "detail": ""
@@ -1021,6 +1061,11 @@
     },
     {
       "name": "link:docs/04-deployment-testing.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/04-deployment-testing.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -1386,6 +1431,11 @@
     },
     {
       "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:01-request-flow.md",
       "passed": true,
       "detail": ""
     },

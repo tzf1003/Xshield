@@ -20,8 +20,8 @@ use crate::context::{
 };
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
 use crate::slots::{
-    origin_object, origin_tier, reliability_name, request_access, request_slot, response_slot,
-    route_template, tier_name,
+    identity_claims, origin_object, origin_tier, reliability_name, request_access, request_slot,
+    response_slot, route_template, tier_name,
 };
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
@@ -88,6 +88,12 @@ pub struct Judgement {
     /// in the [`Observation`] of the response, which teaches the session nothing
     /// from an echo of them.
     pub sent: Vec<Digest16>,
+    /// Digests of the values the request sent that the site's tiers turn down: an attempt, or a
+    /// sighting that proves no right (docs/01 section 1.4). Empty unless the request is forwarded.
+    /// The edge hands them back in the [`Observation`] of this request's response only: that
+    /// response teaches nothing from them, but a later response may show such a value as the
+    /// object it is (a listing of the session's own objects).
+    pub echo: Vec<Digest16>,
 }
 
 /// A response the origin returned, for [`Judge::observe`].
@@ -123,6 +129,8 @@ pub struct Observation<'a> {
     pub now_ms: u64,
     /// The digests of the values the request sent (see [`Judgement::sent`]).
     pub sent: &'a [Digest16],
+    /// The digests of the values the tiers turned down for this request (see [`Judgement::echo`]).
+    pub echo: &'a [Digest16],
 }
 
 #[derive(Default)]
@@ -300,6 +308,7 @@ impl<J: JevPort> Judge<J> {
                 refuse_status: 0,
                 record,
                 sent: Vec::new(),
+                echo: Vec::new(),
             };
         }
         let entry = logical.and_then(|path| site.matching_entry(path));
@@ -335,7 +344,8 @@ impl<J: JevPort> Judge<J> {
         };
         let mut jev = None;
         let mut sent = Vec::new();
-        let verdict = match self.plan(&turn, &mut record.trace, &mut sent) {
+        let mut echo = Vec::new();
+        let verdict = match self.plan(&turn, &mut record.trace, &mut sent, &mut echo) {
             Plan::Done(verdict) => verdict,
             Plan::Ask { limit_key, values } => {
                 let (verdict, row) = self
@@ -382,13 +392,21 @@ impl<J: JevPort> Judge<J> {
             refuse_status,
             record,
             sent: if forward { sent } else { Vec::new() },
+            echo: if forward { echo } else { Vec::new() },
         }
     }
 
     /// Steps 2 to 5: everything that can be settled without calling Jev. Fills
     /// the trace's values and session as it goes, and collects into `sent` the
-    /// digests of the values the session had not seen as references.
-    fn plan(&self, turn: &Turn<'_>, trace: &mut Trace, sent: &mut Vec<Digest16>) -> Plan {
+    /// digests of the values the session had not seen as references, and into
+    /// `echo` the digests of the values the tiers turned down.
+    fn plan(
+        &self,
+        turn: &Turn<'_>,
+        trace: &mut Trace,
+        sent: &mut Vec<Digest16>,
+        echo: &mut Vec<Digest16>,
+    ) -> Plan {
         let request = turn.request;
         let tuning = turn.tuning;
         // Without a credential only an entry may pass (a login, a sign-up
@@ -407,13 +425,14 @@ impl<J: JevPort> Judge<J> {
             shown,
             all_known,
             attempted,
-        } = self.plan_values(turn, session, sent);
+        } = self.plan_values(turn, session, sent, echo);
         trace.values = shown;
         trace.session = Some(TraceSession {
             age_seconds: session.age_seconds(request.now_ms),
             known_values: session.seen_len(),
             entries_passed: None,
             recent: None,
+            identity: session.identity().tag(),
         });
         // An unknown interface always goes to Jev: neither its values nor a cached
         // allow of another request can settle it.
@@ -438,12 +457,14 @@ impl<J: JevPort> Judge<J> {
 
     /// Settles each value of the request against what the session saw: fills the
     /// state's values and the trace's values, and collects into `sent` the digests
-    /// of the values the session had not seen as references.
+    /// of the values the session had not seen as references, and into `echo` the
+    /// digests of the values the tiers turned down.
     fn plan_values(
         &self,
         turn: &Turn<'_>,
         session: &SessionContext,
         sent: &mut Vec<Digest16>,
+        echo: &mut Vec<Digest16>,
     ) -> PlannedValues {
         let request = turn.request;
         let tuning = turn.tuning;
@@ -451,6 +472,7 @@ impl<J: JevPort> Judge<J> {
         let mut attempted = false;
         let mut values = Vec::new();
         let mut shown = Vec::with_capacity(turn.extracted.values.len());
+        let admin = session.identity().is_admin();
         for value in &turn.extracted.values {
             let used = Used {
                 value: &value.value,
@@ -476,13 +498,23 @@ impl<J: JevPort> Judge<J> {
                     })
                 })
                 .unwrap_or_default();
-            let judged = tiers::judge(&ranked, &shown_as_object, access, tuning.objects);
+            let judged = tiers::judge(&ranked, &shown_as_object, access, tuning.objects, admin);
             let verified = !value.inert && judged.verified;
             // An attempt goes to Jev marked as one; the gateway never allows it on its own.
             let attempt = judged.attempt.filter(|_| !value.inert);
             if !verified {
-                // An origin that echoes this value would otherwise teach it.
-                sent.push(self.key.mac("value", value.value.as_bytes()));
+                // An origin that echoes this value would otherwise teach it. A value the tiers
+                // turn down was shown to the session, so only this request's own response is kept
+                // from learning it: a later listing may show the value as the session's own.
+                // Any other value stays out of the session's learning, as before tiers.
+                let digest = self.key.mac("value", value.value.as_bytes());
+                let turned_down =
+                    attempt.is_some() || (!value.inert && !shown_as_object.is_empty());
+                if turned_down {
+                    echo.push(digest);
+                } else {
+                    sent.push(digest);
+                }
             }
             let origin_objects: Vec<Option<String>> = ranked
                 .iter()
@@ -739,14 +771,13 @@ impl<J: JevPort> Judge<J> {
         if !(success || issuing_redirect) {
             return summary;
         }
-        let (values, shape) = if success {
+        let (mut values, shape) = if success {
             read_body(&mut summary, observation)
         } else {
             (Vec::new(), None)
         };
-        summary.values = values.len();
-        summary.fields = field_counts(&values);
-        summary.fingerprints = fingerprints(&self.key, site, observation, resolved, &values);
+        self.count_values(site, observation, resolved, &values, &mut summary);
+        self.without_echo(&mut values, observation.echo);
 
         let request = format!("{} {}", observation.method, resolved.logical_path());
         let request_id = request_number(observation.request_id);
@@ -759,6 +790,7 @@ impl<J: JevPort> Judge<J> {
         let seeded = observation
             .credential
             .filter(|credential| success && !credential.is_empty());
+        let claims = identity_claims(site.objects(), &request, &values);
         let mut inner = self.lock();
         if let Some(shape) = shape {
             summary.shape = shape_if_new(
@@ -797,6 +829,7 @@ impl<J: JevPort> Judge<J> {
                 session.note_sent(observation.sent);
             }
             let added = session.remember(&self.key, &source, &values);
+            session.declare_identity(&self.key, &claims);
             if new_values.is_none() {
                 new_values = Some(added);
             }
@@ -814,6 +847,30 @@ impl<J: JevPort> Judge<J> {
         }
         summary.new_values = new_values.unwrap_or(0);
         summary
+    }
+
+    /// Counts a response's values and fingerprints them into its summary. This is done before the
+    /// echo of the request is dropped, so the counts describe the response as the origin sent it.
+    fn count_values(
+        &self,
+        site: &SiteSpec,
+        observation: &Observation<'_>,
+        resolved: &Resolved,
+        values: &[ResponseValue],
+        summary: &mut ObservationSummary,
+    ) {
+        summary.values = values.len();
+        summary.fields = field_counts(values);
+        summary.fingerprints = fingerprints(&self.key, site, observation, resolved, values);
+    }
+
+    /// Drops the values of a response that are an echo of the request it answers: the tiers turned
+    /// those request values down, so the response teaches nothing from them and declares no
+    /// identity from them (see [`Judgement::echo`]).
+    fn without_echo(&self, values: &mut Vec<ResponseValue>, echo: &[Digest16]) {
+        if !echo.is_empty() {
+            values.retain(|value| !echo.contains(&self.key.mac("value", value.value.as_bytes())));
+        }
     }
 
     /// Stops the session that `context` names from learning from responses.
@@ -1341,6 +1398,7 @@ mod tests {
             body: br#"{"items":[{"id":"7","name":"A","age":8},{"id":"9","name":"B"}]}"#,
             now_ms,
             sent: &[],
+            echo: &[],
         }
     }
 
@@ -1564,6 +1622,7 @@ mod tests {
             body,
             now_ms: 0,
             sent: &[],
+            echo: &[],
         }
     }
 
@@ -1578,6 +1637,7 @@ mod tests {
         Observation {
             route: None,
             sent: &verdict.sent,
+            echo: &verdict.echo,
             ..shown(path, body, credential)
         }
     }
@@ -1828,6 +1888,7 @@ mod tests {
                 body: br#"{"userId":"P-0000099","token":"t"}"#,
                 now_ms: 1_001,
                 sent: &judged.sent,
+                echo: &judged.echo,
             },
         );
         fake.answer("DENY", "BENIGN");
@@ -1886,6 +1947,7 @@ mod tests {
                 body: br#"{"patientId":"P-0000099"}"#,
                 now_ms: 2_001,
                 sent: &renew.sent,
+                echo: &renew.echo,
             },
         );
         fake.answer("DENY", "BENIGN");
@@ -2324,6 +2386,7 @@ mod tests {
             body: br#"{"patient":{"id":"P-0000001"}}"#,
             now_ms: 0,
             sent: &[],
+            echo: &[],
         };
         judge.observe(&site, &redeem);
         let verdict = judge
@@ -2732,6 +2795,7 @@ mod tests {
                 body: b"",
                 now_ms: 1,
                 sent: &[],
+                echo: &[],
             },
         );
         assert_eq!(judge.session_count(), 1);
@@ -2752,6 +2816,7 @@ mod tests {
                 body: b"",
                 now_ms: 2,
                 sent: &[],
+                echo: &[],
             },
         );
         assert_eq!(judge.session_count(), 1, "a plain redirect teaches nothing");
@@ -2779,6 +2844,7 @@ mod tests {
                 body: br#"{"user":{"id":"U-0000001"}}"#,
                 now_ms: 0,
                 sent: &[],
+                echo: &[],
             },
         );
         let verdict = judge
@@ -2971,6 +3037,7 @@ mod tests {
                 body: br#"{"id":7,"name":"Acme"}"#,
                 now_ms: 0,
                 sent: &[],
+                echo: &[],
             },
         );
         let request = get(
@@ -3451,12 +3518,19 @@ mod tests {
 
     /// A site whose search shows every patient to any logged-in session, and whose
     /// DELETE of a patient takes no such source. The note on a patient takes them.
+    /// The session's own listing is tier self.
     fn tiers_site(search_reliability: &str) -> SiteSpec {
+        tiers_site_in("enforce", search_reliability)
+    }
+
+    /// [`tiers_site`] in `mode`.
+    fn tiers_site_in(mode: &str, search_reliability: &str) -> SiteSpec {
         site(&format!(
-            r#","mode":"enforce","objects":{{
+            r#","mode":"{mode}","objects":{{
                 "classes":[{{"id":"patient","name":"患者"}}],
                 "slots":[
                     {{"key":"GET /api/search results[].id","class":"patient","source":"admin","tier":"public","reliability":"{search_reliability}"}},
+                    {{"key":"GET /api/patients patients[].id","class":"patient","source":"admin","tier":"self","reliability":"high"}},
                     {{"key":"DELETE /api/patients/{{id}} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"}},
                     {{"key":"POST /api/patients/{{id}}/notes path[2]","class":"patient","source":"admin","accepts_public":true,"reliability":"high"}}
                 ]}}"#
@@ -3528,6 +3602,251 @@ mod tests {
             .await;
         assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
         assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn equivalent_spellings_of_a_delete_are_the_same_attempt() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        fake.answer("DENY", "BENIGN");
+        // A trailing slash, a doubled slash and an escaped digit name the same patient on the
+        // same route, so each is an attempt at the same position and goes to Jev once.
+        for (now_ms, path) in [
+            (1_000, "/api/patients/7005/"),
+            (2_000, "/api/patients//7005"),
+            (3_000, "/api/patients/%37005"),
+        ] {
+            let verdict = judge.judge(&site, &call("DELETE", path, now_ms)).await;
+            assert_eq!(
+                verdict.record.decision_path,
+                DecisionPath::JevDeny,
+                "{path}"
+            );
+            let value = verdict
+                .record
+                .trace
+                .values
+                .iter()
+                .find(|value| value.value == "7005")
+                .expect("the id is recorded");
+            assert_eq!(
+                value.slot.as_deref(),
+                Some("DELETE /api/patients/{id} path[2]"),
+                "{path}"
+            );
+            assert_eq!(
+                value.attempt,
+                Some(xshield_core::context::Attempt::OverPrivilege),
+                "{path}"
+            );
+        }
+        assert_eq!(fake.calls(), 3, "each spelling goes to Jev once");
+    }
+
+    #[tokio::test]
+    async fn an_attempt_echoed_by_its_own_response_teaches_the_session_nothing() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site_in("observe", "high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        fake.answer("DENY", "BENIGN");
+        // Observe mode forwards the attempt. Its answer echoes the id it deleted under a field
+        // the map does not classify, which would prove the id if the session learned it.
+        let attempt = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 1_000))
+            .await;
+        assert!(attempt.forward, "observe mode forwards the request");
+        assert_eq!(attempt.record.decision_path, DecisionPath::JevDeny);
+        judge.observe(
+            &site,
+            &Observation {
+                method: "DELETE",
+                path: "/api/patients/7005",
+                body: br#"{"deleted":"7005"}"#,
+                sent: &attempt.sent,
+                echo: &attempt.echo,
+                ..list_response("alice", 1_001)
+            },
+        );
+        let again = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 2_000))
+            .await;
+        assert_eq!(again.record.decision_path, DecisionPath::JevDeny);
+        let value = again
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005")
+            .expect("the id is recorded");
+        assert_eq!(
+            value.attempt,
+            Some(xshield_core::context::Attempt::OverPrivilege)
+        );
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_later_listing_of_the_sessions_own_patient_ends_the_attempt() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        fake.answer("DENY", "BENIGN");
+        let attempt = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 1_000))
+            .await;
+        assert_eq!(attempt.record.decision_path, DecisionPath::JevDeny);
+        // The session then lists its own patients, and 7005 is one of them: the listing is a
+        // source of the value now, so the value is no longer only public.
+        judge.observe(
+            &site,
+            &shown_by(
+                "/api/patients",
+                br#"{"patients":[{"id":"7005","name":"B"}]}"#,
+            ),
+        );
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 2_000))
+            .await;
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005")
+            .expect("the id is recorded");
+        assert_eq!(value.attempt, None, "the own listing is a source");
+        assert!(!value.verified, "a self sighting never allows on its own");
+        assert_eq!(fake.calls(), 2);
+        let sent = fake.sent.lock().unwrap()[1].clone();
+        assert!(
+            !state_of(&sent).contains(r#""attempt""#),
+            "the value is no attempt any more: {sent}"
+        );
+    }
+
+    /// A site whose admin listing shows its patients only to administrator sessions, and whose
+    /// DELETE of a patient takes no public source. The session's role is the `role` position.
+    fn admin_site() -> SiteSpec {
+        site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"doctor","name":"医生"},{"id":"staff","name":"员工"},{"id":"patient","name":"患者"}],
+                "slots":[
+                    {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"},
+                    {"key":"GET /api/home role","class":"staff","source":"admin","identity":"role"},
+                    {"key":"GET /api/admin/patients patients[].id","class":"patient","source":"admin","tier":"admin","reliability":"high"},
+                    {"key":"DELETE /api/patients/{id} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"}
+                ]}"#,
+        )
+    }
+
+    /// A `method` request to `path` from `credential`'s session, with no body.
+    fn call_as<'a>(
+        method: &'a str,
+        path: &'a str,
+        credential: &'a str,
+        now_ms: u64,
+    ) -> RequestFacts<'a> {
+        RequestFacts {
+            method,
+            ..get(path, None, Some(credential), now_ms)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_administrator_who_found_a_patient_in_the_admin_listing_may_delete_it() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = admin_site();
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        judge.observe(
+            &site,
+            &Observation {
+                path: "/api/admin/patients",
+                body: br#"{"patients":[{"id":"7005"}]}"#,
+                ..list_response("root", 1_000)
+            },
+        );
+        let verdict = judge
+            .judge(
+                &site,
+                &call_as("DELETE", "/api/patients/7005", "root", 2_000),
+            )
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005")
+            .expect("the id is recorded");
+        assert!(value.verified);
+        assert_eq!(value.attempt, None);
+    }
+
+    #[tokio::test]
+    async fn an_administrator_who_never_saw_the_patient_is_still_blocked() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = admin_site();
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        fake.answer("DENY", "BENIGN");
+        let verdict = judge
+            .judge(
+                &site,
+                &call_as("DELETE", "/api/patients/7005", "root", 2_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 1, "an object nobody showed goes to Jev");
+        let sent = fake.sent.lock().unwrap()[0].clone();
+        assert!(
+            !state_of(&sent).contains(r#""attempt""#),
+            "no sighting, so no attempt: {sent}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admin_listing_proves_nothing_to_a_session_without_the_role() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = admin_site();
+        judge.observe(
+            &site,
+            &Observation {
+                path: "/api/admin/patients",
+                body: br#"{"patients":[{"id":"7005"}]}"#,
+                ..list_response("alice", 1_000)
+            },
+        );
+        fake.answer("DENY", "BENIGN");
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 2_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 1);
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005")
+            .expect("the id is recorded");
+        assert!(!value.verified);
+        assert_eq!(value.attempt, None);
     }
 
     #[tokio::test]
@@ -3640,6 +3959,160 @@ mod tests {
         assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
     }
 
+    /// A site whose `GET /api/home` declares the doctor id as the session's user and its `role` as
+    /// the session's role (docs/07 section 7.9.15).
+    fn identity_site() -> SiteSpec {
+        site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"doctor","name":"医生"},{"id":"staff","name":"员工"}],
+                "slots":[
+                    {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"},
+                    {"key":"GET /api/home role","class":"staff","source":"admin","identity":"role"}
+                ]}"#,
+        )
+    }
+
+    /// A successful `GET /api/home` answered to `credential` with `body`.
+    fn home_for<'a>(credential: &'a str, body: &'a [u8]) -> Observation<'a> {
+        Observation {
+            path: "/api/home",
+            body,
+            ..list_response(credential, 0)
+        }
+    }
+
+    /// The identity a decision record carries, when it carries one.
+    fn identity_of(record: &DecisionRecord) -> Option<xshield_core::context::TraceIdentity> {
+        record
+            .trace
+            .session
+            .as_ref()
+            .and_then(|session| session.identity.clone())
+    }
+
+    #[tokio::test]
+    async fn a_declared_identity_tags_the_decisions_of_its_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = identity_site();
+        let before = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 0))
+            .await;
+        assert_eq!(identity_of(&before.record), None, "nothing shown yet");
+        judge.observe(
+            &site,
+            &home_for("alice", br#"{"doctor":{"id":"DR-A"},"role":"Admin"}"#),
+        );
+        let alice = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 1))
+            .await;
+        let tag = identity_of(&alice.record).expect("the response declared the identity");
+        assert_eq!(tag.org, None);
+        assert_eq!(tag.role.as_deref(), Some("admin"));
+        let user = tag.user.clone().expect("the user is tagged");
+        assert_eq!(user.len(), 16);
+        assert!(
+            user.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        // The id itself never reaches the record.
+        assert!(
+            !serde_json::to_string(&alice.record.trace)
+                .unwrap()
+                .contains("DR-A")
+        );
+
+        judge.observe(&site, &home_for("bob", br#"{"doctor":{"id":"DR-B"}}"#));
+        let bob = judge
+            .judge(&site, &get("/api/patients", None, Some("bob"), 2))
+            .await;
+        let bob_tag = identity_of(&bob.record).expect("bob's session shows its identity");
+        assert_ne!(bob_tag.user, tag.user, "another account is another user");
+        assert_eq!(
+            bob_tag.role, None,
+            "a response without a role declares none"
+        );
+
+        // The next identity response replaces the user, so a switch of organization needs no new
+        // login. A kind that response does not declare is kept.
+        judge.observe(&site, &home_for("alice", br#"{"doctor":{"id":"DR-C"}}"#));
+        let switched = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 3))
+            .await;
+        let switched_tag = identity_of(&switched.record).expect("alice still shows an identity");
+        assert_ne!(switched_tag.user, tag.user);
+        assert_eq!(switched_tag.role.as_deref(), Some("admin"));
+    }
+
+    #[tokio::test]
+    async fn an_echo_or_a_list_of_ids_declares_no_identity() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = identity_site();
+        // The client sent DR-B and the origin echoes it back: an echo is not who the session is.
+        let sent = [judge.key.mac("value", b"DR-B")];
+        judge.observe(
+            &site,
+            &Observation {
+                sent: &sent,
+                echo: &[],
+                ..home_for("alice", br#"{"doctor":{"id":"DR-B"}}"#)
+            },
+        );
+        let echoed = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 1))
+            .await;
+        assert_eq!(identity_of(&echoed.record), None);
+
+        // A response that lists several ids does not say which one is the session's: a site whose
+        // list position is the identity.
+        let list = SiteSpec::from_json(
+            r#"{"name":"list","hosts":["list.test"],"origin":"http://o:1","session":{"cookie":"SID"},
+               "entries":["/login","/api/home","/api/patients"],"mode":"enforce",
+               "objects":{"classes":[{"id":"doctor","name":"医生"}],
+                 "slots":[{"key":"GET /api/home [].id","class":"doctor","source":"admin","identity":"user"}]}}"#,
+        )
+        .unwrap();
+        judge.observe(
+            &list,
+            &home_for("carol", br#"[{"id":"DR-A"},{"id":"DR-B"}]"#),
+        );
+        let several = judge
+            .judge(&list, &get("/api/patients", None, Some("carol"), 2))
+            .await;
+        assert_eq!(identity_of(&several.record), None);
+        judge.observe(
+            &list,
+            &home_for("carol", br#"[{"id":"DR-A"},{"id":"DR-A"}]"#),
+        );
+        let once = judge
+            .judge(&list, &get("/api/patients", None, Some("carol"), 3))
+            .await;
+        assert!(
+            identity_of(&once.record).is_some(),
+            "one distinct id is the session's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_site_without_identity_positions_writes_no_identity() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &home_for("alice", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        let verdict = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 1))
+            .await;
+        let trace = serde_json::to_value(&verdict.record.trace).unwrap();
+        assert!(trace["session"].get("identity").is_none());
+    }
+
+    /// A site whose object map says what the positions of the kind tests carry:
+    /// appointments and `/doctor/{id}` are doctors, `/api/docs` and `/docs/{id}`
+    /// and record attachments are documents.
     fn kinds_site() -> SiteSpec {
         site(
             r#","mode":"enforce","objects":{

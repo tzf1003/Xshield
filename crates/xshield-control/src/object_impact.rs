@@ -17,12 +17,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sqlx::PgPool;
 use xshield_core::{
-    context::{SiteSpec, TraceValue},
+    context::{ADMIN_ROLE, Reliability, SiteSpec, Tier, TraceValue, tier_proves},
     kind::{
         LONG_VALUE_CHARS, Rules, Shown, Used, declaration_reads, declared_kind_of, name_kind_of,
         path_segment, shown_as,
     },
-    path_template::normalize,
+    path_template::position_template,
 };
 use xshield_postgres::decision_stats::{self, Scope, SlotRow};
 
@@ -123,9 +123,9 @@ impl Moved {
     }
 }
 
-/// The request positions the judge reads a different kind for under the two configurations:
-/// the positions a draft adds, removes or gives another kind. A paused entry gives no kind,
-/// so pausing one counts as a change too.
+/// The positions the judge reads a different way under the two configurations: the positions a
+/// draft adds, removes, or gives another kind, tier, reliability or public-source setting. A paused
+/// entry reads as nothing, so pausing one counts as a change too.
 fn moved_positions(current: &SiteSpec, proposed: &SiteSpec) -> BTreeSet<String> {
     let keys: BTreeSet<&str> = current
         .objects()
@@ -135,9 +135,29 @@ fn moved_positions(current: &SiteSpec, proposed: &SiteSpec) -> BTreeSet<String> 
         .map(|slot| slot.key.as_str())
         .collect();
     keys.into_iter()
-        .filter(|key| current.objects().class_of(key) != proposed.objects().class_of(key))
+        .filter(|key| read_of(current, key) != read_of(proposed, key))
         .map(str::to_owned)
         .collect()
+}
+
+/// How the judge reads one position of a configuration: its kind, its tier judgement (with how sure
+/// the map is of it), and its public-source setting (docs/07 section 7.4.7).
+#[derive(Debug, PartialEq, Eq)]
+struct PositionRead {
+    class: Option<String>,
+    tier: Option<(Tier, Reliability)>,
+    accepts_public: Option<bool>,
+    reliability: Option<Reliability>,
+}
+
+fn read_of(spec: &SiteSpec, key: &str) -> PositionRead {
+    let objects = spec.objects();
+    PositionRead {
+        class: objects.class_of(key).map(str::to_owned),
+        tier: objects.tier_judgement_of(key),
+        accepts_public: objects.accepts_public_of(key),
+        reliability: objects.reliability_of(key),
+    }
 }
 
 /// A configuration as the judge reads it: its object map, and the kind rules of its
@@ -157,19 +177,27 @@ impl<'a> Reading<'a> {
 
     /// Whether a request value is verified at position `slot`: one place that showed the
     /// value to the session shows it as the kind the request needs, judged as the gateway
-    /// judges it. The rule reads the value's key, its location and its length, not its text.
+    /// judges it, and the configuration's tiers let that place prove a right (docs/07 section
+    /// 7.4.7). The rule reads the value's key, its location and its length, not its text.
     fn verifies(&self, row: &SlotRow, value: &TraceValue, slot: &str) -> bool {
         let objects = self.spec.objects();
         let wanted = objects.class_of(slot);
         let used = used_of(row, value);
         let long = value.len.unwrap_or_else(|| value.value.chars().count()) >= LONG_VALUE_CHARS;
+        let closed = objects.closed_to_public(slot);
+        let admin = row.role.as_deref() == Some(ADMIN_ROLE);
         value.sources.iter().any(|source| {
             let shown = Shown {
                 field: &source.field,
                 request: &source.request,
             };
             let known = source.slot.as_deref().and_then(|at| objects.class_of(at));
+            let tier = source
+                .slot
+                .as_deref()
+                .and_then(|at| objects.tier_judgement_of(at));
             shown_as(used, shown, wanted, known, &self.rules, long)
+                && tier_proves(tier, closed, admin)
         })
     }
 }
@@ -273,15 +301,14 @@ fn kinds_of(
 
 /// The position of a request value: the trace's own, or the one the gateway gives it.
 fn request_slot(row: &SlotRow, value: &TraceValue) -> String {
-    value
-        .slot
-        .clone()
-        .unwrap_or_else(|| format!("{} {} {}", row.method, route_of(&row.path), value.at))
-}
-
-/// The route template of a path, as positions name it.
-fn route_of(path: &str) -> String {
-    normalize(path).unwrap_or_else(|| path.to_owned())
+    value.slot.clone().unwrap_or_else(|| {
+        format!(
+            "{} {} {}",
+            row.method,
+            position_template(&row.path),
+            value.at
+        )
+    })
 }
 
 /// The requests that each change kind moves.
@@ -330,7 +357,7 @@ impl Groups {
         self.count += 1;
         let (requests, _) = self
             .routes
-            .entry((row.method.clone(), route_of(&row.path)))
+            .entry((row.method.clone(), position_template(&row.path)))
             .or_insert_with(|| (0, row.request_id.clone()));
         *requests += 1;
         if let Some(pair) = kinds {
@@ -463,12 +490,18 @@ mod tests {
     }
 
     fn row(decision: &str, path: &str) -> SlotRow {
+        method_row("GET", decision, path)
+    }
+
+    /// A decision of `method` to `path` by a session that declared no role.
+    fn method_row(method: &str, decision: &str, path: &str) -> SlotRow {
         SlotRow {
             request_id: "req_1".to_owned(),
-            method: "GET".to_owned(),
+            method: method.to_owned(),
             path: path.to_owned(),
             decision_path: decision.to_owned(),
             values: String::new(),
+            role: None,
         }
     }
 
@@ -529,6 +562,139 @@ mod tests {
             vec![origin("id", "GET /api/doctors", "GET /api/doctors [].id")],
         )];
         assert_eq!(shift_under(&current, &proposed, &call, &doctors), None);
+    }
+
+    /// A map of patients: a search that shows them as tier `search` to every session, a DELETE of
+    /// a patient that takes public sources when `accepts`, and an administrator's listing of tier
+    /// `listing` at reliability `listing_reliability`.
+    fn tiered(search: &str, accepts: bool, listing: &str, listing_reliability: &str) -> SiteSpec {
+        spec(&format!(
+            r#"{{"classes":[{{"id":"patient","name":"患者"}}],"slots":[
+                {{"key":"GET /api/search results[].id","class":"patient","source":"admin","tier":"{search}","reliability":"high"}},
+                {{"key":"DELETE /api/patients/{{id}} path[2]","class":"patient","source":"admin","accepts_public":{accepts},"reliability":"high"}},
+                {{"key":"GET /api/admin/patients patients[].id","class":"patient","source":"admin","tier":"{listing}","reliability":"{listing_reliability}"}}
+            ]}}"#
+        ))
+    }
+
+    const DELETE_SLOT: &str = "DELETE /api/patients/{id} path[2]";
+
+    #[test]
+    fn a_draft_that_opens_a_closed_position_turns_its_attempts_into_fast_allows() {
+        // The search shows the patient to every session and the DELETE takes no such source, so the
+        // value is an attempt that Jev judges. The draft lets the DELETE take public sources: the same
+        // value is then verified, and the Jev call would be a fast allow.
+        let current = tiered("public", false, "admin", "high");
+        let proposed = tiered("public", true, "admin", "high");
+        assert_eq!(
+            moved_positions(&current, &proposed),
+            BTreeSet::from([DELETE_SLOT.to_owned()])
+        );
+        let attempt = method_row("DELETE", "jev_deny", "/api/patients/7005");
+        let values = [value(
+            "path[2]",
+            false,
+            vec![origin(
+                "id",
+                "GET /api/search",
+                "GET /api/search results[].id",
+            )],
+        )];
+        assert_eq!(
+            shift_under(&current, &proposed, &attempt, &values),
+            Some(Shift::NewFastAllow)
+        );
+    }
+
+    #[test]
+    fn a_draft_that_closes_a_position_sends_fast_allows_on_public_sources_back_to_jev() {
+        let current = tiered("public", true, "admin", "high");
+        let proposed = tiered("public", false, "admin", "high");
+        let allowed = method_row("DELETE", "fast_allow", "/api/patients/7005");
+        let values = [value(
+            "path[2]",
+            true,
+            vec![origin(
+                "id",
+                "GET /api/search",
+                "GET /api/search results[].id",
+            )],
+        )];
+        assert_eq!(
+            shift_under(&current, &proposed, &allowed, &values),
+            Some(Shift::BackToJev)
+        );
+    }
+
+    #[test]
+    fn a_public_sighting_the_draft_marks_as_own_no_longer_proves_the_value() {
+        // The search is tier public in the current map and tier self in the draft: its sighting
+        // proves nothing as the session's own record, so the fast allow goes back to Jev.
+        let current = tiered("public", true, "admin", "high");
+        let proposed = tiered("self", true, "admin", "high");
+        let allowed = method_row("DELETE", "fast_allow", "/api/patients/7005");
+        let values = [value(
+            "path[2]",
+            true,
+            vec![origin(
+                "id",
+                "GET /api/search",
+                "GET /api/search results[].id",
+            )],
+        )];
+        assert_eq!(
+            shift_under(&current, &proposed, &allowed, &values),
+            Some(Shift::BackToJev)
+        );
+    }
+
+    #[test]
+    fn an_administrator_fast_allow_on_an_admin_listing_stands_while_the_listing_stays_admin() {
+        // For a session that declared the admin role, an admin-tier listing proves the value: a
+        // reliability change that keeps the tier keeps the fast allow.
+        let current = tiered("public", true, "admin", "high");
+        let proposed = tiered("public", true, "admin", "medium");
+        let mut allowed = method_row("DELETE", "fast_allow", "/api/patients/7005");
+        allowed.role = Some("admin".to_owned());
+        let values = [value(
+            "path[2]",
+            true,
+            vec![origin(
+                "id",
+                "GET /api/admin/patients",
+                "GET /api/admin/patients patients[].id",
+            )],
+        )];
+        assert_eq!(moved_positions(&current, &proposed).len(), 1);
+        assert_eq!(shift_under(&current, &proposed, &allowed, &values), None);
+    }
+
+    #[test]
+    fn an_administrator_fast_allow_goes_back_to_jev_when_the_listing_is_no_longer_admin_tier() {
+        let current = tiered("public", true, "admin", "high");
+        let proposed = tiered("public", true, "self", "high");
+        let mut allowed = method_row("DELETE", "fast_allow", "/api/patients/7005");
+        allowed.role = Some("admin".to_owned());
+        let values = [value(
+            "path[2]",
+            true,
+            vec![origin(
+                "id",
+                "GET /api/admin/patients",
+                "GET /api/admin/patients patients[].id",
+            )],
+        )];
+        assert_eq!(
+            shift_under(&current, &proposed, &allowed, &values),
+            Some(Shift::BackToJev)
+        );
+    }
+
+    #[test]
+    fn a_request_spelled_another_way_is_read_at_the_position_it_names() {
+        let spelled = method_row("DELETE", "jev_deny", "/api/patients/%37005/");
+        let attempt = value("path[2]", false, Vec::new());
+        assert_eq!(request_slot(&spelled, &attempt), DELETE_SLOT);
     }
 
     #[test]
