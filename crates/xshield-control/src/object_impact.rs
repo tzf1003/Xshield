@@ -478,6 +478,7 @@ mod tests {
             object_from: None,
             public_access: None,
             attempt: None,
+            unplaced: false,
         }
     }
 

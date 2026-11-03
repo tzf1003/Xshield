@@ -207,6 +207,12 @@ pub struct TraceValue {
     /// response that showed it was public, and the position takes none of those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<Attempt>,
+    /// The request path has no template the map can name (no canonical spelling, or one over
+    /// 256 bytes), and no declared position governs the value. A site that judges public access
+    /// never fast-allows such a request, and the value is no attempt (docs/07 section 7.4.7).
+    /// Absent otherwise.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unplaced: bool,
 }
 
 /// What a request position says of public sources, with how sure the map is: whether
@@ -567,6 +573,7 @@ mod tests {
             object_from: None,
             public_access: None,
             attempt: None,
+            unplaced: false,
         }
     }
 

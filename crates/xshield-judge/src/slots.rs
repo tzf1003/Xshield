@@ -68,6 +68,44 @@ pub fn request_access(objects: &ObjectMap, slot: &str) -> Option<PublicAccess> {
     })
 }
 
+/// Where a request value sits on the map: the declared position that governs it, and what that
+/// position says of public sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestPlace<'a> {
+    /// The key of the declared position that governs the value, when one does.
+    pub key: Option<&'a str>,
+    /// What the map says of that position about public sources, with how sure it is.
+    pub access: Option<PublicAccess>,
+}
+
+impl RequestPlace<'_> {
+    /// The position the value is shown at: the declared key that governs it, else the position
+    /// its path names, as [`request_slot`] gives it.
+    #[must_use]
+    pub fn slot(&self, method: &str, path: &str, at: &str) -> String {
+        self.key
+            .map_or_else(|| request_slot(method, path, at), str::to_owned)
+    }
+}
+
+/// Where a request value of `method` on `path`, at `at`, sits on the map. On a site that judges
+/// public access, a declared position whose route covers the path governs the value even where
+/// the path spells the segment differently: a slug id, a `;` parameter or an escaped slash (see
+/// [`ObjectMap::request_key`]).
+#[must_use]
+pub fn request_place<'a>(
+    objects: &'a ObjectMap,
+    method: &str,
+    path: &str,
+    at: &str,
+) -> RequestPlace<'a> {
+    let key = objects.request_key(method, &route_template(path), at);
+    RequestPlace {
+        key,
+        access: key.and_then(|key| request_access(objects, key)),
+    }
+}
+
 /// The name of a tier as the state and the trace write it (docs/07 section 7.9.16).
 #[must_use]
 pub fn tier_name(tier: Tier) -> &'static str {
@@ -194,6 +232,70 @@ mod tests {
         // Another route, or another method, states nothing.
         assert!(identity_claims(&objects, "GET /api/patients", &values).is_empty());
         assert!(identity_claims(&objects, "POST /api/home", &values).is_empty());
+    }
+
+    #[test]
+    fn a_declared_id_places_a_slug_a_parameter_and_an_escaped_slash() {
+        let objects: ObjectMap = serde_json::from_str(
+            r#"{"classes":[{"id":"patient","name":"患者"}],"slots":[
+                {"key":"DELETE /api/patients/{id} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"}]}"#,
+        )
+        .unwrap();
+        let closed = Some(PublicAccess {
+            accepts: false,
+            reliability: Reliability::High,
+        });
+        for path in [
+            "/api/patients/7005/",
+            "/api/patients/PT-7004",
+            "/api/patients/7005;jsessionid=a",
+            "/api/patients/PT%2F7004",
+        ] {
+            let place = request_place(&objects, "DELETE", path, "path[2]");
+            assert_eq!(
+                place.key,
+                Some("DELETE /api/patients/{id} path[2]"),
+                "{path}"
+            );
+            assert_eq!(place.access, closed, "{path}");
+        }
+        // Another method, location or number of segments is not the declared position.
+        assert_eq!(
+            request_place(&objects, "GET", "/api/patients/PT-7004", "path[2]").key,
+            None
+        );
+        assert_eq!(
+            request_place(&objects, "DELETE", "/api/patients/PT-7004", "path[1]").key,
+            None
+        );
+        assert_eq!(
+            request_place(&objects, "DELETE", "/api/patients/PT-7004/notes", "path[2]").key,
+            None
+        );
+    }
+
+    #[test]
+    fn a_position_that_names_the_spelling_wins_over_a_covering_one() {
+        let objects: ObjectMap = serde_json::from_str(
+            r#"{"classes":[{"id":"patient","name":"患者"}],"slots":[
+                {"key":"DELETE /api/patients/{id} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"},
+                {"key":"DELETE /api/patients/PT-7004 path[2]","class":"patient","source":"admin","accepts_public":true,"reliability":"high"}]}"#,
+        )
+        .unwrap();
+        let place = request_place(&objects, "DELETE", "/api/patients/PT-7004", "path[2]");
+        assert_eq!(place.key, Some("DELETE /api/patients/PT-7004 path[2]"));
+        assert_eq!(
+            place.access,
+            Some(PublicAccess {
+                accepts: true,
+                reliability: Reliability::High,
+            })
+        );
+        // Another id still takes the covering position.
+        assert_eq!(
+            request_place(&objects, "DELETE", "/api/patients/7005", "path[2]").key,
+            Some("DELETE /api/patients/{id} path[2]")
+        );
     }
 
     #[test]

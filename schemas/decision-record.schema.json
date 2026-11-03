@@ -107,7 +107,8 @@
           },
           "description": "请求位置在对象表里的公共来源设定（docs/07 7.9.16）；位置没有 accepts_public 时不写。"
         },
-        "attempt": {"type": "string", "enum": ["over_privilege"], "description": "尝试越权：值只由公共响应展示过，请求位置不接受公共来源。没有时不写。"}
+        "attempt": {"type": "string", "enum": ["over_privilege"], "description": "尝试越权：值只由公共响应展示过，请求位置不接受公共来源。没有时不写。"},
+        "unplaced": {"type": "boolean", "description": "请求路径无法模板化（规范拼写没有或超过 256 字节），没有声明的位置能放置该值；这样的请求在接受公共来源判定的站点上不会被快速放行。没有时不写。"}
       }
     },
     "trace_source": {

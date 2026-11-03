@@ -35,6 +35,9 @@ pub struct Place {
     pub public_access: Option<PublicAccess>,
     /// The attempt the tiers found for the value.
     pub attempt: Option<Attempt>,
+    /// No declared position governs the value, and its request path cannot be templated (see
+    /// [`TraceValue::unplaced`]).
+    pub unplaced: bool,
 }
 
 /// One request value as the trace shows it. `ranked` is the session's origins
@@ -92,6 +95,7 @@ pub fn value_entry(
         object: place.object,
         public_access,
         attempt,
+        unplaced: place.unplaced,
     }
 }
 
