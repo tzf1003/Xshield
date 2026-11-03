@@ -193,43 +193,7 @@ pub fn router(state: Arc<ControlState>) -> Router {
         .route("/api/sites/{name}/preview", post(preview::preview))
         .route("/api/sites/{name}/insights", get(insights::insights))
         .route("/api/sites/{name}/evidence", get(insights::evidence))
-        .route("/api/sites/{name}/objects", get(object_map::list))
-        .route(
-            "/api/sites/{name}/objects/bootstrap",
-            get(object_map::bootstrap),
-        )
-        .route(
-            "/api/sites/{name}/objects/slots/{id}",
-            get(object_map::slot),
-        )
-        .route(
-            "/api/sites/{name}/objects/slots/{id}/dismiss",
-            post(object_map::dismiss),
-        )
-        .route(
-            "/api/sites/{name}/objects/slots/{id}/ambiguous",
-            post(object_map::ambiguous),
-        )
-        .route(
-            "/api/sites/{name}/objects/slots/{id}/ask",
-            post(object_agent_api::ask),
-        )
-        .route(
-            "/api/sites/{name}/objects/runs",
-            get(object_agent_api::runs),
-        )
-        .route(
-            "/api/sites/{name}/objects/runs/{id}",
-            get(object_agent_api::run_detail),
-        )
-        .route(
-            "/api/sites/{name}/objects/run",
-            post(object_agent_api::run_now),
-        )
-        .route(
-            "/api/sites/{name}/objects/agent-sample",
-            get(object_agent_api::sample),
-        )
+        .merge(object_routes())
         .route("/api/status", get(status::status))
         .route("/api/system", get(system::system))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
@@ -260,6 +224,55 @@ pub fn router(state: Arc<ControlState>) -> Router {
     app.layer(middleware::from_fn(static_files::security_headers))
         .layer(middleware::from_fn(json_body_limit))
         .with_state(state)
+}
+
+/// The object map's routes under `/api/sites/{name}/objects`: the positions and their actions, the
+/// automatic changes and their acknowledgements, and the learning agent. The session check covers them
+/// with the rest of the `/api` surface.
+fn object_routes() -> Router<Arc<ControlState>> {
+    Router::new()
+        .route("/api/sites/{name}/objects", get(object_map::list))
+        .route(
+            "/api/sites/{name}/objects/bootstrap",
+            get(object_map::bootstrap),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}",
+            get(object_map::slot),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}/dismiss",
+            post(object_map::dismiss),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}/ambiguous",
+            post(object_map::ambiguous),
+        )
+        .route("/api/sites/{name}/objects/events", get(object_map::events))
+        .route(
+            "/api/sites/{name}/objects/events/{id}/ack",
+            post(object_map::ack_event),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}/ask",
+            post(object_agent_api::ask),
+        )
+        .route(
+            "/api/sites/{name}/objects/runs",
+            get(object_agent_api::runs),
+        )
+        .route(
+            "/api/sites/{name}/objects/runs/{id}",
+            get(object_agent_api::run_detail),
+        )
+        .route(
+            "/api/sites/{name}/objects/run",
+            post(object_agent_api::run_now),
+        )
+        .route(
+            "/api/sites/{name}/objects/agent-sample",
+            get(object_agent_api::sample),
+        )
 }
 
 /// Replaces the framework's plain-text 413 with the API's JSON error code.

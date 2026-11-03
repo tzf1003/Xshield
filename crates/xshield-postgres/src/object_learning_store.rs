@@ -18,7 +18,7 @@
 //! traffic the old one logged. Pruning and retirement only act on rows the window has
 //! aged out, so they need no generation.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -491,7 +491,9 @@ struct EvidenceRow<'a> {
     from: Vec<String>,
 }
 
-/// The evidence of the given positions on or after `oldest_day`, keyed by position.
+/// The evidence of the given positions on or after `oldest_day`, keyed by position. A position an
+/// administrator confirmed again counts only the evidence from its baseline day on: the evidence
+/// before it was in view when the administrator confirmed it.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -502,8 +504,10 @@ pub async fn load_evidence(
     oldest_day: u64,
 ) -> Result<HashMap<String, Evidence>, LearningStoreError> {
     let rows = sqlx::query(
-        "SELECT slot, session, day, kind, from_slots FROM object_evidence
-         WHERE site = $1 AND slot = ANY($2) AND day >= $3",
+        "SELECT e.slot, e.session, e.day, e.kind, e.from_slots FROM object_evidence e
+         LEFT JOIN object_positions p ON p.site = e.site AND p.slot = e.slot
+         WHERE e.site = $1 AND e.slot = ANY($2) AND e.day >= $3
+           AND (p.baseline_day IS NULL OR e.day >= p.baseline_day)",
     )
     .bind(site)
     .bind(slots.to_vec())
@@ -1099,7 +1103,8 @@ pub async fn jev_flows(
 /// Dismisses the proposal of a request position, or the position while it is pending: the
 /// rules stop proposing it. The baseline the evidence must double from is the votes the
 /// position has now, or `min_votes` when it has fewer. Returns whether a position was
-/// dismissed; a confirmed, suspended, retired or ambiguous position is not.
+/// dismissed. A suspended position can be dismissed, and a confirmed, retired or ambiguous one
+/// cannot.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -1119,7 +1124,8 @@ pub async fn dismiss(
              dismissed_class = class,
              dismissed_votes = GREATEST(votes, $3::integer),
              updated_millis = $4
-         WHERE site = $1 AND id = $2 AND side = 'request' AND state IN ('proposed', 'pending')
+         WHERE site = $1 AND id = $2 AND side = 'request'
+           AND state IN ('proposed', 'pending', 'suspended')
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $5 FOR SHARE)",
     )
     .bind(site)
@@ -1133,7 +1139,7 @@ pub async fn dismiss(
 }
 
 /// Marks a request position ambiguous: it stays with Jev, and the rules never propose it.
-/// Only a pending or proposed position is marked: a confirmed, suspended, retired or ambiguous
+/// Only a pending, proposed or suspended position is marked: a confirmed, retired or ambiguous
 /// one is not. Returns whether a position was marked.
 ///
 /// # Errors
@@ -1153,11 +1159,160 @@ pub async fn mark_ambiguous(
              dismissed_class = NULL,
              dismissed_votes = 0,
              updated_millis = $3
-         WHERE site = $1 AND id = $2 AND side = 'request' AND state IN ('pending', 'proposed')
+         WHERE site = $1 AND id = $2 AND side = 'request'
+           AND state IN ('pending', 'proposed', 'suspended')
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $4 FOR SHARE)",
     )
     .bind(site)
     .bind(id)
+    .bind(now_millis)
+    .bind(generation)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// How an administrator handled an automatic change: one row per event handled. An event with no
+/// row is open, unless a later version changed its position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventStatus {
+    /// The event's id: `v{version}-{index}`, as the console lists it.
+    pub event: String,
+    /// `acknowledged` or `undone`.
+    pub status: String,
+    /// `auto_tighten` or `auto_pause`.
+    pub kind: String,
+    /// The position key the automatic change moved or paused.
+    pub slot: String,
+    /// Who handled the event.
+    pub handled_by: String,
+    /// When the event was handled, in milliseconds.
+    pub handled_millis: i64,
+    /// The version the handling saved, when it saved one.
+    pub handled_version: Option<i64>,
+}
+
+fn event_status_row(row: &PgRow) -> Result<EventStatus, LearningStoreError> {
+    Ok(EventStatus {
+        event: row.try_get("event")?,
+        status: row.try_get("status")?,
+        kind: row.try_get("kind")?,
+        slot: row.try_get("slot")?,
+        handled_by: row.try_get("handled_by")?,
+        handled_millis: row.try_get("handled_millis")?,
+        handled_version: row.try_get("handled_version")?,
+    })
+}
+
+/// The handled events of a site's configuration generation, by event id.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn event_statuses(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+) -> Result<Vec<EventStatus>, LearningStoreError> {
+    let rows = sqlx::query(
+        "SELECT event, status, kind, slot, handled_by, handled_millis, handled_version
+         FROM object_event_status WHERE site = $1 AND generation = $2 ORDER BY event",
+    )
+    .bind(site)
+    .bind(generation)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(event_status_row).collect()
+}
+
+/// Records how an administrator handled an automatic change of the site's `generation`. An event is
+/// handled at most twice, once to acknowledge it and once to undo it: a row that is already
+/// acknowledged becomes undone, and any other row stays as it is. Returns whether a row changed, so
+/// `false` means the event was already handled that way, or the site has moved on.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn record_event(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    status: &EventStatus,
+) -> Result<bool, LearningStoreError> {
+    let result = sqlx::query(
+        "INSERT INTO object_event_status
+             (site, generation, event, status, kind, slot, handled_by, handled_millis, handled_version)
+         SELECT $1::text, $2::timestamptz, $3::text, $4::text, $5::text, $6::text, $7::text,
+                $8::bigint, $9::bigint
+         WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $2 FOR SHARE)
+         ON CONFLICT (site, generation, event) DO UPDATE SET
+             status = EXCLUDED.status,
+             handled_by = EXCLUDED.handled_by,
+             handled_millis = EXCLUDED.handled_millis,
+             handled_version = EXCLUDED.handled_version
+         WHERE object_event_status.status = 'acknowledged' AND EXCLUDED.status = 'undone'",
+    )
+    .bind(site)
+    .bind(generation)
+    .bind(&status.event)
+    .bind(&status.status)
+    .bind(&status.kind)
+    .bind(&status.slot)
+    .bind(&status.handled_by)
+    .bind(status.handled_millis)
+    .bind(status.handled_version)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The keys of the positions whose automatic tightening an administrator undid in the site's
+/// `generation`. The learning pass does not split them again.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn undone_slots(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+) -> Result<BTreeSet<String>, LearningStoreError> {
+    let rows = sqlx::query(
+        "SELECT slot FROM object_event_status
+         WHERE site = $1 AND generation = $2 AND kind = 'auto_tighten' AND status = 'undone'",
+    )
+    .bind(site)
+    .bind(generation)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| row.try_get::<String, _>("slot").map_err(Into::into))
+        .collect()
+}
+
+/// Re-confirms a position of the site's `generation`: the evidence before `baseline_day` stops
+/// counting for it, and a suspended position goes back to confirmed, so the pass judges it afresh and
+/// does not pause it again on the evidence that paused it. Returns whether a position was re-confirmed.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn reconfirm(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    slot: &str,
+    baseline_day: u64,
+    now_millis: i64,
+) -> Result<bool, LearningStoreError> {
+    let result = sqlx::query(
+        "UPDATE object_positions SET
+             state = CASE WHEN state = 'suspended' THEN 'confirmed' ELSE state END,
+             baseline_day = $3,
+             updated_millis = $4
+         WHERE site = $1 AND slot = $2
+           AND (state <> 'suspended' OR class IS NOT NULL)
+           AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $5 FOR SHARE)",
+    )
+    .bind(site)
+    .bind(slot)
+    .bind(day_i64(baseline_day))
     .bind(now_millis)
     .bind(generation)
     .execute(pool)
@@ -1182,6 +1337,7 @@ pub async fn forget_site(
     for statement in [
         "DELETE FROM object_evidence WHERE site = $1",
         "DELETE FROM object_positions WHERE site = $1",
+        "DELETE FROM object_event_status WHERE site = $1",
         "DELETE FROM object_agent_calls WHERE site = $1",
         "DELETE FROM object_learning_runs WHERE site = $1",
     ] {
@@ -1962,5 +2118,184 @@ mod tests {
             .unwrap();
         // The cursor, the evidence of the vote and the position the vote names.
         assert_eq!(learning_rows(&pool, &site).await, 3);
+    }
+
+    fn handling(event: &str, status: &str, version: Option<i64>) -> EventStatus {
+        EventStatus {
+            event: event.to_owned(),
+            status: status.to_owned(),
+            kind: "auto_pause".to_owned(),
+            slot: SLOT.to_owned(),
+            handled_by: "administrator".to_owned(),
+            handled_millis: 1_000,
+            handled_version: version,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn an_event_is_acknowledged_once_and_undone_after_that_only() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("event_handling");
+        let generation = with_site(&pool, &site).await;
+        assert!(
+            record_event(
+                &pool,
+                &site,
+                generation,
+                &handling("v2-0", "acknowledged", None)
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !record_event(
+                &pool,
+                &site,
+                generation,
+                &handling("v2-0", "acknowledged", None)
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            record_event(
+                &pool,
+                &site,
+                generation,
+                &handling("v2-0", "undone", Some(3))
+            )
+            .await
+            .unwrap()
+        );
+        // An undone event takes no further handling, and an event of another generation none at all.
+        assert!(
+            !record_event(
+                &pool,
+                &site,
+                generation,
+                &handling("v2-0", "acknowledged", None)
+            )
+            .await
+            .unwrap()
+        );
+        let other = generation + chrono::TimeDelta::days(1);
+        assert!(
+            !record_event(&pool, &site, other, &handling("v2-1", "acknowledged", None))
+                .await
+                .unwrap()
+        );
+        let statuses = event_statuses(&pool, &site, generation).await.unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].status, "undone");
+        assert_eq!(statuses[0].handled_version, Some(3));
+        assert!(
+            event_statuses(&pool, &site, other)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_reconfirmed_position_counts_the_evidence_from_its_baseline_day_on() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("reconfirm");
+        let generation = with_site(&pool, &site).await;
+        let suspended = Judgement {
+            state: LearnedState::Suspended,
+            ..proposal()
+        };
+        put_judgement(&pool, &site, generation, &suspended, 1)
+            .await
+            .unwrap();
+        record_evidence(
+            &pool,
+            &site,
+            generation,
+            &[vote("a", 3, &[]), vote("b", 9, &[])],
+            &[],
+        )
+        .await
+        .unwrap();
+        let slots = [SLOT.to_owned()];
+        let counted = |evidence: &HashMap<String, Evidence>| evidence[SLOT].votes();
+        assert_eq!(
+            counted(&load_evidence(&pool, &site, &slots, 0).await.unwrap()),
+            2
+        );
+
+        let row = row_of(&pool, &site, SLOT, "request").await;
+        assert!(
+            reconfirm(&pool, &site, generation, SLOT, 5, 2)
+                .await
+                .unwrap()
+        );
+        // The vote before the baseline day no longer counts, and the suspended state is confirmed.
+        assert_eq!(
+            counted(&load_evidence(&pool, &site, &slots, 0).await.unwrap()),
+            1
+        );
+        assert_eq!(
+            row_of(&pool, &site, SLOT, "request").await.state,
+            "confirmed"
+        );
+        let baseline: i64 = sqlx::query_scalar(
+            "SELECT baseline_day FROM object_positions WHERE site = $1 AND slot = $2",
+        )
+        .bind(&site)
+        .bind(SLOT)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(baseline, 5);
+        assert_eq!(row.id, row_of(&pool, &site, SLOT, "request").await.id);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_suspended_position_can_be_dismissed_and_an_undone_split_is_listed() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("suspended_dismiss");
+        let generation = with_site(&pool, &site).await;
+        let suspended = Judgement {
+            state: LearnedState::Suspended,
+            ..proposal()
+        };
+        put_judgement(&pool, &site, generation, &suspended, 1)
+            .await
+            .unwrap();
+        let row = row_of(&pool, &site, SLOT, "request").await;
+        assert!(
+            dismiss(&pool, &site, generation, row.id, 20, 2)
+                .await
+                .unwrap()
+        );
+        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "pending");
+
+        let mut split = handling("v4-0", "undone", Some(5));
+        split.kind = "auto_tighten".to_owned();
+        assert!(
+            record_event(&pool, &site, generation, &split)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            undone_slots(&pool, &site, generation).await.unwrap(),
+            BTreeSet::from([SLOT.to_owned()])
+        );
+        // A paused event is not a split, so it lists nothing.
+        let mut pause = handling("v6-0", "undone", Some(6));
+        pause.slot = "GET /other path[1]".to_owned();
+        assert!(
+            record_event(&pool, &site, generation, &pause)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            undone_slots(&pool, &site, generation).await.unwrap(),
+            BTreeSet::from([SLOT.to_owned()])
+        );
     }
 }

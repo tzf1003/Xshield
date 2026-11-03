@@ -1,6 +1,7 @@
 //! The object map of one site (console design section 7 and object-map design sections
 //! 1 to 5): the positions the console lists, one position's drawer, the dismiss and
-//! ambiguous actions, and the bootstrap candidates.
+//! ambiguous actions, and the bootstrap candidates. It also lists the automatic changes,
+//! takes their acknowledgements, and tells what a suspended position is judged by now.
 //!
 //! A learned position is addressed as `s<id>`, where the number is its row's identity. A
 //! declared position, one the site's configuration names, is addressed as `a<digest>`,
@@ -18,17 +19,19 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use xshield_core::{
     context::{
-        ObjectSlot, SiteSpec, SlotSource,
-        learning::{RETIRE_DAYS, WINDOW_DAYS, day_of, observe},
+        ObjectMap, ObjectSlot, SiteSpec, SlotSource,
+        learning::{Evidence, RETIRE_DAYS, WINDOW_DAYS, day_of, observe},
     },
     kind::{NameReason, NameSource, Rules, request_name, response_name},
 };
 use xshield_postgres::{
+    object_agent_store::{self as runs},
     object_learning_store::{self as store, Flow, JevFlow, PositionRow},
     site_spec_store::{self, SiteRecord},
 };
@@ -54,6 +57,13 @@ const EXAMPLES_MAX: i64 = 3;
 const EVENTS_DAYS: i64 = 30;
 /// Most automatic versions one object map response reads.
 const EVENTS_MAX: i64 = 20;
+/// Days the learning status line counts automatic changes over.
+const STATUS_DAYS: i64 = 7;
+/// Most learning runs the status line reads, to find the last one that finished.
+const LAST_RUNS_READ: i64 = 5;
+/// Who the console shows as the administrator that handled an automatic change: the store keeps
+/// no name, since the console has one administrator.
+const HANDLED_BY: &str = "administrator";
 /// Milliseconds in an hour.
 const HOUR_MILLIS: i64 = 3_600_000;
 /// Most decision rows the bootstrap candidates read, the newest first.
@@ -158,6 +168,72 @@ struct SlotRow {
     in_effect: bool,
     /// The learning agent's status of a learned request position, when it has one.
     agent_status: Option<AgentPhase>,
+    /// Why a suspended position is suspended, and what the rules would judge it by now. Only a
+    /// suspended position has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suspension: Option<SuspensionBody>,
+}
+
+/// Why a position is suspended, and what the rules judge it by now: `suspension`.
+#[derive(Debug, Clone, Serialize)]
+struct SuspensionBody {
+    /// When the automatic pause happened. `None` when no pause of the last 30 days names the
+    /// position, for example when the administrator has not set automatic pausing.
+    at: Option<String>,
+    /// Whether the learning task paused the position.
+    auto: bool,
+    version: Option<i64>,
+    event_id: Option<String>,
+    reason: Option<Value>,
+    /// The entry the pause took away.
+    previous: Option<PreviousBody>,
+    /// What the rules judge the position by when its entry is not used, from its name.
+    fallback: FallbackBody,
+    /// The kinds the position's votes name since the pause, the largest share first.
+    evidence_now: Vec<ShareBody>,
+    /// Whether an administrator acknowledged the pause without changing the configuration.
+    acknowledged: bool,
+}
+
+/// The entry an automatic pause took away: `suspension.previous`.
+#[derive(Debug, Clone, Serialize)]
+struct PreviousBody {
+    class: Option<String>,
+    source: Option<Origin>,
+    /// When an administrator confirmed the entry. The configuration does not record it, so null.
+    confirmed_at: Option<String>,
+    /// Who confirmed the entry. The configuration does not record it, so null.
+    confirmed_by: Option<String>,
+}
+
+/// The judgement a name gives a position: `suspension.fallback`.
+#[derive(Debug, Clone, Serialize)]
+struct FallbackBody {
+    /// The declared kind the name relates to, or the kind word the name gives. Null when the name
+    /// gives none.
+    kind: Option<String>,
+    /// The reason code of the name: `field_name`, `parent_name`, `endpoint_name` or `route_word`,
+    /// or `none`.
+    basis: &'static str,
+    word: Option<String>,
+}
+
+/// The share of a position's votes that name one kind: `suspension.evidence_now`.
+#[derive(Debug, Clone, Serialize)]
+struct ShareBody {
+    class: String,
+    share: f64,
+}
+
+/// The learning pass's status line: `learning_status`.
+#[derive(Debug, Serialize)]
+struct LearningStatusBody {
+    /// When the last learning run finished, when one has.
+    last_pass_at: Option<String>,
+    /// Automatic tightenings of the last seven days, counted per entry.
+    auto_tighten_7d: usize,
+    /// Automatic pauses of the last seven days, counted per entry.
+    auto_pause_7d: usize,
 }
 
 /// The counts of the whole map: `ObjectCounts`. Retired positions are not counted.
@@ -198,8 +274,73 @@ pub(crate) struct ObjectsBody {
     slots: Vec<SlotRow>,
     /// Which automatic behaviours this build runs, so the console can say which are off.
     features: Features,
-    /// The automatic changes of the last 30 days, newest first: one event per entry changed.
-    events: Vec<Value>,
+    /// The automatic changes of the last 30 days that no one has handled, newest first: one event
+    /// per entry changed.
+    events: Vec<AutomaticEvent>,
+    /// The learning pass's status line.
+    learning_status: LearningStatusBody,
+}
+
+/// `GET /objects/events`: the automatic changes the query names, newest first.
+#[derive(Debug, Serialize)]
+pub(crate) struct EventsBody {
+    events: Vec<AutomaticEvent>,
+}
+
+/// How an administrator handled an automatic change: `status`. An event no one handled and no later
+/// version changed is `open`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EventState {
+    Open,
+    /// Known to the administrator, with the configuration unchanged.
+    Acknowledged,
+    /// Undone by a save, which named the event.
+    Undone,
+    /// A later version changed the same entry, so the event no longer describes it.
+    Superseded,
+}
+
+/// Who handled an automatic change, and when: `handled`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct HandledBody {
+    by: String,
+    at: String,
+    /// The version the handling saved, when it saved one.
+    version: Option<i64>,
+}
+
+/// One side of an automatic change: the kind and the configuration entry it names. A pause that
+/// removed the entry has no entry after it.
+#[derive(Debug, Clone, Serialize)]
+struct EntryBody {
+    class: Option<String>,
+    entry: Option<ObjectSlot>,
+}
+
+/// One automatic change to one entry: `ObjectEvent`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AutomaticEvent {
+    id: String,
+    kind: &'static str,
+    at: String,
+    version: i64,
+    slot_id: String,
+    key: String,
+    side: Side,
+    before: EntryBody,
+    after: EntryBody,
+    reason: Option<Value>,
+    /// The fast allows the change turns back to Jev. Not counted yet, so empty.
+    impact: Vec<Value>,
+    /// Sample requests of the change. Not collected yet, so empty.
+    examples: Vec<String>,
+    status: EventState,
+    handled: Option<HandledBody>,
+    note: Option<String>,
+    /// When the version was recorded, for the day window; not part of the response.
+    #[serde(skip)]
+    at_millis: i64,
 }
 
 /// The automatic behaviours this build runs: `features` of the object map's response.
@@ -360,7 +501,11 @@ pub async fn list(
     let now = now_millis();
     let learned = store::positions(&state.pool, &name).await?;
     let view = AgentView::load(&state, &record, now).await?;
-    let rows = merged(&record.spec, &learned, &view)?;
+    let mut rows = merged(&record.spec, &learned, &view)?;
+    let events = automatic_events(&state, &record, now).await?;
+    for row in &mut rows {
+        row.suspension = suspension_of(&state, &record, &events, row, now).await?;
+    }
     let waiting = rows
         .iter()
         .filter(|row| {
@@ -377,6 +522,7 @@ pub async fn list(
     let learning_run =
         agent_api::learning_run(&state.pool, &name, now, &view, waiting, failed).await?;
     let classes = record.spec.objects().classes().len();
+    let learning_status = learning_status(&state, &record, &events, now).await?;
     Ok(Json(ObjectsBody {
         counts: counts_of(classes, &rows),
         agent_configured: view.model_configured(),
@@ -385,7 +531,11 @@ pub async fn list(
         classes: classes_of(&record.spec, &rows),
         slots: rows.into_iter().filter(|row| filter.matches(row)).collect(),
         features: FEATURES,
-        events: automatic_events(&state, &name).await?,
+        events: events
+            .into_iter()
+            .filter(|event| event.status == EventState::Open)
+            .collect(),
+        learning_status,
     }))
 }
 
@@ -403,10 +553,12 @@ pub async fn slot(
     let now = now_millis();
     let learned = store::positions(&state.pool, &name).await?;
     let view = AgentView::load(&state, &record, now).await?;
-    let row = merged(&record.spec, &learned, &view)?
+    let events = automatic_events(&state, &record, now).await?;
+    let mut row = merged(&record.spec, &learned, &view)?
         .into_iter()
         .find(|row| row.id == id)
         .ok_or_else(slot_not_found)?;
+    row.suspension = suspension_of(&state, &record, &events, &row, now).await?;
     let agent = match learned
         .iter()
         .find(|learned| learned_id(learned.id) == row.id)
@@ -482,6 +634,293 @@ pub async fn ambiguous(
     let changed =
         store::mark_ambiguous(&state.pool, &name, record.created_at, row.id, now_millis()).await?;
     changed_or_conflict(changed)
+}
+
+/// The filters of the events list: whether it lists the open events only, a kind, and the earliest
+/// time an event may have.
+struct EventFilter {
+    open_only: bool,
+    kind: Option<&'static str>,
+    since_millis: i64,
+}
+
+impl EventFilter {
+    /// # Errors
+    /// `INVALID_FILTER` naming `status` (`open` or `all`), `kind` (`auto_tighten`, `auto_pause` or
+    /// `anomaly`) or `days` (1 to [`EVENTS_DAYS`]) for a value the list does not take.
+    fn of(params: &Params, now: i64) -> ApiResult<Self> {
+        let open_only = match params.text("status") {
+            None | Some("open") => true,
+            Some("all") => false,
+            Some(_) => return Err(ApiError::invalid_filter("status")),
+        };
+        let kind = match params.text("kind") {
+            None => None,
+            Some("auto_tighten") => Some("auto_tighten"),
+            Some("auto_pause") => Some("auto_pause"),
+            Some("anomaly") => Some("anomaly"),
+            Some(_) => return Err(ApiError::invalid_filter("kind")),
+        };
+        let days = match params.int("days")? {
+            None => EVENTS_DAYS,
+            Some(days) if (1..=EVENTS_DAYS).contains(&days) => days,
+            Some(_) => return Err(ApiError::invalid_filter("days")),
+        };
+        Ok(Self {
+            open_only,
+            kind,
+            since_millis: now.saturating_sub(days.saturating_mul(DAY_MILLIS)),
+        })
+    }
+
+    fn matches(&self, event: &AutomaticEvent) -> bool {
+        (!self.open_only || event.status == EventState::Open)
+            && self.kind.is_none_or(|kind| event.kind == kind)
+            && event.at_millis >= self.since_millis
+    }
+}
+
+/// `GET /api/sites/{name}/objects/events`: the automatic changes of the last `days` days, newest
+/// first. `status=open` (the default) lists the ones no one has handled, and `status=all` lists them
+/// all, with their handling.
+///
+/// # Errors
+/// `SITE_NOT_FOUND` for an unknown site, `INVALID_FILTER` naming `status`, `kind` or `days` for a
+/// value the list does not take, and a 500 when a query fails.
+pub async fn events(
+    State(state): State<Arc<ControlState>>,
+    Path(name): Path<String>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> ApiResult<Json<EventsBody>> {
+    let now = now_millis();
+    let filter = EventFilter::of(&Params::from(query), now)?;
+    let record = site_of(&state, &name).await?;
+    let events = automatic_events(&state, &record, now).await?;
+    Ok(Json(EventsBody {
+        events: events
+            .into_iter()
+            .filter(|event| filter.matches(event))
+            .collect(),
+    }))
+}
+
+/// `POST /api/sites/{name}/objects/events/{id}/ack`: marks an automatic change as known, with the
+/// configuration unchanged and no version written. Acknowledging an acknowledged change does nothing.
+///
+/// # Errors
+/// `SITE_NOT_FOUND` and `EVENT_NOT_FOUND` (404) for an unknown site or event; `EVENT_UNDONE` and
+/// `EVENT_SUPERSEDED` (409) for an event that is already undone, or that a later version changed.
+pub async fn ack_event(
+    State(state): State<Arc<ControlState>>,
+    Path((name, id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let record = site_of(&state, &name).await?;
+    let now = now_millis();
+    let event = find_event(&state, &record, &id, now).await?;
+    match event.status {
+        EventState::Acknowledged => Ok(StatusCode::NO_CONTENT),
+        EventState::Open => {
+            let handling = handling_of(&event, "acknowledged", None, now);
+            store::record_event(&state.pool, &name, record.created_at, &handling).await?;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        EventState::Undone => Err(ApiError::new(StatusCode::CONFLICT, "EVENT_UNDONE")),
+        EventState::Superseded => Err(ApiError::new(StatusCode::CONFLICT, "EVENT_SUPERSEDED")),
+    }
+}
+
+/// An automatic change a save names as the change it undoes or re-confirms.
+pub(crate) struct PendingEvent {
+    site: String,
+    generation: DateTime<Utc>,
+    event: AutomaticEvent,
+}
+
+/// Checks, before a save writes, the automatic change the save names with `object_event`. The change
+/// must still be open or acknowledged, so that the save undoes what the administrator sees.
+///
+/// # Errors
+/// As [`ack_event`], for the change the save names.
+pub(crate) async fn check_save_event(
+    state: &ControlState,
+    record: &SiteRecord,
+    id: &str,
+) -> ApiResult<PendingEvent> {
+    let event = find_event(state, record, id, now_millis()).await?;
+    match event.status {
+        EventState::Open | EventState::Acknowledged => Ok(PendingEvent {
+            site: record.spec.name().to_owned(),
+            generation: record.created_at,
+            event,
+        }),
+        EventState::Undone => Err(ApiError::new(StatusCode::CONFLICT, "EVENT_UNDONE")),
+        EventState::Superseded => Err(ApiError::new(StatusCode::CONFLICT, "EVENT_SUPERSEDED")),
+    }
+}
+
+/// Records, after a save wrote `version`, that the save undid the pending change. The position it
+/// changed starts again from the day after the save: the evidence before that day stops counting for
+/// it, and a suspended position is confirmed again. So the pass does not split or pause the position
+/// again on the evidence that led to the change. The save has written the configuration already, so a
+/// record that fails is logged, not returned.
+pub(crate) async fn mark_saved(state: &ControlState, pending: &PendingEvent, version: i64) {
+    let now = now_millis();
+    let handling = handling_of(&pending.event, "undone", Some(version), now);
+    if let Err(error) =
+        store::record_event(&state.pool, &pending.site, pending.generation, &handling).await
+    {
+        eprintln!(
+            "xshield-control: event {} not recorded as undone for site {}, {error}",
+            pending.event.id, pending.site
+        );
+    }
+    let baseline = day_of(u64::try_from(now).unwrap_or(0)).saturating_add(1);
+    if let Err(error) = store::reconfirm(
+        &state.pool,
+        &pending.site,
+        pending.generation,
+        &pending.event.key,
+        baseline,
+        now,
+    )
+    .await
+    {
+        eprintln!(
+            "xshield-control: position {} not re-confirmed for site {}, {error}",
+            pending.event.key, pending.site
+        );
+    }
+}
+
+/// The suspension of a suspended position: the pause that suspended it, the entry it took away, what
+/// the name gives, and the kinds its votes name since the pause. `None` for any other position.
+///
+/// # Errors
+/// A 500 when a read of the evidence fails.
+async fn suspension_of(
+    state: &ControlState,
+    record: &SiteRecord,
+    events: &[AutomaticEvent],
+    row: &SlotRow,
+    now: i64,
+) -> ApiResult<Option<SuspensionBody>> {
+    if row.state != PositionState::Suspended {
+        return Ok(None);
+    }
+    let map = record.spec.objects();
+    let rules = Rules::of(record.spec.advanced());
+    let pause = events
+        .iter()
+        .filter(|event| {
+            event.kind == "auto_pause"
+                && event.key == row.key
+                && matches!(event.status, EventState::Open | EventState::Acknowledged)
+        })
+        .max_by_key(|event| event.version);
+    let evidence = store::load_evidence(
+        &state.pool,
+        record.spec.name(),
+        std::slice::from_ref(&row.key),
+        oldest_day(now),
+    )
+    .await?;
+    Ok(Some(SuspensionBody {
+        at: pause.map(|event| event.at.clone()),
+        auto: pause.is_some(),
+        version: pause.map(|event| event.version),
+        event_id: pause.map(|event| event.id.clone()),
+        reason: pause.and_then(|event| event.reason.clone()),
+        previous: pause.map(|event| PreviousBody {
+            class: event.before.class.clone(),
+            source: event
+                .before
+                .entry
+                .as_ref()
+                .map(|entry| Origin::from(entry.source)),
+            confirmed_at: None,
+            confirmed_by: None,
+        }),
+        fallback: fallback_of(&row.key, map, &rules),
+        evidence_now: evidence
+            .get(&row.key)
+            .map_or_else(Vec::new, |votes| shares_of(votes, map)),
+        acknowledged: pause.is_some_and(|event| event.status == EventState::Acknowledged),
+    }))
+}
+
+/// What the rules judge a position by when its entry is not used: the declared kind its name relates
+/// to, or the kind word the name gives, with the same name rules the judge reads.
+fn fallback_of(key: &str, map: &ObjectMap, rules: &Rules) -> FallbackBody {
+    let Some((reason, _)) = name_of(key, rules) else {
+        return FallbackBody {
+            kind: None,
+            basis: "none",
+            word: None,
+        };
+    };
+    let kind = map
+        .classes()
+        .iter()
+        .find(|class| rules.relates(&reason.word, &class.id))
+        .map_or_else(|| reason.word.clone(), |class| class.id.clone());
+    FallbackBody {
+        kind: Some(kind),
+        basis: reason_code(reason.source),
+        word: Some(reason.word),
+    }
+}
+
+/// The share of a position's votes each kind holds, the largest share first. Empty without votes.
+fn shares_of(evidence: &Evidence, map: &ObjectMap) -> Vec<ShareBody> {
+    let votes = evidence.votes();
+    if votes == 0 {
+        return Vec::new();
+    }
+    let mut shares: Vec<ShareBody> = evidence
+        .kinds(map)
+        .into_iter()
+        .map(|(class, count)| ShareBody {
+            class: class.to_owned(),
+            share: f64::from(count) / f64::from(votes),
+        })
+        .collect();
+    shares.sort_by(|left, right| {
+        right
+            .share
+            .total_cmp(&left.share)
+            .then_with(|| left.class.cmp(&right.class))
+    });
+    shares
+}
+
+/// The learning pass's status line: when it last finished, and how many automatic changes of each
+/// kind the last seven days hold.
+///
+/// # Errors
+/// A 500 when a read of the learning runs fails.
+async fn learning_status(
+    state: &ControlState,
+    record: &SiteRecord,
+    events: &[AutomaticEvent],
+    now: i64,
+) -> ApiResult<LearningStatusBody> {
+    let last_pass_at = runs::recent_runs(&state.pool, record.spec.name(), LAST_RUNS_READ)
+        .await?
+        .iter()
+        .find_map(|run| run.finished_millis)
+        .and_then(rfc3339);
+    let since = now.saturating_sub(STATUS_DAYS.saturating_mul(DAY_MILLIS));
+    let recent = |kind: &str| {
+        events
+            .iter()
+            .filter(|event| event.kind == kind && event.at_millis >= since)
+            .count()
+    };
+    Ok(LearningStatusBody {
+        last_pass_at,
+        auto_tighten_7d: recent("auto_tighten"),
+        auto_pause_7d: recent("auto_pause"),
+    })
 }
 
 /// `GET /api/sites/{name}/objects/bootstrap`: the kinds the cold start can propose. The candidates
@@ -615,14 +1054,27 @@ fn reason_code(source: NameSource) -> &'static str {
 }
 
 /// The automatic changes of the last [`EVENTS_DAYS`] days, newest first: one event for each entry a
-/// version changed, with the entry it replaced and the entry it became. Every event is `open`: the
-/// console's acknowledgements are not recorded yet.
+/// version changed, with the entry it replaced and the entry it became. An event's status is how an
+/// administrator handled it, when that is recorded; otherwise it is `superseded` once the entry is no
+/// longer the one the change made, and `open` while it is.
 ///
 /// # Errors
-/// A 500 when a read of the configuration history fails.
-async fn automatic_events(state: &ControlState, name: &str) -> ApiResult<Vec<Value>> {
-    let since = now_millis().saturating_sub(EVENTS_DAYS.saturating_mul(DAY_MILLIS));
+/// A 500 when a read of the configuration history or of the handled events fails.
+async fn automatic_events(
+    state: &ControlState,
+    record: &SiteRecord,
+    now: i64,
+) -> ApiResult<Vec<AutomaticEvent>> {
+    let name = record.spec.name();
+    let since = now.saturating_sub(EVENTS_DAYS.saturating_mul(DAY_MILLIS));
     let versions = site_spec_store::automatic_history(&state.pool, name, EVENTS_MAX).await?;
+    let handled: BTreeMap<String, store::EventStatus> =
+        store::event_statuses(&state.pool, name, record.created_at)
+            .await?
+            .into_iter()
+            .map(|status| (status.event.clone(), status))
+            .collect();
+    let map = record.spec.objects();
     let mut events = Vec::new();
     for version in versions {
         if version.changed_at.timestamp_millis() < since {
@@ -640,7 +1092,16 @@ async fn automatic_events(state: &ControlState, name: &str) -> ApiResult<Vec<Val
         for (index, (previous, slot)) in
             changed_slots(before.as_ref(), spec).into_iter().enumerate()
         {
-            events.push(automatic_event(&version, index, previous, slot));
+            let id = format!("v{}-{index}", version.version);
+            let current = map.slots().iter().find(|entry| entry.key == slot.key);
+            events.push(automatic_event(
+                &version,
+                index,
+                previous,
+                slot,
+                current,
+                handled.get(&id),
+            ));
         }
     }
     Ok(events)
@@ -649,14 +1110,17 @@ async fn automatic_events(state: &ControlState, name: &str) -> ApiResult<Vec<Val
 /// One automatic change in the shape the console reads: the entry it replaced and the entry it
 /// became, the side of the position, and the reason. A pause is for evidence that points at other
 /// kinds. A tightening moves a position to the class its votes show, and its reason names the two
-/// classes. The status is `open` until the console acknowledges or undoes the event, which is not
-/// recorded yet.
+/// classes. The status is the administrator's handling when one is recorded. Otherwise it is
+/// `superseded` when `current`, the entry the configuration holds now, is no longer the entry the
+/// change made, and `open` when it is.
 fn automatic_event(
     version: &site_spec_store::HistoryEntry,
     index: usize,
     previous: Option<&ObjectSlot>,
     slot: &ObjectSlot,
-) -> Value {
+    current: Option<&ObjectSlot>,
+    handled: Option<&store::EventStatus>,
+) -> AutomaticEvent {
     let reason = match version.change {
         site_spec_store::Change::AutoPause => Some(serde_json::json!({ "code": "evidence_drift" })),
         site_spec_store::Change::AutoTighten => Some(serde_json::json!({
@@ -665,22 +1129,82 @@ fn automatic_event(
         })),
         _ => None,
     };
-    serde_json::json!({
-        "id": format!("v{}-{index}", version.version),
-        "kind": version.change.as_str(),
-        "at": version.changed_at.to_rfc3339(),
-        "version": version.version,
-        "key": slot.key,
-        "side": side_of_key(&slot.key).as_str(),
-        "before": { "class": previous.map(|entry| entry.class.as_str()), "entry": previous },
-        "after": { "class": slot.class, "entry": slot },
-        "reason": reason,
-        "impact": [],
-        "examples": [],
-        "status": "open",
-        "handled": null,
-        "note": version.note,
-    })
+    let (status, handled) = match handled {
+        Some(row) => (
+            if row.status == "undone" {
+                EventState::Undone
+            } else {
+                EventState::Acknowledged
+            },
+            Some(HandledBody {
+                by: row.handled_by.clone(),
+                at: rfc3339(row.handled_millis).unwrap_or_default(),
+                version: row.handled_version,
+            }),
+        ),
+        None if current == Some(slot) => (EventState::Open, None),
+        None => (EventState::Superseded, None),
+    };
+    AutomaticEvent {
+        id: format!("v{}-{index}", version.version),
+        kind: version.change.as_str(),
+        at: version.changed_at.to_rfc3339(),
+        at_millis: version.changed_at.timestamp_millis(),
+        version: version.version,
+        slot_id: declared_id(&slot.key),
+        key: slot.key.clone(),
+        side: side_of_key(&slot.key),
+        before: EntryBody {
+            class: previous.map(|entry| entry.class.clone()),
+            entry: previous.cloned(),
+        },
+        after: EntryBody {
+            class: Some(slot.class.clone()),
+            entry: Some(slot.clone()),
+        },
+        reason,
+        impact: Vec::new(),
+        examples: Vec::new(),
+        status,
+        handled,
+        note: version.note.clone(),
+    }
+}
+
+/// The automatic change with the given id among the automatic changes of the site.
+///
+/// # Errors
+/// `EVENT_NOT_FOUND` (404) for an id that names no automatic change of the last [`EVENTS_DAYS`]
+/// days, and a 500 when a read fails.
+async fn find_event(
+    state: &ControlState,
+    record: &SiteRecord,
+    id: &str,
+    now: i64,
+) -> ApiResult<AutomaticEvent> {
+    automatic_events(state, record, now)
+        .await?
+        .into_iter()
+        .find(|event| event.id == id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "EVENT_NOT_FOUND"))
+}
+
+/// The handling of an event as the store records it.
+fn handling_of(
+    event: &AutomaticEvent,
+    status: &str,
+    version: Option<i64>,
+    now: i64,
+) -> store::EventStatus {
+    store::EventStatus {
+        event: event.id.clone(),
+        status: status.to_owned(),
+        kind: event.kind.to_owned(),
+        slot: event.key.clone(),
+        handled_by: HANDLED_BY.to_owned(),
+        handled_millis: now,
+        handled_version: version,
+    }
 }
 
 /// The entries of `after` that `before` does not hold as they are, each with the entry it replaced.
@@ -811,6 +1335,7 @@ fn declared_row(slot: &ObjectSlot, learned: Option<&PositionRow>) -> SlotRow {
         dismissed: false,
         in_effect: !slot.paused,
         agent_status: None,
+        suspension: None,
     }
 }
 
@@ -859,6 +1384,7 @@ fn learned_row(row: &PositionRow, view: &AgentView) -> ApiResult<SlotRow> {
         dismissed: row.dismissed,
         in_effect: false,
         agent_status: view.phase_of(row),
+        suspension: None,
     })
 }
 
@@ -1454,12 +1980,15 @@ mod tests {
             changed_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("the epoch"),
             spec: Some(paused.clone()),
         };
-        let event = automatic_event(
+        let event = serde_json::to_value(automatic_event(
             &version,
             0,
             Some(&before.objects().slots()[0]),
             &paused.objects().slots()[0],
-        );
+            Some(&paused.objects().slots()[0]),
+            None,
+        ))
+        .expect("an event");
         assert_eq!(event["id"], "v3-0");
         assert_eq!(event["kind"], "auto_pause");
         assert_eq!(event["status"], "open");
@@ -1492,12 +2021,15 @@ mod tests {
             changed_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("the epoch"),
             spec: Some(moved.clone()),
         };
-        let event = automatic_event(
+        let event = serde_json::to_value(automatic_event(
             &version,
             0,
             Some(&before.objects().slots()[0]),
             &moved.objects().slots()[0],
-        );
+            Some(&moved.objects().slots()[0]),
+            None,
+        ))
+        .expect("an event");
         assert_eq!(event["kind"], "auto_tighten");
         assert_eq!(event["status"], "open");
         assert_eq!(event["before"]["class"], "doctor");
@@ -1523,6 +2055,190 @@ mod tests {
         assert!(changed_slots(Some(&paused), &paused).is_empty());
         assert_eq!(changed_slots(None, &paused).len(), 1);
         assert!(changed_slots(None, &before).is_empty());
+    }
+
+    /// A version of `spec`, recorded at `millis` after the epoch.
+    fn version_at(
+        spec: &SiteSpec,
+        change: site_spec_store::Change,
+        version: i64,
+        millis: i64,
+    ) -> site_spec_store::HistoryEntry {
+        site_spec_store::HistoryEntry {
+            version,
+            change,
+            rollback_of: None,
+            note: None,
+            changed_at: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
+                .expect("a time"),
+            spec: Some(spec.clone()),
+        }
+    }
+
+    /// How an administrator handled the pause `v3-0` of the request position of the doctor route.
+    fn handled(status: &str, version: Option<i64>) -> store::EventStatus {
+        store::EventStatus {
+            event: "v3-0".to_owned(),
+            status: status.to_owned(),
+            kind: "auto_pause".to_owned(),
+            slot: "GET /doctor/{id} path[1]".to_owned(),
+            handled_by: HANDLED_BY.to_owned(),
+            handled_millis: 1_000,
+            handled_version: version,
+        }
+    }
+
+    #[test]
+    fn an_event_is_superseded_once_a_later_version_changed_its_entry() {
+        let entry = r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule"}"#;
+        let before = site_with_slots(entry);
+        let paused = site_with_slots(&entry.replace("\"rule\"", "\"rule\", \"paused\": true"));
+        let version = version_at(&paused, site_spec_store::Change::AutoPause, 3, 0);
+        let status = |current: &SiteSpec, handling: Option<&store::EventStatus>| {
+            automatic_event(
+                &version,
+                0,
+                Some(&before.objects().slots()[0]),
+                &paused.objects().slots()[0],
+                current.objects().slots().first(),
+                handling,
+            )
+            .status
+        };
+        // The entry is still the paused one, so the event is open; a later version that put the
+        // unpaused entry back supersedes it.
+        assert_eq!(status(&paused, None), EventState::Open);
+        assert_eq!(status(&before, None), EventState::Superseded);
+        // A handling stands even when a later version changed the entry again.
+        assert_eq!(
+            status(&before, Some(&handled("undone", Some(4)))),
+            EventState::Undone
+        );
+        assert_eq!(
+            status(&before, Some(&handled("acknowledged", None))),
+            EventState::Acknowledged
+        );
+    }
+
+    #[test]
+    fn a_handling_names_who_made_it_and_the_version_it_saved() {
+        let entry = r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule", "paused": true}"#;
+        let paused = site_with_slots(entry);
+        let version = version_at(&paused, site_spec_store::Change::AutoPause, 3, 0);
+        let event = |handling: Option<&store::EventStatus>| {
+            serde_json::to_value(automatic_event(
+                &version,
+                0,
+                None,
+                &paused.objects().slots()[0],
+                Some(&paused.objects().slots()[0]),
+                handling,
+            ))
+            .expect("an event")
+        };
+        let undone = event(Some(&handled("undone", Some(4))));
+        assert_eq!(undone["status"], "undone");
+        assert_eq!(undone["handled"]["by"], "administrator");
+        assert_eq!(undone["handled"]["version"], 4);
+        let acknowledged = event(Some(&handled("acknowledged", None)));
+        assert_eq!(acknowledged["status"], "acknowledged");
+        assert_eq!(acknowledged["handled"]["version"], Value::Null);
+        assert_eq!(event(None)["handled"], Value::Null);
+    }
+
+    #[test]
+    fn the_events_list_takes_the_status_kind_and_days_it_names_and_refuses_the_rest() {
+        let now = 40 * DAY_MILLIS;
+        let filter = |query: &[(&str, &str)]| {
+            let map: BTreeMap<String, String> = query
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect();
+            EventFilter::of(&Params::from(map), now)
+        };
+        assert!(filter(&[]).expect("the default").open_only);
+        assert!(!filter(&[("status", "all")]).expect("all").open_only);
+        assert_eq!(
+            filter(&[("days", "2")]).expect("two days").since_millis,
+            now - 2 * DAY_MILLIS
+        );
+        for (query, field) in [
+            (&[("status", "some")][..], "status"),
+            (&[("kind", "other")][..], "kind"),
+            (&[("days", "31")][..], "days"),
+            (&[("days", "0")][..], "days"),
+        ] {
+            let error = filter(query).err().expect("a refused filter");
+            assert_eq!(error.code(), "INVALID_FILTER", "{field}");
+        }
+        // An event of 35 days ago is listed by the 30-day default and not by a two-day list.
+        let old = version_at(
+            &spec_with_one_pause(),
+            site_spec_store::Change::AutoPause,
+            3,
+            now - 35 * DAY_MILLIS,
+        );
+        let event = automatic_event(
+            &old,
+            0,
+            None,
+            &old.spec.as_ref().expect("a spec").objects().slots()[0],
+            None,
+            None,
+        );
+        assert!(!filter(&[]).expect("default").matches(&event));
+        assert!(!filter(&[("days", "30")]).expect("thirty").matches(&event));
+        assert!(!filter(&[("days", "2")]).expect("two").matches(&event));
+    }
+
+    /// A spec whose one position is paused, as the pause wrote it.
+    fn spec_with_one_pause() -> SiteSpec {
+        site_with_slots(
+            r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule", "paused": true}"#,
+        )
+    }
+
+    #[test]
+    fn a_suspension_falls_back_to_the_kind_its_name_gives_and_names_the_kinds_its_votes_show() {
+        let spec = SiteSpec::from_json(
+            r#"{"name": "clinic", "hosts": ["clinic.example.com"], "origin": "http://10.0.0.5:8080",
+                "session": {"cookie": "SESSIONID"}, "entries": ["/login"],
+                "objects": {"classes": [{"id": "doctor", "name": "医生"}, {"id": "documents", "name": "文档"}],
+                "slots": [{"key": "GET /api/records/{id} attachments[].doc_id", "class": "documents", "source": "admin"},
+                          {"key": "GET /api/records/{id} doctor.id", "class": "doctor", "source": "admin"}]}}"#,
+        )
+        .expect("test spec");
+        let rules = Rules::of(spec.advanced());
+        let fallback = fallback_of("GET /doctor/{id} path[1]", spec.objects(), &rules);
+        assert_eq!(fallback.kind.as_deref(), Some("doctor"));
+        assert_eq!(fallback.basis, "route_word");
+        assert_eq!(fallback.word.as_deref(), Some("doctor"));
+        let none = fallback_of("GET /x path[1]", spec.objects(), &rules);
+        assert_eq!((none.kind, none.basis, none.word), (None, "none", None));
+
+        let mut votes = Evidence::default();
+        for (session, from) in [
+            ("s1", "GET /api/records/{id} attachments[].doc_id"),
+            ("s2", "GET /api/records/{id} attachments[].doc_id"),
+            ("s3", "GET /api/records/{id} doctor.id"),
+        ] {
+            votes.add_vote(xshield_core::context::learning::Vote {
+                slot: "GET /doctor/{id} path[1]".to_owned(),
+                session: session.to_owned(),
+                day: 1,
+                from: vec![from.to_owned()],
+            });
+        }
+        let shares = shares_of(&votes, spec.objects());
+        assert_eq!(
+            shares
+                .iter()
+                .map(|share| share.class.as_str())
+                .collect::<Vec<_>>(),
+            ["documents", "doctor"]
+        );
+        assert!((shares[0].share - 2.0 / 3.0).abs() < 1e-9);
+        assert!(shares_of(&Evidence::default(), spec.objects()).is_empty());
     }
 }
 
