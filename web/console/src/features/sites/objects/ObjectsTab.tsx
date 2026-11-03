@@ -22,9 +22,11 @@ import { ObjectClassCard } from "./ObjectClassCard.tsx";
 import { ObjectClassList } from "./ObjectClassList.tsx";
 import { ObjectCounters } from "./ObjectCounters.tsx";
 import { ObjectEventsDrawer } from "./ObjectEventsDrawer.tsx";
+import { JudgementPanel } from "./JudgementPanel.tsx";
 import { ObjectsBanner } from "./ObjectsBanner.tsx";
 import { choiceOf, filtersOf, type SourceChoice } from "./objects-agent.ts";
 import { type ApplyOptions, classMatches, slotsOfClass } from "./objects-model.ts";
+import { sameJson } from "../spec-model.ts";
 import { SlotDrawer } from "./SlotDrawer.tsx";
 import { SlotTable } from "./SlotTable.tsx";
 import { SynonymMigrateDialog } from "./SynonymMigrateDialog.tsx";
@@ -125,6 +127,8 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
   if (data === undefined) return <Loading height={180} />;
 
   const counts = data.counts;
+  // The draft holds changes of its own: a judgement confirmed now would be written over the version the draft started from.
+  const drafted = !sameJson(working, site.spec);
   const mapped =
     counts.pending + counts.proposed + counts.confirmed + counts.ambiguous + counts.suspended;
   const empty = counts.classes === 0 && mapped === 0;
@@ -278,6 +282,13 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
       </div>
 
       {empty && skipped ? <Notice>{OBJECT_TEXT.coldStart.skipped}</Notice> : null}
+      <JudgementPanel
+        site={site.name}
+        judgements={data.judgements ?? []}
+        rows={data.slots}
+        classes={data.classes}
+        dirty={drafted}
+      />
       {body}
 
       {/* Keyed by the position: the notice and the open picker of one position do not carry to the next. */}

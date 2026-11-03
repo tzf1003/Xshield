@@ -8,7 +8,7 @@ import type { RequestDetail, TraceSource } from "../../api/types.ts";
 import { keepScope } from "../../app/scope.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { isRequestId } from "../../lib/ids.ts";
-import { API_LABEL } from "../../lib/vocab.ts";
+import { API_LABEL, OBJECT_JUDGEMENT } from "../../lib/vocab.ts";
 import { SafeText } from "../../ui/SafeText.tsx";
 import { SourceChip } from "../../ui/SourceChip.tsx";
 import { REDACTED, type Reading } from "./detail-model.ts";
@@ -157,6 +157,7 @@ export function SourceWithClass({
   summaries: RequestDetail["sources"];
   mismatch?: boolean;
 }) {
+  const tierText = tierShort(source);
   return (
     <span className="rd-srcwrap">
       <SourceChip source={source} sources={summaries} copyable />
@@ -165,8 +166,17 @@ export function SourceWithClass({
           {`· ${source.object}`}
         </span>
       )}
+      {tierText === null ? null : <span className="small rd-srccls">{`· ${tierText}`}</span>}
     </span>
   );
+}
+
+/** A source's tier and how sure the map is of it, short: `公共 · 高`. Null when the map gave the position no tier. */
+function tierShort(source: TraceSource): string | null {
+  if (source.tier === undefined) return null;
+  const tier = OBJECT_JUDGEMENT.tier[source.tier].name;
+  if (source.reliability === undefined) return tier;
+  return `${tier} · ${OBJECT_JUDGEMENT.reliability[source.reliability].name}`;
 }
 
 /** The reading of a value: a neutral mark and its text, coloured by the tone (docs/06 6.5.3). */

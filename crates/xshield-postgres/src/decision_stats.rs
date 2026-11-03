@@ -963,6 +963,33 @@ pub async fn after_would_block_references(
     Ok(count)
 }
 
+/// Requests of a site's window that carry an attempt (docs/07 section 7.4.7): a value that only
+/// public responses showed, used at a position that takes no public source. Counted by request, not by
+/// value, from the `attempt` marks of the decision's values.
+///
+/// # Errors
+/// Returns [`sqlx::Error`] when the query fails.
+pub async fn attempt_requests(
+    pool: &PgPool,
+    site: &str,
+    since_millis: i64,
+) -> Result<i64, sqlx::Error> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM decision_log d
+         WHERE d.site = $1 AND d.at_millis >= $2
+           AND EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(COALESCE(d.trace -> 'values', '[]'::jsonb)) AS v
+               WHERE v ->> 'attempt' = 'over_privilege'
+           )",
+    )
+    .bind(site)
+    .bind(since_millis)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
 /// Counts of rows by decision path, failure code and context, under a scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Breakdown {

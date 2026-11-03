@@ -4,7 +4,7 @@
 import { Link } from "@tanstack/react-router";
 import type { DecisionPath, Readiness } from "../../api/types.ts";
 import { fmtInt, fmtLocalDateTime, fmtMs } from "../../lib/format.ts";
-import { DECISION_INFO, HEALTH_LABEL } from "../../lib/vocab.ts";
+import { DECISION_INFO, HEALTH_LABEL, OBJECT_JUDGEMENT } from "../../lib/vocab.ts";
 
 export type ReadyMark = "✓" | "▲" | "–";
 /** `listChip` names the request-list chip that the row's own link opens (docs/06 line 627). */
@@ -48,6 +48,15 @@ export function readinessRows(readiness: Readiness, now: number): Row[] {
           text: `本应拦截 ${fmtInt(total)} 条：${breakdown}`,
           listChip: "would_block",
         },
+  );
+  rows.push(
+    readiness.attempts > 0
+      ? {
+          key: "attempts",
+          mark: "▲",
+          text: OBJECT_JUDGEMENT.readiness.attempts(fmtInt(readiness.attempts)),
+        }
+      : { key: "attempts", mark: "✓", text: OBJECT_JUDGEMENT.readiness.attemptsNone },
   );
   rows.push(
     readiness.open_suggestions > 0

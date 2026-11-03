@@ -6,12 +6,14 @@ import { parseDocument } from "yaml";
 import type {
   Advanced,
   LearningSettings,
+  ObjectSlotEntry,
   ObjectsSpec,
   RouteRule,
   SessionCredential,
   SiteSpec,
   SuggestionAction,
 } from "../../api/types.ts";
+import { judgementChoiceOf, judgementKey, withJudgement } from "../../lib/judgement.ts";
 import {
   declarationKey,
   declarationsOf,
@@ -336,22 +338,64 @@ const CONFLICT_LABELS: Record<string, string> = {
 };
 
 /**
- * Lists merge without conflict: what this draft removed is removed from the latest list, and what it added
- * is appended. Keys identify items (a rule, a host, or a pair of synonyms).
+ * Lists merge without conflict: what this draft removed is removed from the latest list, and what it added is
+ * appended. Keys identify items (a rule, a host, a pair of synonyms, a position). An item this draft changed keeps the
+ * draft's version when the latest list still holds the version the draft started from, so an edit such as a position's
+ * identity or judgement survives a save that rebases onto a newer version. An item both sides changed is merged by
+ * `both` when the list has one, and keeps the latest version otherwise.
  */
-function mergeList<T>(base: T[], mine: T[], latest: T[], key: (item: T) => string): T[] {
-  const baseKeys = new Set(base.map(key));
-  const mineKeys = new Set(mine.map(key));
-  const removed = new Set([...baseKeys].filter((item) => !mineKeys.has(item)));
-  const merged = latest.filter((item) => !removed.has(key(item)));
+function mergeList<T>(
+  base: T[],
+  mine: T[],
+  latest: T[],
+  key: (item: T) => string,
+  both?: (started: T, edited: T, latest: T) => T,
+): T[] {
+  const baseByKey = new Map(base.map((item): [string, T] => [key(item), item]));
+  const mineByKey = new Map(mine.map((item): [string, T] => [key(item), item]));
+  const removed = new Set([...baseByKey.keys()].filter((id) => !mineByKey.has(id)));
+  const merged = latest
+    .filter((item) => !removed.has(key(item)))
+    .map((item) => {
+      const started = baseByKey.get(key(item));
+      const edited = mineByKey.get(key(item));
+      if (started === undefined || edited === undefined) return item;
+      if (sameJson(edited, started)) return item;
+      if (sameJson(item, started)) return edited;
+      return both === undefined ? item : both(started, edited, item);
+    });
   const seen = new Set(merged.map(key));
   for (const item of mine) {
     const id = key(item);
-    if (baseKeys.has(id) || seen.has(id)) continue;
+    if (baseByKey.has(id) || seen.has(id)) continue;
     seen.add(id);
     merged.push(item);
   }
   return merged;
+}
+
+/**
+ * A position both sides changed (console design 4.3). Each part is merged on its own: the placement (class and source),
+ * the pause and the judgement (identity, tier, acceptance, reliability) are the draft's where the draft changed them, and
+ * the latest version's otherwise. So a position the learning task paused keeps its pause when the draft gave it an
+ * identity, and the identity is kept too.
+ */
+function mergeSlot(
+  started: ObjectSlotEntry,
+  edited: ObjectSlotEntry,
+  latest: ObjectSlotEntry,
+): ObjectSlotEntry {
+  const placed = edited.class !== started.class || edited.source !== started.source;
+  const pauseChanged = (edited.paused ?? false) !== (started.paused ?? false);
+  const judged = judgementKey(edited) !== judgementKey(started);
+  const merged: ObjectSlotEntry = {
+    key: latest.key,
+    class: placed ? edited.class : latest.class,
+    source: placed ? edited.source : latest.source,
+  };
+  const paused = pauseChanged ? edited.paused : latest.paused;
+  if (paused !== undefined) merged.paused = paused;
+  return withJudgement(merged, judgementChoiceOf(judged ? edited : latest));
 }
 
 /**
@@ -422,6 +466,7 @@ export function rebaseSpec(
     mine.objects?.slots ?? [],
     latest.objects?.slots ?? [],
     (item) => item.key,
+    mergeSlot,
   );
   const objects: ObjectsSpec | undefined =
     learning === undefined && classes.length === 0 && slots.length === 0

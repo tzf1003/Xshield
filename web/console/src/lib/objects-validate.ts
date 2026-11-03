@@ -11,6 +11,7 @@ import type {
   ObjectSource,
   ObjectsSpec,
 } from "../api/types.ts";
+import { judgementKey, judgementWords } from "./judgement.ts";
 import { parsePattern } from "./patterns.ts";
 import { DECLARE_TEXT, LEARNING_TEXT, OBJECT_KIND_LABEL } from "./vocab.ts";
 
@@ -306,6 +307,11 @@ function slotChanges(
     if ((previous.paused ?? false) !== (item.paused ?? false)) {
       changes.push(`${positionWords(item.key)} ${item.paused ? "暂停" : "恢复使用"}`);
     }
+    if (judgementKey(previous) !== judgementKey(item)) {
+      const was = judgementWords(previous) ?? "无";
+      const now = judgementWords(item) ?? "无";
+      changes.push(`${positionWords(item.key)} 判断 ${was} → ${now}`);
+    }
   }
   for (const item of before ?? []) {
     if (!next.has(item.key)) changes.push(`对象表 －1：${positionWords(item.key)}`);
@@ -425,7 +431,26 @@ function classOf(
   };
 }
 
-/** One position of `objects.slots`, read strictly: the key, the class, the source and the paused flag. */
+/** The keys one position of `objects.slots` may hold (docs/07 7.9.15, 7.9.16). */
+const SLOT_KEYS: readonly string[] = [
+  "key",
+  "class",
+  "source",
+  "paused",
+  "identity",
+  "tier",
+  "accepts_public",
+  "reliability",
+];
+const IDENTITIES: readonly string[] = ["user", "org", "role"];
+const TIERS: readonly string[] = ["self", "org", "admin", "public"];
+const RELIABILITIES: readonly string[] = ["high", "medium", "low"];
+
+/**
+ * One position of `objects.slots`, read strictly: the key, the class, the source, the paused flag and the judgement
+ * fields (identity, tier, accepts_public, reliability). The gateway refuses a position with both a tier and an
+ * acceptance, and a reliability with neither; the same two checks run here, so a form never shows what it would refuse.
+ */
 function slotOf(
   value: unknown,
   index: number,
@@ -433,17 +458,50 @@ function slotOf(
   const where = DECLARE_TEXT.slotShape(index + 1);
   if (!isRecord(value)) return { ok: false, message: where };
   for (const key of Object.keys(value)) {
-    if (!["key", "class", "source", "paused"].includes(key))
-      return { ok: false, message: DECLARE_TEXT.unknownKey(key) };
+    if (!SLOT_KEYS.includes(key)) return { ok: false, message: DECLARE_TEXT.unknownKey(key) };
   }
-  const { key, class: cls, source, paused } = value;
+  const { key, class: cls, source, paused, identity, tier, accepts_public, reliability } = value;
   if (typeof key !== "string" || typeof cls !== "string" || !isSource(source)) {
     return { ok: false, message: where };
   }
   if (paused !== undefined && typeof paused !== "boolean") return { ok: false, message: where };
+  if (identity !== undefined && !isOneOf(IDENTITIES, identity))
+    return { ok: false, message: where };
+  if (tier !== undefined && !isOneOf(TIERS, tier)) return { ok: false, message: where };
+  if (accepts_public !== undefined && typeof accepts_public !== "boolean") {
+    return { ok: false, message: where };
+  }
+  if (reliability !== undefined && !isOneOf(RELIABILITIES, reliability)) {
+    return { ok: false, message: where };
+  }
   const entry: ObjectSlotEntry = { key, class: cls, source };
   if (paused !== undefined) entry.paused = paused;
+  if (identity !== undefined) entry.identity = identity as ObjectSlotEntry["identity"];
+  if (tier !== undefined) entry.tier = tier as ObjectSlotEntry["tier"];
+  if (accepts_public !== undefined) entry.accepts_public = accepts_public;
+  if (reliability !== undefined) entry.reliability = reliability as ObjectSlotEntry["reliability"];
+  const judgementProblem = judgementProblemOf(entry);
+  if (judgementProblem !== null) return { ok: false, message: judgementProblem(index + 1) };
   return { ok: true, value: entry };
+}
+
+function isOneOf(list: readonly string[], value: unknown): boolean {
+  return typeof value === "string" && list.includes(value);
+}
+
+/** The gateway's two judgement rules for one entry (docs/07 7.9.16), as the message for its place, or null. */
+function judgementProblemOf(entry: ObjectSlotEntry): ((index: number) => string) | null {
+  if (entry.tier !== undefined && entry.accepts_public !== undefined) {
+    return DECLARE_TEXT.judgementConflict;
+  }
+  if (
+    entry.reliability !== undefined &&
+    entry.tier === undefined &&
+    entry.accepts_public === undefined
+  ) {
+    return DECLARE_TEXT.reliabilityAlone;
+  }
+  return null;
 }
 
 /**
@@ -534,6 +592,8 @@ export function checkObjects(objects: ObjectsSpec | undefined): string[] {
   const keys = new Set<string>();
   slots.forEach((item, index) => {
     if (keyProblem(item.key) !== null) messages.push(DECLARE_TEXT.slotShape(index + 1));
+    const judgementProblem = judgementProblemOf(item);
+    if (judgementProblem !== null) messages.push(judgementProblem(index + 1));
     if (keys.has(item.key)) messages.push(DECLARE_TEXT.slotDuplicate(item.key));
     keys.add(item.key);
     if (!ids.has(item.class)) messages.push(DECLARE_TEXT.slotClassUnknown(item.key, item.class));

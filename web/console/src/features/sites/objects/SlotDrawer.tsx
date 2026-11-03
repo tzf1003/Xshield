@@ -22,6 +22,12 @@ import type {
 } from "../../../api/types.ts";
 import { fmtInt, pct } from "../../../lib/format.ts";
 import {
+  type JudgementChoice,
+  judgementChoiceOf,
+  judgementKey,
+  withJudgement,
+} from "../../../lib/judgement.ts";
+import {
   checkDeclarations,
   checkObjects,
   classProblem,
@@ -57,6 +63,7 @@ import {
   withoutSlot,
 } from "./objects-model.ts";
 import { disagrees, refusalWord } from "./objects-agent.ts";
+import { JudgementEditor } from "./JudgementEditor.tsx";
 import { PathSlotLabel } from "./PathSlotLabel.tsx";
 import { StateTag } from "./SlotTable.tsx";
 import { SuspensionSection } from "./SuspensionSection.tsx";
@@ -209,9 +216,16 @@ export function SlotDrawer({
     const className = (id: string | null) => classNameOf(classes, id);
     const pathLabel = path === null ? "" : pathLabelOf(path);
 
+    // The entry the draft holds for this position, when it has one. Its judgement (identity, tier, acceptance and
+    // reliability) belongs to the position, so a class change or a restore carries it over rather than rebuilding
+    // the entry from its class alone.
+    const heldEntry = slots.find((item) => item.key === data.key);
+
     // The entry a class writes for this position: a declaration for a field, an object slot for a path position.
     const entryOf = (cls: string, source: ObjectSource): ObjectConfigEntry =>
-      field === null ? { key: data.key, class: cls, source } : { field, kind: cls, in: [scope] };
+      field === null
+        ? withJudgement({ key: data.key, class: cls, source }, judgementChoiceOf(heldEntry))
+        : { field, kind: cls, in: [scope] };
 
     // The configuration with the entry put in, and its class added to the map (under `name`) when the map lacks it.
     const withEntryAndClass = (entry: ObjectConfigEntry, name?: string): SiteSpec => {
@@ -249,12 +263,16 @@ export function SlotDrawer({
     const proposalBlock =
       proposalEntry === null ? OBJECT_TEXT.drawer.noClass : blockOf(proposalEntry);
 
-    // A paused position takes back the entry from before its pause, without the pause (console design 3.3).
+    // A paused position takes back the entry from before its pause, without the pause (console design 3.3). The judgement
+    // it had comes back too: the paused entry the draft holds, or else the one the pause recorded.
     const restoreEntry: ObjectConfigEntry | null =
       previous === null || previous.class === null
         ? null
         : field === null
-          ? { key: data.key, class: previous.class, source: previous.source }
+          ? withJudgement(
+              { key: data.key, class: previous.class, source: previous.source },
+              judgementChoiceOf(heldEntry ?? previous),
+            )
           : { field, kind: previous.class, in: [scope] };
     const restoreBlock = restoreEntry === null ? null : blockOf(restoreEntry);
 
@@ -340,6 +358,11 @@ export function SlotDrawer({
     const confirmPick = () => {
       if (pickEntry === null || pickBlock !== null) return;
       commit(withEntryAndClass(pickEntry, pickClass === NEW_CLASS ? pickedName : undefined));
+    };
+    // The drawer's judgement choices change the held entry only; the save dialog saves them as one version.
+    const applyJudgement = (choice: JudgementChoice, note: string) => {
+      if (heldEntry === undefined) return;
+      commit(withEntry(working, withJudgement(heldEntry, choice)), { note });
     };
     const reclass = () => {
       if (field !== null) onReclass(field, scope);
@@ -468,6 +491,16 @@ export function SlotDrawer({
         <div className="small">
           <SafeText text={data.basis} />
         </div>
+
+        {field === null ? (
+          <JudgementEditor
+            key={heldEntry === undefined ? "none" : judgementKey(heldEntry)}
+            side={data.side}
+            entry={heldEntry}
+            paused={heldEntry?.paused === true}
+            onApply={applyJudgement}
+          />
+        ) : null}
 
         <section className="obj-section">
           <div className="field-label">{flowsLabel}</div>

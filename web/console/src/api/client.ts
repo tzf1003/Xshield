@@ -24,6 +24,7 @@ import type {
   ObjectAgentInput,
   ObjectEventsFilter,
   ObjectEventsResponse,
+  ObjectJudgementConfirmation,
   ObjectRunDetail,
   ObjectRunsResponse,
   ObjectsFilter,
@@ -174,6 +175,15 @@ export const api = {
     post<void>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/dismiss`),
   ambiguousSlot: (site: string, id: string) =>
     post<void>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/ambiguous`),
+  /** Confirms the judgement a declared position's proposal gives: one new version of the site (docs/07 7.9.16). */
+  confirmJudgement: (site: string, id: string, body: ObjectJudgementConfirmation) =>
+    post<void>(
+      `/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/judgement/confirm`,
+      body,
+    ),
+  /** Dismisses a proposal: the same judgement is not proposed again until the rules give another one (7.9.16). */
+  dismissJudgement: (site: string, id: string) =>
+    post<void>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/judgement/dismiss`),
   bootstrap: (site: string) => get<BootstrapResponse>(`/sites/${name(site)}/objects/bootstrap`),
   /** The learning task's changes and anomalies (console design 6 C2). */
   objectEvents: (site: string, filter: ObjectEventsFilter) =>

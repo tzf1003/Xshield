@@ -3,9 +3,16 @@
 // its request. The same summary sits in the Jev tab beside the request's cards.
 
 import { Link } from "@tanstack/react-router";
-import type { EntryPass, RecentAccess, RequestDetail, Trace } from "../../api/types.ts";
+import type {
+  EntryPass,
+  RecentAccess,
+  RequestDetail,
+  Trace,
+  TraceSession,
+} from "../../api/types.ts";
 import { fmtElapsed, fmtInt, fmtLocalDateTime } from "../../lib/format.ts";
 import { isSessionLabel, shortSession } from "../../lib/ids.ts";
+import { OBJECT_JUDGEMENT } from "../../lib/vocab.ts";
 import { Card, Empty } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
 import { sessionLists } from "./detail-model.ts";
@@ -35,6 +42,20 @@ export function SessionTab({ detail, requestId }: { detail: RequestDetail; reque
       />
     </Card>
   );
+}
+
+/** Who the session was when the decision was made, in words: the user and the organization as labels of keyed
+ *  hashes, the role as its label (docs/07 7.9.15). Empty when the site declared no identity for the session. */
+function identityWords(identity: TraceSession["identity"]): string[] {
+  if (identity === undefined) return [];
+  const parts: string[] = [];
+  if (identity.user !== undefined)
+    parts.push(`${OBJECT_JUDGEMENT.identity.user.name} ${identity.user}`);
+  if (identity.org !== undefined)
+    parts.push(`${OBJECT_JUDGEMENT.identity.org.name} ${identity.org}`);
+  if (identity.role !== undefined)
+    parts.push(`${OBJECT_JUDGEMENT.identity.role.name} ${identity.role}`);
+  return parts;
 }
 
 export function SessionSummary({
@@ -68,6 +89,14 @@ export function SessionSummary({
             <dd>{fmtElapsed(session.age_seconds)}</dd>
             <dt>已见值</dt>
             <dd className="tnum">{fmtInt(session.known_values)} 个</dd>
+            {identityWords(session.identity).length === 0 ? null : (
+              <>
+                <dt title={OBJECT_JUDGEMENT.identityRow}>{OBJECT_JUDGEMENT.identityRow}</dt>
+                <dd className="mono">
+                  <SafeText text={identityWords(session.identity).join(" · ")} />
+                </dd>
+              </>
+            )}
           </>
         ) : null}
       </dl>
