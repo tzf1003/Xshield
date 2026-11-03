@@ -159,6 +159,9 @@ function problemItems(problem: GatewayProblem, key: string): AttentionItem[] {
           actions: [{ label: "查看存储", target: toSystem("storage") }],
         },
       ];
+    // The overview reads this from GET /api/system/models (modelItems), so the status problem is not listed twice.
+    case "jev_config_not_loaded":
+      return [];
     // An offline instance is a warning too, like a late heartbeat; the status lights list it in full.
     case "edge_offline":
     case "heartbeat_late":
@@ -369,7 +372,7 @@ function siteItems(site: SiteSummary, input: AttentionInput): AttentionItem[] {
 
 /** A gateway that does not run the Jev configuration the console has, for more than a minute (design 3.6). */
 function modelItems(jev: JevModelsState | null | undefined, now: number): AttentionItem[] {
-  if (jev === null || jev === undefined || jev.version === null) return [];
+  if (jev === null || jev === undefined) return [];
   const behind = jevNotLoaded(jev, now);
   if (behind.length === 0) return [];
   const summary = notLoadedSummary(behind);

@@ -36,7 +36,7 @@ const SAVED: JevModelValues = {
 };
 
 const AGENT_SAVED: AgentModelValues = {
-  provider: "vercel_gateway",
+  provider: "gateway",
   endpoint: "https://ai-gateway.vercel.sh/v1",
   model: "openai/gpt-4.1-mini",
   timeout_ms: 30000,
@@ -54,7 +54,6 @@ function passing(overrides: Partial<ModelTestResult> = {}): ModelTestResult {
     detail: null,
     answer_valid: true,
     answer_reason: null,
-    at: AT,
     ...overrides,
   };
 }
@@ -142,6 +141,18 @@ test("formFromValues and jevValues carry a configuration in and out", () => {
   assert.deepEqual(jevValues({ ...form, timeout: " 3000 " }), { ...SAVED, timeout_ms: 3000 });
 });
 
+test("a preset line without a saved address or model takes the route's own", () => {
+  const form = formFromValues("jev", {
+    route: "direct",
+    endpoint: null,
+    model: null,
+    timeout_ms: 3000,
+  });
+  assert.equal(form.endpoint, "https://api.typesafe.ai/v1/systemone");
+  assert.equal(form.model, "typesafe-ai/jev");
+  assert.equal(form.timeout, "3000");
+});
+
 test("an agent form shows its timeout in seconds, and agentValues sends milliseconds", () => {
   const form = formFromValues("agent", AGENT_SAVED);
   assert.equal(form.timeout, "30");
@@ -170,7 +181,7 @@ test("withChoice on the agent sets the gateway address, and drops the shared key
   const custom = withChoice("agent", form, "custom");
   assert.equal(custom.shareKey, false);
   assert.equal(custom.endpoint, AGENT_SAVED.endpoint);
-  const gateway = withChoice("agent", custom, "vercel_gateway");
+  const gateway = withChoice("agent", custom, "gateway");
   assert.equal(gateway.endpoint, "https://ai-gateway.vercel.sh/v1");
 });
 
@@ -211,7 +222,7 @@ test("testFailureText says a failure in words, with its status and the timeout",
 });
 
 test("describeTest reads a passing test, an answer that does not parse, and a failure", () => {
-  const ok = describeTest("jev", passing(), 2000);
+  const ok = describeTest("jev", passing(), 2000, AT);
   assert.equal(ok.tone, "ok");
   assert.match(ok.text, /^\d{2}:\d{2}:\d{2} 成功 · 812 ms · 模型返回了合法的回答$/);
   assert.equal(ok.detail, null);
@@ -225,6 +236,7 @@ test("describeTest reads a passing test, an answer that does not parse, and a fa
       answer_reason: "缺少 access 字段",
     }),
     2000,
+    AT,
   );
   assert.equal(invalid.tone, "warn");
   assert.equal(invalid.text, `${MODEL_TEXT.testAnswerInvalid}：缺少 access 字段`);
@@ -232,8 +244,9 @@ test("describeTest reads a passing test, an answer that does not parse, and a fa
 
   const failed = describeTest(
     "agent",
-    passing({ ok: false, status: 401, latency_ms: null, answer_valid: null, detail: "bad key" }),
+    passing({ ok: false, status: 401, answer_valid: null, detail: "bad key" }),
     30000,
+    AT,
   );
   assert.equal(failed.tone, "bad");
   assert.equal(failed.text, MODEL_TEXT.testFailUnauthorized);
@@ -251,20 +264,21 @@ test("changeText says a history change in words, and the key by its last four", 
     "线路 TypeSafe 直连 → Vercel AI Gateway",
   );
   assert.equal(
-    changeText({ field: "timeout_ms", old: 3000, new: 2000 }, "jev"),
+    changeText({ field: "timeout_ms", old: "3000", new: "2000" }, "jev"),
     "超时 3000 ms → 2000 ms",
   );
   assert.equal(
-    changeText({ field: "timeout_ms", old: 60000, new: 30000 }, "agent"),
+    changeText({ field: "timeout_ms", old: "60000", new: "30000" }, "agent"),
     "超时 60 秒 → 30 秒",
   );
   assert.equal(
     changeText({ field: "key", old: "1c2e", new: "9f3a" }, "jev"),
     "已替换（…1c2e → …9f3a）",
   );
-  assert.equal(changeText({ field: "key", old: null, new: "9f3a" }, "jev"), "已设置（…9f3a）");
+  assert.equal(changeText({ field: "key", old: "", new: "9f3a" }, "jev"), "已设置（…9f3a）");
+  assert.equal(changeText({ field: "key", old: "9f3a", new: "" }, "jev"), "已清除（原 …9f3a）");
   assert.equal(
-    changeText({ field: "share_key_with_jev", old: false, new: true }, "agent"),
+    changeText({ field: "share_key_with_jev", old: "false", new: "true" }, "agent"),
     "与 Jev 共用密钥 否 → 是",
   );
 });

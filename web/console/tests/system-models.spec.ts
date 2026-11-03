@@ -13,6 +13,8 @@ import { useFixtures } from "./helpers/trace.ts";
 
 const JEV_PATH = "/api/system/models/jev";
 const AGENT_PATH = "/api/system/models/agent";
+/** The address the gateway line resolves to: a preset line sends and shows it, and the saved value stays null. */
+const JEV_GATEWAY_ENDPOINT = "https://ai-gateway.vercel.sh/typesafe/v1/systemone";
 
 /** The Jev card is the first of the two model cards, the learning agent's the second. */
 function card(page: Page, which: "jev" | "agent"): Locator {
@@ -41,8 +43,14 @@ function edgeBody(page: Page, edge: string): Locator {
 function behindModels(): ModelsState {
   const models = structuredClone(systemModels);
   models.jev.loaded = [
-    { edge: "edge-1", online: true, version: 14, error: null },
-    { edge: "edge-2", online: true, version: 13, error: "MODEL_KEY_UNREADABLE" },
+    { edge: "edge-1", online: true, source: "console", version: 14, error: null },
+    {
+      edge: "edge-2",
+      online: true,
+      source: "console",
+      version: 13,
+      error: "MODEL_KEY_UNREADABLE",
+    },
   ];
   return models;
 }
@@ -67,9 +75,7 @@ async function conflictOnFirstSave(page: Page, current: number): Promise<void> {
   );
 }
 
-test("the models tab shows both configurations, what the gateways run, and the agent's sites", async ({
-  page,
-}) => {
+test("the models tab shows both configurations and what the gateways run", async ({ page }) => {
   await useFixtures(page);
   await page.goto("/system?tab=models");
   await expect(page.getByRole("tab", { name: MODEL_TEXT.tab })).toHaveAttribute(
@@ -80,20 +86,14 @@ test("the models tab shows both configurations, what the gateways run, and the a
   const jev = card(page, "jev");
   await expect(jev.getByText(MODEL_TEXT.jevTitle)).toBeVisible();
   await expect(jev.getByText("2/2 个网关已加载第 14 版")).toBeVisible();
-  await expect(jev.getByText("https://ai-gateway.vercel.sh/typesafe/v1/systemone")).toBeVisible();
+  await expect(jev.getByText(JEV_GATEWAY_ENDPOINT)).toBeVisible();
   await expect(jev.getByText(/已设置 · 末 4 位 …9f3a/)).toBeVisible();
   await expect(jev.getByText("调用 1,284 · 失败 1.3% · p95 812 ms")).toBeVisible();
 
   const agent = card(page, "agent");
   await expect(agent.getByText(MODEL_TEXT.agentTitle)).toBeVisible();
-  await expect(agent.getByText("最近一次成功")).toBeVisible();
-  await expect(
-    agent.getByText("调用 412 · 成功 398 · 失败 14（超时） · 1 个站点开启了学习代理"),
-  ).toBeVisible();
-  await agent.getByRole("button", { name: new RegExp(MODEL_TEXT.siteUsage) }).click();
-  const sites = agent.getByRole("table", { name: MODEL_TEXT.siteUsage });
-  await expect(sites.locator("tbody tr")).toHaveCount(1);
-  await expect(sites.getByText("emr")).toBeVisible();
+  await expect(agent.getByText(MODEL_TEXT.agentConfigured(3))).toBeVisible();
+  await expect(agent.getByText(systemModels.agent.endpoint, { exact: true })).toBeVisible();
 });
 
 test("a test runs the form's values, and a configuration that tested is saved as tested", async ({
@@ -108,7 +108,7 @@ test("a test runs the form's values, and a configuration that tested is saved as
   await expect(jev.getByRole("status")).toContainText("成功");
   expect(callsTo(page, "POST", `${JEV_PATH}/test`).at(-1)?.body).toEqual({
     route: "gateway",
-    endpoint: systemModels.jev.endpoint,
+    endpoint: JEV_GATEWAY_ENDPOINT,
     model: "typesafe-ai/jev",
     timeout_ms: 3000,
   });
@@ -125,7 +125,7 @@ test("a test runs the form's values, and a configuration that tested is saved as
     expect.objectContaining({
       body: {
         route: "gateway",
-        endpoint: systemModels.jev.endpoint,
+        endpoint: JEV_GATEWAY_ENDPOINT,
         model: "typesafe-ai/jev",
         timeout_ms: 3000,
         expected_version: 14,
@@ -231,13 +231,12 @@ test("a failed test names the reason, and the model's own text is shown as plain
 }) => {
   const failed: ModelTestResult = {
     ok: false,
-    latency_ms: null,
+    latency_ms: 35,
     status: 401,
     failure: null,
     detail: "<b>invalid api key</b>",
     answer_valid: null,
     answer_reason: null,
-    at: "2026-11-01T13:20:00.000Z",
   };
   await useFixtures(page, { overrides: { [`POST ${JEV_PATH}/test`]: reply(200, failed) } });
   await page.goto("/system?tab=models");
@@ -258,8 +257,8 @@ test("a configuration only the environment supplies can be taken over, and its k
   models.jev = {
     ...models.jev,
     source: "env",
-    key: { set: true, last4: null, updated_at: null },
-    loaded: models.jev.loaded.map((load) => ({ ...load, version: null })),
+    key: { set: true, last4: null, updated_at: null, shared_with_jev: false },
+    loaded: models.jev.loaded.map((load) => ({ ...load, source: "env", version: null })),
   };
   await useFixtures(page, { models });
   await page.goto("/system?tab=models");
@@ -352,13 +351,10 @@ test("an agent that is not configured says so, and its form asks for a key", asy
   models.agent = {
     ...models.agent,
     configured: false,
-    version: null,
+    source: null,
+    version: 0,
     updated_at: null,
     key: { set: false, last4: null, updated_at: null, shared_with_jev: false },
-    health: "unknown",
-    usage: { window: "today", calls: 0, ok: 0, failed: 0, top_failure: null, enabled_sites: 0 },
-    sites: [],
-    last_call: null,
   };
   await useFixtures(page, { models });
   await page.goto("/system?tab=models");
@@ -389,7 +385,7 @@ test("an agent on the same gateway as Jev can share its key, and then sends none
 
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(callsTo(page, "PUT", AGENT_PATH).at(-1)?.body).toEqual({
-    provider: "vercel_gateway",
+    provider: "gateway",
     endpoint: systemModels.agent.endpoint,
     model: systemModels.agent.model,
     timeout_ms: 30000,

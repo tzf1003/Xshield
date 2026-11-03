@@ -2,13 +2,8 @@
 // of each card, when the card polls, and which gateways count as not loaded in the overview. Pure functions, no
 // React, so the unit tests can pin the wording and the timing.
 
-import type { AgentModelsState, JevModelsState, ModelCall, ModelLoad } from "../api/types.ts";
-import {
-  MODEL_FAILURE_TEXT,
-  MODEL_LOAD_ERROR_TEXT,
-  MODEL_STATUS_TEXT,
-  MODEL_TEXT,
-} from "./vocab.ts";
+import type { AgentModelsState, JevModelsState, ModelLoad } from "../api/types.ts";
+import { MODEL_LOAD_ERROR_TEXT, MODEL_TEXT } from "./vocab.ts";
 
 /** A saved version has this long to reach the gateways before it counts as not loaded (design 2.5, 3.6). */
 export const LOAD_GRACE_MS = 60_000;
@@ -20,17 +15,6 @@ export type StatusLine = {
   icon: "●" | "▲" | "–" | "○";
   text: string;
 };
-
-/** A failed call in a few words: its HTTP status first, then its failure code (`401 未授权`, `超时`). */
-export function callShort(call: Pick<ModelCall, "status" | "failure">): string {
-  const byStatus = call.status === null ? undefined : MODEL_STATUS_TEXT[call.status];
-  if (byStatus !== undefined) return byStatus;
-  const name =
-    call.failure === null
-      ? MODEL_TEXT.testUnknown
-      : (MODEL_FAILURE_TEXT[call.failure] ?? call.failure);
-  return call.status === null ? name : `${call.status} ${name}`;
-}
 
 /** Whether an RFC 3339 time is inside the grace period. A time that is missing counts as not recent. */
 function recent(iso: string | null, now: number): boolean {
@@ -48,6 +32,7 @@ function behindOf(jev: JevModelsState, version: number): ModelLoad[] {
 
 /** The Jev card's line: how many gateways run the console version, or what holds one back. */
 export function jevStatusLine(jev: JevModelsState, now: number): StatusLine {
+  if (jev.source === null) return { tone: "neutral", icon: "–", text: MODEL_TEXT.unset };
   const online = jev.loaded.filter((load) => load.online);
   if (jev.source === "env") {
     return online.length === 0
@@ -55,7 +40,7 @@ export function jevStatusLine(jev: JevModelsState, now: number): StatusLine {
       : { tone: "ok", icon: "●", text: MODEL_TEXT.loadEnv(online.length) };
   }
   if (online.length === 0) return { tone: "neutral", icon: "–", text: MODEL_TEXT.onlineNone };
-  const version = jev.version ?? 0;
+  const version = jev.version;
   const behind = behindOf(jev, version);
   if (behind.length === 0) {
     return {
@@ -76,7 +61,7 @@ export function jevStatusLine(jev: JevModelsState, now: number): StatusLine {
 
 /** The card re-reads the configuration only while a saved version is still on its way to some gateway. */
 export function jevWaitingForLoad(jev: JevModelsState | undefined, now: number): boolean {
-  if (jev === undefined || jev.source !== "console" || jev.version === null) return false;
+  if (jev === undefined || jev.source !== "console" || jev.version < 1) return false;
   if (!recent(jev.updated_at, now)) return false;
   return behindOf(jev, jev.version).some((load) => load.error === null);
 }
@@ -84,7 +69,7 @@ export function jevWaitingForLoad(jev: JevModelsState | undefined, now: number):
 /** The gateways the overview lists: online, behind the console version, for more than the grace period. */
 export function jevNotLoaded(jev: JevModelsState, now: number): ModelLoad[] {
   const version = jev.version;
-  if (jev.source !== "console" || version === null || jev.updated_at === null) return [];
+  if (jev.source !== "console" || version < 1 || jev.updated_at === null) return [];
   const at = Date.parse(jev.updated_at);
   if (Number.isNaN(at) || now - at <= LOAD_GRACE_MS) return [];
   return behindOf(jev, version);
@@ -105,14 +90,8 @@ export function notLoadedSummary(loads: ModelLoad[]): { edges: string; reason: s
   };
 }
 
-/** The agent card's line: configured or not, and how its last calls went. */
+/** The agent card's line: configured or not, and which saved version runs. The agent's calls are not reported yet. */
 export function agentStatusLine(agent: AgentModelsState): StatusLine {
   if (!agent.configured) return { tone: "neutral", icon: "–", text: MODEL_TEXT.unset };
-  const last = agent.last_call;
-  if (last === null) return { tone: "neutral", icon: "–", text: MODEL_TEXT.noCallYet };
-  if (agent.health === "failing") {
-    return { tone: "warn", icon: "▲", text: MODEL_TEXT.failing(callShort(last)) };
-  }
-  if (last.ok) return { tone: "ok", icon: "●", text: MODEL_TEXT.lastOk };
-  return { tone: "warn", icon: "▲", text: MODEL_TEXT.lastFailed(callShort(last)) };
+  return { tone: "ok", icon: "●", text: MODEL_TEXT.agentConfigured(agent.version) };
 }

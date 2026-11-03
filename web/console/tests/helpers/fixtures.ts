@@ -20,8 +20,8 @@ import type {
   JevStats,
   JevStatus,
   LookupResponse,
-  ModelHistoryResponse,
   ModelsState,
+  ModelVersion,
   RequestCounts,
   RequestDetail,
   RequestListResponse,
@@ -104,8 +104,7 @@ export const system: SystemInfo = wire(systemJson);
 /** Both model configurations as GET /api/system/models answers them (系统 · 模型, design 5.1). */
 export const systemModels: ModelsState = wire(systemModelsJson);
 /** The saved versions of each configuration, newest first (design 2.6, 5.1). */
-export const modelHistory: { jev: ModelHistoryResponse; agent: ModelHistoryResponse } =
-  wire(modelHistoryJson);
+export const modelHistory: { jev: ModelVersion[]; agent: ModelVersion[] } = wire(modelHistoryJson);
 export const insights: Insights = wire(insightsJson);
 export const evidence: Evidence = evidenceJson;
 export const summary: StatsSummary = summaryJson;

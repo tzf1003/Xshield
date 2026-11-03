@@ -75,12 +75,12 @@ export function ModelForm(props: ModelFormProps) {
 
   const choice = form.choice;
   const preset = kind === "jev" ? presetModel(choice as JevRoute) : null;
-  const fixedEndpoint = kind === "jev" ? preset !== null : choice === "vercel_gateway";
+  const fixedEndpoint = kind === "jev" ? preset !== null : choice === "gateway";
   const choiceOptions: Array<{ value: FormChoice; label: string }> =
     kind === "jev"
       ? JEV_CHOICES.map((value) => ({ value, label: MODEL_ROUTE_LABEL[value] }))
       : [
-          { value: "vercel_gateway", label: MODEL_PROVIDER_LABEL.vercel_gateway },
+          { value: "gateway", label: MODEL_PROVIDER_LABEL.gateway },
           { value: "custom", label: MODEL_PROVIDER_LABEL.custom },
         ];
 

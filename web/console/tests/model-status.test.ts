@@ -3,10 +3,9 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AgentModelsState, JevModelsState, ModelCall, ModelLoad } from "../src/api/types.ts";
+import type { AgentModelsState, JevModelsState, ModelLoad } from "../src/api/types.ts";
 import {
   agentStatusLine,
-  callShort,
   jevNotLoaded,
   jevStatusLine,
   jevWaitingForLoad,
@@ -26,51 +25,45 @@ function load(
   error: string | null = null,
   online = true,
 ): ModelLoad {
-  return { edge, online, version, error };
+  return { edge, online, source: version === null ? null : "console", version, error };
 }
 
 function jev(overrides: Partial<JevModelsState> = {}): JevModelsState {
   return {
-    route: "gateway",
-    endpoint: "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
-    model: "typesafe-ai/jev",
-    timeout_ms: 2000,
+    configured: true,
     source: "console",
     version: 14,
     updated_at: OLD,
-    key: { set: true, last4: "9f3a", updated_at: OLD },
+    route: "gateway",
+    endpoint: null,
+    endpoint_host: null,
+    model: "typesafe-ai/jev",
+    timeout_ms: 2000,
+    key: { set: true, last4: "9f3a", updated_at: OLD, shared_with_jev: false },
     key_env: "AI_GATEWAY_API_KEY",
-    env_overridden: [],
     env_available: true,
+    env_overridden: [],
     loaded: [load("edge-1", 14), load("edge-2", 14)],
-    usage: { window: "1h", calls: 0, failed: 0, p95_ms: null },
-    last_call: null,
-    impact: { sites: 2, fail_closed: [], timeout_overrides: 0 },
+    impact: { sites: 2, fail_closed: [] },
+    usage: { window_minutes: 5, calls: 0, failed: 0, p95_ms: null },
     ...overrides,
   };
 }
 
 function agent(overrides: Partial<AgentModelsState> = {}): AgentModelsState {
   return {
-    provider: "vercel_gateway",
+    configured: true,
+    source: "console",
+    version: 3,
+    updated_at: OLD,
+    provider: "gateway",
     endpoint: "https://ai-gateway.vercel.sh/v1",
     model: "openai/gpt-4.1-mini",
     timeout_ms: 30000,
     share_key_with_jev: false,
-    configured: true,
-    version: 3,
-    updated_at: OLD,
     key: { set: true, last4: "c81d", updated_at: OLD, shared_with_jev: false },
-    health: "ok",
-    usage: { window: "today", calls: 0, ok: 0, failed: 0, top_failure: null, enabled_sites: 0 },
-    sites: [],
-    last_call: null,
     ...overrides,
   };
-}
-
-function call(overrides: Partial<ModelCall> = {}): ModelCall {
-  return { at: OLD, ok: false, status: null, failure: null, ...overrides };
 }
 
 test("the grace period is a minute and the card polls every five seconds (design 2.5, 3.6)", () => {
@@ -78,17 +71,12 @@ test("the grace period is a minute and the card polls every five seconds (design
   assert.equal(LOAD_POLL_MS, 5_000);
 });
 
-test("callShort names a failed call by its status first, then by its failure code", () => {
-  assert.equal(callShort({ status: 401, failure: "JEV_HTTP_ERROR" }), "401 未授权");
-  assert.equal(callShort({ status: 429, failure: null }), "429 服务限流");
-  assert.equal(callShort({ status: null, failure: "JEV_TIMEOUT" }), "超时");
-  assert.equal(callShort({ status: 500, failure: "JEV_HTTP_ERROR" }), "500 服务出错");
-  assert.equal(callShort({ status: 404, failure: null }), "404 未知错误");
-  assert.equal(callShort({ status: null, failure: null }), "未知错误");
-});
-
 test("an environment-supplied configuration shows how many gateways read it", () => {
-  const env = jev({ source: "env", version: null, updated_at: null });
+  const readsEnv: ModelLoad[] = [
+    { edge: "edge-1", online: true, source: "env", version: null, error: null },
+    { edge: "edge-2", online: true, source: "env", version: null, error: null },
+  ];
+  const env = jev({ source: "env", updated_at: null, loaded: readsEnv });
   assert.deepEqual(jevStatusLine(env, NOW), {
     tone: "ok",
     icon: "●",
@@ -98,6 +86,15 @@ test("an environment-supplied configuration shows how many gateways read it", ()
     tone: "neutral",
     icon: "–",
     text: MODEL_TEXT.onlineNone,
+  });
+});
+
+test("neither a saved configuration nor an environment one reads as not configured", () => {
+  const unset = jev({ source: null, version: 0, updated_at: null, loaded: [] });
+  assert.deepEqual(jevStatusLine(unset, NOW), {
+    tone: "neutral",
+    icon: "–",
+    text: MODEL_TEXT.unset,
   });
 });
 
@@ -156,7 +153,7 @@ test("with no online gateway the card says so", () => {
 
 test("the card polls only while a saved version is still on its way to a gateway", () => {
   assert.equal(jevWaitingForLoad(undefined, NOW), false);
-  assert.equal(jevWaitingForLoad(jev({ source: "env", version: null }), NOW), false);
+  assert.equal(jevWaitingForLoad(jev({ source: "env" }), NOW), false);
   assert.equal(
     jevWaitingForLoad(jev({ updated_at: RECENT, loaded: [load("edge-2", 13)] }), NOW),
     true,
@@ -180,7 +177,8 @@ test("a gateway counts as not loaded only after the grace period, and only while
     behind,
   );
   assert.deepEqual(jevNotLoaded(jev({ loaded: [load("edge-3", 13, null, false)] }), NOW), []);
-  assert.deepEqual(jevNotLoaded(jev({ source: "env", version: null }), NOW), []);
+  assert.deepEqual(jevNotLoaded(jev({ source: "env" }), NOW), []);
+  assert.deepEqual(jevNotLoaded(jev({ source: null, version: 0 }), NOW), []);
   assert.deepEqual(jevNotLoaded(jev({ updated_at: null, loaded: behind }), NOW), []);
 });
 
@@ -199,24 +197,15 @@ test("notLoadedSummary names the gateways and the distinct reasons they give", (
   assert.equal(notLoadedSummary([load("edge-1", 13, "SOMETHING_NEW")]).reason, "SOMETHING_NEW");
 });
 
-test("the agent card says whether it is configured and how its last calls went", () => {
-  assert.deepEqual(agentStatusLine(agent({ configured: false })), {
+test("the agent card says whether it is configured and which saved version runs", () => {
+  assert.deepEqual(agentStatusLine(agent({ configured: false, source: null, version: 0 })), {
     tone: "neutral",
     icon: "–",
     text: MODEL_TEXT.unset,
   });
-  assert.equal(agentStatusLine(agent()).text, MODEL_TEXT.noCallYet);
-  assert.deepEqual(agentStatusLine(agent({ last_call: call({ ok: true, status: 200 }) })), {
+  assert.deepEqual(agentStatusLine(agent()), {
     tone: "ok",
     icon: "●",
-    text: MODEL_TEXT.lastOk,
+    text: MODEL_TEXT.agentConfigured(3),
   });
-  assert.deepEqual(
-    agentStatusLine(agent({ last_call: call({ status: null, failure: "JEV_TIMEOUT" }) })),
-    { tone: "warn", icon: "▲", text: "最近一次失败：超时" },
-  );
-  assert.deepEqual(
-    agentStatusLine(agent({ health: "failing", last_call: call({ status: 401 }) })),
-    { tone: "warn", icon: "▲", text: "最近 5 次调用失败：401 未授权" },
-  );
 });

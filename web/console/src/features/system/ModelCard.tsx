@@ -34,6 +34,8 @@ import {
   jevForm,
   jevProblems,
   jevValues,
+  presetEndpoint,
+  presetModel,
   sameForm,
   timeoutMsOf,
   type TestLine,
@@ -45,15 +47,8 @@ import {
   notLoadedSummary,
   type StatusLine,
 } from "../../lib/model-status.ts";
-import {
-  errorText,
-  MODEL_FAILURE_TEXT,
-  MODEL_PROVIDER_LABEL,
-  MODEL_ROUTE_LABEL,
-  MODEL_TEXT,
-} from "../../lib/vocab.ts";
+import { errorText, MODEL_PROVIDER_LABEL, MODEL_ROUTE_LABEL, MODEL_TEXT } from "../../lib/vocab.ts";
 import { Card, Kv, Notice } from "../../ui/Page.tsx";
-import { AgentUsageTable } from "./AgentUsageTable.tsx";
 import { ModelForm } from "./ModelForm.tsx";
 import { ModelHistory } from "./ModelHistory.tsx";
 import { ModelSaveDialog } from "./ModelSaveDialog.tsx";
@@ -113,8 +108,9 @@ function useModelTest(kind: ModelKind, now: number) {
       setBusy(true);
       try {
         const result = await api.testModel(kind, body, controller.signal);
-        setLine(describeTest(kind, result, timeoutMs));
-        if (result.ok) setPassed({ form: tried, at: result.at });
+        const at = new Date().toISOString();
+        setLine(describeTest(kind, result, timeoutMs, at));
+        if (result.ok) setPassed({ form: tried, at });
       } catch (error) {
         if (!controller.signal.aborted) setLine(failureLine(error));
       } finally {
@@ -174,7 +170,8 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
   const tested = test.passed !== null && sameForm(test.passed.form, form);
   const status = jevStatusLine(jev, now);
   const notLoaded = jevNotLoaded(jev, now);
-  const timeoutOverrides = jev.impact.timeout_overrides;
+  // A card without a saved configuration or a gateway's environment still shows the defaults of the gateway line.
+  const route: JevRoute = jev.route ?? "gateway";
 
   const keySummary = !jev.key.set
     ? MODEL_TEXT.keyUnset
@@ -182,7 +179,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
       ? MODEL_TEXT.keyFromEnv(jev.key_env)
       : MODEL_TEXT.keySet(jev.key.last4 ?? "", whenText(jev.key.updated_at));
   const sourceText =
-    jev.source === "console" && jev.version !== null
+    jev.source === "console"
       ? `${MODEL_TEXT.sourceConsole(jev.version, whenText(jev.updated_at))}${
           jev.env_overridden.length > 0 ? MODEL_TEXT.overridden(jev.env_overridden.join("、")) : ""
         }`
@@ -219,7 +216,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
       {
         ...jevValues(form),
         ...(key === "" ? {} : { key }),
-        expected_version: jev.version ?? 0,
+        expected_version: jev.version,
         note,
         tested,
       },
@@ -272,7 +269,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
       onOk: async () => {
         setBackError(null);
         try {
-          await remove.mutateAsync(jev.version ?? 0);
+          await remove.mutateAsync(jev.version);
         } catch (error) {
           setBackError(errorText(error instanceof ApiError ? error.code : undefined));
         }
@@ -281,14 +278,13 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
   };
 
   const changes: ChangeRow[] = formChanges("jev", saved, form, jev.key.last4, restored !== null);
-  const impact = [MODEL_TEXT.impactJev(jev.impact.sites, jev.version)];
-  if (timeoutOverrides > 0 && saved.timeout.trim() !== form.timeout.trim()) {
-    impact.push(MODEL_TEXT.impactTimeoutOverrides(timeoutOverrides));
-  }
+  const impact = [
+    MODEL_TEXT.impactJev(jev.impact.sites, jev.source === "console" ? jev.version : null),
+  ];
 
   return (
     <Card className="sys-model" title={MODEL_TEXT.jevTitle} aside={<StatusLabel line={status} />}>
-      {notLoaded.length > 0 && jev.version !== null && !editing ? (
+      {notLoaded.length > 0 && !editing ? (
         <Notice tone="warn">
           {MODEL_TEXT.attentionNotLoaded(
             jev.version,
@@ -330,21 +326,30 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
           onCancel={closeEdit}
           onSave={() => setSaveOpen(true)}
         />
+      ) : jev.source === null ? (
+        <>
+          <p className="sys-lead">{MODEL_TEXT.jevUnset}</p>
+          <div className="sys-actions">
+            <button type="button" className="btn btn-primary" onClick={() => openEdit()}>
+              {MODEL_TEXT.btnConfigure}
+            </button>
+          </div>
+        </>
       ) : (
         <>
           <Kv
             items={[
-              [MODEL_TEXT.rowRoute, MODEL_ROUTE_LABEL[jev.route]],
-              [MODEL_TEXT.rowEndpoint, mono(jev.endpoint)],
-              [MODEL_TEXT.rowModel, mono(jev.model)],
-              [MODEL_TEXT.rowKey, keySummary],
+              [MODEL_TEXT.rowRoute, MODEL_ROUTE_LABEL[route]],
               [
-                MODEL_TEXT.rowTimeout,
-                MODEL_TEXT.timeoutJev(fmtMs(jev.timeout_ms), timeoutOverrides),
+                MODEL_TEXT.rowEndpoint,
+                mono(jev.endpoint ?? presetEndpoint(route) ?? jev.endpoint_host ?? "—"),
               ],
+              [MODEL_TEXT.rowModel, mono(jev.model ?? presetModel(route) ?? "—")],
+              [MODEL_TEXT.rowKey, keySummary],
+              [MODEL_TEXT.rowTimeout, MODEL_TEXT.timeoutJev(fmtMs(jev.timeout_ms))],
               [MODEL_TEXT.rowSource, sourceText],
               [
-                MODEL_TEXT.rowUsageHour,
+                MODEL_TEXT.rowUsageWindow(usage.window_minutes),
                 <>
                   {usageLine} <Link to="/jev">{MODEL_TEXT.linkJevCalls}</Link>
                 </>,
@@ -365,7 +370,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
               type="button"
               className="btn"
               disabled={test.busy || test.cooldown > 0}
-              onClick={() => void test.run({}, saved, jev.timeout_ms)}
+              onClick={() => void test.run(jevValues(saved), saved, timeoutMsOf("jev", saved))}
             >
               {testLabel(test.busy, test.cooldown)}
             </button>
@@ -396,7 +401,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
 
       {saveOpen ? (
         <ModelSaveDialog
-          title={MODEL_TEXT.saveTitle(MODEL_TEXT.jevTitle, (jev.version ?? 0) + 1)}
+          title={MODEL_TEXT.saveTitle(MODEL_TEXT.jevTitle, jev.version + 1)}
           defaultNote={restored === null ? "" : MODEL_TEXT.restoreNote(restored)}
           changes={changes}
           impact={impact}
@@ -408,7 +413,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
           saving={save.isPending}
           conflict={conflict}
           error={saveError}
-          saveLabel={MODEL_TEXT.btnSaveVersion((jev.version ?? 0) + 1)}
+          saveLabel={MODEL_TEXT.btnSaveVersion(jev.version + 1)}
           onSave={submit}
           onClose={() => setSaveOpen(false)}
           onReload={() => void reload()}
@@ -425,7 +430,7 @@ export function AgentModelCard({
   jevRoute,
 }: {
   agent: AgentModelsState;
-  jevRoute: JevRoute;
+  jevRoute: JevRoute | null;
 }) {
   const client = useQueryClient();
   const clock = useNowBucket(1_000);
@@ -433,7 +438,6 @@ export function AgentModelCard({
   const save = useSaveAgentModel();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Form>(() => agentForm(agent));
-  const [usageOpen, setUsageOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
   const [restored, setRestored] = useState<number | null>(null);
@@ -442,14 +446,12 @@ export function AgentModelCard({
 
   const saved = agentForm(agent);
   // The key is shared only when both sides run on the Vercel AI Gateway (design 2.2).
-  const shareAllowed = jevRoute === "gateway" && form.choice === "vercel_gateway";
+  const shareAllowed = jevRoute === "gateway" && form.choice === "gateway";
   const keyRequired = !form.shareKey && !agent.key.set;
   const problems: FormProblems = agentProblems(form, keyRequired);
   const valid = Object.keys(problems).length === 0;
   const tested = test.passed !== null && sameForm(test.passed.form, form);
   const status = agentStatusLine(agent);
-  const usage = agent.usage;
-  const enabledSites = agent.sites.filter((site) => site.enabled).length;
 
   const keySummary = agent.key.shared_with_jev
     ? MODEL_TEXT.keyShared
@@ -457,17 +459,9 @@ export function AgentModelCard({
       ? MODEL_TEXT.keyUnset
       : MODEL_TEXT.keySet(agent.key.last4 ?? "", whenText(agent.key.updated_at));
   const sourceText =
-    agent.version === null
-      ? "—"
-      : MODEL_TEXT.sourceConsole(agent.version, whenText(agent.updated_at));
-  const topFailure =
-    usage.top_failure === null
-      ? null
-      : (MODEL_FAILURE_TEXT[usage.top_failure] ?? usage.top_failure);
-  const usageLine =
-    usage.calls === 0
-      ? MODEL_TEXT.noUsageYet
-      : MODEL_TEXT.usageAgent(usage.calls, usage.ok, usage.failed, topFailure, enabledSites);
+    agent.source === "console"
+      ? MODEL_TEXT.sourceConsole(agent.version, whenText(agent.updated_at))
+      : "—";
 
   const openEdit = (next?: Form) => {
     setForm(next ?? agentForm(agent));
@@ -490,7 +484,7 @@ export function AgentModelCard({
       {
         ...agentValues(form),
         ...(key === "" || form.shareKey ? {} : { key }),
-        expected_version: agent.version ?? 0,
+        expected_version: agent.version,
         note,
         tested,
       },
@@ -535,9 +529,7 @@ export function AgentModelCard({
   };
 
   const changes = formChanges("agent", saved, form, agent.key.last4, restored !== null);
-  const impact = [
-    enabledSites > 0 ? MODEL_TEXT.impactAgent(enabledSites) : MODEL_TEXT.impactAgentNone,
-  ];
+  const impact = [MODEL_TEXT.impactAgent];
 
   const body = editing ? (
     <ModelForm
@@ -573,28 +565,13 @@ export function AgentModelCard({
       <Kv
         items={[
           [MODEL_TEXT.rowProvider, MODEL_PROVIDER_LABEL[agent.provider]],
-          [MODEL_TEXT.rowEndpoint, mono(agent.endpoint ?? "—")],
+          [MODEL_TEXT.rowEndpoint, mono(agent.endpoint)],
           [MODEL_TEXT.rowModel, mono(agent.model ?? "—")],
           [MODEL_TEXT.rowKey, keySummary],
           [MODEL_TEXT.rowTimeout, MODEL_TEXT.timeoutAgent(Math.round(agent.timeout_ms / 1000))],
           [MODEL_TEXT.rowSource, sourceText],
-          [
-            MODEL_TEXT.rowUsageToday,
-            <>
-              {usageLine}{" "}
-              <button
-                type="button"
-                className="linkbtn"
-                aria-expanded={usageOpen}
-                onClick={() => setUsageOpen((open) => !open)}
-              >
-                {MODEL_TEXT.siteUsage} {usageOpen ? "▴" : "▾"}
-              </button>
-            </>,
-          ],
         ]}
       />
-      {usageOpen ? <AgentUsageTable sites={agent.sites} /> : null}
       <div className="sys-actions">
         <button type="button" className="linkbtn" onClick={() => setHistoryOpen((open) => !open)}>
           {MODEL_TEXT.btnHistory}
@@ -603,7 +580,7 @@ export function AgentModelCard({
           type="button"
           className="btn"
           disabled={test.busy || test.cooldown > 0}
-          onClick={() => void test.run({}, saved, agent.timeout_ms)}
+          onClick={() => void test.run(agentValues(saved), saved, timeoutMsOf("agent", saved))}
         >
           {testLabel(test.busy, test.cooldown)}
         </button>
@@ -631,7 +608,7 @@ export function AgentModelCard({
       {body}
       {saveOpen ? (
         <ModelSaveDialog
-          title={MODEL_TEXT.saveTitle(MODEL_TEXT.agentTitle, (agent.version ?? 0) + 1)}
+          title={MODEL_TEXT.saveTitle(MODEL_TEXT.agentTitle, agent.version + 1)}
           defaultNote={restored === null ? "" : MODEL_TEXT.restoreNote(restored)}
           changes={changes}
           impact={impact}
@@ -643,7 +620,7 @@ export function AgentModelCard({
           saving={save.isPending}
           conflict={conflict}
           error={saveError}
-          saveLabel={MODEL_TEXT.btnSaveVersion((agent.version ?? 0) + 1)}
+          saveLabel={MODEL_TEXT.btnSaveVersion(agent.version + 1)}
           onSave={submit}
           onClose={() => setSaveOpen(false)}
           onReload={() => void reload()}

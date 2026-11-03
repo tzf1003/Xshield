@@ -71,27 +71,35 @@ export type TestLine = {
 
 // ------------------------------------------------------------------ forms from and to values
 
+/** The Jev values of the state, with what the state leaves open filled the way a form needs it. */
+function jevStateValues(jev: JevModelsState): JevModelValues {
+  return {
+    route: jev.route ?? "gateway",
+    endpoint: jev.endpoint,
+    model: jev.model,
+    timeout_ms: jev.timeout_ms ?? JEV_TIMEOUT.fallback,
+  };
+}
+
 export function jevForm(jev: JevModelsState): ModelForm {
-  return formFromValues("jev", jev);
+  return formFromValues("jev", jevStateValues(jev));
 }
 
 export function agentForm(agent: AgentModelsState): ModelForm {
-  return formFromValues("agent", {
-    ...agent,
-    provider: agent.provider,
-    endpoint: agent.endpoint ?? (agent.provider === "vercel_gateway" ? AGENT_GATEWAY_ENDPOINT : ""),
-    model: agent.model ?? "",
-  });
+  return formFromValues("agent", agent);
 }
 
-/** A form for the values of a configuration: the saved one, the environment's, or a restored version. */
+/**
+ * A form for the values of a configuration: the saved one, the environment's, or a restored version. A preset line
+ * has no address of its own in the saved values, so the form takes the route's.
+ */
 export function formFromValues(kind: ModelKind, values: ModelValues): ModelForm {
   if (kind === "jev") {
     const jev = values as JevModelValues;
     return {
       choice: jev.route,
-      endpoint: jev.endpoint,
-      model: jev.model,
+      endpoint: jev.endpoint ?? presetEndpoint(jev.route) ?? "",
+      model: jev.model ?? presetModel(jev.route) ?? "",
       timeout: String(jev.timeout_ms),
       shareKey: false,
       key: "",
@@ -101,7 +109,7 @@ export function formFromValues(kind: ModelKind, values: ModelValues): ModelForm 
   return {
     choice: agent.provider,
     endpoint: agent.endpoint,
-    model: agent.model,
+    model: agent.model ?? "",
     timeout: String(Math.round(agent.timeout_ms / 1000)),
     shareKey: agent.share_key_with_jev,
     key: "",
@@ -142,13 +150,18 @@ export function withChoice(kind: ModelKind, form: ModelForm, choice: FormChoice)
       model: preset.model ?? form.model,
     };
   }
-  const gateway = choice === "vercel_gateway";
+  const gateway = choice === "gateway";
   return {
     ...form,
     choice,
     endpoint: gateway ? AGENT_GATEWAY_ENDPOINT : form.endpoint,
     shareKey: gateway ? form.shareKey : false,
   };
+}
+
+/** The address a line starts with, or null when the line has no preset (custom). */
+export function presetEndpoint(choice: JevRoute): string | null {
+  return JEV_PRESETS[choice].endpoint;
 }
 
 /** The model a line starts with, or null when the line has no preset (custom). */
@@ -343,18 +356,19 @@ export function testFailureText(
 }
 
 /** The line a test shows under its form: success, an answer that does not parse, or a failure. */
+/** `at` is when the answer arrived, in RFC 3339: the server keeps no time for a test. */
 export function describeTest(
   kind: ModelKind,
   result: ModelTestResult,
   timeoutMs: number,
+  at: string,
 ): TestLine {
   if (result.ok) {
-    const latency =
-      result.latency_ms === null ? "—" : `${result.latency_ms.toLocaleString("en-US")} ms`;
+    const latency = `${result.latency_ms.toLocaleString("en-US")} ms`;
     return {
       tone: "ok",
       icon: "✓",
-      text: `${clockText(result.at)} ${MODEL_TEXT.testSucceeded} · ${latency} · ${MODEL_TEXT.testOkJev}`,
+      text: `${clockText(at)} ${MODEL_TEXT.testSucceeded} · ${latency} · ${MODEL_TEXT.testOkJev}`,
       detail: null,
     };
   }
@@ -385,24 +399,28 @@ export function timeoutMsOf(kind: ModelKind, form: ModelForm): number {
 
 // ------------------------------------------------------------------ history
 
-function valueText(field: string, value: ModelChange["old"], kind: ModelKind): string {
-  if (value === null) return "—";
-  if (typeof value === "boolean") return value ? MODEL_TEXT.changeYes : MODEL_TEXT.changeNo;
-  if (field === "route") return MODEL_ROUTE_LABEL[value as JevRoute] ?? String(value);
-  if (field === "provider") return MODEL_PROVIDER_LABEL[value as AgentProvider] ?? String(value);
-  if (field === "timeout_ms" && typeof value === "number") {
-    return kind === "jev" ? `${value} ms` : `${Math.round(value / 1000)} 秒`;
+/** A history value in words. The history keeps every value as text, so an empty field is `""`. */
+function valueText(field: string, value: string, kind: ModelKind): string {
+  if (value === "") return "—";
+  if (field === "route") return MODEL_ROUTE_LABEL[value as JevRoute] ?? value;
+  if (field === "provider") return MODEL_PROVIDER_LABEL[value as AgentProvider] ?? value;
+  if (field === "share_key_with_jev") {
+    return value === "true" ? MODEL_TEXT.changeYes : MODEL_TEXT.changeNo;
   }
-  return String(value);
+  if (field === "timeout_ms") {
+    const millis = Number(value);
+    return kind === "jev" ? `${millis} ms` : `${Math.round(millis / 1000)} 秒`;
+  }
+  return value;
 }
 
 /** One change of a saved version in words: the field, then its old and new values. The key shows its last four. */
 export function changeText(change: ModelChange, kind: ModelKind): string {
   if (change.field === "key") {
-    return MODEL_TEXT.keyReplaced(
-      typeof change.old === "string" ? change.old : null,
-      typeof change.new === "string" ? change.new : "",
-    );
+    const before = change.old === "" ? null : change.old;
+    return change.new === ""
+      ? MODEL_TEXT.keyCleared(before)
+      : MODEL_TEXT.keyReplaced(before, change.new);
   }
   const label = MODEL_FIELD_LABEL[change.field] ?? change.field;
   return `${label} ${valueText(change.field, change.old, kind)} → ${valueText(change.field, change.new, kind)}`;

@@ -266,7 +266,13 @@ export const ERROR_TEXT: Record<string, string> = {
   WINDOW_TOO_LARGE: "时间范围最长 7 天",
   TOO_MANY_IDS: "一次最多对照 1000 个请求 ID",
   BODY_TOO_LARGE: "内容过大（配置最大 64 KiB，导入文件最大 100 MiB）",
-  ENV_KEY_MISSING: "环境变量里没有可用的密钥，不能改回",
+  MODEL_ENV_KEY_MISSING: "环境变量里没有可用的密钥，不能改回",
+  MODEL_KEY_REQUIRED: "这组配置还没有密钥，请填写后再保存",
+  MODEL_KEY_UNAVAILABLE: "控制台没有配置密钥加密，暂时不能保存密钥",
+  MODEL_KEY_UNREADABLE: "已保存的密钥读不出来，请重新填写",
+  MODEL_NOTE_INVALID: "备注最长 200 个字符",
+  MODEL_TEST_RATE_LIMITED: "10 秒内只能测试一次",
+  MODEL_STORE_UNAVAILABLE: "模型配置的存储暂时不可用，请稍后重试",
   INTERNAL: "控制面出错，请稍后重试；问题持续时查看控制面日志",
 };
 
@@ -285,7 +291,7 @@ export const MODEL_ROUTE_LABEL: Record<JevRoute, string> = {
 };
 
 export const MODEL_PROVIDER_LABEL: Record<AgentProvider, string> = {
-  vercel_gateway: "Vercel AI Gateway（OpenAI 兼容）",
+  gateway: "Vercel AI Gateway（OpenAI 兼容）",
   custom: "自定义 OpenAI 兼容地址",
 };
 
@@ -317,13 +323,6 @@ export const MODEL_FAILURE_TEXT: Record<string, string> = {
   answer_invalid: "回答不能解析",
 };
 
-/** A failed call's HTTP status in a few words, for a card's status line. */
-export const MODEL_STATUS_TEXT: Record<number, string> = {
-  401: "401 未授权",
-  451: "451 地区不能直连",
-  429: "429 服务限流",
-};
-
 /** Error codes a gateway reports for a console version it could not load (design 2.1). Unknown codes show as they are. */
 export const MODEL_LOAD_ERROR_TEXT: Record<string, string> = {
   MODEL_KEY_UNREADABLE: "密钥无法解密",
@@ -333,14 +332,12 @@ export const MODEL_LOAD_ERROR_TEXT: Record<string, string> = {
 export const MODEL_TEXT = {
   tab: "模型",
   jevTitle: "Jev 判定模型",
+  jevUnset: "还没有 Jev 的模型配置：控制台没有保存过，网关也读不到环境变量里的配置。",
   agentTitle: "学习代理模型",
   agentLead: "学习代理在规则判不了某个位置的类别时，用这个模型给出提议。",
   agentOff: "没有配置时，各站点的学习代理开关保持关闭，学习照常按规则进行。",
   unset: "未配置",
-  noCallYet: "已配置，还没有调用过",
-  lastOk: "最近一次成功",
-  lastFailed: (failure: string) => `最近一次失败：${failure}`,
-  failing: (failure: string) => `最近 5 次调用失败：${failure}`,
+  agentConfigured: (version: number) => `已配置 · 第 ${version} 版`,
   onlineNone: "没有在线的网关",
   loadedOf: (loaded: number, online: number, version: number) =>
     `${loaded}/${online} 个网关已加载第 ${version} 版`,
@@ -355,26 +352,19 @@ export const MODEL_TEXT = {
   rowKey: "密钥",
   rowTimeout: "超时",
   rowSource: "来源",
-  rowUsageHour: "最近 1 小时",
-  rowUsageToday: "今天",
+  rowUsageWindow: (minutes: number) => `最近 ${minutes} 分钟`,
   keySet: (last4: string, when: string) => `已设置 · 末 4 位 …${last4} · ${when} 更新`,
   keyUnset: "未设置",
   keyFromEnv: (name: string | null) => `来自环境变量 ${name ?? "（名字未知）"}`,
   keyShared: "与 Jev 共用",
-  timeoutJev: (ms: string, overrides: number) =>
-    overrides > 0
-      ? `${ms}（站点可在高级判定参数里覆盖，${overrides} 个站点覆盖了）`
-      : `${ms}（站点可在高级判定参数里覆盖）`,
+  timeoutJev: (ms: string) => `${ms}（站点可在高级判定参数里覆盖）`,
   timeoutAgent: (seconds: number) => `${seconds} 秒`,
   sourceConsole: (version: number, when: string) => `控制台第 ${version} 版 · ${when}`,
   sourceEnv: "环境变量（控制台里还没有配置，网关仍读环境变量）",
   overridden: (names: string) => ` · 环境变量 ${names} 已被覆盖`,
   usageJev: (calls: string, failRate: string, p95: string) =>
     `调用 ${calls} · 失败 ${failRate} · p95 ${p95}`,
-  usageAgent: (calls: number, ok: number, failed: number, top: string | null, sites: number) =>
-    `调用 ${calls} · 成功 ${ok} · 失败 ${failed}${top ? `（${top}）` : ""} · ${sites} 个站点开启了学习代理`,
   linkJevCalls: "查看 Jev 调用 →",
-  siteUsage: "各站点用量",
   btnHistory: "变更记录",
   btnTest: "测试连接",
   btnTesting: "正在测试…",
@@ -417,7 +407,6 @@ export const MODEL_TEXT = {
   modelSwitchKeep: "保留当前",
   timeoutHelp: (min: number, max: number, fallback: number, hint: string) =>
     `${min} 到 ${max}，默认 ${fallback}。${hint}`,
-  impactAgentNone: "没有站点开启学习代理，保存只影响之后开启的站点。",
   colAction: "操作",
   testDetail: "模型返回的错误正文（不可信文本）",
   testSucceeded: "成功",
@@ -458,11 +447,9 @@ export const MODEL_TEXT = {
     current === null
       ? `全部 ${sites} 个站点的 Jev 调用改用新配置。网关约 5 秒内加载。`
       : `全部 ${sites} 个站点的 Jev 调用改用新配置。网关约 5 秒内加载；加载失败的网关继续用第 ${current} 版。`,
-  impactAgent: (sites: number) =>
-    `开启了学习代理的 ${sites} 个站点下一次学习起改用新配置。学习代理只产生提议，放宽仍要人确认。`,
+  impactAgent: "学习代理下一次学习起改用新配置。学习代理只产生提议，放宽仍要人确认。",
   impactFailClosed: (sites: string[]) =>
     `▲ ${sites.length} 个站点处于拦截模式，Jev 失败时拒绝请求：${sites.join("、")}`,
-  impactTimeoutOverrides: (count: number) => `${count} 个站点覆盖了超时，它们继续用自己的超时。`,
   testedOk: (time: string) => `✓ ${time} 用这份配置测试成功`,
   testedMissing: "! 这份配置还没有测试成功",
   ackUntested: "我知道没有测试成功，仍然保存",
@@ -473,6 +460,7 @@ export const MODEL_TEXT = {
       : `配置已被改为第 ${version} 版，你的改动还没有保存。`,
   keyReplaced: (old: string | null, next: string) =>
     old === null ? `已设置（…${next}）` : `已替换（…${old} → …${next}）`,
+  keyCleared: (old: string | null) => (old === null ? "已清除" : `已清除（原 …${old}）`),
   keyKept: (last4: string | null) => (last4 === null ? "没有设置" : `保持当前的 …${last4}`),
   changeYes: "是",
   changeNo: "否",
@@ -483,6 +471,7 @@ export const MODEL_TEXT = {
   historyTitle: "变更记录",
   historyEmpty: "还没有变更记录。",
   historyNoChange: "没有改动",
+  historyRevertToEnv: "改回环境变量",
   historyTested: "成功",
   historyUntested: "没有测试",
   colVersion: "版本",
@@ -490,12 +479,6 @@ export const MODEL_TEXT = {
   colChanges: "改了什么",
   colNote: "备注",
   colTest: "测试",
-  colSite: "站点",
-  colUsed: "今天已用 / 上限",
-  colFailed: "失败",
-  colLast: "上次调用",
-  sitesEmpty: "没有站点。",
-  siteOff: "未开启",
   edgeSourceConsole: (version: number) => `控制台第 ${version} 版`,
   edgeSourceEnv: "环境变量",
   edgeBehind: (version: number, reason: string) => `▲ 未加载第 ${version} 版：${reason}`,

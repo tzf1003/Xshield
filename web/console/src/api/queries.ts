@@ -379,8 +379,8 @@ export function useSaveJevModel() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (body: ModelWrite<JevModelValues>) => api.saveJevModel(body),
-    onSuccess: (jev) => {
-      client.setQueryData<ModelsState>(keys.models, (old) => (old ? { ...old, jev } : old));
+    // A save answers with the version only, so the configuration is read again rather than patched in.
+    onSuccess: () => {
       void client.invalidateQueries({ queryKey: keys.models });
     },
   });
@@ -391,8 +391,7 @@ export function useSaveAgentModel() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (body: ModelWrite<AgentModelValues>) => api.saveAgentModel(body),
-    onSuccess: (agent) => {
-      client.setQueryData<ModelsState>(keys.models, (old) => (old ? { ...old, agent } : old));
+    onSuccess: () => {
       void client.invalidateQueries({ queryKey: keys.models });
     },
   });

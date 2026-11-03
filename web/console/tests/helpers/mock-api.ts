@@ -238,8 +238,8 @@ function freshState(options: MockOptions): State {
     signedIn: options.signedIn ?? true,
     models: structuredClone(options.models ?? systemModels),
     modelVersions: {
-      jev: structuredClone(modelHistory.jev.items),
-      agent: structuredClone(modelHistory.agent.items),
+      jev: structuredClone(modelHistory.jev),
+      agent: structuredClone(modelHistory.agent),
     },
     sites: new Map([
       [emr.name, emr],
@@ -337,7 +337,7 @@ const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
   [
     "GET",
     /^\/api\/system\/models\/(jev|agent)\/history$/,
-    (m, _c, s) => ok({ items: s.modelVersions[modelKindOf(m)].slice(0, 20) }),
+    (m, _c, s) => ok(s.modelVersions[modelKindOf(m)].slice(0, 20)),
   ],
 ];
 
@@ -995,8 +995,8 @@ function modelKindOf(match: RegExpMatchArray): ModelKind {
 }
 
 /** A save or a switch back names the version it was read at; a stale one answers 409 with the current one. */
-function checkModelVersion(current: number | null, expected: number | undefined): void {
-  if ((expected ?? 0) !== (current ?? 0)) {
+function checkModelVersion(current: number, expected: number | undefined): void {
+  if ((expected ?? 0) !== current) {
     throw new ApiFailure(409, "VERSION_CONFLICT", { current_version: current });
   }
 }
@@ -1004,17 +1004,45 @@ function checkModelVersion(current: number | null, expected: number | undefined)
 /** One above the highest version ever saved, so a version number is never reused. */
 function nextModelVersion(state: State, kind: ModelKind): number {
   const saved = state.modelVersions[kind].map((item) => item.version);
-  return Math.max(0, state.models[kind].version ?? 0, ...saved) + 1;
+  return Math.max(0, state.models[kind].version, ...saved) + 1;
+}
+
+/** A preset line resolves its address from the route (design 2.2); a custom line keeps the one it was given. */
+const JEV_PRESET_ENDPOINT: Record<string, string | undefined> = {
+  gateway: "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
+  direct: "https://api.typesafe.ai/v1/systemone",
+};
+const JEV_PRESET_MODEL = "typesafe-ai/jev";
+const AGENT_GATEWAY_ENDPOINT = "https://ai-gateway.vercel.sh/v1";
+
+/** The settings a Jev version resolves to, as its history keeps them. */
+function jevResolved(
+  route: JevRoute,
+  endpoint: string | null,
+  model: string | null,
+  timeoutMs: number,
+) {
+  return {
+    route,
+    endpoint: JEV_PRESET_ENDPOINT[route] ?? endpoint,
+    model: model ?? JEV_PRESET_MODEL,
+    timeout_ms: timeoutMs,
+  };
+}
+
+/** The history keeps every value as text, and an empty value as "". */
+function asText(value: string | number | boolean | null | undefined): string {
+  return value === null || value === undefined ? "" : String(value);
 }
 
 /** The fields that differ between two configurations, as the history lists them (design 2.6). */
 function modelChanges(
-  before: Record<string, string | number | boolean>,
-  after: Record<string, string | number | boolean>,
+  before: Record<string, string | number | boolean | null>,
+  after: Record<string, string | number | boolean | null>,
 ): ModelChange[] {
   return Object.keys(after)
-    .filter((field) => before[field] !== after[field])
-    .map((field) => ({ field, old: before[field] ?? null, new: after[field] ?? null }));
+    .filter((field) => asText(before[field]) !== asText(after[field]))
+    .map((field) => ({ field, old: asText(before[field]), new: asText(after[field]) }));
 }
 
 /** The key a save carries, or null when it keeps the saved one (design 5.1). */
@@ -1027,44 +1055,55 @@ function saveJev(call: Call, state: State, options: MockOptions): Answer {
   const jev = state.models.jev;
   checkModelVersion(jev.version, body.expected_version);
   const key = typedKey(body);
-  if (key === null && !jev.key.set) throw new ApiFailure(400, "MODEL_KEY_REQUIRED");
+  // Only a key the console holds counts: an environment key does not carry over into a console version.
+  const consoleKey = jev.source === "console" && jev.key.set;
+  if (key === null && !consoleKey) throw new ApiFailure(400, "MODEL_KEY_REQUIRED");
   const version = nextModelVersion(state, "jev");
-  const values = {
-    route: body.route ?? jev.route,
-    endpoint: body.endpoint ?? jev.endpoint,
-    model: body.model ?? jev.model,
-    timeout_ms: body.timeout_ms ?? jev.timeout_ms,
-  };
-  const changes = modelChanges(
-    { route: jev.route, endpoint: jev.endpoint, model: jev.model, timeout_ms: jev.timeout_ms },
-    values,
+  const route = body.route ?? "gateway";
+  const timeoutMs = body.timeout_ms ?? 2000;
+  const next = jevResolved(route, body.endpoint ?? null, body.model ?? null, timeoutMs);
+  const before = jevResolved(
+    jev.route ?? "gateway",
+    jev.endpoint,
+    jev.model,
+    jev.timeout_ms ?? 2000,
   );
-  if (key !== null) changes.push({ field: "key", old: jev.key.last4, new: key.slice(-4) });
+  const changes = modelChanges(before, next);
+  if (key !== null) changes.push({ field: "key", old: jev.key.last4 ?? "", new: key.slice(-4) });
   state.models.jev = {
     ...jev,
-    ...values,
+    configured: true,
     source: "console",
     version,
     updated_at: MODEL_STAMP,
-    key: key === null ? jev.key : { set: true, last4: key.slice(-4), updated_at: MODEL_STAMP },
+    route,
+    endpoint: JEV_PRESET_ENDPOINT[route] === undefined ? (body.endpoint ?? null) : null,
+    endpoint_host: null,
+    model: next.model,
+    timeout_ms: timeoutMs,
+    key:
+      key === null
+        ? jev.key
+        : { set: true, last4: key.slice(-4), updated_at: MODEL_STAMP, shared_with_jev: false },
     // A gateway that does not load the version keeps the one it runs, which leaves the rollout partial.
     loaded:
       options.gatewaysLoadSaved === false
         ? jev.loaded
-        : jev.loaded.map((load) => ({ ...load, version, error: null })),
+        : jev.loaded.map((load) => ({ ...load, source: "console", version, error: null })),
   };
   state.modelVersions.jev = [
     {
       version,
       at: MODEL_STAMP,
-      note: body.note ?? "",
-      tested: body.tested === true,
-      config: values,
+      change: "save",
+      config: next,
       changes,
+      note: body.note ? body.note : null,
+      tested: body.tested === true,
     },
     ...state.modelVersions.jev,
   ];
-  return ok(state.models.jev);
+  return ok({ group: "jev", version });
 }
 
 function saveAgent(call: Call, state: State): Answer {
@@ -1077,11 +1116,12 @@ function saveAgent(call: Call, state: State): Answer {
     throw new ApiFailure(400, "MODEL_KEY_REQUIRED");
   }
   const version = nextModelVersion(state, "agent");
-  const values = {
-    provider: body.provider ?? agent.provider,
-    endpoint: body.endpoint ?? agent.endpoint,
-    model: body.model ?? agent.model,
-    timeout_ms: body.timeout_ms ?? agent.timeout_ms,
+  const provider = body.provider ?? "gateway";
+  const next = {
+    provider,
+    endpoint: provider === "gateway" ? AGENT_GATEWAY_ENDPOINT : (body.endpoint ?? agent.endpoint),
+    model: body.model ?? null,
+    timeout_ms: body.timeout_ms ?? 30_000,
     share_key_with_jev: shared,
   };
   const changes = modelChanges(
@@ -1092,14 +1132,15 @@ function saveAgent(call: Call, state: State): Answer {
       timeout_ms: agent.timeout_ms,
       share_key_with_jev: agent.share_key_with_jev,
     },
-    values,
+    next,
   );
-  if (key !== null) changes.push({ field: "key", old: agent.key.last4, new: key.slice(-4) });
+  if (key !== null) changes.push({ field: "key", old: agent.key.last4 ?? "", new: key.slice(-4) });
   const jevKey = state.models.jev.key;
   state.models.agent = {
     ...agent,
-    ...values,
+    ...next,
     configured: true,
+    source: "console",
     version,
     updated_at: MODEL_STAMP,
     key: shared
@@ -1117,14 +1158,15 @@ function saveAgent(call: Call, state: State): Answer {
     {
       version,
       at: MODEL_STAMP,
-      note: body.note ?? "",
-      tested: body.tested === true,
-      config: values,
+      change: "save",
+      config: next,
       changes,
+      note: body.note ? body.note : null,
+      tested: body.tested === true,
     },
     ...state.modelVersions.agent,
   ];
-  return ok(state.models.agent);
+  return ok({ group: "agent", version });
 }
 
 /**
@@ -1140,21 +1182,57 @@ function modelTestResult(): ModelTestResult {
     detail: null,
     answer_valid: true,
     answer_reason: null,
-    at: MODEL_STAMP,
   };
 }
 
 /** 改回环境变量: the console's configuration goes, the gateways read the environment again (design 2.3). */
 function backToEnvironment(call: Call, state: State): Answer {
   const jev = state.models.jev;
-  if (!jev.env_available) throw new ApiFailure(409, "ENV_KEY_MISSING");
+  if (!jev.env_available) throw new ApiFailure(409, "MODEL_ENV_KEY_MISSING");
   checkModelVersion(jev.version, numberParam(call.params, "expected_version"));
+  // The version still moves on: the history gets a revert entry that says what the console gave up.
+  const version = nextModelVersion(state, "jev");
+  const defaults = jevResolved("gateway", null, null, 2000);
+  const before = jevResolved(
+    jev.route ?? "gateway",
+    jev.endpoint,
+    jev.model,
+    jev.timeout_ms ?? 2000,
+  );
+  const changes = modelChanges(before, defaults);
+  if (jev.source === "console" && jev.key.last4 !== null) {
+    changes.push({ field: "key", old: jev.key.last4, new: "" });
+  }
   state.models.jev = {
     ...jev,
     source: "env",
-    key: { set: true, last4: null, updated_at: null },
+    version,
+    updated_at: MODEL_STAMP,
+    route: "gateway",
+    endpoint: null,
+    endpoint_host: "ai-gateway.vercel.sh",
+    model: JEV_PRESET_MODEL,
+    timeout_ms: 2000,
+    key: { set: true, last4: null, updated_at: null, shared_with_jev: false },
     env_overridden: [],
-    loaded: jev.loaded.map((load) => ({ ...load, version: null, error: null })),
+    loaded: jev.loaded.map((load) => ({
+      ...load,
+      source: "env",
+      version: null,
+      error: null,
+    })),
   };
+  state.modelVersions.jev = [
+    {
+      version,
+      at: MODEL_STAMP,
+      change: "revert_to_env",
+      config: defaults,
+      changes,
+      note: null,
+      tested: false,
+    },
+    ...state.modelVersions.jev,
+  ];
   return ok(state.models.jev);
 }

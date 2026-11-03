@@ -21,7 +21,7 @@ export function ModelHistory({
   if (!history.data) {
     return <ErrorBar error={history.error} onRetry={() => void history.refetch()} />;
   }
-  const items = history.data.items;
+  const items = history.data;
   if (items.length === 0) return <p className="muted small">{MODEL_TEXT.historyEmpty}</p>;
   return (
     <div className="tbl-wrap sys-history">
@@ -43,12 +43,15 @@ export function ModelHistory({
         </thead>
         <tbody>
           {items.map((item) => {
-            const at = Date.parse(item.at);
+            const at = Date.parse(item.at ?? "");
             return (
               <tr key={item.version}>
                 <td className="num tnum">{item.version}</td>
                 <td className="tnum wrap">{Number.isNaN(at) ? "—" : shortDateTime(at)}</td>
                 <td className="wrap">
+                  {item.change === "revert_to_env" ? (
+                    <div>{MODEL_TEXT.historyRevertToEnv}</div>
+                  ) : null}
                   {item.changes.length === 0 ? (
                     <span className="muted">{MODEL_TEXT.historyNoChange}</span>
                   ) : (
@@ -57,7 +60,7 @@ export function ModelHistory({
                     ))
                   )}
                 </td>
-                <td className="wrap">{item.note === "" ? "—" : item.note}</td>
+                <td className="wrap">{item.note ? item.note : "—"}</td>
                 <td>{item.tested ? MODEL_TEXT.historyTested : MODEL_TEXT.historyUntested}</td>
                 <td>
                   <button

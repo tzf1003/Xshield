@@ -13,16 +13,16 @@ import type {
   JevPrompt,
   JevStats,
   JevStatus,
-  AgentModelsState,
   JevModelsState,
   JevModelValues,
   AgentModelValues,
+  SavedModel,
   LookupResponse,
-  ModelHistoryResponse,
   ModelKind,
   ModelsState,
   ModelTestBody,
   ModelTestResult,
+  ModelVersion,
   ModelWrite,
   RequestCounts,
   RequestDetail,
@@ -176,10 +176,9 @@ export const api = {
   // The model configuration of the system page (design agent-model-ui 2, 5.1). Keys travel only in the
   // body of a save or a test; no call returns one.
   systemModels: () => get<ModelsState>("/system/models"),
-  saveJevModel: (body: ModelWrite<JevModelValues>) =>
-    put<JevModelsState>("/system/models/jev", body),
+  saveJevModel: (body: ModelWrite<JevModelValues>) => put<SavedModel>("/system/models/jev", body),
   saveAgentModel: (body: ModelWrite<AgentModelValues>) =>
-    put<AgentModelsState>("/system/models/agent", body),
+    put<SavedModel>("/system/models/agent", body),
   testModel: (kind: ModelKind, body: ModelTestBody, signal?: AbortSignal) =>
     call<ModelTestResult>(
       "POST",
@@ -194,7 +193,7 @@ export const api = {
       "DELETE",
       `/system/models/jev${qs({ expected_version: expectedVersion })}`,
     ),
-  modelHistory: (kind: ModelKind) => get<ModelHistoryResponse>(`/system/models/${kind}/history`),
+  modelHistory: (kind: ModelKind) => get<ModelVersion[]>(`/system/models/${kind}/history`),
 };
 
 /** Builds a query string from defined values only. */
