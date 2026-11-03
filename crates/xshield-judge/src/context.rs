@@ -3,11 +3,12 @@
 //! Values are stored only as keyed hashes. The store lives in gateway memory;
 //! a restart empties it and users re-enter through an entry.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
+use xshield_core::context::{IdentityRole, TraceIdentity, role_label};
 use xshield_core::kind::{Rules, Shown, Used, affinity, declares, shown_as};
 
 use crate::values::{ResponseValue, is_id_like};
@@ -308,6 +309,83 @@ pub struct SentRecord {
     digests: HashSet<Digest16>,
 }
 
+/// Who a session is, as the origin's identity positions declared it (docs/01 section 1.2).
+/// The user and the organization are keyed hashes of their ids, so the gateway never keeps an
+/// id; the role is its label. A kind the session has not shown is `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionIdentity {
+    user: Option<Digest16>,
+    org: Option<Digest16>,
+    role: Option<String>,
+}
+
+/// Domains of the identity hashes: a user id and an organization id that happen to be equal
+/// are different things and hash apart.
+const USER_DOMAIN: &str = "identity.user";
+const ORG_DOMAIN: &str = "identity.org";
+
+impl SessionIdentity {
+    /// What one response declares: `claims` are its values at the site's identity positions,
+    /// each with its kind. A kind counts only when its positions hold exactly one distinct value.
+    /// A response that lists several ids declares none, because a list is not who the session is.
+    #[must_use]
+    pub fn declared(key: &ContextKey, claims: &[(IdentityRole, &str)]) -> Self {
+        let mut users = BTreeSet::new();
+        let mut orgs = BTreeSet::new();
+        let mut roles = BTreeSet::new();
+        for (kind, value) in claims {
+            match kind {
+                IdentityRole::User => {
+                    users.insert(key.mac(USER_DOMAIN, value.as_bytes()));
+                }
+                IdentityRole::Org => {
+                    orgs.insert(key.mac(ORG_DOMAIN, value.as_bytes()));
+                }
+                IdentityRole::Role => roles.extend(role_label(value)),
+            }
+        }
+        Self {
+            user: only(&users),
+            org: only(&orgs),
+            role: only(&roles),
+        }
+    }
+
+    /// Takes over what `declared` says: a kind it declares replaces the session's, and a kind it
+    /// does not declare is kept. An identity response is read on every call, so a switch of
+    /// organization without a new login shows at once.
+    pub fn update(&mut self, declared: &SessionIdentity) {
+        if let Some(user) = declared.user {
+            self.user = Some(user);
+        }
+        if let Some(org) = declared.org {
+            self.org = Some(org);
+        }
+        if let Some(role) = &declared.role {
+            self.role = Some(role.clone());
+        }
+    }
+
+    /// The identity as a decision record carries it, or `None` while the session has shown none.
+    #[must_use]
+    pub fn tag(&self) -> Option<TraceIdentity> {
+        (self.user.is_some() || self.org.is_some() || self.role.is_some()).then(|| TraceIdentity {
+            user: self.user.as_ref().map(label),
+            org: self.org.as_ref().map(label),
+            role: self.role.clone(),
+        })
+    }
+}
+
+/// The one member of a set, or `None` when the set is empty or holds several.
+fn only<T: Clone + Ord>(set: &BTreeSet<T>) -> Option<T> {
+    if set.len() == 1 {
+        set.iter().next().cloned()
+    } else {
+        None
+    }
+}
+
 /// Everything remembered about one session.
 #[derive(Debug)]
 pub struct SessionContext {
@@ -322,6 +400,8 @@ pub struct SessionContext {
     sent: HashSet<Digest16>,
     /// The session stopped learning from responses (see [`SENT_MAX`]).
     sent_overflow: bool,
+    /// Who the session is, as its identity responses declared it.
+    identity: SessionIdentity,
 }
 
 impl SessionContext {
@@ -336,7 +416,32 @@ impl SessionContext {
             cache: HashMap::new(),
             sent: HashSet::new(),
             sent_overflow: false,
+            identity: SessionIdentity::default(),
         }
+    }
+
+    /// Who the session is, as its identity responses declared it.
+    #[must_use]
+    pub fn identity(&self) -> &SessionIdentity {
+        &self.identity
+    }
+
+    /// Records what a successful response declares about the session (W1). `claims` are its
+    /// values at the site's identity positions. A value the session sent is not declared: an
+    /// echo of what the session sent says nothing about who it is, the same rule that keeps
+    /// echoes out of [`SessionContext::remember`]. Nothing is declared once the session has
+    /// stopped learning from responses.
+    pub fn declare_identity(&mut self, key: &ContextKey, claims: &[(IdentityRole, &str)]) {
+        if self.sent_overflow {
+            return;
+        }
+        let shown: Vec<(IdentityRole, &str)> = claims
+            .iter()
+            .copied()
+            .filter(|(_, value)| !self.sent.contains(&key.mac("value", value.as_bytes())))
+            .collect();
+        self.identity
+            .update(&SessionIdentity::declared(key, &shown));
     }
 
     /// Seconds since the session was first seen.

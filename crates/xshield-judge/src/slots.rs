@@ -8,10 +8,11 @@
 //! only place a template is made for positions, so a later change to route
 //! templates changes every position in one spot.
 
-use xshield_core::context::ObjectMap;
+use xshield_core::context::{IdentityRole, ObjectMap};
 use xshield_core::path_template::normalize;
 
 use crate::context::Origin;
+use crate::values::ResponseValue;
 
 /// The route template of `path`: numeric and UUID segments become `{id}`.
 /// A path the normalization does not accept is kept as it is.
@@ -47,6 +48,41 @@ pub fn origin_object<'a>(objects: &'a ObjectMap, origin: &Origin) -> Option<&'a 
     objects.class_of(&origin_slot(origin)?)
 }
 
+/// The values a response holds at the positions the map gives an identity (docs/01 section
+/// 1.2), each with that identity. `request` is `METHOD /path` as the origins name it, so only
+/// the positions of the route the response answered count, and a paused entry states nothing.
+#[must_use]
+pub fn identity_claims<'a>(
+    objects: &ObjectMap,
+    request: &str,
+    values: &'a [ResponseValue],
+) -> Vec<(IdentityRole, &'a str)> {
+    let Some((method, path)) = request.split_once(' ') else {
+        return Vec::new();
+    };
+    let route = format!("{method} {}", route_template(path));
+    let mut claims = Vec::new();
+    for slot in objects.slots() {
+        let Some(at) = slot
+            .key
+            .strip_prefix(route.as_str())
+            .and_then(|rest| rest.strip_prefix(' '))
+        else {
+            continue;
+        };
+        let Some(kind) = objects.identity_of(&slot.key) else {
+            continue;
+        };
+        claims.extend(
+            values
+                .iter()
+                .filter(|value| value.at == at)
+                .map(|value| (kind, value.value.as_str())),
+        );
+    }
+    claims
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +108,35 @@ mod tests {
             Some("GET /api/appointments [].doc_id")
         );
         assert_eq!(response_slot("GET", "/api/x", ""), None);
+    }
+
+    #[test]
+    fn a_response_states_an_identity_only_at_the_positions_the_map_gives_one() {
+        let objects: ObjectMap = serde_json::from_str(
+            r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+                {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"},
+                {"key":"GET /api/home doctor.name","class":"doctor","source":"admin"}]}"#,
+        )
+        .unwrap();
+        let values = vec![
+            ResponseValue {
+                field: "id".to_owned(),
+                value: "DR-A".to_owned(),
+                at: "doctor.id".to_owned(),
+            },
+            ResponseValue {
+                field: "name".to_owned(),
+                value: "A".to_owned(),
+                at: "doctor.name".to_owned(),
+            },
+        ];
+        assert_eq!(
+            identity_claims(&objects, "GET /api/home", &values),
+            vec![(IdentityRole::User, "DR-A")]
+        );
+        // Another route, or another method, states nothing.
+        assert!(identity_claims(&objects, "GET /api/patients", &values).is_empty());
+        assert!(identity_claims(&objects, "POST /api/home", &values).is_empty());
     }
 
     #[test]

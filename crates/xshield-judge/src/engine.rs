@@ -19,7 +19,7 @@ use crate::context::{
     Source, label, request_number, request_text,
 };
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
-use crate::slots::{origin_object, request_slot, response_slot, route_template};
+use crate::slots::{identity_claims, origin_object, request_slot, response_slot, route_template};
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
 };
@@ -459,6 +459,7 @@ impl<J: JevPort> Judge<J> {
             known_values: session.seen_len(),
             entries_passed: None,
             recent: None,
+            identity: session.identity().tag(),
         });
         // An unknown interface always goes to Jev: neither its values nor a cached
         // allow of another request can settle it.
@@ -701,6 +702,7 @@ impl<J: JevPort> Judge<J> {
         let seeded = observation
             .credential
             .filter(|credential| success && !credential.is_empty());
+        let claims = identity_claims(site.objects(), &request, &values);
         let mut inner = self.lock();
         if let Some(shape) = shape {
             summary.shape = shape_if_new(
@@ -739,6 +741,7 @@ impl<J: JevPort> Judge<J> {
                 session.note_sent(observation.sent);
             }
             let added = session.remember(&self.key, &source, &values);
+            session.declare_identity(&self.key, &claims);
             if new_values.is_none() {
                 new_values = Some(added);
             }
@@ -3363,6 +3366,156 @@ mod tests {
             Some("GET /api/patients items[].id")
         );
         assert_eq!(value.object, None);
+    }
+
+    /// A site whose `GET /api/home` declares the doctor id as the session's user and its `role` as
+    /// the session's role (docs/07 section 7.9.15).
+    fn identity_site() -> SiteSpec {
+        site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"doctor","name":"医生"},{"id":"staff","name":"员工"}],
+                "slots":[
+                    {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"},
+                    {"key":"GET /api/home role","class":"staff","source":"admin","identity":"role"}
+                ]}"#,
+        )
+    }
+
+    /// A successful `GET /api/home` answered to `credential` with `body`.
+    fn home_for<'a>(credential: &'a str, body: &'a [u8]) -> Observation<'a> {
+        Observation {
+            path: "/api/home",
+            body,
+            ..list_response(credential, 0)
+        }
+    }
+
+    /// The identity a decision record carries, when it carries one.
+    fn identity_of(record: &DecisionRecord) -> Option<xshield_core::context::TraceIdentity> {
+        record
+            .trace
+            .session
+            .as_ref()
+            .and_then(|session| session.identity.clone())
+    }
+
+    #[tokio::test]
+    async fn a_declared_identity_tags_the_decisions_of_its_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = identity_site();
+        let before = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 0))
+            .await;
+        assert_eq!(identity_of(&before.record), None, "nothing shown yet");
+        judge.observe(
+            &site,
+            &home_for("alice", br#"{"doctor":{"id":"DR-A"},"role":"Admin"}"#),
+        );
+        let alice = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 1))
+            .await;
+        let tag = identity_of(&alice.record).expect("the response declared the identity");
+        assert_eq!(tag.org, None);
+        assert_eq!(tag.role.as_deref(), Some("admin"));
+        let user = tag.user.clone().expect("the user is tagged");
+        assert_eq!(user.len(), 16);
+        assert!(
+            user.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        // The id itself never reaches the record.
+        assert!(
+            !serde_json::to_string(&alice.record.trace)
+                .unwrap()
+                .contains("DR-A")
+        );
+
+        judge.observe(&site, &home_for("bob", br#"{"doctor":{"id":"DR-B"}}"#));
+        let bob = judge
+            .judge(&site, &get("/api/patients", None, Some("bob"), 2))
+            .await;
+        let bob_tag = identity_of(&bob.record).expect("bob's session shows its identity");
+        assert_ne!(bob_tag.user, tag.user, "another account is another user");
+        assert_eq!(
+            bob_tag.role, None,
+            "a response without a role declares none"
+        );
+
+        // The next identity response replaces the user, so a switch of organization needs no new
+        // login. A kind that response does not declare is kept.
+        judge.observe(&site, &home_for("alice", br#"{"doctor":{"id":"DR-C"}}"#));
+        let switched = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 3))
+            .await;
+        let switched_tag = identity_of(&switched.record).expect("alice still shows an identity");
+        assert_ne!(switched_tag.user, tag.user);
+        assert_eq!(switched_tag.role.as_deref(), Some("admin"));
+    }
+
+    #[tokio::test]
+    async fn an_echo_or_a_list_of_ids_declares_no_identity() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = identity_site();
+        // The client sent DR-B and the origin echoes it back: an echo is not who the session is.
+        let sent = [judge.key.mac("value", b"DR-B")];
+        judge.observe(
+            &site,
+            &Observation {
+                sent: &sent,
+                ..home_for("alice", br#"{"doctor":{"id":"DR-B"}}"#)
+            },
+        );
+        let echoed = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 1))
+            .await;
+        assert_eq!(identity_of(&echoed.record), None);
+
+        // A response that lists several ids does not say which one is the session's: a site whose
+        // list position is the identity.
+        let list = SiteSpec::from_json(
+            r#"{"name":"list","hosts":["list.test"],"origin":"http://o:1","session":{"cookie":"SID"},
+               "entries":["/login","/api/home","/api/patients"],"mode":"enforce",
+               "objects":{"classes":[{"id":"doctor","name":"医生"}],
+                 "slots":[{"key":"GET /api/home [].id","class":"doctor","source":"admin","identity":"user"}]}}"#,
+        )
+        .unwrap();
+        judge.observe(
+            &list,
+            &home_for("carol", br#"[{"id":"DR-A"},{"id":"DR-B"}]"#),
+        );
+        let several = judge
+            .judge(&list, &get("/api/patients", None, Some("carol"), 2))
+            .await;
+        assert_eq!(identity_of(&several.record), None);
+        judge.observe(
+            &list,
+            &home_for("carol", br#"[{"id":"DR-A"},{"id":"DR-A"}]"#),
+        );
+        let once = judge
+            .judge(&list, &get("/api/patients", None, Some("carol"), 3))
+            .await;
+        assert!(
+            identity_of(&once.record).is_some(),
+            "one distinct id is the session's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_site_without_identity_positions_writes_no_identity() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &home_for("alice", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        let verdict = judge
+            .judge(&site, &get("/api/patients", None, Some("alice"), 1))
+            .await;
+        let trace = serde_json::to_value(&verdict.record.trace).unwrap();
+        assert!(trace["session"].get("identity").is_none());
     }
 
     /// A site whose object map says what the positions of the kind tests carry:
