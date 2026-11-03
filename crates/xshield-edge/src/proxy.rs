@@ -596,6 +596,9 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
         record.trace.timing.total_ms = Some(millis_since(ctx.started));
         record.trace.timing.origin_ms = ctx.origin_ms;
         record.trace.upstream_error = error.map(|error| upstream_error_label(error).to_owned());
+        // Last, once every part of the trace is set, so the row that is written
+        // is the trimmed one (docs/07 section 7.4.4).
+        record.trace.fit();
         self.sink.send(record);
     }
 

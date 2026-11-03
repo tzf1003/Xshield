@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, JSON Schema and synthetic sample checks only. Not Rust behaviour (cargo test runs crates/xshield-core/tests/v4_samples.rs over the same samples), not WAF effectiveness and not model accuracy.",
   "passed": true,
-  "checks_total": 281,
-  "passed_count": 281,
+  "checks_total": 282,
+  "passed_count": 282,
   "checks": [
     {
       "name": "json:examples/sites-dev.json",
@@ -726,6 +726,11 @@
     },
     {
       "name": "no_tool_tokens:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
