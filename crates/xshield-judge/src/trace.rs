@@ -2,7 +2,7 @@
 //! request values as the session saw them, the links to the requests that
 //! showed them, and the query string with secrets removed.
 
-use xshield_core::context::trace::VALUE_CHARS_MAX;
+use xshield_core::context::trace::{TRACE_PATH_BYTES_MAX, VALUE_CHARS_MAX};
 use xshield_core::context::{ObjectFrom, TraceEntry, TraceRecent, TraceSource, TraceValue};
 
 use crate::context::{EntryPass, Origin, Recent, request_text};
@@ -142,22 +142,24 @@ fn cut(mut text: String, max: usize) -> String {
     text
 }
 
-/// An entry the session passed, as the trace lists it.
+/// An entry the session passed, as the trace lists it. Its path is cut to
+/// [`TRACE_PATH_BYTES_MAX`] bytes, since a request path has no length limit.
 #[must_use]
 pub fn entry_trace(pass: &EntryPass) -> TraceEntry {
     TraceEntry {
-        path: pass.path.clone(),
+        path: cut(pass.path.clone(), TRACE_PATH_BYTES_MAX),
         at_millis: nonzero(pass.at_ms),
         request_id: request_text(pass.request_id),
     }
 }
 
-/// A recent request of the session, as the trace lists it.
+/// A recent request of the session, as the trace lists it. Its path is cut the
+/// same way as an entry's.
 #[must_use]
 pub fn recent_trace(recent: &Recent) -> TraceRecent {
     TraceRecent {
         method: recent.method.clone(),
-        path: recent.path.clone(),
+        path: cut(recent.path.clone(), TRACE_PATH_BYTES_MAX),
         status: recent.status,
         request_id: request_text(recent.request_id),
         at_millis: nonzero(recent.at_ms),
@@ -198,5 +200,41 @@ mod tests {
         assert_eq!((len, clipped), (Some(300), true));
         let (text, len, clipped) = shown("body.token", Some("token"), "t0k", None, &[]);
         assert_eq!((text.as_str(), len, clipped), (REDACTED, Some(3), false));
+    }
+
+    #[test]
+    fn session_paths_are_cut_and_short_ones_kept() {
+        let long = format!("/{}", "a".repeat(5000));
+        let pass = EntryPass {
+            path: long.clone(),
+            at_ms: 1,
+            request_id: 2,
+        };
+        assert_eq!(entry_trace(&pass).path.len(), TRACE_PATH_BYTES_MAX);
+        let recent = Recent {
+            method: "GET".to_owned(),
+            path: long,
+            status: 200,
+            request_id: 2,
+            at_ms: 1,
+        };
+        assert_eq!(recent_trace(&recent).path.len(), TRACE_PATH_BYTES_MAX);
+        let short = Recent {
+            path: "/api/x".to_owned(),
+            ..recent
+        };
+        assert_eq!(recent_trace(&short).path, "/api/x");
+    }
+
+    #[test]
+    fn a_cut_session_path_stays_on_a_character_boundary() {
+        let pass = EntryPass {
+            path: "é".repeat(200),
+            at_ms: 1,
+            request_id: 2,
+        };
+        let cut = entry_trace(&pass).path;
+        assert!(cut.len() <= TRACE_PATH_BYTES_MAX);
+        assert!(cut.chars().all(|letter| letter == 'é'));
     }
 }

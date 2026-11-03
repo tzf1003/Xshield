@@ -216,9 +216,9 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values[].seen` / `verified` | 会话里见过这个值 / 网关已按同类对象核验（快速放行的依据） |
 | `values[].sources[]` | 最多 3 个来源，顺序与 `state` 里的 `seen_as` 相同（最相关的在前，[7.5.2](#752-state-与追溯信息的对齐)）；`request_id`、`at_millis` 正常情况下都有（上下文随网关重启清空，[7.3.2](#732-追溯链路)），只有导入的旧格式记录和测试数据可能为 null；同一 `(field, request)` 再次出现时保留最早的那次（[7.7.1](#771-会话上下文增加请求-id)） |
 | `values_truncated` | 请求体未结构化、超过 64 KiB 解析上限或值数到上限（即 `ExtractedRequest::truncated`），或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4） |
-| `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条）；`known_values` 是会话已见值数量 |
+| `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条），其中的请求路径超过 256 字节时截到 256 字节（`TRACE_PATH_BYTES_MAX`）；`known_values` 是会话已见值数量 |
 | `session.identity` | 站点声明了身份位置且会话已见身份时才有：`user`、`org` 为键控哈希标签，`role` 为角色标签，规则见 [7.9.15](#7915-对象表的身份位置w1)。没有身份位置的站点不写这一段 |
-| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
+>| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
 | `timing` | `total_ms` 从收到请求头到响应写完；`judge_ms` 是判定耗时（含 Jev）；`origin_ms` 从发出上游请求到收到响应头 |
 | `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
 | `response.values` / `new_values` | 从响应里取出的值数、其中会话原先没有的值数 |
@@ -233,7 +233,7 @@ GET /api/patients ──响应里出现 id=7──┐
 
 - 值和查询串的脱敏与 `state` 用同一函数：字段名或位置含内置 9 个词（`password`、`passwd`、`pwd`、`secret`、`token`、`otp`、`credential`、`authorization`、`cvv`）或站点 `advanced.secret_fields` 中的词的值，以及含会话凭证原文的值，写成 `<redacted>`，另记 `len`。查询串按 `k=v` 逐对脱敏后重新拼接。
 - 单个值最长保存 256 个字符，超出截断并标 `clipped: true`、原长 `len`。
-- `trace` 序列化后不超过 16 KiB；网关在写出记录前裁剪（`Trace::fit`，每条记录都经过）：超出时依次去掉惰性值、把来源减到 1 个、值截到 64 字符，并标 `trimmed: true`；仍超出时清空 `values` 并标 `values_truncated: true`。
+- `trace` 序列化后不超过 16 KiB；网关在写出记录前裁剪（`Trace::fit`，每条记录都经过）。超出时依次去掉惰性值、把来源减到 1 个、值截到 64 字符，并标 `trimmed: true`；仍超出时，若只去掉响应的结构（`shape`）和指纹（`fingerprints`）就够，就只去掉它们，保留值；否则清空 `values` 并标 `values_truncated: true`；还超出时去掉余下的响应结构和指纹、字段计数、内容类型，以及会话的 `recent` 与 `entries_passed`。这样剩下的部分只有两个路径模式（各不超过 256 字节）、长度有上限的身份标签（角色至多 32 字节）和固定长度的字段，体积有上限，单条记录不会超过 16 KiB。
 - 响应只存字段名、计数和值指纹（`response.fingerprints`），不存响应里的值；请求头只存 `Host`。
 - 响应指纹每条记录最多 16 个位置、每个位置 8 个，指纹定长，所以一条记录里增加的字节数有上限。
 

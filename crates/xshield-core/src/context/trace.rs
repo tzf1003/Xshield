@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 pub const TRACE_BYTES_MAX: usize = 16 * 1024;
 /// Longest value text kept before it is clipped.
 pub const VALUE_CHARS_MAX: usize = 256;
+/// Longest request path a session entry or recent request keeps, in bytes. The
+/// same bound as a configured path (`MAX_PATH_BYTES`); longer paths are cut.
+pub const TRACE_PATH_BYTES_MAX: usize = 256;
 /// Value text length after [`Trace::fit`] has run out of gentler cuts.
 const FIT_VALUE_CHARS: usize = 64;
 /// Most response positions whose value fingerprints one response records. The
@@ -74,10 +77,15 @@ impl Trace {
         }
     }
 
-    /// Trims the trace until it fits [`TRACE_BYTES_MAX`], in this order: the
-    /// inert values go, then every value keeps one source, then values are cut
-    /// to 64 characters, and last the values themselves go. Sets `trimmed`
-    /// when anything was removed.
+    /// Trims the trace until it fits [`TRACE_BYTES_MAX`]. The inert values go
+    /// first, then every value keeps one source, then values are cut to 64
+    /// characters (docs/07 section 7.4.4). Next the response's learning detail
+    /// (its structure and fingerprints) goes, but only when that alone is enough,
+    /// because the values are the evidence. Then the values themselves go. Last,
+    /// if the trace is still too big, the rest of the detail goes: the field
+    /// counts, the content type, and the session's recent requests and entries.
+    /// What remains is small. Sets `trimmed` when anything was removed, and
+    /// `values_truncated` when values were cleared.
     pub fn fit(&mut self) {
         if self.encoded_len() <= TRACE_BYTES_MAX {
             return;
@@ -97,8 +105,42 @@ impl Trace {
             }
         }
         if self.encoded_len() > TRACE_BYTES_MAX {
+            let mut slim = self.clone();
+            slim.strip_learning();
+            if slim.encoded_len() <= TRACE_BYTES_MAX {
+                *self = slim;
+            }
+        }
+        if self.encoded_len() > TRACE_BYTES_MAX && !self.values.is_empty() {
             self.values.clear();
             self.values_truncated = true;
+        }
+        if self.encoded_len() > TRACE_BYTES_MAX {
+            self.strip_learning();
+        }
+        if self.encoded_len() > TRACE_BYTES_MAX {
+            self.strip_detail();
+        }
+    }
+
+    /// Removes the response's structure and its fingerprints.
+    fn strip_learning(&mut self) {
+        if let Some(response) = self.response.as_mut() {
+            response.shape = None;
+            response.fingerprints.clear();
+        }
+    }
+
+    /// Removes the response's field counts and content type, and the session's
+    /// recent requests and entries.
+    fn strip_detail(&mut self) {
+        if let Some(response) = self.response.as_mut() {
+            response.fields.clear();
+            response.content_type = None;
+        }
+        if let Some(session) = self.session.as_mut() {
+            session.recent = None;
+            session.entries_passed = None;
         }
     }
 
@@ -527,6 +569,220 @@ mod tests {
         assert!(trace.values_truncated);
         assert!(trace.values.is_empty());
         assert!(trace.trimmed);
+    }
+
+    fn fingerprinted(slots: usize, key_chars: usize) -> ObservationSummary {
+        let mut response = ObservationSummary::new(None, 0, Observed::Json);
+        for slot in 0..slots {
+            let key = format!("GET /{} items[].id{slot}", "r".repeat(key_chars));
+            let digests = (0..FINGERPRINTS_PER_SLOT_MAX)
+                .map(|digest| format!("{:016x}", slot * 8 + digest))
+                .collect();
+            response.fingerprints.insert(key, digests);
+        }
+        response
+    }
+
+    #[test]
+    fn learning_detail_goes_before_the_values_when_that_is_enough() {
+        let mut trace = Trace::new();
+        trace.values = (0..80)
+            .map(|i| value(&format!("query.k{i}"), &"v".repeat(256), false, 0))
+            .collect();
+        trace.response = Some(fingerprinted(FINGERPRINT_SLOTS_MAX, 400));
+        assert!(
+            encoded(&trace) > TRACE_BYTES_MAX,
+            "the fixture must need trimming"
+        );
+        trace.fit();
+        assert!(encoded(&trace) <= TRACE_BYTES_MAX);
+        assert!(trace.trimmed);
+        assert_eq!(
+            trace.values.len(),
+            80,
+            "the values are the evidence and stay"
+        );
+        assert!(!trace.values_truncated);
+        let response = trace.response.expect("the response summary stays");
+        assert!(response.fingerprints.is_empty());
+    }
+
+    #[test]
+    fn the_values_go_before_the_session_lists_when_learning_is_not_enough() {
+        let mut trace = Trace::new();
+        trace.values = (0..200)
+            .map(|i| value(&format!("query.k{i}"), &"v".repeat(256), false, 0))
+            .collect();
+        trace.session = Some(TraceSession {
+            age_seconds: 1,
+            known_values: 1,
+            identity: None,
+            entries_passed: None,
+            recent: Some(vec![TraceRecent {
+                method: "GET".to_owned(),
+                path: "/api/x".to_owned(),
+                status: 200,
+                request_id: None,
+                at_millis: None,
+            }]),
+        });
+        trace.fit();
+        assert!(encoded(&trace) <= TRACE_BYTES_MAX);
+        assert!(trace.values.is_empty());
+        assert!(trace.values_truncated);
+        let session = trace.session.expect("the session stays");
+        assert!(session.recent.is_some(), "the recent requests stay");
+    }
+
+    #[test]
+    fn detail_at_its_limits_still_fits_within_the_limit() {
+        let path = "p".repeat(TRACE_PATH_BYTES_MAX);
+        let mut trace = Trace::new();
+        trace.session = Some(TraceSession {
+            age_seconds: 1,
+            known_values: 1,
+            identity: None,
+            entries_passed: Some(
+                (0..16)
+                    .map(|index| TraceEntry {
+                        path: path.clone(),
+                        at_millis: Some(1),
+                        request_id: Some(format!("req_{index:032x}")),
+                    })
+                    .collect(),
+            ),
+            recent: Some(
+                (0..10)
+                    .map(|index| TraceRecent {
+                        method: "GET".to_owned(),
+                        path: path.clone(),
+                        status: 200,
+                        request_id: Some(format!("req_{index:032x}")),
+                        at_millis: Some(1),
+                    })
+                    .collect(),
+            ),
+        });
+        let mut response = fingerprinted(FINGERPRINT_SLOTS_MAX, 400);
+        response.content_type = Some("c".repeat(8 * 1024));
+        response.fields = (0..12)
+            .map(|index| FieldCount {
+                field: format!("{index:0>32}"),
+                count: 1,
+            })
+            .collect();
+        response.shape = Some(
+            (0..SHAPE_FIELDS_MAX)
+                .map(|index| ShapeField {
+                    path: format!("{index:0>128}"),
+                    kind: "string".to_owned(),
+                })
+                .collect(),
+        );
+        trace.response = Some(response);
+        assert!(
+            encoded(&trace) > TRACE_BYTES_MAX,
+            "the fixture must need trimming"
+        );
+        trace.fit();
+        assert!(encoded(&trace) <= TRACE_BYTES_MAX);
+        assert!(trace.trimmed);
+        assert!(!trace.values_truncated, "there were no values to clear");
+        let response = trace.response.expect("the response summary stays");
+        assert!(response.shape.is_none() && response.fingerprints.is_empty());
+        assert!(response.fields.is_empty() && response.content_type.is_none());
+        let session = trace.session.expect("the session stays");
+        assert!(session.recent.is_none() && session.entries_passed.is_none());
+    }
+
+    #[test]
+    fn the_worst_case_fits_and_what_is_left_is_small() {
+        // Every field at the largest the gateway writes: the longest patterns the
+        // configuration allows, a key too long to keep, and detail at its limits.
+        let mut trace = Trace::new();
+        trace.entry = Some(format!("/{}", "e".repeat(255)));
+        trace.bypass = Some(format!("/{}", "b".repeat(255)));
+        trace.cache_source = Some(format!("req_{:032x}", u128::MAX));
+        trace.refused = Some("unknown_site".to_owned());
+        trace.upstream_error = Some("timeout".to_owned());
+        let mut long_key = value("body.key", &"v".repeat(256), false, 3);
+        long_key.key = Some("k".repeat(40 * 1024));
+        trace.values = std::iter::once(long_key)
+            .chain((0..40).map(|i| value(&format!("query.k{i}"), &"v".repeat(256), false, 3)))
+            .collect();
+        trace.session = Some(TraceSession {
+            age_seconds: u64::MAX,
+            known_values: usize::MAX,
+            identity: Some(TraceIdentity {
+                user: Some("u".repeat(16)),
+                org: Some("o".repeat(16)),
+                role: Some("r".repeat(32)),
+            }),
+            entries_passed: Some(
+                (0..16)
+                    .map(|index| TraceEntry {
+                        path: "p".repeat(TRACE_PATH_BYTES_MAX),
+                        at_millis: Some(u64::MAX),
+                        request_id: Some(format!("req_{index:032x}")),
+                    })
+                    .collect(),
+            ),
+            recent: Some(
+                (0..10)
+                    .map(|index| TraceRecent {
+                        method: "GET".to_owned(),
+                        path: "p".repeat(TRACE_PATH_BYTES_MAX),
+                        status: u16::MAX,
+                        request_id: Some(format!("req_{index:032x}")),
+                        at_millis: Some(u64::MAX),
+                    })
+                    .collect(),
+            ),
+        });
+        let mut response = fingerprinted(FINGERPRINT_SLOTS_MAX, 2048);
+        response.content_type = Some("c".repeat(8 * 1024));
+        response.skip = Some(Skip::TooLarge);
+        response.issued_session = Some(format!("{:016x}", u64::MAX));
+        response.fields = (0..12)
+            .map(|index| FieldCount {
+                field: format!("{index:0>1024}"),
+                count: 1,
+            })
+            .collect();
+        response.shape = Some(
+            (0..SHAPE_FIELDS_MAX)
+                .map(|index| ShapeField {
+                    path: format!("{index:0>1024}"),
+                    kind: "string".to_owned(),
+                })
+                .collect(),
+        );
+        trace.response = Some(response);
+        assert!(
+            encoded(&trace) > TRACE_BYTES_MAX,
+            "the fixture must need trimming"
+        );
+        trace.fit();
+        assert!(
+            encoded(&trace) <= TRACE_BYTES_MAX,
+            "the written trace is {} bytes",
+            encoded(&trace)
+        );
+        assert!(trace.trimmed && trace.values_truncated && trace.values.is_empty());
+        assert!(
+            trace.entry.is_some() && trace.bypass.is_some(),
+            "the patterns stay"
+        );
+        let response = trace.response.as_ref().expect("the response summary stays");
+        assert!(response.shape.is_none() && response.fingerprints.is_empty());
+        assert!(response.fields.is_empty() && response.content_type.is_none());
+        let session = trace.session.as_ref().expect("the session stays");
+        assert!(session.recent.is_none() && session.entries_passed.is_none());
+        assert!(
+            encoded(&trace) <= 2 * 1024,
+            "what is left is {} bytes",
+            encoded(&trace)
+        );
     }
 
     #[test]
