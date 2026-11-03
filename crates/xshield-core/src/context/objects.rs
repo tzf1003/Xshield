@@ -61,6 +61,19 @@ pub enum SlotSource {
     Agent,
 }
 
+/// The identity a response position states about the session (docs/01 section 1.2): the
+/// origin's own word, in a response, about who the session is. A request never states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityRole {
+    /// The user the session is logged in as. The gateway keeps a keyed hash of the id only.
+    User,
+    /// The organization or tenant the session acts for. The gateway keeps a keyed hash only.
+    Org,
+    /// The role the session holds, such as `admin`. The gateway keeps its label, see [`role_label`].
+    Role,
+}
+
 /// One confirmed position and the kind of object it carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +90,10 @@ pub struct ObjectSlot {
     /// paused.
     #[serde(default, skip_serializing_if = "is_false")]
     pub paused: bool,
+    /// The identity this response position states about the session, when it does: `user`,
+    /// `org` or `role`. Absent for an ordinary position. Only responses are read for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<IdentityRole>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -240,6 +257,15 @@ impl ObjectMap {
         self.slot(key).is_some_and(|slot| slot.paused)
     }
 
+    /// The identity a response position states about the session, when the map declares one and
+    /// does not pause the entry. The judge reads it from responses only.
+    #[must_use]
+    pub fn identity_of(&self, key: &str) -> Option<IdentityRole> {
+        self.slot(key)
+            .filter(|slot| !slot.paused)
+            .and_then(|slot| slot.identity)
+    }
+
     /// The map with the entries of `keys` paused. A key the map does not declare, and an
     /// entry already paused, change nothing. The index stays valid: keys and places do not move.
     #[must_use]
@@ -253,15 +279,18 @@ impl ObjectMap {
     }
 
     /// The map with `key` set to `class` from `source`, and not paused. The entry the map has
-    /// for the key is replaced, paused or not. A key the map does not declare is appended, so
-    /// the index stays valid.
+    /// for the key is replaced, paused or not, but the identity it states is kept: a position's
+    /// kind is confirmed or restored, and who the response says the session is stays declared.
+    /// A key the map does not declare is appended, so the index stays valid.
     #[must_use]
     pub fn with_entry(mut self, key: &str, class: &str, source: SlotSource) -> Self {
+        let identity = self.slot(key).and_then(|slot| slot.identity);
         let entry = ObjectSlot {
             key: key.to_owned(),
             class: class.to_owned(),
             source,
             paused: false,
+            identity,
         };
         if let Some(&place) = self.index.get(key) {
             if let Some(slot) = self.slots.get_mut(place) {
@@ -453,6 +482,24 @@ fn valid_key(key: &str) -> bool {
         && !location.is_empty()
         && location.len() <= 128
         && location.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Longest role label the gateway keeps, in bytes.
+pub const ROLE_MAX: usize = 32;
+
+/// The role label a response names, or `None` when the value is not one. A role is a short
+/// category such as `admin`, so its label is the trimmed, lower-case text: 1 to 32 ASCII
+/// letters, digits, `_`, `-`, `.` or `:`. Any other value names no role, and a value that may
+/// be a name or an id is never kept as text.
+#[must_use]
+pub fn role_label(value: &str) -> Option<String> {
+    let role = value.trim().to_ascii_lowercase();
+    let fits = !role.is_empty()
+        && role.len() <= ROLE_MAX
+        && role
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'));
+    fits.then_some(role)
 }
 
 #[cfg(test)]
@@ -755,6 +802,79 @@ mod tests {
         assert_eq!(loaded.learning().agent.daily_limit, AGENT_DAILY_MAX);
         // A daily limit of zero is allowed: the agent is off, so the limit is unused.
         assert!(map(r#"{"learning":{"agent":{"daily_limit":0}}}"#).is_ok());
+    }
+
+    #[test]
+    fn a_position_states_an_identity_only_when_the_map_says_so() {
+        let loaded = map(r#"{
+            "classes": [{"id": "doctor", "name": "医生"}],
+            "slots": [
+                {"key": "GET /api/home doctor.id", "class": "doctor", "source": "admin", "identity": "user"},
+                {"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"}
+            ]
+        }"#)
+        .unwrap();
+        assert_eq!(
+            loaded.identity_of("GET /api/home doctor.id"),
+            Some(IdentityRole::User)
+        );
+        assert_eq!(loaded.identity_of("GET /doctor/{id} path[1]"), None);
+        assert_eq!(loaded.identity_of("GET /api/me id"), None);
+        // An identity names one of the three kinds; anything else is refused.
+        assert!(map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"tenant"}]}"#)
+        .is_err());
+    }
+
+    #[test]
+    fn a_position_without_an_identity_is_written_as_before() {
+        let plain = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"}]}"#)
+        .unwrap();
+        let written = serde_json::to_value(&plain).unwrap();
+        assert!(written["slots"][0].get("identity").is_none());
+        let stated = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"role"}]}"#)
+        .unwrap();
+        let written = serde_json::to_value(&stated).unwrap();
+        assert_eq!(written["slots"][0]["identity"], "role");
+    }
+
+    #[test]
+    fn a_confirmed_kind_keeps_the_identity_and_a_paused_entry_states_none() {
+        let loaded = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"}]}"#)
+        .unwrap();
+        let confirmed = loaded.with_entry("GET /api/home doctor.id", "doctor", SlotSource::Agent);
+        assert_eq!(
+            confirmed.identity_of("GET /api/home doctor.id"),
+            Some(IdentityRole::User)
+        );
+        let paused = confirmed.with_paused(&["GET /api/home doctor.id".to_owned()]);
+        assert_eq!(paused.identity_of("GET /api/home doctor.id"), None);
+        assert_eq!(paused.slots()[0].identity, Some(IdentityRole::User));
+        let added = paused.with_entry("GET /api/me id", "doctor", SlotSource::Admin);
+        assert_eq!(added.identity_of("GET /api/me id"), None);
+    }
+
+    #[test]
+    fn a_role_is_kept_as_a_short_label_and_anything_else_names_no_role() {
+        assert_eq!(role_label(" Admin ").as_deref(), Some("admin"));
+        assert_eq!(role_label("ROLE_ADMIN").as_deref(), Some("role_admin"));
+        assert_eq!(
+            role_label("doctor.v2:ward-3").as_deref(),
+            Some("doctor.v2:ward-3")
+        );
+        assert_eq!(role_label(""), None);
+        assert_eq!(role_label("   "), None);
+        assert_eq!(role_label("管理员"), None);
+        assert_eq!(role_label("a b"), None);
+        assert_eq!(role_label("zhangsan@example.com"), None);
+        assert_eq!(
+            role_label(&"a".repeat(ROLE_MAX)).map(|role| role.len()),
+            Some(ROLE_MAX)
+        );
+        assert_eq!(role_label(&"a".repeat(ROLE_MAX + 1)), None);
     }
 
     /// Lower-case letters for a number, so that kind ids stay distinct.

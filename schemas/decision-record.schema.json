@@ -120,6 +120,17 @@
       "properties": {
         "age_seconds": {"type": "integer", "minimum": 0},
         "known_values": {"type": "integer", "minimum": 0},
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "description": "站点声明了身份位置、且会话已见身份时才有，见 docs/07 7.9.15。user、org 为键控哈希标签，role 为角色标签。",
+          "properties": {
+            "user": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+            "org": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+            "role": {"type": "string", "pattern": "^[a-z0-9_.:-]{1,32}$"}
+          }
+        },
         "entries_passed": {
           "type": "array",
           "items": {

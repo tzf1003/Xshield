@@ -178,7 +178,8 @@
             "properties": {
               "key": {"type": "string", "minLength": 1, "description": "位置，形如 GET /doctor/{id} path[1]。"},
               "class": {"type": "string", "minLength": 1},
-              "source": {"type": "string", "enum": ["admin", "rule", "agent"]}
+              "source": {"type": "string", "enum": ["admin", "rule", "agent"]},
+              "identity": {"type": "string", "enum": ["user", "org", "role"], "description": "响应位置声明的本会话身份，见 docs/07 7.9.15。"}
             }
           }
         },

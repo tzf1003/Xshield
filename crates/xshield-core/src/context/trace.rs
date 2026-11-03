@@ -200,6 +200,26 @@ pub struct TraceSession {
     /// records only; the trim level says how many of them `state` carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent: Option<Vec<TraceRecent>>,
+    /// Who the session was when the decision was made, as the site's identity positions
+    /// said (docs/07 section 7.4.3). Absent when the site declares none, or the session has
+    /// shown none, so records of such sites are written as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<TraceIdentity>,
+}
+
+/// The identity a session showed. The user and the organization are labels of keyed
+/// hashes, never the ids; the role is its label (see `role_label` in the object map).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceIdentity {
+    /// Label of the keyed hash of the user id: 16 hex digits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Label of the keyed hash of the organization id: 16 hex digits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
+    /// The role the session holds, for example `admin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// An entry the session passed.

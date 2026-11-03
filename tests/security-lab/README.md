@@ -37,6 +37,7 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |
 | C4 | 登录请求 | Jev 收到的是 `<redacted>`，判定日志里也没有口令 | `jev_allow` |
 | C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拦截，`JEV_CALL_LIMIT` | `jev_unavailable` |
+| W1 | 声明了 `GET /api/home doctor.id` 为用户身份的站点：医生 A、B 各自登录后，判定记录的 `trace.session.identity.user` 是各自的键控哈希标签，换账号不同，同一账号相同；没有声明身份的站点不写 `identity` | 放行，身份标签按上述规则 | `fast_allow` |
 
 ### A9 说明：搜索结果不是拦截的依据
 

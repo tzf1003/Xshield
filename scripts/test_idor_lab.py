@@ -45,6 +45,12 @@ EDGE = TARGET / ("debug/xshield-edge.exe" if os.name == "nt" else "debug/xshield
 # A lab-only key for the context hashes; nothing outside this run uses it.
 CONTEXT_KEY_HEX = "5b" * 32
 ENTRIES = ["/login", "/api/home", "/api/patients", "/share/*"]
+# The identity site declares the doctor id of GET /api/home as the session's user (docs/07 7.9.15).
+# The other sites declare nothing, so their decision records carry no identity.
+IDENTITY_OBJECTS = {
+    "classes": [{"id": "doctor", "name": "医生"}],
+    "slots": [{"key": "GET /api/home doctor.id", "class": "doctor", "source": "admin", "identity": "user"}],
+}
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,7 @@ def site_specs(origin_port: int) -> list[dict]:
         site("deny-when-down", "deny.lab", advanced=fast_timeout),
         site("allow-when-down", "allow.lab", on_jev_unavailable="allow", advanced=fast_timeout),
         site("limited", "limit.lab", advanced={"session_calls_per_minute": 2}),
+        site("identity", "identity.lab", objects=IDENTITY_OBJECTS),
     ]
 
 
@@ -490,6 +497,49 @@ def c5(lab: Lab) -> None:
     lab.expect("third call is over the session limit", lab.send(
         "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"}),
         Expect(403, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+
+
+@scenario("W1", "声明了身份位置的站点：判定记录带会话的用户标签；换账号标签不同；未声明的站点不写身份")
+def w1(lab: Lab) -> None:
+    def identity_of(sent: Sent) -> dict:
+        session = ((sent.record or {}).get("trace") or {}).get("session") or {}
+        return session.get("identity") or {}
+
+    # The first identity response sets the session's user; the next judged request carries it.
+    cookie_a = lab.login("identity.lab", "doctor_a", "W1 doctor A logs in on the identity site")
+    lab.expect("W1 doctor A opens the home page", lab.send(
+        "identity.lab", "GET", "/api/home", cookie=cookie_a), Expect(200, "fast_allow", "allowed", True))
+    listed_a = lab.expect("W1 doctor A lists patients", lab.send(
+        "identity.lab", "GET", "/api/patients", cookie=cookie_a), Expect(200, "fast_allow", "allowed", True))
+    user_a = identity_of(listed_a).get("user", "")
+    lab.check("the decision record carries doctor A's user as a 16-digit keyed label",
+              len(user_a) == 16 and all(char in "0123456789abcdef" for char in user_a),
+              f"identity {identity_of(listed_a)}")
+    lab.check("the decision record keeps no doctor id",
+              "DR-A" not in json.dumps(listed_a.record, ensure_ascii=False), "DR-A is in the record")
+
+    cookie_b = lab.login("identity.lab", "doctor_b", "W1 doctor B logs in on the identity site")
+    lab.expect("W1 doctor B opens the home page", lab.send(
+        "identity.lab", "GET", "/api/home", cookie=cookie_b), Expect(200, "fast_allow", "allowed", True))
+    listed_b = lab.expect("W1 doctor B lists patients", lab.send(
+        "identity.lab", "GET", "/api/patients", cookie=cookie_b), Expect(200, "fast_allow", "allowed", True))
+    user_b = identity_of(listed_b).get("user", "")
+    lab.check("another account carries another user label", user_b != "" and user_b != user_a,
+              f"both {user_a!r} and {user_b!r}")
+
+    cookie_again = lab.login("identity.lab", "doctor_a", "W1 doctor A logs in again")
+    lab.expect("W1 doctor A opens the home page again", lab.send(
+        "identity.lab", "GET", "/api/home", cookie=cookie_again), Expect(200, "fast_allow", "allowed", True))
+    relisted = lab.expect("W1 doctor A lists patients again", lab.send(
+        "identity.lab", "GET", "/api/patients", cookie=cookie_again), Expect(200, "fast_allow", "allowed", True))
+    lab.check("the same account carries the same user label", identity_of(relisted).get("user") == user_a,
+              f"identity {identity_of(relisted)}")
+
+    plain = lab.login("emr.lab", "doctor_a", "W1 doctor A logs in on a site without identity")
+    unset = lab.expect("W1 the same list on a site without identity", lab.send(
+        "emr.lab", "GET", "/api/patients", cookie=plain), Expect(200, "fast_allow", "allowed", True))
+    lab.check("a site without identity positions writes no identity", not identity_of(unset),
+              f"identity {identity_of(unset)}")
 
 
 def main() -> int:
