@@ -13,6 +13,11 @@ pub const VALUE_CHARS_MAX: usize = 256;
 /// Longest request path a session entry or recent request keeps, in bytes. The
 /// same bound as a configured path (`MAX_PATH_BYTES`); longer paths are cut.
 pub const TRACE_PATH_BYTES_MAX: usize = 256;
+/// Longest name a value keeps in the trace, in bytes: its location, its key and
+/// its position. Like a session path, a longer name is cut, so one very long key
+/// cannot push every value of its request out of the row. The console aligns
+/// with the same bound (`TRACE_NAME_BYTES_MAX` in `align.ts`).
+pub const TRACE_NAME_BYTES_MAX: usize = 256;
 /// Value text length after [`Trace::fit`] has run out of gentler cuts.
 const FIT_VALUE_CHARS: usize = 64;
 /// Most response positions whose value fingerprints one response records. The
@@ -153,9 +158,13 @@ impl Trace {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // the flags are the trace's own vocabulary
 pub struct TraceValue {
-    /// Location, for example `path[2]` or `query.doctor`.
+    /// Location, for example `path[2]` or `query.doctor`; cut to
+    /// [`TRACE_NAME_BYTES_MAX`] bytes (see `at_len`).
     pub at: String,
-    /// Key it travels under, when it has one.
+    /// The original length in bytes of `at`, when it was cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_len: Option<usize>,
+    /// Key it travels under, when it has one. Cut to [`TRACE_NAME_BYTES_MAX`] bytes.
     pub key: Option<String>,
     /// The value, `<redacted>` for a secret, clipped to 256 characters.
     pub value: String,
@@ -484,6 +493,7 @@ mod tests {
     fn value(at: &str, text: &str, inert: bool, sources: usize) -> TraceValue {
         TraceValue {
             at: at.to_owned(),
+            at_len: None,
             key: None,
             value: text.to_owned(),
             len: None,

@@ -2,7 +2,7 @@
 //! request values as the session saw them, the links to the requests that
 //! showed them, and the query string with secrets removed.
 
-use xshield_core::context::trace::{TRACE_PATH_BYTES_MAX, VALUE_CHARS_MAX};
+use xshield_core::context::trace::{TRACE_NAME_BYTES_MAX, TRACE_PATH_BYTES_MAX, VALUE_CHARS_MAX};
 use xshield_core::context::{ObjectFrom, TraceEntry, TraceRecent, TraceSource, TraceValue};
 
 use crate::context::{EntryPass, Origin, Recent, request_text};
@@ -42,8 +42,9 @@ pub fn value_entry(
     let key = value.key.as_deref();
     let (text, len, clipped) = shown(&value.at, key, &value.value, credential, secret_words);
     TraceValue {
-        at: value.at.clone(),
-        key: value.key.clone(),
+        at_len: (value.at.len() > TRACE_NAME_BYTES_MAX).then_some(value.at.len()),
+        at: cut(value.at.clone(), TRACE_NAME_BYTES_MAX),
+        key: value.key.clone().map(|key| cut(key, TRACE_NAME_BYTES_MAX)),
         value: text,
         len,
         clipped,
@@ -65,13 +66,13 @@ pub fn value_entry(
                     request: origin.request.clone(),
                     request_id: request_text(origin.request_id),
                     at_millis: nonzero(origin.at_ms),
-                    slot: origin_slot(origin),
+                    slot: origin_slot(origin).map(|slot| cut(slot, TRACE_NAME_BYTES_MAX)),
                     object_from: object.as_ref().map(|_| ObjectFrom::Map),
                     object,
                 }
             })
             .collect(),
-        slot: Some(place.slot),
+        slot: Some(cut(place.slot, TRACE_NAME_BYTES_MAX)),
         object_from: place.object.as_ref().map(|_| ObjectFrom::Map),
         object: place.object,
     }
@@ -191,6 +192,39 @@ mod tests {
         let cut = redacted_query(&query, None, &[]);
         assert!(cut.len() <= QUERY_BYTES_MAX);
         assert!(cut.is_char_boundary(cut.len()));
+    }
+
+    #[test]
+    fn a_long_key_or_location_is_cut_and_the_value_keeps_its_text() {
+        let long = "k".repeat(40 * 1024);
+        let value = RequestValue {
+            at: format!("body.{long}"),
+            value: "2".to_owned(),
+            key: Some(long.clone()),
+            inert: false,
+        };
+        let place = Place {
+            slot: format!("POST /api/x {long}"),
+            ..Place::default()
+        };
+        let at_bytes = value.at.len();
+        let entry = value_entry(&value, true, false, &[], None, &[], place);
+        assert!(entry.at.len() <= TRACE_NAME_BYTES_MAX);
+        assert_eq!(entry.at_len, Some(at_bytes), "the original length is kept");
+        assert!(
+            entry
+                .key
+                .as_deref()
+                .is_some_and(|key| key.len() <= TRACE_NAME_BYTES_MAX)
+        );
+        assert!(
+            entry
+                .slot
+                .as_deref()
+                .is_some_and(|slot| slot.len() <= TRACE_NAME_BYTES_MAX)
+        );
+        assert_eq!(entry.value, "2");
+        assert!(entry.seen);
     }
 
     #[test]

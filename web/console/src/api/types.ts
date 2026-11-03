@@ -183,8 +183,10 @@ export interface TraceSource {
 }
 
 export interface TraceValue {
-  /** Location: `path[2]`, `query.q`, `body.items[].id`. */
+  /** Location: `path[2]`, `query.q`, `body.items[].id`. Cut to 256 bytes; see `at_len`. */
   at: string;
+  /** The original length in bytes of `at`, kept when the location was cut. */
+  at_len?: number | null;
   /** The key the value travels under, when it has one. */
   key: string | null;
   /** Value text; `<redacted>` for secrets (the original length is in `len`). */

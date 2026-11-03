@@ -118,6 +118,12 @@ export function ValueText({
   );
 }
 
+/** A location the trace cut to its name limit (docs/07 7.4.3): 已裁剪, with the original length in bytes. */
+export function CutName({ atLen }: { atLen: number | null | undefined }) {
+  if (atLen === null || atLen === undefined) return null;
+  return <span className="small dim">{` 已裁剪 · 原长 ${fmtInt(atLen)} 字节`}</span>;
+}
+
 /** Where a class came from: the confirmed object map, or a name read from the field (design 4.2). */
 export type ClassFrom = "map" | "name" | null;
 

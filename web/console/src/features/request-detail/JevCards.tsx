@@ -22,6 +22,7 @@ import {
 import {
   ClassTag,
   CopyAction,
+  CutName,
   HintMark,
   keyed,
   SourceWithClass,
@@ -155,6 +156,7 @@ function ValueCard({
         <span className="mono small tnum">#{row.jevIndex}</span>
         <span className="mono small rd-clip">
           <SafeText text={row.at} query={query} />
+          <CutName atLen={row.atLen} />
         </span>
         <span className="small dim">{VALUE_KIND_LABEL[row.kind]}</span>
         {row.object === null ? null : <ClassTag object={row.object} from={row.objectFrom} />}
