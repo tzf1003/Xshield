@@ -285,7 +285,8 @@ def a1(lab: Lab) -> None:
 @scenario("A2", "医生 A 把地址改成患者 D：拦截")
 def a2(lab: Lab) -> None:
     cookie = lab.login("emr.lab", "doctor_a")
-    lab.send("emr.lab", "GET", "/api/patients", cookie=cookie)
+    lab.expect("list my patients", lab.send("emr.lab", "GET", "/api/patients", cookie=cookie),
+               Expect(200, "fast_allow", "allowed", True))
     lab.expect("open patient D from the same session", lab.send(
         "emr.lab", "GET", "/api/patients/PT-7004", cookie=cookie),
         Expect(403, "jev_deny", "blocked", False))
@@ -304,7 +305,8 @@ def a3(lab: Lab) -> None:
 @scenario("A4", "医生 A 删除患者 D：拦截")
 def a4(lab: Lab) -> None:
     cookie = lab.login("emr.lab", "doctor_a")
-    lab.send("emr.lab", "GET", "/api/patients", cookie=cookie)
+    lab.expect("list my patients", lab.send("emr.lab", "GET", "/api/patients", cookie=cookie),
+               Expect(200, "fast_allow", "allowed", True))
     lab.expect("delete patient D", lab.send("emr.lab", "DELETE", "/api/patients/PT-7004", cookie=cookie),
                Expect(403, "jev_deny", "blocked", False))
     # The refused DELETE never reached the origin, so patient D is still there.
@@ -314,7 +316,8 @@ def a4(lab: Lab) -> None:
 @scenario("A5", "医生 A 在“我的患者”接口上加别的医生参数：拦截")
 def a5(lab: Lab) -> None:
     cookie = lab.login("emr.lab", "doctor_a")
-    lab.send("emr.lab", "GET", "/api/patients", cookie=cookie)
+    lab.expect("list my patients", lab.send("emr.lab", "GET", "/api/patients", cookie=cookie),
+               Expect(200, "fast_allow", "allowed", True))
     lab.expect("list with doctor B's parameter", lab.send(
         "emr.lab", "GET", "/api/patients?doctor=DR-B", cookie=cookie),
         Expect(403, "jev_deny", "blocked", False))
@@ -324,7 +327,8 @@ def a5(lab: Lab) -> None:
 @scenario("A6", "接收者兑换患者 A 的分享码后打开患者 A：放行")
 def a6(lab: Lab) -> None:
     owner = lab.login("emr.lab", "doctor_a")
-    lab.send("emr.lab", "GET", "/api/patients", cookie=owner)
+    lab.expect("list my patients", lab.send("emr.lab", "GET", "/api/patients", cookie=owner),
+               Expect(200, "fast_allow", "allowed", True))
     shared = lab.expect("owner shares patient A", lab.send(
         "emr.lab", "POST", "/api/patients/PT-7001/share", cookie=owner),
         Expect(201, "fast_allow", "allowed", True))
@@ -413,7 +417,8 @@ def c2(lab: Lab) -> None:
 @scenario("C3", "观察模式下的 A2：转发，日志记“本应拦截”")
 def c3(lab: Lab) -> None:
     cookie = lab.login("observe.lab", "doctor_a")
-    lab.send("observe.lab", "GET", "/api/patients", cookie=cookie)
+    lab.expect("list my patients", lab.send("observe.lab", "GET", "/api/patients", cookie=cookie),
+               Expect(200, "fast_allow", "allowed", True))
     lab.expect("open patient D in observe mode", lab.send(
         "observe.lab", "GET", "/api/patients/PT-7004", cookie=cookie),
         Expect(200, "jev_deny", "would_block", True))
