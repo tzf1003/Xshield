@@ -80,6 +80,24 @@ impl LearnedState {
     }
 }
 
+/// Who gave a position's kind: the rules, or the learning agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// The rules judged the position from its names and votes.
+    Rule,
+    /// The learning agent answered the position's question.
+    Agent,
+}
+
+impl Source {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Agent => "agent",
+        }
+    }
+}
+
 /// What the pass writes for one position it judged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Judgement<'a> {
@@ -97,6 +115,8 @@ pub struct Judgement<'a> {
     pub share_per_mille: u32,
     /// The last UTC day with a vote.
     pub last_day: u64,
+    /// Who gave the kind.
+    pub source: Source,
 }
 
 /// A place in a site's decision log: the time of a row and its id. Rows are read in
@@ -498,9 +518,10 @@ pub async fn put_judgement(
 ) -> Result<(), LearningStoreError> {
     sqlx::query(
         "INSERT INTO object_positions
-             (site, slot, state, class, votes, sessions, share_per_mille, last_day, updated_millis)
+             (site, slot, state, class, votes, sessions, share_per_mille, last_day, updated_millis,
+              source)
          SELECT $1::text, $2::text, $3::text, $4::text, $5::integer, $6::integer, $7::integer,
-             $8::bigint, $9::bigint
+             $8::bigint, $9::bigint, $11::text
          WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $10 FOR SHARE)
          ON CONFLICT (site, slot) DO UPDATE SET
              state = EXCLUDED.state,
@@ -510,6 +531,7 @@ pub async fn put_judgement(
              share_per_mille = EXCLUDED.share_per_mille,
              last_day = EXCLUDED.last_day,
              updated_millis = EXCLUDED.updated_millis,
+             source = EXCLUDED.source,
              dismissed = false,
              dismissed_class = NULL,
              dismissed_votes = 0
@@ -530,6 +552,7 @@ pub async fn put_judgement(
     .bind(day_i64(judgement.last_day))
     .bind(now_millis)
     .bind(generation)
+    .bind(judgement.source.as_str())
     .execute(pool)
     .await?;
     Ok(())
@@ -661,7 +684,8 @@ pub async fn withdraw_proposal(
     now_millis: i64,
 ) -> Result<(), LearningStoreError> {
     sqlx::query(
-        "UPDATE object_positions SET state = 'pending', class = NULL, updated_millis = $4
+        "UPDATE object_positions SET state = 'pending', class = NULL, source = 'rule',
+             updated_millis = $4
          WHERE site = $1 AND slot = $2 AND state = 'proposed'
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $3 FOR SHARE)",
     )
@@ -689,6 +713,8 @@ pub struct PositionRow {
     pub class: Option<String>,
     /// Whether the proposal was dismissed, or the position was while it was pending.
     pub dismissed: bool,
+    /// `rule` or `agent`: who gave the kind of a proposal.
+    pub source: String,
     /// Votes in the window.
     pub votes: i32,
     /// Sessions that voted in the window.
@@ -705,7 +731,8 @@ pub struct PositionRow {
 /// Returns [`LearningStoreError`] on a database failure.
 pub async fn positions(pool: &PgPool, site: &str) -> Result<Vec<PositionRow>, LearningStoreError> {
     let rows = sqlx::query(
-        "SELECT id, slot, side, state, class, dismissed, votes, sessions, share_per_mille, last_day
+        "SELECT id, slot, side, state, class, dismissed, source, votes, sessions, share_per_mille,
+             last_day
          FROM object_positions WHERE site = $1 ORDER BY id",
     )
     .bind(site)
@@ -724,7 +751,8 @@ pub async fn position(
     id: i64,
 ) -> Result<Option<PositionRow>, LearningStoreError> {
     let row = sqlx::query(
-        "SELECT id, slot, side, state, class, dismissed, votes, sessions, share_per_mille, last_day
+        "SELECT id, slot, side, state, class, dismissed, source, votes, sessions, share_per_mille,
+             last_day
          FROM object_positions WHERE site = $1 AND id = $2",
     )
     .bind(site)
@@ -742,6 +770,7 @@ fn position_row(row: &PgRow) -> Result<PositionRow, LearningStoreError> {
         state: row.try_get("state")?,
         class: row.try_get("class")?,
         dismissed: row.try_get("dismissed")?,
+        source: row.try_get("source")?,
         votes: row.try_get("votes")?,
         sessions: row.try_get("sessions")?,
         share_per_mille: row.try_get("share_per_mille")?,
@@ -1071,6 +1100,8 @@ pub async fn forget_site(
     for statement in [
         "DELETE FROM object_evidence WHERE site = $1",
         "DELETE FROM object_positions WHERE site = $1",
+        "DELETE FROM object_agent_calls WHERE site = $1",
+        "DELETE FROM object_learning_runs WHERE site = $1",
     ] {
         sqlx::query(statement)
             .bind(site)
@@ -1146,6 +1177,7 @@ mod tests {
             sessions: 5,
             share_per_mille: 950,
             last_day: 3,
+            source: Source::Rule,
         }
     }
 
