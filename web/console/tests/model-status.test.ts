@@ -5,7 +5,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentModelsState, JevModelsState, ModelLoad } from "../src/api/types.ts";
 import {
+  agentFailureWord,
   agentStatusLine,
+  agentTodayLine,
+  failingStreak,
   jevNotLoaded,
   jevStatusLine,
   jevWaitingForLoad,
@@ -62,6 +65,16 @@ function agent(overrides: Partial<AgentModelsState> = {}): AgentModelsState {
     timeout_ms: 30000,
     share_key_with_jev: false,
     key: { set: true, last4: "c81d", updated_at: OLD, shared_with_jev: false },
+    recent_failures: [null, null, null, null, null],
+    usage: {
+      window: "today",
+      calls: 52,
+      ok: 50,
+      failed: 2,
+      top_failure: "timeout",
+      enabled_sites: 2,
+    },
+    sites: [],
     ...overrides,
   };
 }
@@ -197,15 +210,74 @@ test("notLoadedSummary names the gateways and the distinct reasons they give", (
   assert.equal(notLoadedSummary([load("edge-1", 13, "SOMETHING_NEW")]).reason, "SOMETHING_NEW");
 });
 
-test("the agent card says whether it is configured and which saved version runs", () => {
+test("the agent card says whether it is configured, and what its latest calls did (design 2.1)", () => {
   assert.deepEqual(agentStatusLine(agent({ configured: false, source: null, version: 0 })), {
     tone: "neutral",
     icon: "–",
     text: MODEL_TEXT.unset,
   });
+  assert.deepEqual(agentStatusLine(agent({ recent_failures: [] })), {
+    tone: "neutral",
+    icon: "–",
+    text: MODEL_TEXT.agentNoCalls,
+  });
   assert.deepEqual(agentStatusLine(agent()), {
     tone: "ok",
     icon: "●",
-    text: MODEL_TEXT.agentConfigured(3),
+    text: MODEL_TEXT.agentLastOk,
   });
+});
+
+test("a failing agent names how many calls failed in a row and why the newest one did", () => {
+  const once = agentStatusLine(agent({ recent_failures: ["timeout", null, null] }));
+  assert.deepEqual(once, {
+    tone: "warn",
+    icon: "▲",
+    text: "最近一次失败：超时",
+  });
+  const twice = agentStatusLine(agent({ recent_failures: ["not_json", "timeout", null] }));
+  assert.equal(twice.text, "最近 2 次失败：回答不能解析");
+  const five = agentStatusLine(
+    agent({ recent_failures: ["unavailable", "unavailable", "timeout", "timeout", "timeout"] }),
+  );
+  assert.equal(five.text, "最近 5 次失败：模型不可用");
+  assert.equal(five.tone, "warn");
+});
+
+test("the failing streak counts from the newest call and stops at the first answer", () => {
+  assert.equal(failingStreak([]), 0);
+  assert.equal(failingStreak([null, "timeout"]), 0);
+  assert.equal(failingStreak(["timeout", null, "timeout"]), 1);
+  assert.equal(failingStreak(["timeout", "timeout", null, "timeout"]), 2);
+  assert.equal(failingStreak(["timeout", "timeout", "timeout", "timeout", "timeout"]), 5);
+});
+
+test("a learning failure reads in words, and an unknown one is kept as itself", () => {
+  assert.equal(agentFailureWord("timeout"), "超时");
+  assert.equal(agentFailureWord("made_up"), "回答不可用（made_up）");
+});
+
+test("today's line counts the calls, the answers and the failures, with the reason most failed", () => {
+  assert.equal(
+    agentTodayLine({
+      window: "today",
+      calls: 52,
+      ok: 50,
+      failed: 2,
+      top_failure: "timeout",
+      enabled_sites: 3,
+    }),
+    "调用 52 · 成功 50 · 失败 2（超时） · 3 个站点开启了学习代理",
+  );
+  assert.equal(
+    agentTodayLine({
+      window: "today",
+      calls: 0,
+      ok: 0,
+      failed: 0,
+      top_failure: null,
+      enabled_sites: 0,
+    }),
+    "调用 0 · 成功 0 · 失败 0 · 0 个站点开启了学习代理",
+  );
 });

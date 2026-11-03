@@ -92,8 +92,38 @@ test("the models tab shows both configurations and what the gateways run", async
 
   const agent = card(page, "agent");
   await expect(agent.getByText(MODEL_TEXT.agentTitle)).toBeVisible();
-  await expect(agent.getByText(MODEL_TEXT.agentConfigured(3))).toBeVisible();
+  await expect(agent.getByText(MODEL_TEXT.agentLastOk)).toBeVisible();
   await expect(agent.getByText(systemModels.agent.endpoint, { exact: true })).toBeVisible();
+  await expect(
+    agent.getByText("调用 52 · 成功 50 · 失败 2（超时） · 2 个站点开启了学习代理"),
+  ).toBeVisible();
+});
+
+test("the agent's failing calls show in its status, and the sites' use opens to a table", async ({
+  page,
+}) => {
+  const models = structuredClone(systemModels);
+  models.agent = {
+    ...models.agent,
+    recent_failures: ["timeout", "timeout", "timeout", "timeout", "timeout"],
+  };
+  await useFixtures(page, { models });
+  await page.goto("/system?tab=models");
+
+  const agent = card(page, "agent");
+  await expect(agent.getByText("最近 5 次失败：超时")).toBeVisible();
+  const toggle = agent.getByRole("button", { name: MODEL_TEXT.sitesClosed });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+
+  const table = agent.getByRole("table", { name: MODEL_TEXT.sitesCaption });
+  await expect(table.getByRole("link", { name: "emr" })).toHaveAttribute("href", /\/sites\/emr/);
+  await expect(table.getByRole("cell", { name: "31 / 200" })).toBeVisible();
+  await expect(table.getByRole("cell", { name: "21 / 200" })).toBeVisible();
+  await expect(agent.getByRole("button", { name: MODEL_TEXT.sitesOpen })).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
 });
 
 test("a test runs the form's values, and a configuration that tested is saved as tested", async ({

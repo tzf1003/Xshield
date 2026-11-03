@@ -40,6 +40,33 @@
       "last4": "c81d",
       "updated_at": "2026-10-30T09:00:00.000Z",
       "shared_with_jev": false
-    }
+    },
+    "recent_failures": [null, null, null, null, null],
+    "usage": {
+      "window": "today",
+      "calls": 52,
+      "ok": 50,
+      "failed": 2,
+      "top_failure": "timeout",
+      "enabled_sites": 2
+    },
+    "sites": [
+      {
+        "site": "emr",
+        "enabled": true,
+        "used": 31,
+        "limit": 200,
+        "failed": 2,
+        "last_call_at": "2026-11-03T04:12:00.000Z"
+      },
+      {
+        "site": "juice",
+        "enabled": true,
+        "used": 21,
+        "limit": 200,
+        "failed": 0,
+        "last_call_at": "2026-11-03T03:58:00.000Z"
+      }
+    ]
   }
 }

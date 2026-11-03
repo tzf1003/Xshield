@@ -1024,6 +1024,36 @@ export interface AgentModelsState extends AgentModelValues {
   version: number;
   updated_at: string | null;
   key: ModelKey;
+  /** The failure of each of the latest five calls, newest first; null for an answer. Empty before any call. */
+  recent_failures: (ModelFailure | null)[];
+  /** The learning agent's calls today, counted in UTC. */
+  usage: AgentUsage;
+  /** The sites with the agent on, and the sites that asked it today, by name. */
+  sites: AgentSiteUsage[];
+}
+
+/** The learning agent's calls on one day. */
+export interface AgentUsage {
+  window: "today";
+  calls: number;
+  /** Calls that gave an accepted answer. */
+  ok: number;
+  failed: number;
+  /** The failure most of the failed calls ended with. */
+  top_failure: ModelFailure | null;
+  /** The sites that have the agent on. */
+  enabled_sites: number;
+}
+
+/** One site's learning agent use: today's questions against its daily limit. */
+export interface AgentSiteUsage {
+  site: string;
+  enabled: boolean;
+  used: number;
+  limit: number;
+  failed: number;
+  /** When the site's latest question was asked, on any day. */
+  last_call_at: string | null;
 }
 
 /** `GET /api/system/models`. */
