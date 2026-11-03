@@ -61,11 +61,22 @@ v4 目标状态必需的环境变量只有这些（TLS 多证书、PROXY 协议�
 | `XSHIELD_CONTROL_LISTEN` | 控制台监听地址 |
 | `XSHIELD_CONTROL_PLAIN_HTTP` | 可选：控制台只经 `http://` 访问时设为 `true`。管理员 Cookie 改为不带 `__Host-` 前缀、不带 `Secure`，因为浏览器不保存 HTTP 下的 Secure Cookie。只用于网络本身已加密或可信的情况，例如经 Tailscale 访问 `http://主机名:端口`；其余情况保持默认 |
 | `XSHIELD_ADMIN_PASSWORD_HASH` | 管理员口令哈希（新增） |
-| `XSHIELD_CONTEXT_KEY_HEX` | 会话键和已见值哈希用的密钥（新增） |
-| `AI_GATEWAY_API_KEY` | Jev 调用凭证 |
+| `XSHIELD_CONTEXT_KEY_HEX` | 会话键和已见值哈希用的密钥（新增）。控制面也读它，用来加密控制台保存的模型密钥（3.3.1）；网关和控制面必须设成同一个值 |
+| `AI_GATEWAY_API_KEY` | Jev 调用凭证。控制台保存了 Jev 密钥（3.3.1）后以控制台为准，这个变量不再使用 |
 | `XSHIELD_JEV_ENDPOINT` / `XSHIELD_JEV_MODEL` | 可选：Jev 调用地址和线上模型名，换私有部署模型时设置（新增，默认 Vercel AI Gateway）。地址必须是 https，回环地址可用 http |
 | `XSHIELD_JEV_ROUTE` / `XSHIELD_JEV_API_KEY` | 可选：直连 TypeSafe |
 | `XSHIELD_JEV_TIMEOUT_MS` | 可选：单次 Jev 调用超时，100 到 30000 毫秒，默认 2000；到模型服务链路慢时调大 |
+
+### 3.3.1 模型配置在控制台保存
+
+Jev 判定模型和学习代理模型在控制台“系统”页的“模型”标签里配置（`tab=models`）。线路、地址、模型名和超时存在 `model_config` 表里（迁移 `0006_model_config.sql`）。密钥用 AES-256-GCM 加密后存库，数据库和日志里只出现末 4 位。每次保存都写一行 `model_config_history`，并要求带上读取时的版本号，版本不一致返回 409 `VERSION_CONFLICT`。
+
+- 网关每 5 秒读取一次 Jev 配置。控制台保存了 Jev 密钥时以它为准；没有时网关继续读上表的环境变量，已有部署不用改。
+- 新版本加载失败（例如密钥无法解密）时，网关继续用上一版，并在心跳的 `config_error` 里报告失败码；控制台的总览出现“模型配置未加载”的事项。
+- 启动时没有任何 Jev 密钥不会退出。网关照常服务，判定记为 `JEV_NOT_CONFIGURED`（07.5.4），直到控制台保存了密钥或设置了环境变量。
+- 加密密钥由 `XSHIELD_CONTEXT_KEY_HEX` 经 HMAC-SHA256 派生（标签 `xshield model config key v1`），每次加密用新的随机 96 位 nonce，列名作为附加数据，所以密文不能挪到别的列用。更换 `XSHIELD_CONTEXT_KEY_HEX` 后，已保存的密钥无法解密，需要在控制台重新保存。
+- 控制面没有设置 `XSHIELD_CONTEXT_KEY_HEX` 时，模型页仍可查看和修改地址、模型名、超时，但不能保存密钥（503 `MODEL_KEY_UNAVAILABLE`）。
+- 学习代理模型只由控制台进程调用，不经网关。
 
 v3 代码目前读取 109 个 `XSHIELD_*` 变量，逐个的去留见 [05.3](05-v3-removal.md#53-环境变量去留)。
 

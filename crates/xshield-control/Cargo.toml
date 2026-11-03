@@ -21,6 +21,7 @@ sqlx = { workspace = true, features = ["macros", "migrate"] }
 tokio.workspace = true
 tokio-stream.workspace = true
 xshield-core = { path = "../xshield-core" }
+xshield-judge = { path = "../xshield-judge" }
 xshield-postgres = { path = "../xshield-postgres" }
 
 [dev-dependencies]

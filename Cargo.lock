@@ -3062,6 +3062,7 @@ dependencies = [
  "tokio-stream",
  "tower",
  "xshield-core",
+ "xshield-judge",
  "xshield-postgres",
 ]
 
@@ -3073,6 +3074,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -3090,6 +3092,7 @@ dependencies = [
  "uuid",
  "xshield-core",
  "xshield-judge",
+ "xshield-postgres",
 ]
 
 [[package]]
@@ -3116,10 +3119,12 @@ name = "xshield-postgres"
 version = "4.0.0-rc1"
 dependencies = [
  "chrono",
+ "ring",
  "serde_json",
  "sqlx",
  "tokio",
  "xshield-core",
+ "zeroize",
 ]
 
 [[package]]

@@ -61,7 +61,7 @@ AGENTS.md 要求新增配置项、表、依赖之前先确认现有机制不够�
 ```
 
 - **xshield-edge**：判定并转发；对每个请求产出一条记录，批量写入 `decision_log`；每 10 秒（以及站点表变化后立即）写一次 `edge_status`；启动时登记指令版本到 `jev_prompts`。
-- **xshield-control**：唯一写 `site_configs` / `site_config_history` 的进程；提供控制台 API 和静态文件；启动时执行迁移；每小时维护分区和保留期。控制面不调用 Jev，也不持有 Jev 密钥。
+- **xshield-control**：唯一写 `site_configs` / `site_config_history` 的进程；提供控制台 API 和静态文件；启动时执行迁移；每小时维护分区和保留期。控制面不做判定，也不把 Jev 当作判定依据。它只在模型页“测试连接”时发一次最小调用，并保存控制台里模型密钥的密文（用 `XSHIELD_CONTEXT_KEY_HEX` 派生的密钥加密，见 7.9.14）。
 - **web/console**：React 单页应用，所有数据来自 `/api/*`。
 
 ### 7.2.2 一个请求的数据流
@@ -260,7 +260,7 @@ GET /api/patients ──响应里出现 id=7──┐
 |---|---|
 | `state` | 发出的 `state` 原文（已脱敏，≤ 8 KiB），与现有字段相同。**以字符串保存**（紧凑 JSON，就是发出的字节），不要改成嵌套对象：`jsonb` 会重排键、丢掉空白，无法逐字节还原。格式化只在控制台展示时做，所以“原文”视图和“复制 state”拿到的是网关实际发出的内容 |
 | `prompt` | 指令版本 ID：`jq_` 加 `questions` JSON 的 SHA-256 前 16 位十六进制；全文在 `jev_prompts` 表（新增）。完整请求体由 `model`、`state`、`questions` 三者拼回，是“还原值”：键的顺序可能与实际发出的不同，字节数以 `request_bytes` 为准 |
-| `model` / `route` | 线上模型名（`typesafe-ai/jev`、`jev-1.13.0` 或 `XSHIELD_JEV_MODEL`）；线路 `gateway` / `direct` / `custom`（新增） |
+| `model` / `route` | 线上模型名（`typesafe-ai/jev`、`jev-1.13.0` 或 `XSHIELD_JEV_MODEL`）；线路 `gateway` / `direct` / `custom`（新增），没有加载配置时为 `none` |
 | `timeout_ms` | 这次调用实际使用的超时：站点 `advanced.jev_timeout_ms`，没写时取 `XSHIELD_JEV_TIMEOUT_MS`（新增） |
 | `trim` | `state` 裁剪级别 0–4（新增，见 7.5.3） |
 | `request_bytes` | 完整请求体字节数（新增） |
@@ -314,6 +314,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `JEV_RESPONSE_TOO_LARGE` | 响应超过 64 KiB | 有 |
 | `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 |
 | `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 |
+| `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 |
 | `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB | 无 |
 | `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调） | 无 |
 
@@ -429,6 +430,8 @@ advanced:
 ### 7.7.5 心跳
 
 `crates/xshield-edge/src/status.rs`（新增模块）每 10 秒、以及站点表变化后立即 upsert `edge_status` 一行：实例名、启动时间、构建版本、监听端口、是否 TLS、每个站点加载的版本、加载时间（`loaded_at_millis`，Unix 毫秒；没有版本的站点不带这个键）和错误、会话数、队列长度、四个计数器（`written`、`dropped`、`dropped_bypass`、`write_errors`）、缺口历史 `gaps`（[7.7.4](#774-日志发送)）、Jev 线路配置（线路、端点主机名、模型、默认超时、指令 ID，不含密钥）和运行参数（[7.9.8](#798-系统)）。文件模式下不写。
+
+心跳的 `jev` 块在原有字段外增加模型配置的加载状态：`config_source`（`console` 或 `env`，都没有时为 `null`）、`config_version`（控制台版本，环境变量时为 `null`）、`config_error`（最近一次加载失败的码，配置在用时照常服务）、`env_available`（环境变量里有可用的配置）、`env_key_var`（网关读取密钥的环境变量名）和 `env_overridden`（控制台配置在用时被忽略的环境变量名，只列名字）。密钥不进心跳。
 
 控制面认为一个实例“在线”的条件是 `seen_at` 在 30 秒内；超过 24 小时没有心跳的行被清理（[7.8.2](#782-分区与保留)）。多个实例各写一行，控制台按实例分别显示，不求平均。
 
@@ -617,6 +620,7 @@ CREATE TABLE jev_prompts (
 | `GET /api/sites/{name}/objects/bootstrap` | 冷启动的类别候选（24 小时窗口）；候选尚未计算，当前为空 |
 | `GET /api/status` | 顶栏状态灯和“配置生效”需要的轻量状态，每 15 秒轮询一次（7.9.13） |
 | `GET /api/system` | 网关实例、日志存储、运行参数（7.9.8）；只在系统页按需读取，不轮询 |
+| `GET /api/system/models`、`PUT /api/system/models/{group}`、`POST …/test`、`DELETE /api/system/models/jev`、`GET …/history` | 模型页：Jev 判定模型和学习代理模型的配置、测试、改回环境变量和变更记录（7.9.14） |
 
 `GET /api/stats/summary` 的 `spark` 是概览的小趋势线：把时间窗（两端都计入）均分为 12 段，按时间从早到晚排列。`judged`、`blocked`、`would_block`、`unjudged`、`jev_calls` 是每段的计数，12 段相加等于同名的总量。`jev_p95_ms` 是每段 Jev 往返的 95 分位，取整到毫秒；该段没有 Jev 调用时为 0。`spark` 与总量读自同一批行，超过 200 万行时都只计最新的 200 万行。
 
@@ -829,6 +833,7 @@ CREATE TABLE jev_prompts (
 | `ok`（绿） | 其余 |
 
 `problems` 的产生规则：`site_load_failed`：任一在线实例的 `sites[x].error` 非空（含 Host 冲突落选，错误码 `SITE_HOST_TAKEN`）；`version_behind`：在线实例加载的版本低于 `site_configs.version`，**且最新版本已保存超过 30 秒**（刚保存后的前 30 秒是正常的生效过程，不告警）；`edge_offline`：24 小时内发过心跳、现在 `seen_at` 超过 30 秒前的实例，带最后心跳时间和它停在的各站点版本（离线实例不参与 `version_behind` 判断，免得同一件事报两次）；`log_gap`：最近 15 分钟内有缺口；`queue_pressure`：发送队列超过容量的 80%；`partition_missing`：今天没有分区或未来分区不足 2 天（[7.8.2](#782-分区与保留)）；`heartbeat_late`：在线实例的心跳间隔超过 15 秒。
+`jev_config_not_loaded`：控制台保存了 Jev 密钥、保存已超过 60 秒，而某个在线实例的心跳里 `config_source` 不是 `console`，或 `config_version` 不等于保存的版本。`config_error` 非空时一并带出。没有保存 Jev 密钥时不产生这一项。
 
 “在线”指 `seen_at` 在 30 秒内。`edges.total` 包含 24 小时内发过心跳的全部实例，离线的计入 `total` 而不计入 `online`，所以“2/3 在线”能被看到。`jev` 与 `GET /api/jev/status` 的同名字段相同（[7.9.7](#797-jev)），省略 `config`。
 
@@ -844,6 +849,22 @@ CREATE TABLE jev_prompts (
 ```
 
 `edges_loaded` 是在线且 `loaded_version == version` 的实例数。界面显示“N/M 个网关已生效”：两者相等且大于 0 时是“● v13 已生效”；`edges_online` 为 0 时是“没有在线的网关，配置已保存，网关上线后加载”；有实例报错时显示该实例的错误码文案。离线实例不拖住进度，只在摘要里另注“edge-3 离线”。保存后界面每秒轮询 `GET /api/sites/{name}`，全部生效或 30 秒后停止。
+
+### 7.9.14 模型配置（系统页“模型”标签）
+
+界面设计见 `notes/agent-model-ui` 第 2 节和 5.1；存储见 [03.3.1](03-admin-config-audit.md#331-模型配置在控制台保存)。
+
+| 接口 | 作用 |
+|---|---|
+| `GET /api/system/models` | 两组已保存的配置；密钥只有是否设置、末 4 位和更新时间；Jev 组的 `source` 为 `console` 或 `env`，`key_env` 是网关读取密钥的环境变量名；`loaded` 是各在线网关的 `{ edge, online, version, error }`（只列在线网关，`online` 恒为 true）；`impact` 是站点数和 `fail_closed`（拦截模式下 Jev 失败会拒绝请求的站点）；`usage` 是 Jev 最近 5 分钟的 `window_minutes`、调用数、失败数和 p95 |
+| `PUT /api/system/models/{jev｜agent}` | 保存新版本。正文：`route`（Jev）或 `provider`（学习代理，`gateway` 或 `custom`）、`endpoint`、`model`、`timeout_ms`、`expected_version`、可选 `note`（最多 200 字符）、可选 `tested`、可选 `key`（省略保留已保存的密钥，字符串替换；学习代理另有 `share_key_with_jev`）。返回 `{ group, version }`；版本不一致 409 `VERSION_CONFLICT` |
+| `POST /api/system/models/{jev｜agent}/test` | 用正文里的值发一次最小调用，`key` 省略时用已保存的。返回 `ok`、`latency_ms`、`status`、`failure`、`detail`（模型返回的错误正文，最多 300 字符，不可信文本）、`answer_valid`、`answer_reason`。每组 10 秒内第二次起返回 429 `MODEL_TEST_RATE_LIMITED` |
+| `DELETE /api/system/models/jev?expected_version=N` | 改回环境变量。只有在线网关都在环境里有可用配置时允许，否则 409 `MODEL_ENV_KEY_MISSING`。版本照常加一并写一条 `revert_to_env` 历史；返回与 `GET` 的 `jev` 相同结构的 Jev 组 |
+| `GET /api/system/models/{jev｜agent}/history` | 最近 20 版：版本、时间、改动的字段（旧值、新值；密钥只写末 4 位）、备注、保存时是否测试成功 |
+
+- 接口从不返回密钥本身。测试从控制台进程发出，不写判定日志，也不计入学习代理的每日上限。
+- 保存后网关在约 5 秒内加载，并在心跳里报告版本。控制台保存超过 60 秒、在线网关仍未加载这一版（或报告了失败码）时，状态灯列出 `jev_config_not_loaded` 问题（7.9.13）。
+- 本版接口不返回 `last_call`（两组），也不返回学习代理的 `health`、`usage`、`sites`；它们等学习代理和判定日志的数据接入后再补，界面在此之前不显示这些块。
 
 ## 7.10 控制台前端架构
 

@@ -7,10 +7,12 @@
 //! - [`source`] loads sites from `PostgreSQL` or a file,
 //! - [`sink`] ships decision log rows,
 //! - [`status`] writes the heartbeat and registers the Jev prompt,
+//! - [`jev_settings`] keeps the Jev client in step with the console and the environment,
 //! - [`proxy`] is the `ProxyHttp` implementation,
 //! - [`server`] puts listeners around it,
 //! - [`settings`] reads the environment.
 
+pub mod jev_settings;
 pub mod proxy;
 pub mod server;
 pub mod settings;

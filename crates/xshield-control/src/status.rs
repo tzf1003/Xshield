@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use xshield_postgres::{
     edge_status_store::{self, EdgeStatus},
+    model_config_store,
     partitions::{self, PartitionInfo},
     site_spec_store::{self, SiteRecord},
 };
@@ -30,6 +31,17 @@ const QUEUE_PRESSURE_PERCENT: i64 = 80;
 const DEFAULT_QUEUE_CAPACITY: i64 = 10_000;
 /// The future days with a partition that the console expects.
 const FUTURE_DAYS_NEEDED: i64 = 2;
+/// How long a saved Jev version may take to reach the gateways before it counts as not loaded.
+const JEV_LOAD_GRACE_MILLIS: i64 = 60_000;
+
+/// The Jev settings the console saved, when it holds a key for Jev.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JevWanted {
+    /// The version the gateways should have loaded.
+    pub version: i64,
+    /// When that version was saved, Unix milliseconds.
+    pub saved_at_millis: i64,
+}
 
 /// The `GET /api/status` response: the gateway light and the Jev health.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,6 +105,14 @@ pub enum Problem {
     HeartbeatLate {
         edge: String,
     },
+    /// An online gateway has not loaded the Jev settings the console saved.
+    JevConfigNotLoaded {
+        edge: String,
+        wanted: i64,
+        loaded: Option<i64>,
+        error: Option<String>,
+        saved_at_millis: i64,
+    },
 }
 
 /// `GET /api/status`: the gateway light, the problems behind it, and the Jev
@@ -107,7 +127,15 @@ pub async fn status(State(state): State<Arc<ControlState>>) -> ApiResult<Json<St
     let sites = site_spec_store::list(&state.pool).await?;
     let daily = partitions::list_partitions(&state.pool).await?;
     let jev_health = jev::health_summary(&state.pool, now_ms).await?;
-    let problems = collect_problems(&edges, &sites, &daily, now);
+    let model_rows = model_config_store::read(&state.pool).await?;
+    let wanted = model_rows.jev.key_last4.as_ref().map(|_| JevWanted {
+        version: model_rows.jev.version,
+        saved_at_millis: model_rows
+            .jev
+            .saved_at
+            .map_or(0, |at| at.timestamp_millis()),
+    });
+    let problems = collect_problems(&edges, &sites, &daily, wanted, now);
     let online = edges.iter().filter(|edge| edge.is_online(now)).count();
     let total = edges
         .iter()
@@ -142,18 +170,52 @@ fn collect_problems(
     edges: &[EdgeStatus],
     sites: &[SiteRecord],
     daily: &[PartitionInfo],
+    wanted: Option<JevWanted>,
     now: DateTime<Utc>,
 ) -> Vec<Problem> {
     let now_ms = now.timestamp_millis();
     let online: Vec<&EdgeStatus> = edges.iter().filter(|edge| edge.is_online(now)).collect();
     let mut found = site_load_failures(&online);
     found.extend(versions_behind(&online, sites, now_ms));
+    found.extend(jev_config_not_loaded(&online, wanted, now_ms));
     found.extend(offline_edges(edges, now));
     found.extend(log_gaps(edges, now_ms));
     found.extend(queue_pressure(&online));
     found.extend(partition_missing(daily, now));
     found.extend(late_heartbeats(&online, now_ms));
     found
+}
+
+/// Online instances that have not loaded the Jev settings saved more than a minute
+/// ago. Nothing is reported while the console holds no key for Jev.
+#[must_use]
+fn jev_config_not_loaded(
+    online: &[&EdgeStatus],
+    wanted: Option<JevWanted>,
+    now_ms: i64,
+) -> Vec<Problem> {
+    let Some(wanted) = wanted else {
+        return Vec::new();
+    };
+    if now_ms - wanted.saved_at_millis <= JEV_LOAD_GRACE_MILLIS {
+        return Vec::new();
+    }
+    online
+        .iter()
+        .filter_map(|edge| {
+            let report = jev::reported_config(edge);
+            let loaded = (report.config_source.as_deref() == Some("console"))
+                .then_some(report.config_version)
+                .flatten();
+            (loaded != Some(wanted.version)).then(|| Problem::JevConfigNotLoaded {
+                edge: edge.edge.clone(),
+                wanted: wanted.version,
+                loaded,
+                error: report.config_error.clone(),
+                saved_at_millis: wanted.saved_at_millis,
+            })
+        })
+        .collect()
 }
 
 /// Sites that an online instance failed to load, with the error code it reports.

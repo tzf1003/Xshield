@@ -15,11 +15,14 @@
 //! binary at build time and needs no setting. `XSHIELD_CONTROL_PLAIN_HTTP=true`
 //! drops `Secure` from the administrator cookie, for a console reached over
 //! plain `http://` on a network that is already encrypted (docs/03 section 3.3).
+//! `XSHIELD_CONTEXT_KEY_HEX`, the same secret the gateways read, lets the model
+//! page save API keys; without it those keys cannot be saved.
 
 use std::{env, error::Error, io::Read as _, net::SocketAddr};
 
 use sqlx::postgres::PgPoolOptions;
 use xshield_control::{ControlState, hash_password, router, run_maintenance, run_migrations};
+use xshield_postgres::key_seal::KeySealer;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8081";
 
@@ -29,6 +32,38 @@ fn run_hash_password_cli() -> Result<(), Box<dyn Error>> {
     let password = input.trim_end_matches(['\n', '\r']);
     println!("{}", hash_password(password)?);
     Ok(())
+}
+
+/// The sealer of the model keys, from the context secret when the deployment sets one.
+/// Without it the model page can still show the saved settings, but not save a key.
+fn context_sealer() -> Result<Option<KeySealer>, Box<dyn Error>> {
+    let Ok(text) = env::var("XSHIELD_CONTEXT_KEY_HEX") else {
+        return Ok(None);
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let secret = decode_hex(text)
+        .filter(|bytes| bytes.len() >= 32)
+        .ok_or("XSHIELD_CONTEXT_KEY_HEX must be at least 64 hex digits")?;
+    let sealer = KeySealer::from_context_secret(&secret)
+        .map_err(|error| format!("XSHIELD_CONTEXT_KEY_HEX: {error:?}"))?;
+    Ok(Some(sealer))
+}
+
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) {
+        return None;
+    }
+    text.as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let high = char::from(pair[0]).to_digit(16)?;
+            let low = char::from(pair[1]).to_digit(16)?;
+            u8::try_from(high * 16 + low).ok()
+        })
+        .collect()
 }
 
 async fn run_server() -> Result<(), Box<dyn Error>> {
@@ -53,11 +88,13 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
             "database migration failed: {error} (docs/04 section 4.2 covers a database created before start-up migrations)"
         )
     })?;
+    let key_sealer = context_sealer()?;
     let state = ControlState::new(
         pool.clone(),
         admin_password_hash,
         console_origin,
         plain_http,
+        key_sealer,
     )
     .map_err(|error| error.to_string())?;
 
