@@ -20,6 +20,8 @@ import type {
   JevStats,
   JevStatus,
   LookupResponse,
+  ModelsState,
+  ModelVersionWire,
   RequestCounts,
   RequestDetail,
   RequestListResponse,
@@ -40,6 +42,7 @@ import insightsJson from "../fixtures/insights.json" with { type: "json" };
 import jevStatsJson from "../fixtures/jev-stats.json" with { type: "json" };
 import jevStatusJson from "../fixtures/jev-status.json" with { type: "json" };
 import lookupJson from "../fixtures/lookup.json" with { type: "json" };
+import modelHistoryJson from "../fixtures/model-history.json" with { type: "json" };
 import previewJson from "../fixtures/preview.json" with { type: "json" };
 import promptJson from "../fixtures/prompt.json" with { type: "json" };
 import requestDetailBasketJson from "../fixtures/request-detail-req_01a1973940107ebea1af2c54ce635f38.json" with {
@@ -62,6 +65,7 @@ import statusDownJson from "../fixtures/status-down.json" with { type: "json" };
 import statusJson from "../fixtures/status.json" with { type: "json" };
 import summaryJson from "../fixtures/summary.json" with { type: "json" };
 import systemJson from "../fixtures/system.json" with { type: "json" };
+import systemModelsJson from "../fixtures/system-models.json" with { type: "json" };
 import timeseriesJson from "../fixtures/timeseries.json" with { type: "json" };
 import objectSlotS2Json from "../fixtures/object-slot-s2.json" with { type: "json" };
 import objectSlotS8Json from "../fixtures/object-slot-s8.json" with { type: "json" };
@@ -99,6 +103,11 @@ export const sessionTimeline: SessionTimeline = wire(sessionTimelineJson);
 export const jevStatus: JevStatus = wire(jevStatusJson);
 export const jevStats: JevStats = jevStatsJson;
 export const system: SystemInfo = wire(systemJson);
+/** Both model configurations as GET /api/system/models answers them (系统 · 模型, design 5.1). */
+export const systemModels: ModelsState = wire(systemModelsJson);
+/** The saved versions of each configuration, newest first (design 2.6, 5.1). */
+export const modelHistory: { jev: ModelVersionWire[]; agent: ModelVersionWire[] } =
+  wire(modelHistoryJson);
 export const insights: Insights = wire(insightsJson);
 export const evidence: Evidence = evidenceJson;
 export const summary: StatsSummary = summaryJson;

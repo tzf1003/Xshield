@@ -1,16 +1,18 @@
-// The system page at /system (docs/06 6.4.11): four tabs, kept in the address (`?tab=`) so a link opens
+// The system page at /system (docs/06 6.4.11): five tabs, kept in the address (`?tab=`) so a link opens
 // the same one. The gateway, storage and parameter tabs read GET /api/system (useSystem); the import tab
 // needs nothing else. The page adds no polling of its own.
 
 import { Tabs } from "antd";
 import { useSearch } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { useSystem } from "../../api/queries.ts";
+import { useSystem, useSystemModels } from "../../api/queries.ts";
 import { useNowBucket, useSetSearch } from "../../app/scope.ts";
 import type { SystemTab } from "../../app/search-schema.ts";
+import { MODEL_TEXT } from "../../lib/vocab.ts";
 import { ErrorBar, Loading, PageHead } from "../../ui/Page.tsx";
 import { EdgesTable } from "./EdgesTable.tsx";
 import { ImportPanel } from "./ImportPanel.tsx";
+import { ModelsPanel } from "./ModelsPanel.tsx";
 import { ParamsPanel } from "./ParamsPanel.tsx";
 import { StoragePanel } from "./StoragePanel.tsx";
 import "./system.css";
@@ -19,6 +21,7 @@ const TABS: Array<{ key: SystemTab; label: string }> = [
   { key: "edges", label: "网关" },
   { key: "storage", label: "日志存储" },
   { key: "params", label: "运行参数" },
+  { key: "models", label: MODEL_TEXT.tab },
   { key: "import", label: "导入" },
 ];
 
@@ -27,18 +30,24 @@ export function SystemPage() {
   const setSearch = useSetSearch();
   const tab: SystemTab = search.tab ?? "edges";
   const system = useSystem();
+  // The gateway tab compares each instance with the console version of the Jev configuration (design 2.7).
+  const models = useSystemModels();
   const now = useNowBucket(5_000);
   const data = system.data;
+  // Only a console configuration in use has a version the gateways are compared with (design 2.7).
+  const consoleVersion = models.data?.jev.source === "console" ? models.data.jev.version : null;
 
   let body: ReactNode;
   if (tab === "import") {
     body = <ImportPanel />;
+  } else if (tab === "models") {
+    body = <ModelsPanel />;
   } else if (system.isPending) {
     body = <Loading height={160} />;
   } else if (!data) {
     body = <ErrorBar error={system.error} onRetry={() => void system.refetch()} />;
   } else if (tab === "edges") {
-    body = <EdgesTable edges={data.edges} now={now} />;
+    body = <EdgesTable edges={data.edges} now={now} consoleVersion={consoleVersion} />;
   } else if (tab === "storage") {
     body = <StoragePanel system={data} now={now} />;
   } else {

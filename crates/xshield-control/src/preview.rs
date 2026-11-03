@@ -234,8 +234,17 @@ pub enum ChangeDetailBody {
         values: i64,
         fields: Vec<(String, i64)>,
     },
+    /// A fast allow that calls Jev again, and the kinds that explain it: the kind the name of
+    /// its request value gives (`name_kind`), and the kind the object map or a field
+    /// declaration gives it (`object_kind`). Estimated, like `Approximate`.
+    Kinds {
+        approximate: bool,
+        name_kind: String,
+        object_kind: String,
+    },
     /// A count the history cannot settle, because it names requests by an interface the
-    /// history does not hold: `api_split`, `entry_unreachable` and `cache_by_api`.
+    /// history does not hold: `api_split`, `entry_unreachable` and `cache_by_api`, and the
+    /// estimated fast allows of `new_fast_allow` and `back_to_jev`.
     Approximate { approximate: bool },
 }
 

@@ -840,17 +840,20 @@ pub struct SlotRow {
     pub values: String,
 }
 
-/// The decisions of `scope` that were fast-allowed or called Jev, and whose trace names
-/// one of `slots` as a request position or as the position a value was seen at. Newest
-/// first, at most [`SLOT_SCAN_LIMIT`]. Returns the rows and whether they are all of the
-/// window. A trace written before positions were recorded has no `slot` and is not found.
+/// The decisions of `scope` that were fast-allowed or called Jev, and whose trace names one of
+/// `slots` as a request position or as the position a value was seen at, or mentions one of
+/// `fields` as a name. A name matches in any case and with `_` or `-` between its letters, so
+/// `doc_id` also finds `docId`: the match is a superset, and the caller checks each value
+/// exactly. Newest first, at most [`SLOT_SCAN_LIMIT`]. Returns the rows and whether they are all
+/// of the window. A trace written before positions were recorded has no `slot` and is not found.
 ///
 /// # Errors
 /// Returns [`sqlx::Error`] when the query fails.
-pub async fn slot_rows(
+pub async fn window_rows(
     pool: &PgPool,
     scope: &Scope,
     slots: &[String],
+    fields: &[String],
 ) -> Result<(Vec<SlotRow>, bool), sqlx::Error> {
     let mut query = QueryBuilder::<Postgres>::new(
         "SELECT request_id, method, path, decision_path, (trace -> 'values')::text AS values
@@ -860,7 +863,7 @@ pub async fn slot_rows(
     query.push(
         " AND decision_path IN ('fast_allow', 'jev_allow', 'jev_deny', 'jev_unavailable')
           AND jsonb_typeof(trace -> 'values') = 'array'
-          AND EXISTS (
+          AND (EXISTS (
               SELECT 1 FROM jsonb_array_elements(trace -> 'values') AS v
               WHERE v ->> 'slot' = ANY(",
     );
@@ -871,7 +874,13 @@ pub async fn slot_rows(
                   WHERE s ->> 'slot' = ANY(",
     );
     query.push_bind(slots.to_vec());
-    query.push("))) ORDER BY at_millis DESC LIMIT ");
+    // Closes the `ANY`, the inner `EXISTS` and the outer one; the name test goes in the group.
+    query.push(")))");
+    if let Some(pattern) = name_pattern(fields) {
+        query.push(" OR (trace -> 'values')::text ~* ");
+        query.push_bind(pattern);
+    }
+    query.push(") ORDER BY at_millis DESC LIMIT ");
     query.push_bind(SLOT_SCAN_LIMIT + 1);
     let rows = query.build().fetch_all(pool).await?;
     let limit = usize::try_from(SLOT_SCAN_LIMIT).unwrap_or(usize::MAX);
@@ -887,6 +896,29 @@ pub async fn slot_rows(
         });
     }
     Ok((out, complete))
+}
+
+/// The case-insensitive pattern of the spellings of `names`: each name's letters in order, with
+/// `_` or `-` allowed between them, as the judge reads a field name (`doc_id`, `docId` and
+/// `doc-id` are one name). `None` when there is no name to look for.
+fn name_pattern(names: &[String]) -> Option<String> {
+    let alternatives: Vec<String> = names
+        .iter()
+        .map(|name| {
+            name.chars()
+                .filter(|c| !matches!(c, '_' | '-'))
+                .map(|c| {
+                    if c.is_alphanumeric() {
+                        format!("{c}[_-]?")
+                    } else {
+                        format!("\\{c}[_-]?")
+                    }
+                })
+                .collect::<String>()
+        })
+        .filter(|pattern| !pattern.is_empty())
+        .collect();
+    (!alternatives.is_empty()).then(|| format!("({})", alternatives.join("|")))
 }
 
 /// Requests in `since_millis..` whose trace says they cite a value learned
@@ -1127,6 +1159,16 @@ mod tests {
 
     use super::*;
     use crate::partitions::{day_bounds_millis, ensure_partition};
+
+    #[test]
+    fn a_name_matches_its_spellings_in_any_case_and_with_separators() {
+        assert_eq!(
+            name_pattern(&["doc_id".to_owned()]).as_deref(),
+            Some("(d[_-]?o[_-]?c[_-]?i[_-]?d[_-]?)")
+        );
+        assert_eq!(name_pattern(&["_".to_owned()]), None);
+        assert_eq!(name_pattern(&[]), None);
+    }
 
     /// The site of the rows these tests write, so a scope on it sees only them.
     const TEST_SITE: &str = "stats-test";

@@ -49,6 +49,8 @@ export function problemText(problem: GatewayProblem): string {
       return `判定日志分区不足，未来只有 ${problem.days_ahead} 天`;
     case "heartbeat_late":
       return `${problem.edge} 心跳延迟`;
+    case "jev_config_not_loaded":
+      return `${problem.edge} 还没有加载第 ${problem.wanted} 版 Jev 配置`;
     case "edge_offline": {
       const stuck = Object.entries(problem.loaded)
         .map(([site, version]) => `${site} v${version}`)

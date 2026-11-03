@@ -504,6 +504,12 @@ export interface JevConfig {
   model: string;
   default_timeout_ms: number;
   prompt: string;
+  /** Where the instance's Jev configuration comes from (design agent-model-ui 2.1). Absent before models existed. */
+  config_source?: ModelSource;
+  /** The console version the instance runs; null when it runs the environment's configuration. */
+  config_version?: number | null;
+  /** A stable error code when the instance refused the console version it was sent. */
+  config_error?: string | null;
 }
 
 export interface JevStats {
@@ -923,6 +929,177 @@ export interface SystemInfo {
   };
 }
 
+// ------------------------------------------------------------------ models (系统 · 模型; design agent-model-ui 2, 5.1)
+
+/** Which configuration is in use: the console's saved version, or the environment the gateways read. */
+export type ModelSource = "console" | "env";
+/** The learning agent's provider: the Vercel AI Gateway (OpenAI-compatible) or any OpenAI-compatible address. */
+export type AgentProvider = "gateway" | "custom";
+/** A failure code of a call or a test: a JEV_* code, or `dns`, `tls`, `answer_invalid` (design 7). */
+export type ModelFailure = string;
+export type ModelKind = "jev" | "agent";
+
+/** The key is write-only: the API says whether one is set, its last four characters and when it changed. */
+export interface ModelKey {
+  set: boolean;
+  last4: string | null;
+  updated_at: string | null;
+  /** The learning agent uses Jev's key. Always false for the Jev group. */
+  shared_with_jev: boolean;
+}
+
+/** One online gateway and the Jev configuration it loaded. Only online gateways are listed. */
+export interface ModelLoad {
+  edge: string;
+  online: boolean;
+  /** `console` or `env`; null while the gateway has nothing loaded. */
+  source: ModelSource | null;
+  /** The console version the gateway runs; null for the environment or when nothing is loaded. */
+  version: number | null;
+  /** A stable error code when the gateway refused the version it was sent (e.g. the key cannot be read). */
+  error: string | null;
+}
+
+/** The Jev values a form sends. A preset route takes its address and model from the route. */
+export interface JevModelValues {
+  route: JevRoute;
+  endpoint: string | null;
+  model: string | null;
+  timeout_ms: number;
+}
+
+/** The learning agent's values a form sends. */
+export interface AgentModelValues {
+  provider: AgentProvider;
+  endpoint: string;
+  model: string | null;
+  timeout_ms: number;
+  share_key_with_jev: boolean;
+}
+
+export type ModelValues = JevModelValues | AgentModelValues;
+
+/** The Jev group. Fields that need a gateway or a saved version are null while nothing provides them. */
+export interface JevModelsState {
+  /** A key is in place: saved in the console, or in the environment of an online gateway. */
+  configured: boolean;
+  /** `console` while the console holds a configuration, `env` while the gateways read the environment, null when neither. */
+  source: ModelSource | null;
+  /** The console's version counter: 0 before the first save. It keeps its number when the environment takes over. */
+  version: number;
+  /** When the last version was saved. */
+  updated_at: string | null;
+  /** The saved route, or the one an online gateway reports from its environment. */
+  route: JevRoute | null;
+  /** The saved address; null for a preset route, or while the gateways read their environment. */
+  endpoint: string | null;
+  /** The host an online gateway reports, given while the gateways read their environment. */
+  endpoint_host: string | null;
+  model: string | null;
+  timeout_ms: number | null;
+  key: ModelKey;
+  /** The environment variable the gateways read the key from, by name only. */
+  key_env: string | null;
+  /** Whether an online gateway's environment holds a usable configuration. */
+  env_available: boolean;
+  /** Environment variables that the console configuration overrides (names only, never values). */
+  env_overridden: string[];
+  loaded: ModelLoad[];
+  impact: {
+    /** Every site: all of them judge through Jev. */
+    sites: number;
+    /** Sites in enforce mode whose requests are refused when Jev fails. */
+    fail_closed: string[];
+  };
+  /** The Jev calls of the health window. */
+  usage: { window_minutes: number; calls: number; failed: number; p95_ms: number | null };
+}
+
+/** The learning agent's group. */
+export interface AgentModelsState extends AgentModelValues {
+  configured: boolean;
+  /** `console` once something has been saved; null before that. */
+  source: "console" | null;
+  /** The console's version counter: 0 before the first save. */
+  version: number;
+  updated_at: string | null;
+  key: ModelKey;
+}
+
+/** `GET /api/system/models`. */
+export interface ModelsState {
+  jev: JevModelsState;
+  agent: AgentModelsState;
+}
+
+/** A save's answer: the group and the version it now has. The page reads the group again for the rest. */
+export interface SavedModel {
+  group: ModelKind;
+  version: number;
+}
+
+/** A save: the form's values, the key only when it is replaced, and the version the form was read at. */
+export type ModelWrite<V extends ModelValues> = V & {
+  /** Omitted or null keeps the saved key; a string replaces it. */
+  key?: string | null;
+  /** The version the page was read at: 0 before the first save. */
+  expected_version: number;
+  /** Empty means no note. */
+  note: string;
+  /** Whether this exact configuration tested successfully before it was saved. Recorded, not enforced. */
+  tested: boolean;
+};
+
+/** A test: the form's values; without a key, the saved one is used. */
+export type ModelTestBody = Partial<ModelValues> & { key?: string | null };
+
+/** The outcome of a test call. The server keeps no time for it; the page records when the answer arrived. */
+export interface ModelTestResult {
+  ok: boolean;
+  latency_ms: number;
+  /** The HTTP status the model service answered with; null when it did not answer. */
+  status: number | null;
+  failure: ModelFailure | null;
+  /** The start of the error body the model service returned: at most 300 characters, untrusted text. */
+  detail: string | null;
+  answer_valid: boolean | null;
+  /** A short reason made by the server when the answer did not parse. It is not model output. */
+  answer_reason: string | null;
+}
+
+/** One changed field of a saved version. Values are the strings the history keeps; a key shows its last four. */
+export interface ModelChange {
+  field: string;
+  old: string;
+  new: string;
+}
+
+/** A saved version's settings as the history stores them: the JSON of the core's config, without the key. */
+export type ModelWireConfig = Record<string, string | number | boolean | null>;
+
+/** One saved version as the API sends it, newest first. */
+export interface ModelVersionWire {
+  version: number;
+  at: string | null;
+  /** `save`, or `revert_to_env` for the Jev group given back to the environment. */
+  change: "save" | "revert_to_env";
+  /** The settings of that version, without the key, as JSON: a timeout is a number, a share flag a boolean. */
+  config: ModelWireConfig;
+  changes: ModelChange[];
+  /** Null when the note is empty. */
+  note: string | null;
+  tested: boolean;
+  /** `replaced`, `cleared`, or null when the key was kept. The page reads the key change from `changes`. */
+  key_change?: string | null;
+  /** The last four characters of a key this version set; null when it set none. */
+  key_last4?: string | null;
+}
+
+/** One saved version as the page holds it: `config` read back into the types of the form (lib/model-form.ts). */
+export interface ModelVersion extends Omit<ModelVersionWire, "config"> {
+  config: ModelValues;
+}
+
 // ------------------------------------------------------------------ import (7.9.9)
 
 export interface ImportResult {
@@ -1011,6 +1188,16 @@ export type GatewayProblem =
   | { kind: "queue_pressure"; edge: string; queue: number; capacity: number }
   | { kind: "partition_missing"; days_ahead: number }
   | { kind: "heartbeat_late"; edge: string }
+  | {
+      kind: "jev_config_not_loaded";
+      edge: string;
+      /** The console version the gateway should run. */
+      wanted: number;
+      /** The version it runs; null when it runs none from the console. */
+      loaded: number | null;
+      error: string | null;
+      saved_at_millis: number;
+    }
   | { kind: "edge_offline"; edge: string; last_seen_ms: number; loaded: Record<string, number> };
 
 /** GET /api/status: the top bar lights and the overview's attention list (every 15 seconds). */

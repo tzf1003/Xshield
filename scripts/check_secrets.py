@@ -40,6 +40,10 @@ KEY_ASSIGNMENT = re.compile(
 
 # (path, rule) -> why a match there is not a credential.
 ALLOW: dict[tuple[str, str], str] = {
+    ("web/console/tests/model-form.test.ts", "url-credentials"): (
+        "unit test input: the console must refuse an endpoint that carries a username and "
+        "password; the values are made up"
+    ),
     (
         "crates/xshield-control/src/agent_model.rs",
         "url-credentials",
