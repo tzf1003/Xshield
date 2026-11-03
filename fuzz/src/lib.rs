@@ -18,8 +18,6 @@
 // stated once here instead of on each function.
 #![allow(clippy::missing_panics_doc)]
 
-use std::sync::OnceLock;
-use xshield_audit::{SealVerifyingKey, SignedSegmentManifest};
 use xshield_core::{
     path_shape::{PATH_SHAPE_BYTES_MAX, path_shape as shape, valid_path_shape},
     site::{
@@ -40,17 +38,13 @@ pub type Target = fn(&[u8]);
 /// exercised its parsers (`proxy_header`, `route_admission`,
 /// `query_pagination`, `routing_authority`, `request_crypto`,
 /// `auth_binding`, `strict_json`, `sensor_batch`) went with it. The ones
-/// left here only exercise `xshield-core` and `xshield-audit` parsers,
-/// which are unaffected.
+/// left here only exercise `xshield-core` parsers, which are unaffected.
 pub const TARGETS: &[(&str, Target)] = &[
     ("path_shape", path_shape),
     ("site_config", site_config),
     ("page_fingerprint", page_fingerprint),
     ("upstream_address", upstream_address),
-    ("seal_manifest", seal_manifest),
 ];
-
-const SEAL_PUBLIC_KEY: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
 
 /// Splits an input into at most `N` text fields at newlines; the last field
 /// keeps any further newlines. Invalid UTF-8 is replaced, so every field is
@@ -109,14 +103,4 @@ pub fn upstream_address(data: &[u8]) {
     let [address, allowance] = fields::<2>(data);
     let _ = parse_upstream_socket(&address);
     let _ = UpstreamAllowance::parse_admitted(&allowance);
-}
-
-/// A segment manifest read back from the object store. Arbitrary bytes are
-/// never a valid signature under a fixed key.
-pub fn seal_manifest(data: &[u8]) {
-    static KEY: OnceLock<SealVerifyingKey> = OnceLock::new();
-    let key = KEY.get_or_init(|| {
-        SealVerifyingKey::from_hex("seal-key-r1", SEAL_PUBLIC_KEY).expect("valid Ed25519 key")
-    });
-    assert!(SignedSegmentManifest::verify(data, key).is_err());
 }

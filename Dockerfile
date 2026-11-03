@@ -1,8 +1,7 @@
-# Container images for the three deployable roles (docs/19): edge, control, worker.
+# Container images for the two deployable roles (docs/19): edge and control.
 #
 #   docker build --target edge    -t xshield-edge .
 #   docker build --target control -t xshield-control .
-#   docker build --target worker  -t xshield-worker .
 #
 # Base images are pinned by digest (docs/19: no floating tags as a release input);
 # the Rust version matches rust-toolchain.toml. Bump both together, and the digests
@@ -31,7 +30,7 @@ COPY . .
 COPY --from=console-builder /src/web/console/dist ./web/console/dist
 # `--locked`: the lockfile is the dependency record; a drifting build must fail.
 RUN cargo build --release --locked \
-    -p xshield-edge -p xshield-control -p xshield-worker -p xshield-audit
+    -p xshield-edge -p xshield-control
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime-base
 RUN apt-get update \
@@ -48,13 +47,3 @@ FROM runtime-base AS control
 COPY --from=builder /src/target/release/xshield-control /usr/local/bin/xshield-control
 ENTRYPOINT ["/usr/local/bin/xshield-control"]
 
-# The worker package ships the audit-journal-to-index publisher and the audit
-# seal binary; the default is the publisher and the other is chosen with
-# `docker run --entrypoint`. The v3-only outbox, evidence-retention and offline
-# model-evaluation binaries were deleted with their gateway producer (docs/05
-# §5.2); xshield-control still calls the publisher's library functions, so the
-# publisher binary and this image stay until xshield-control is rewritten.
-FROM runtime-base AS worker
-COPY --from=builder /src/target/release/xshield-worker /usr/local/bin/xshield-worker
-COPY --from=builder /src/target/release/xshield-audit-seal /usr/local/bin/xshield-audit-seal
-ENTRYPOINT ["/usr/local/bin/xshield-worker"]

@@ -12,8 +12,8 @@
 //! Source files are additionally scanned for socket I/O from `std::net`; plain
 //! address value types (`IpAddr`, `SocketAddr`) stay allowed because the domain
 //! validates upstream addresses without opening connections. `std::fs` is not
-//! banned: `secret_env` reads mounted secret files and `resident` writes a local
-//! liveness file, neither of which is a database or HTTP boundary.
+//! banned: `secret_env` reads mounted secret files, which is not a database or
+//! HTTP boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -223,7 +223,7 @@ fn domain_crate_dependency_closure_reaches_no_database_http_runtime_or_adapter_c
         );
     }
     // The workspace does use these crates, so the absence below is meaningful.
-    for adapter in ["sqlx", "tokio", "hyper", "reqwest", "clickhouse"] {
+    for adapter in ["sqlx", "tokio", "hyper"] {
         assert!(
             packages.iter().any(|package| package.name == adapter),
             "{adapter} is no longer in the workspace lock; revisit this gate"

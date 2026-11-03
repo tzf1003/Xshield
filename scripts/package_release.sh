@@ -58,8 +58,6 @@ stage="$dist_dir/stage/$name"
 binaries=(
     xshield-edge
     xshield-control
-    xshield-worker
-    xshield-audit-seal
     xshield-build
 )
 
@@ -68,7 +66,7 @@ mkdir -p -- "$stage/bin" "$stage/docs"
 
 printf '==> cargo build --release (target: %s)\n' "$target_dir"
 (cd "$repo_root" && cargo build --release --locked \
-    -p xshield-edge -p xshield-control -p xshield-worker -p xshield-audit)
+    -p xshield-edge -p xshield-control)
 for binary in "${binaries[@]}"; do
     install -m 0755 -- "$target_dir/release/$binary" "$stage/bin/$binary"
 done
@@ -84,8 +82,7 @@ printf '==> console bundle\n'
 
 printf '==> assemble\n'
 cp -R -- "$repo_root/migrations" "$stage/migrations"
-mkdir -p -- "$stage/sql" "$stage/examples"
-cp -- "$repo_root/sql/clickhouse.sql" "$stage/sql/"
+mkdir -p -- "$stage/examples"
 cp -- "$repo_root"/examples/gateway-bootstrap-config.json "$stage/examples/"
 cp -- "$repo_root/README.md" "$repo_root/CHANGELOG.md" "$stage/"
 cp -- "$repo_root"/docs/*.md "$stage/docs/"

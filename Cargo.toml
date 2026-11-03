@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/xshield-audit", "crates/xshield-control", "crates/xshield-core", "crates/xshield-evidence", "crates/xshield-judge",
-    "crates/xshield-edge", "crates/xshield-postgres", "crates/xshield-worker"]
+members = ["crates/xshield-control", "crates/xshield-core", "crates/xshield-edge",
+    "crates/xshield-judge", "crates/xshield-postgres"]
 resolver = "3"
 
 [workspace.package]
@@ -17,17 +17,13 @@ async-trait = "0.1"
 axum = "0.8"
 bytes = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clickhouse = { version = "=0.15.2", default-features = false, features = ["chrono", "rustls-tls-ring", "rustls-tls-webpki-roots"] }
-crc32fast = "1"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-tokio"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 openssl = "0.10"
-openidconnect = "=4.0.1"
 pingora = { version = "=0.9.0", default-features = false, features = ["openssl", "proxy"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
@@ -37,11 +33,7 @@ tokio = { version = "~1.51", features = ["io-util", "macros", "net", "rt-multi-t
 # endpoint; by the tokio-rs team, MIT.
 tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
 tower = "0.5"
-# Blocking HTTP for the S3 evidence adapter, whose vault API is synchronous and runs
-# on blocking threads; no environment proxy, rustls with webpki roots, no gzip.
-ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 uuid = { version = "1", features = ["v7"] }
-url = "2"
 zeroize = "1"
 
 [workspace.lints.rust]

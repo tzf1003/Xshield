@@ -1,7 +1,6 @@
 name: release-images
 
-# Publishes the three deployable images (Dockerfile targets edge, control,
-# worker) for a release tag to GitHub Container Registry, with a build
+# Publishes the two deployable images (Dockerfile targets edge and control) for a release tag to GitHub Container Registry, with a build
 # provenance attestation and SBOM, and signs each pushed digest with a keyless
 # Sigstore signature bound to this workflow and tag (docs/19 19.7). Deploy by
 # digest and verify before use:
@@ -45,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [edge, control, worker]
+        target: [edge, control]
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
     steps:

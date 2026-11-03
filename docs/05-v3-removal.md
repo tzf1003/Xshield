@@ -31,16 +31,16 @@
 | `crates/xshield-core` | 保留领域 ID 和站点配置类型（按 [03.2](03-admin-config-audit.md#32-站点配置) 精简）；新增会话上下文、请求值提取、判定步骤；删除 `calibration`、资格与审批相关类型 |
 | `crates/xshield-gateway` | 已删除；代理、TLS、监听器、上下文存储、Jev 调用与判定日志写入由全新的 `crates/xshield-edge`（配合 `crates/xshield-judge`）取代，而非在原地改造 |
 | `crates/xshield-control` | 保留站点增改、模式切换；新增判定日志查询、配置历史与回滚、口令登录，以及请求追溯、影响预估、调优建议、判定日志导入导出（[07.9](07-console-architecture.md#79-控制面-api)）；删除审批状态机、案件、证据访问、保全、v3 的证据导出、校准报告、任务管理、API Key、OIDC |
-| `crates/xshield-worker` | 已删除离线 CLI（`xshield-model-eval`）、`model_eval` 的 Jev 传输与响应解析（`transport.rs`、`wire.rs`）、outbox 发布器（模块与 `xshield-outbox-worker`）、校准（`calibration_audit`、`calibration_evaluator`、`calibration_vault_reader`）与证据迁移/清理二进制（`xshield-evidence-migrate`、`xshield-evidence-retain`）；没有移入网关，因为 `crates/xshield-judge` 已自带独立的 Jev 客户端。`crates/xshield-control` 已不再依赖本 crate，原先由它调用的审计 journal 发布器（`PublisherConfig`、`publish_sealed_segments`、`inspect_publication_health`）与检索（`search.rs`、`local_request.rs`）因此没有控制面调用方；本 crate 仍直接依赖 `crates/xshield-audit`、`crates/xshield-evidence` 读取封存 journal，尚未被任何改造任务认领，暂留待后续 PR 判断整个 crate 是否也能删除 |
-| `crates/xshield-audit`、`crates/xshield-evidence` | 删除（尚需先解除 `crates/xshield-worker` 对它们的依赖，见上一行） |
+| `crates/xshield-worker` | 已删除整个 crate（离线 CLI、`model_eval`、outbox 发布器、校准、证据迁移/清理、ClickHouse 索引与检索）；它只剩控制面已删除的调用方，没有需要迁移到网关的能力，因为 `crates/xshield-judge` 已自带 Jev 客户端 |
+| `crates/xshield-audit`、`crates/xshield-evidence` | 已删除（封存 journal 与加密证据库，含 S3 适配器与 MinIO 集成作业） |
 | `crates/xshield-postgres` | 只留站点配置、配置历史、判定日志三张表，另加网关心跳和 Jev 指令版本两张小表（[07.8](07-console-architecture.md#78-数据库)）；模块为 `site_spec_store`、`decision_log_store`、`decision_stats`、`edge_status_store`、`jev_prompt_store`、`partitions`。原 `lib.rs` 的 `PostgresIdentityStore`／`StoreError`（v3 身份绑定、凭证、匿名会话、outbox）以及其余 v3 模块（案件、证据访问、保全、导出、校准、资格账本、provenance、管理 API Key/Session、旧版 `site_config`）与对应集成测试一并删除；不再依赖 `xshield-evidence`、`openssl`、`uuid`、`zeroize` |
-| `migrations/`、`sql/` | 产品尚未上线，用一份新的基线迁移取代现有迁移；删除 ClickHouse schema |
+| `migrations/`、`sql/` | 产品尚未上线，用一份新的基线迁移取代现有迁移；ClickHouse schema（`sql/clickhouse.sql`）已删除；`sql/postgres.sql` 待与 `migrations/` 核对后删除 |
 | `web/console` | 按 [06](06-console-ui.md) 重写：总览、请求追溯、会话、Jev 调用、站点、系统（[03.5](03-admin-config-audit.md#35-控制台范围)） |
-| `sensor/` | 删除 |
+| `sensor/` | 已删除（浏览器探针，连同其 CI 作业与验收脚本） |
 | `deploy/` | 已删除（含 `compose`）；v4 尚无参考部署，这是已知且接受的缺口（[04](04-deployment-testing.md)），不在本次改造中补上 |
 | `schemas/`、`examples/`、`validation/`、`templates/` | 换成 v4 的站点配置和判定日志样例，删除 v3 契约及其校验 |
 | `tests/`、`scripts/` | IDOR 靶场改造成 [04.3](04-deployment-testing.md#43-验收场景) 的场景；删除只服务于已删机制的回归脚本 |
-| `fuzz/` | 保留请求值提取、响应解析相关的 fuzz 目标，其余删除 |
+| `fuzz/` | 保留 `path_shape`、`site_config`、`page_fingerprint`、`upstream_address`；`seal_manifest` 随 `xshield-audit` 删除 |
 
 建议按"先新增 v4 判定路径并跑通验收场景，再批量删除 v3 模块"的顺序改造，避免中间状态既没有旧能力也没有新能力。
 

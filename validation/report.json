@@ -1,13 +1,13 @@
 {
   "scope": "Document syntax, schema and synthetic fixture checks only. Not Rust compilation, SQL integration, WAF security evaluation or model benchmark.",
   "passed": true,
-  "checks_total": 3964,
-  "passed_count": 3964,
+  "checks_total": 3962,
+  "passed_count": 3962,
   "acceptance_cases": {
     "total": 78,
-    "planned": 61,
-    "partial": 15,
-    "automated": 2
+    "planned": 68,
+    "partial": 9,
+    "automated": 1
   },
   "checks": [
     {
@@ -19122,16 +19122,6 @@
     },
     {
       "name": "acceptance:DEV-06:coverage_claim",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "clickhouse:active_views_deduplicate",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "clickhouse:active_views_filter_expiry",
       "passed": true,
       "detail": ""
     },

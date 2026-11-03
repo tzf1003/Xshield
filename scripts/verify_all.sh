@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # Local verification gates from docs/17 section 17.10, one log file per step.
 #
-#   scripts/verify_all.sh [rust] [sensor] [console]    (no argument: all three groups)
+#   scripts/verify_all.sh [rust] [console]    (no argument: both groups)
 #
 # Groups
 #   rust     fmt, audit-event coverage, environment-variable and secret guards,
 #            dependency policy (cargo-deny), library
 #            validation, clippy, tests,
 #            doc tests, PostgreSQL integration suite
-#   sensor   the browser sensor unit tests (sensor/, still used by the not-yet-
-#            removed v3 control plane; xshield-gateway and its real-binary
-#            regression scripts were deleted with it, docs/05-v3-removal.md)
 #   console  npm ci, lint, unit tests, production build, Playwright e2e
 #
 # Environment
@@ -28,7 +25,7 @@
 #   PGHOST/PGPORT/PGUSER/PGPASSWORD   server for the PostgreSQL steps.
 #
 # A step whose tool is missing is reported as SKIP, never as success. The exit
-# status is non-zero when any step failed. Docker, ClickHouse and Keycloak
+# status is non-zero when any step failed. Docker and Keycloak
 # regressions are not part of this script (see docs/20).
 set -u
 
@@ -52,13 +49,13 @@ cd "$repo_root" || exit 2
 
 groups=("$@")
 if [ "${#groups[@]}" -eq 0 ]; then
-    groups=(rust sensor console)
+    groups=(rust console)
 fi
 for group in "${groups[@]}"; do
     case "$group" in
-        rust | sensor | console) ;;
+        rust | console) ;;
         *)
-            printf 'error: unknown group %s (expected rust, sensor or console)\n' "$group" >&2
+            printf 'error: unknown group %s (expected rust or console)\n' "$group" >&2
             exit 2
             ;;
     esac
@@ -105,7 +102,6 @@ group_rust() {
         return
     fi
     run_step fmt cargo fmt --all --check
-    run_step audit-coverage python3 scripts/check_audit_event_coverage.py
     run_step env-docs python3 scripts/check_env_docs.py
     run_step secrets python3 scripts/check_secrets.py
     if have cargo-deny; then
@@ -121,14 +117,6 @@ group_rust() {
         run_step postgres scripts/test_postgres.sh
     else
         skip_step postgres "psql/createdb not found"
-    fi
-}
-
-group_sensor() {
-    if have node; then
-        run_step sensor-unit node --test sensor/test/sensor.test.mjs sensor/test/sensor-1.1.0.test.mjs sensor/test/sensor-1.2.0.test.mjs sensor/test/sensor-1.3.0.test.mjs
-    else
-        skip_step sensor-unit "node not found"
     fi
 }
 

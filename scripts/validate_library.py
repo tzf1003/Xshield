@@ -2031,9 +2031,6 @@ def main() -> int:
     tests=load(ACCEPTANCE_CATALOGUE);check('acceptance:count',tests['total']==len(tests['cases']))
     check('acceptance:unique_ids',len({c['id'] for c in tests['cases']})==len(tests['cases']))
     acceptance=check_acceptance_cases(tests)
-    clickhouse=(ROOT/'sql/clickhouse.sql').read_text()
-    check('clickhouse:active_views_deduplicate',clickhouse.count('LIMIT 1 BY event_id')==2)
-    check('clickhouse:active_views_filter_expiry',clickhouse.count('WHERE retention_expires_at > now64(6)')==2)
     for p in sorted(ROOT.glob('docs/*.md')):
         text=p.read_text()
         check('fences:'+p.name,len(re.findall(r'^```',text,re.M))%2==0)
