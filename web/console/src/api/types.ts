@@ -1054,6 +1054,8 @@ export interface AgentSiteUsage {
   failed: number;
   /** When the site's latest question was asked, on any day. */
   last_call_at: string | null;
+  /** The days in a row before today on which the site used its whole limit, at most a week: 7 may be longer. */
+  full_days: number;
 }
 
 /** `GET /api/system/models`. */

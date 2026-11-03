@@ -526,6 +526,11 @@ export const MODEL_TEXT = {
   attentionNotLoaded: (version: number, edges: string, reason: string) =>
     `▲ ${edges} 没有加载 Jev 模型配置第 ${version} 版：${reason}`,
   attentionAction: "查看模型配置",
+  attentionAgentFailing: (count: string, word: string, sites: string | null) =>
+    `学习代理最近 ${count} 次调用失败：${word}${sites === null ? "" : `，${sites} 个站点的学习暂时只按规则进行`}`,
+  attentionAgentLimit: (site: string, run: string, limit: string) =>
+    `${site} 的学习代理${run}用完 ${limit} 次上限`,
+  attentionAgentAction: "调整上限",
 } as const;
 
 export const RANGE_LABEL = {

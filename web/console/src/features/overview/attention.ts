@@ -7,6 +7,7 @@
 // the same words. Pure functions, no React.
 
 import type {
+  AgentModelsState,
   DecisionPath,
   Evidence,
   GatewayProblem,
@@ -22,7 +23,12 @@ import type { ChipId, RequestsSearch, SiteTab, SystemTab } from "../../app/searc
 import { fmtInt, fmtMs } from "../../lib/format.ts";
 import { lostReasons, problemText } from "../../lib/health.ts";
 import { isSiteName } from "../../lib/ids.ts";
-import { jevNotLoaded, notLoadedSummary } from "../../lib/model-status.ts";
+import {
+  agentFailureWord,
+  failingStreak,
+  jevNotLoaded,
+  notLoadedSummary,
+} from "../../lib/model-status.ts";
 import {
   DECISION_INFO,
   FAILURE_INFO,
@@ -58,12 +64,20 @@ export type AttentionInput = {
   evidence: ReadonlyMap<string, Evidence>;
   /** The Jev model configuration, once it has loaded: gateways that run another version are listed (design 3.6). */
   jevModels?: JevModelsState | null;
+  /** The learning agent's model, once it has loaded: its latest calls and the sites that used their limit (design 3.6). */
+  agentModels?: AgentModelsState | null;
 };
 
 const RANK: Record<Level, number> = { serious: 0, warn: 1, info: 2 };
 const DAY_MS = 86_400_000;
 /** A window a link carries is never narrower than this, so it stays valid after a refresh. */
 const MIN_WINDOW_MS = 60_000;
+/** design 3.6: the learning agent's latest calls all failed, from this many in a row. */
+const AGENT_FAILING_CALLS = 5;
+/** design 3.6: a site that used its whole daily limit this many days in a row. */
+const LIMIT_RUN_DAYS = 3;
+/** The API counts a run of full days up to a week, so a run of this length may be longer. */
+const FULL_DAYS_CAP = 7;
 /** The order the suggestion kinds are listed in, as on the site's insights tab. */
 const SUGGESTION_ORDER: SuggestionKind[] = [
   "entry_candidate",
@@ -386,12 +400,53 @@ function modelItems(jev: JevModelsState | null | undefined, now: number): Attent
   ];
 }
 
+/**
+ * The learning agent's rows (design 3.6): its latest five calls all failed, or a site with the agent on used its
+ * whole daily limit for days in a row. A model that is not configured lists nothing.
+ */
+export function agentItems(agent: AgentModelsState | null | undefined): AttentionItem[] {
+  if (agent === null || agent === undefined || !agent.configured) return [];
+  const items: AttentionItem[] = [];
+  const streak = failingStreak(agent.recent_failures);
+  const [newest] = agent.recent_failures;
+  if (newest !== undefined && newest !== null && streak >= AGENT_FAILING_CALLS) {
+    const sites = agent.usage.enabled_sites;
+    items.push({
+      key: "agent-failing",
+      level: "warn",
+      text: MODEL_TEXT.attentionAgentFailing(
+        fmtInt(streak),
+        agentFailureWord(newest),
+        sites > 0 ? fmtInt(sites) : null,
+      ),
+      actions: [{ label: MODEL_TEXT.attentionAction, target: toSystem("models") }],
+    });
+  }
+  for (const site of agent.sites) {
+    if (!site.enabled || site.full_days < LIMIT_RUN_DAYS) continue;
+    const run =
+      site.full_days >= FULL_DAYS_CAP
+        ? `连续 ${fmtInt(FULL_DAYS_CAP)} 天以上`
+        : `连续 ${fmtInt(site.full_days)} 天`;
+    items.push({
+      key: `agent-limit-${site.site}`,
+      level: "warn",
+      text: MODEL_TEXT.attentionAgentLimit(site.site, run, fmtInt(site.limit)),
+      actions: siteActions(site.site, [
+        [MODEL_TEXT.attentionAgentAction, toSite(site.site, "objects")],
+      ]),
+    });
+  }
+  return items;
+}
+
 /** Everything that needs handling, most serious first. An empty list means nothing does. */
 export function buildAttention(input: AttentionInput): AttentionItem[] {
   const items = [
     ...gatewayItems(input.status),
     ...jevItems(input.status.jev),
     ...modelItems(input.jevModels, input.now),
+    ...agentItems(input.agentModels),
     ...input.sites.flatMap((site) => siteItems(site, input)),
   ];
   return items.sort((a, b) => RANK[a.level] - RANK[b.level]);
