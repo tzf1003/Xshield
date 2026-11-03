@@ -8,7 +8,7 @@
 //! only place a template is made for positions, so a later change to route
 //! templates changes every position in one spot.
 
-use xshield_core::context::ObjectMap;
+use xshield_core::context::{ObjectMap, PublicAccess, Reliability, Tier};
 use xshield_core::path_template::normalize;
 
 use crate::context::Origin;
@@ -45,6 +45,24 @@ pub fn origin_slot(origin: &Origin) -> Option<String> {
 #[must_use]
 pub fn origin_object<'a>(objects: &'a ObjectMap, origin: &Origin) -> Option<&'a str> {
     objects.class_of(&origin_slot(origin)?)
+}
+
+/// The tier the map gives the response position an origin was seen at, with how sure the
+/// map is of it. `None` when the map gives no tier there.
+#[must_use]
+pub fn origin_tier(objects: &ObjectMap, origin: &Origin) -> Option<(Tier, Reliability)> {
+    let slot = origin_slot(origin)?;
+    Some((objects.tier_of(&slot)?, objects.reliability_of(&slot)?))
+}
+
+/// What the map says of a request position about public sources, with how sure it is.
+/// `None` when the map says nothing about that position.
+#[must_use]
+pub fn request_access(objects: &ObjectMap, slot: &str) -> Option<PublicAccess> {
+    Some(PublicAccess {
+        accepts: objects.accepts_public_of(slot)?,
+        reliability: objects.reliability_of(slot)?,
+    })
 }
 
 #[cfg(test)]

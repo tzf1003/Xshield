@@ -108,7 +108,9 @@ class _Handler(BaseHTTPRequestHandler):
             owner = query.get("doctor", [doctor])[0]
             return 200, {"patients": [p for p in origin.patients.values() if p["doctor"] == owner]}, {}
         if method == "POST" and url.path == "/api/patients":
-            patient = {"id": f"PT-{origin.next_patient}", "name": _json(body).get("name", ""), "doctor": doctor}
+            # Numeric ids: the object map's path templates replace numeric and UUID segments
+            # only (docs/07), so a patient created in the lab has positions in the map.
+            patient = {"id": str(origin.next_patient), "name": _json(body).get("name", ""), "doctor": doctor}
             origin.next_patient += 1
             origin.patients[patient["id"]] = patient
             return 201, patient, {}
@@ -127,6 +129,11 @@ class _Handler(BaseHTTPRequestHandler):
             code = "SHR-" + secrets.token_hex(4).upper()
             origin.shares[code] = parts[2]
             return 201, {"code": code}, {}
+        if len(parts) == 4 and parts[:2] == ["api", "patients"] and parts[3] == "notes" and method == "POST":
+            # Deliberately vulnerable as well: a note is written on any patient named in the path.
+            if parts[2] not in origin.patients:
+                return 404, {"error": "not_found"}, {}
+            return 201, {"saved": True, "patient": parts[2]}, {}
         if len(parts) == 2 and parts[0] == "share" and method == "POST":
             patient_id = origin.shares.get(parts[1])
             if patient_id is None:

@@ -11,5 +11,6 @@ pub mod probe;
 pub mod slot;
 pub mod slots;
 pub mod state;
+mod tiers;
 mod trace;
 pub mod values;

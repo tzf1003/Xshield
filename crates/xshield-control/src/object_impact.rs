@@ -428,6 +428,8 @@ mod tests {
             slot: Some(slot.to_owned()),
             object: None,
             object_from: None,
+            tier: None,
+            reliability: None,
         }
     }
 
@@ -446,6 +448,8 @@ mod tests {
             slot: None,
             object: None,
             object_from: None,
+            public_access: None,
+            attempt: None,
         }
     }
 

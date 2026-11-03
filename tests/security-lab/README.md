@@ -29,7 +29,9 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | A6 | 接收者兑换患者 A 的分享码后打开患者 A | 兑换放行，打开放行 | `jev_allow`，`fast_allow` |
 | A7 | 接收者未兑换分享码，直接打开患者 A | 拦截 | `jev_deny` |
 | A8 | 医生 A 新建患者后打开新患者详情 | 新建放行，打开放行 | `jev_allow`，`fast_allow` |
-| A9 | 医生 A 在搜索结果里看到医生 B 的患者，然后删除它；同样删除没被搜到的患者 | **已知缺口**：搜到的患者删除放行（源站真的删除），没搜到的拦截。写操作和读操作不区分，见下方 A9 说明 | `jev_allow`，`jev_deny` |
+| A9 | 医生 A 在搜索结果里看到医生 B 的患者，然后删除它；同样删除没被搜到的患者 | 两次删除都拦截，源站两个患者都还在。搜到的那次记为尝试越权，交 Jev 判 DENY，见下方说明 | `jev_deny`，`jev_deny` |
+| A10 | 医生 A 搜到医生 B 的患者后，在它的备注接口上写入 | 放行。备注位置接受公共来源，搜到的患者在这里有效 | `fast_allow` |
+| A11 | 没有标注档位的站点，同样的搜索后删除 | 与标注前相同：放行，源站删除。这是没有标注的站点的已知缺口 | `jev_allow` |
 | B1 | 搜索框、表单里的中英文文本 | 放行；重复的搜索走放行缓存 | `jev_allow`，`cached_allow` |
 | B2 | 参数里的 SQL 注入、命令执行、路径穿越 | 拦截 | `jev_deny` |
 | C1 | Jev 返回 503 或超时，`on_jev_unavailable=deny` | 拦截，注明 `JEV_HTTP_ERROR` / `JEV_TIMEOUT` | `jev_unavailable` |
@@ -38,14 +40,20 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | C4 | 登录请求 | Jev 收到的是 `<redacted>`，判定日志里也没有口令 | `jev_allow` |
 | C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拦截，`JEV_CALL_LIMIT` | `jev_unavailable` |
 
-### A9 说明：搜索结果不是拦截的依据
+### A9 至 A11 说明：搜索结果与档位
 
-源站的搜索接口没有按归属过滤，会把医生 B 的患者返回给医生 A。网关把这些 ID 记为"源站展示过"，之后对它们的删除（写操作）与打开（读操作）一样放行，判定路径不因 HTTP 方法改变。这是现行设计的结果（[docs/00 §0.6](../../docs/00-overview.md)）：源站在正常界面里多给了数据，网关不修复源站的授权错误。A9 把这个现状记录成预期，修改判定规则后，A9 的第一条删除预期要改为拦截。
+源站的搜索接口没有按归属过滤，会把医生 B 的患者返回给医生 A。`emr` 站点的对象表把搜索响应标为公共档（`tier: public`，可靠性高），把删除位置标为 `accepts_public: false`。搜到的患者因此不能凭搜索结果被删除：这次删除记为尝试越权，网关不快速放行，交给 Jev，Jev 答 DENY，源站不会收到请求。没搜到的患者照旧拦截。
+
+判定记录的 `trace.values` 里，搜到的患者那一项带 `"attempt": "over_privilege"` 和 `"public_access": {"accepts": false, "reliability": "high"}`，来源带 `"tier": "public"`；Jev 收到的 `state` 里同样带这些标记。
+
+A10 的备注位置标为 `accepts_public: true`，搜到的患者在这里有效，快速放行。A11 的 `plain` 站点没有对象表，判定与标注前相同，所以同样的删除仍然放行。这是 [docs/00 §0.6](../../docs/00-overview.md) 的范围：没有标注的站点，源站搜索结果仍被当作展示过的证明。
+
+A9 的第一条删除原来预期放行（已知缺口），标注档位之后改为拦截。管理员的两个场景（管理档搜索后删除放行、没搜到的直接删除拦截）等身份位置（W1）合入后再加。
 
 ## Fake Jev 的脚本
 
 - 请求值含 `JEVDOWN` 时返回 503，edge 记为 `JEV_HTTP_ERROR`；含 `JEVSLOW` 时一秒后才应答。C1、C2 的站点超时设为 100 ms，所以 `JEVSLOW` 记为 `JEV_TIMEOUT`。
-- access：路径段或查询参数被 edge 标为 `reference` 且会话从未见过，判 DENY。入口自身需要的输入（`/login` 的表单、`/share/` 下的分享码）不算。请求体里的自由文本（新患者的姓名、备注）不算对象引用，只有标识字段才算。
+- access：带 `attempt: over_privilege` 的值判 DENY（只由公共档响应展示过，请求位置不接受公共来源）。路径段或查询参数被 edge 标为 `reference` 且会话从未见过，也判 DENY。入口自身需要的输入（`/login` 的表单、`/share/` 下的分享码）不算。请求体里的自由文本（新患者的姓名、备注）不算对象引用，只有标识字段才算。
 - attack：值或路径含 `union select`、`or 1=1`、`../`、`; cat `、`<script>` 时判 ATTACK。
 - 概率固定：所选选项 0.9，其余每个选项 0.05。
 

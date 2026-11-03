@@ -8,20 +8,21 @@ use std::time::{Duration, Instant};
 
 use xshield_core::context::{
     Conclusion, ContextKind, DecisionPath, DecisionRecord, FieldCount, JevRecord, Mode, ObjectMap,
-    ObservationSummary, Observed, OnJevUnavailable, Outcome, Resolved, SessionCredential,
-    ShapeField, SiteSpec, Skip, Trace, TraceSession,
+    ObservationSummary, Observed, OnJevUnavailable, Outcome, Reliability, Resolved,
+    SessionCredential, ShapeField, SiteSpec, Skip, Tier, Trace, TraceSession, TraceValue,
 };
 use xshield_core::kind::{Rules, Used};
 
 use crate::context::{
-    CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Recent, SENT_MAX, SentRecord,
-    Source, label, request_number, request_text,
+    CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Origin, Recent, SENT_MAX,
+    SentRecord, SessionContext, Source, label, request_number, request_text,
 };
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
-use crate::slots::{origin_object, request_slot, route_template};
+use crate::slots::{origin_object, origin_tier, request_access, request_slot, route_template};
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
 };
+use crate::tiers;
 use crate::trace::{Place, entry_trace, recent_trace, redacted_query, value_entry};
 use crate::values::{
     ExtractedRequest, ResponseValue, extract_request, extract_response_facts, json_unescape,
@@ -167,6 +168,16 @@ enum Plan {
         limit_key: Digest16,
         values: Vec<StateValue>,
     },
+}
+
+/// What settling a request's values came to: the values the state lists, the
+/// values the trace lists, whether every value was verified, and whether one of
+/// them is an attempt.
+struct PlannedValues {
+    values: Vec<StateValue>,
+    shown: Vec<TraceValue>,
+    all_known: bool,
+    attempted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -387,7 +398,53 @@ impl<J: JevPort> Judge<J> {
         };
         let mut inner = self.lock();
         let session = inner.store.session(session_id, request.now_ms);
+        let PlannedValues {
+            values,
+            shown,
+            all_known,
+            attempted,
+        } = self.plan_values(turn, session, sent);
+        trace.values = shown;
+        trace.session = Some(TraceSession {
+            age_seconds: session.age_seconds(request.now_ms),
+            known_values: session.seen_len(),
+            entries_passed: None,
+            recent: None,
+        });
+        // An unknown interface always goes to Jev: neither its values nor a cached
+        // allow of another request can settle it.
+        let unknown = turn.resolved.is_unknown();
+        if all_known && !attempted && !turn.extracted.truncated && !unknown {
+            return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
+        }
+        // An attempt goes to Jev, whatever an earlier allow of the same request said.
+        if tuning.cache_ms > 0
+            && !unknown
+            && !attempted
+            && let Some(source) = session.cached_allow(turn.cache_key, request.now_ms)
+        {
+            trace.cache_source = request_text(source);
+            return Plan::Done(Verdict::Safe(DecisionPath::CachedAllow));
+        }
+        Plan::Ask {
+            limit_key: session_id,
+            values,
+        }
+    }
+
+    /// Settles each value of the request against what the session saw: fills the
+    /// state's values and the trace's values, and collects into `sent` the digests
+    /// of the values the session had not seen as references.
+    fn plan_values(
+        &self,
+        turn: &Turn<'_>,
+        session: &SessionContext,
+        sent: &mut Vec<Digest16>,
+    ) -> PlannedValues {
+        let request = turn.request;
+        let tuning = turn.tuning;
         let mut all_known = true;
+        let mut attempted = false;
         let mut values = Vec::new();
         let mut shown = Vec::with_capacity(turn.extracted.values.len());
         for value in &turn.extracted.values {
@@ -405,12 +462,20 @@ impl<J: JevPort> Judge<J> {
                 .unwrap_or_default();
             let slot = request_slot(request.method, request.path, &value.at);
             let request_object = tuning.objects.class_of(&slot);
-            let verified = !value.inert
-                && seen.is_some_and(|seen| {
-                    seen.is_shown_as(used, &tuning.rules, request_object, |origin| {
+            let access = request_access(tuning.objects, &slot);
+            // The origins that show the value as the kind of object the request names for
+            // it; the site's tiers then say which of them prove a right (docs/01 section 1.4).
+            let shown_as_object = seen
+                .map(|seen| {
+                    seen.shown_origins(used, &tuning.rules, request_object, |origin| {
                         origin_object(tuning.objects, origin)
                     })
-                });
+                })
+                .unwrap_or_default();
+            let judged = tiers::judge(&ranked, &shown_as_object, access, tuning.objects);
+            let verified = !value.inert && judged.verified;
+            // An attempt goes to Jev marked as one; the gateway never allows it on its own.
+            let attempt = judged.attempt.filter(|_| !value.inert);
             if !verified {
                 // An origin that echoes this value would otherwise teach it.
                 sent.push(self.key.mac("value", value.value.as_bytes()));
@@ -419,8 +484,13 @@ impl<J: JevPort> Judge<J> {
                 .iter()
                 .map(|origin| origin_object(tuning.objects, origin).map(str::to_owned))
                 .collect();
+            let origin_tiers: Vec<Option<(Tier, Reliability)>> = ranked
+                .iter()
+                .map(|origin| origin_tier(tuning.objects, origin))
+                .collect();
             if !value.inert {
                 all_known &= verified;
+                attempted |= attempt.is_some();
                 values.push(StateValue {
                     verified,
                     at: value.at.clone(),
@@ -429,18 +499,21 @@ impl<J: JevPort> Judge<J> {
                     seen_as: ranked
                         .iter()
                         .zip(&origin_objects)
-                        .map(|(origin, object)| match object {
-                            Some(kind) => format!("{} @ {} [{kind}]", origin.field, origin.request),
-                            None => format!("{} @ {}", origin.field, origin.request),
-                        })
+                        .zip(&origin_tiers)
+                        .map(|((origin, object), tier)| seen_text(origin, object.as_deref(), *tier))
                         .collect(),
                     object: request_object.map(str::to_owned),
+                    public_access: access,
+                    attempt,
                 });
             }
             let place = Place {
                 slot,
                 object: request_object.map(str::to_owned),
                 origin_objects,
+                origin_tiers,
+                public_access: access,
+                attempt,
             };
             shown.push(value_entry(
                 value,
@@ -452,29 +525,11 @@ impl<J: JevPort> Judge<J> {
                 place,
             ));
         }
-        trace.values = shown;
-        trace.session = Some(TraceSession {
-            age_seconds: session.age_seconds(request.now_ms),
-            known_values: session.seen_len(),
-            entries_passed: None,
-            recent: None,
-        });
-        // An unknown interface always goes to Jev: neither its values nor a cached
-        // allow of another request can settle it.
-        let unknown = turn.resolved.is_unknown();
-        if all_known && !turn.extracted.truncated && !unknown {
-            return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
-        }
-        if tuning.cache_ms > 0
-            && !unknown
-            && let Some(source) = session.cached_allow(turn.cache_key, request.now_ms)
-        {
-            trace.cache_source = request_text(source);
-            return Plan::Done(Verdict::Safe(DecisionPath::CachedAllow));
-        }
-        Plan::Ask {
-            limit_key: session_id,
+        PlannedValues {
             values,
+            shown,
+            all_known,
+            attempted,
         }
     }
 
@@ -885,6 +940,24 @@ fn settle_values(extracted: &mut ExtractedRequest, resolved: &Resolved) {
         if fixed {
             value.inert = true;
         }
+    }
+}
+
+/// What `seen_as` says of one origin: `field @ request`, then the kind of object its response
+/// position carries, then, where the map gives the position a tier, the tier and how sure the
+/// map is of it. A site without tiers reads exactly as it did before tiers.
+fn seen_text(origin: &Origin, object: Option<&str>, tier: Option<(Tier, Reliability)>) -> String {
+    let base = match object {
+        Some(kind) => format!("{} @ {} [{kind}]", origin.field, origin.request),
+        None => format!("{} @ {}", origin.field, origin.request),
+    };
+    match tier {
+        Some((tier, reliability)) => format!(
+            "{base} (tier {}, reliability {})",
+            tier.as_str(),
+            reliability.as_str()
+        ),
+        None => base,
     }
 }
 
@@ -3243,9 +3316,205 @@ mod tests {
         assert_eq!(value.object, None);
     }
 
-    /// A site whose object map says what the positions of the kind tests carry:
-    /// appointments and `/doctor/{id}` are doctors, `/api/docs` and `/docs/{id}`
-    /// and record attachments are documents.
+    /// A request of `method` to `path` from alice's session, with no body.
+    fn call<'a>(method: &'a str, path: &'a str, now_ms: u64) -> RequestFacts<'a> {
+        RequestFacts {
+            method,
+            ..get(path, None, Some("alice"), now_ms)
+        }
+    }
+
+    /// A site whose search shows every patient to any logged-in session, and whose
+    /// DELETE of a patient takes no such source. The note on a patient takes them.
+    fn tiers_site(search_reliability: &str) -> SiteSpec {
+        site(&format!(
+            r#","mode":"enforce","objects":{{
+                "classes":[{{"id":"patient","name":"患者"}}],
+                "slots":[
+                    {{"key":"GET /api/search results[].id","class":"patient","source":"admin","tier":"public","reliability":"{search_reliability}"}},
+                    {{"key":"DELETE /api/patients/{{id}} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"}},
+                    {{"key":"POST /api/patients/{{id}}/notes path[2]","class":"patient","source":"admin","accepts_public":true,"reliability":"high"}}
+                ]}}"#
+        ))
+    }
+
+    const SEARCH_BODY: &[u8] = br#"{"results":[{"id":"7005","name":"B"}]}"#;
+
+    /// The state part of the prompt Jev was sent. The questions carry the
+    /// instructions, which name every field, so a check that a field is absent
+    /// looks past them.
+    fn state_of(sent: &str) -> &str {
+        &sent[sent.find(r#""state""#).expect("the prompt carries a state")..]
+    }
+
+    #[tokio::test]
+    async fn a_public_search_shows_an_object_but_proves_no_delete_of_it() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        fake.answer("DENY", "BENIGN");
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 1_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(
+            fake.calls(),
+            1,
+            "an attempt goes to Jev, never allowed on its own"
+        );
+        let sent = fake.sent.lock().unwrap()[0].clone();
+        assert!(sent.contains(r#""attempt":"over_privilege""#), "{sent}");
+        assert!(
+            sent.contains(r#""public_access":{"accepts":false,"reliability":"high"}"#),
+            "{sent}"
+        );
+        assert!(sent.contains("(tier public, reliability high)"), "{sent}");
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005")
+            .expect("the id is recorded");
+        assert_eq!(
+            value.attempt,
+            Some(xshield_core::context::Attempt::OverPrivilege)
+        );
+        assert!(!value.verified);
+        assert_eq!(value.sources[0].tier, Some(Tier::Public));
+        assert_eq!(value.sources[0].reliability, Some(Reliability::High));
+    }
+
+    #[tokio::test]
+    async fn an_attempt_is_not_served_from_the_allow_cache() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        // Jev allows the first DELETE; the second identical DELETE must still go to Jev.
+        let first = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 1_000))
+            .await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        let second = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 2_000))
+            .await;
+        assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_public_sighting_still_proves_a_note_on_the_patient() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let verdict = judge
+            .judge(&site, &call("POST", "/api/patients/7005/notes", 1_000))
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005")
+            .expect("the id is recorded");
+        assert!(value.verified);
+        assert!(value.attempt.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_weak_public_tier_proves_the_delete_as_it_did_before_tiers() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("low");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 1_000))
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_site_without_tiers_judges_the_same_search_then_delete_as_before() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 1_000))
+            .await;
+        // The search does not name the kind of the id, so the id is unverified and Jev decides.
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        let sent = fake.sent.lock().unwrap()[0].clone();
+        let state = state_of(&sent);
+        assert!(
+            !state.contains(r#""attempt""#) && !state.contains(r#""public_access""#),
+            "{sent}"
+        );
+        assert!(!state.contains("tier"), "{sent}");
+        assert!(
+            state.contains(r#""seen_as":["id @ GET /api/search"]"#),
+            "{sent}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_value_no_response_showed_is_not_an_attempt() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        fake.answer("DENY", "BENIGN");
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/7006", 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 1);
+        let sent = fake.sent.lock().unwrap()[0].clone();
+        assert!(!state_of(&sent).contains(r#""attempt""#), "{sent}");
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7006")
+            .expect("the id is recorded");
+        assert!(value.attempt.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_administrator_listing_is_no_public_sighting_and_no_attempt() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"patient","name":"患者"}],
+                "slots":[
+                    {"key":"GET /api/admin/search results[].id","class":"patient","source":"admin","tier":"admin","reliability":"high"},
+                    {"key":"DELETE /api/patients/{id} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"}
+                ]}"#,
+        );
+        judge.observe(&site, &shown_by("/api/admin/search", SEARCH_BODY));
+        fake.answer("DENY", "BENIGN");
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/7005", 1_000))
+            .await;
+        assert_eq!(fake.calls(), 1);
+        let sent = fake.sent.lock().unwrap()[0].clone();
+        let state = state_of(&sent);
+        assert!(state.contains("(tier admin, reliability high)"), "{sent}");
+        assert!(!state.contains(r#""attempt""#), "{sent}");
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+    }
+
     fn kinds_site() -> SiteSpec {
         site(
             r#","mode":"enforce","objects":{

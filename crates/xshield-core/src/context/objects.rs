@@ -61,6 +61,70 @@ pub enum SlotSource {
     Agent,
 }
 
+/// Who a response position shows its data to (docs/07 section 7.4.7): the session's own
+/// records, its organisation's, what only an administrator session receives, or what any
+/// logged-in session receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    /// The session's own records, written `self` in the configuration.
+    #[serde(rename = "self")]
+    Own,
+    /// Records shared within the session's organisation.
+    Org,
+    /// What only an administrator session receives.
+    Admin,
+    /// What any logged-in session receives, such as a search over every record.
+    Public,
+}
+
+impl Tier {
+    /// The word the configuration and the judge's state use for the tier.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Own => "self",
+            Self::Org => "org",
+            Self::Admin => "admin",
+            Self::Public => "public",
+        }
+    }
+}
+
+/// How sure the map is of a position's tier or public access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reliability {
+    /// Learned from enough sessions that the map is sure of it.
+    High,
+    /// Learned, but from fewer sessions or with some disagreement.
+    Medium,
+    /// Weak evidence; the judge does not tighten on it.
+    Low,
+}
+
+impl Reliability {
+    /// The word the configuration and the judge's state use for the reliability.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+}
+
+/// Whether a request position takes a value that only a public response showed, and how sure
+/// the map is of that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicAccess {
+    /// Whether the position takes such a value. `false` for a write or a private read.
+    pub accepts: bool,
+    /// How sure the map is.
+    pub reliability: Reliability,
+}
+
 /// One confirmed position and the kind of object it carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +141,19 @@ pub struct ObjectSlot {
     /// paused.
     #[serde(default, skip_serializing_if = "is_false")]
     pub paused: bool,
+    /// A response position: who the response shows its data to. Absent when the map gives no
+    /// tier. Used only with `reliability`, and never on a position that has `accepts_public`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    /// A request position: whether it takes a value that only a public response showed.
+    /// Absent when the map says nothing. Used only with `reliability`, and never on a
+    /// position that has `tier`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts_public: Option<bool>,
+    /// How sure the map is of `tier` or `accepts_public`. Absent means `low`. Refused on its
+    /// own: it describes a judgement, and an entry holds at most one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliability: Option<Reliability>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -240,6 +317,29 @@ impl ObjectMap {
         self.slot(key).is_some_and(|slot| slot.paused)
     }
 
+    /// The tier of a response position, when the map gives one and does not pause the position.
+    #[must_use]
+    pub fn tier_of(&self, key: &str) -> Option<Tier> {
+        self.slot(key).filter(|slot| !slot.paused)?.tier
+    }
+
+    /// Whether a request position takes a value that only a public response showed, when the
+    /// map gives that and does not pause the position.
+    #[must_use]
+    pub fn accepts_public_of(&self, key: &str) -> Option<bool> {
+        self.slot(key).filter(|slot| !slot.paused)?.accepts_public
+    }
+
+    /// How sure the map is of the position's tier or public access: its `reliability`, or `low`
+    /// when the entry gives a judgement without one. `None` when the entry gives no judgement or
+    /// the map pauses the position.
+    #[must_use]
+    pub fn reliability_of(&self, key: &str) -> Option<Reliability> {
+        let slot = self.slot(key).filter(|slot| !slot.paused)?;
+        (slot.tier.is_some() || slot.accepts_public.is_some())
+            .then_some(slot.reliability.unwrap_or(Reliability::Low))
+    }
+
     /// The map with the entries of `keys` paused. A key the map does not declare, and an
     /// entry already paused, change nothing. The index stays valid: keys and places do not move.
     #[must_use]
@@ -253,18 +353,25 @@ impl ObjectMap {
     }
 
     /// The map with `key` set to `class` from `source`, and not paused. The entry the map has
-    /// for the key is replaced, paused or not. A key the map does not declare is appended, so
-    /// the index stays valid.
+    /// for the key is replaced, paused or not, but its tier and public access stay: they
+    /// describe the position, not the kind it carries. A key the map does not declare is
+    /// appended, so the index stays valid.
     #[must_use]
     pub fn with_entry(mut self, key: &str, class: &str, source: SlotSource) -> Self {
-        let entry = ObjectSlot {
+        let mut entry = ObjectSlot {
             key: key.to_owned(),
             class: class.to_owned(),
             source,
             paused: false,
+            tier: None,
+            accepts_public: None,
+            reliability: None,
         };
         if let Some(&place) = self.index.get(key) {
             if let Some(slot) = self.slots.get_mut(place) {
+                entry.tier = slot.tier;
+                entry.accepts_public = slot.accepts_public;
+                entry.reliability = slot.reliability;
                 *slot = entry;
             }
         } else {
@@ -336,6 +443,9 @@ pub enum ObjectsReason {
     TooMany,
     /// A kind id is not lower-case ASCII letters, or not 3 to 24 of them.
     ClassIdInvalid,
+    /// A position's tier fields do not form an entry: a tier or public access without its
+    /// reliability, both a tier and public access, or a reliability with neither.
+    TierInvalid,
 }
 
 impl ObjectsReason {
@@ -348,6 +458,7 @@ impl ObjectsReason {
             Self::KeyInvalid => "key_invalid",
             Self::TooMany => "too_many",
             Self::ClassIdInvalid => "class_id_invalid",
+            Self::TierInvalid => "tier_invalid",
         }
     }
 }
@@ -394,6 +505,9 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
             if !ids.contains_key(slot.class.as_str()) {
                 return Err(refused(place, Some(ObjectsReason::ClassUnknown)));
             }
+            if !valid_tiering(slot) {
+                return Err(refused(place, Some(ObjectsReason::TierInvalid)));
+            }
             if index.insert(slot.key.clone(), at).is_some() {
                 return Err(refused(place, Some(ObjectsReason::DuplicateKey)));
             }
@@ -424,6 +538,17 @@ fn valid_learning(learning: &LearningSettings) -> bool {
     (1..=THRESHOLD_MAX).contains(&learning.thresholds.uses)
         && (1..=THRESHOLD_MAX).contains(&learning.thresholds.sessions)
         && learning.agent.daily_limit <= AGENT_DAILY_MAX
+}
+
+/// The tier fields of an entry hold one judgement at most: a response position (`tier`), or a
+/// request position (`accepts_public`), with an optional `reliability` that defaults to low.
+/// A reliability with no judgement says nothing, so it is refused.
+fn valid_tiering(slot: &ObjectSlot) -> bool {
+    match (slot.tier, slot.accepts_public, slot.reliability) {
+        (None, None, reliability) => reliability.is_none(),
+        (Some(_), None, _) | (None, Some(_), _) => true,
+        _ => false,
+    }
 }
 
 /// `lower-case` letters only, 3 to 24 bytes, as the kind rules of the
@@ -755,6 +880,154 @@ mod tests {
         assert_eq!(loaded.learning().agent.daily_limit, AGENT_DAILY_MAX);
         // A daily limit of zero is allowed: the agent is off, so the limit is unused.
         assert!(map(r#"{"learning":{"agent":{"daily_limit":0}}}"#).is_ok());
+    }
+
+    const TIERED: &str = r#"{
+        "classes": [{"id": "patient", "name": "患者"}],
+        "slots": [
+            {"key": "GET /api/search results[].id", "class": "patient", "source": "admin", "tier": "public", "reliability": "high"},
+            {"key": "GET /api/patients patients[].id", "class": "patient", "source": "admin", "tier": "self", "reliability": "medium"},
+            {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "source": "admin", "accepts_public": false, "reliability": "high"}
+        ]
+    }"#;
+
+    #[test]
+    fn tiers_and_public_access_read_back_and_round_trip() {
+        let tiered = map(TIERED).unwrap();
+        assert_eq!(
+            tiered.tier_of("GET /api/search results[].id"),
+            Some(Tier::Public)
+        );
+        assert_eq!(
+            tiered.tier_of("GET /api/patients patients[].id"),
+            Some(Tier::Own)
+        );
+        assert_eq!(tiered.tier_of("DELETE /api/patients/{id} path[2]"), None);
+        assert_eq!(
+            tiered.accepts_public_of("DELETE /api/patients/{id} path[2]"),
+            Some(false)
+        );
+        assert_eq!(
+            tiered.accepts_public_of("GET /api/search results[].id"),
+            None
+        );
+        // The reliability of a judgement is its own word, and `low` when the entry gives none.
+        assert_eq!(
+            tiered.reliability_of("GET /api/search results[].id"),
+            Some(Reliability::High)
+        );
+        assert_eq!(
+            tiered.reliability_of("GET /api/patients patients[].id"),
+            Some(Reliability::Medium)
+        );
+        assert_eq!(
+            tiered.reliability_of("DELETE /api/patients/{id} path[2]"),
+            Some(Reliability::High)
+        );
+        assert_eq!(tiered.reliability_of("GET /doctor/{id} path[1]"), None);
+        // A tier does not change the kind the position carries.
+        assert_eq!(
+            tiered.class_of("GET /api/search results[].id"),
+            Some("patient")
+        );
+        let text = serde_json::to_string(&tiered).unwrap();
+        assert!(
+            text.contains(r#""tier":"public""#) && text.contains(r#""tier":"self""#),
+            "{text}"
+        );
+        assert!(text.contains(r#""accepts_public":false"#), "{text}");
+        assert_eq!(map(&text).unwrap(), tiered);
+        // A map that gives no tier writes none of the fields.
+        let plain = serde_json::to_string(&map(VALID).unwrap()).unwrap();
+        assert!(
+            !plain.contains("tier")
+                && !plain.contains("reliability")
+                && !plain.contains("accepts_public"),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn a_paused_position_gives_no_public_access() {
+        let text = TIERED.replace(
+            r#""source": "admin", "accepts_public": false"#,
+            r#""source": "admin", "paused": true, "accepts_public": false"#,
+        );
+        let paused = map(&text).unwrap();
+        assert_eq!(
+            paused.accepts_public_of("DELETE /api/patients/{id} path[2]"),
+            None
+        );
+        assert_eq!(
+            paused.reliability_of("DELETE /api/patients/{id} path[2]"),
+            None
+        );
+        assert_eq!(
+            paused.tier_of("GET /api/search results[].id"),
+            Some(Tier::Public)
+        );
+    }
+
+    #[test]
+    fn tier_fields_must_form_one_entry() {
+        let refusal = |fields: &str| -> ObjectsIssue {
+            let text = format!(
+                r#"{{"classes":[{{"id":"patient","name":"患者"}}],"slots":[{{"key":"GET /api/search results[].id","class":"patient","source":"admin",{fields}}}]}}"#
+            );
+            let dto: ObjectMapDto = serde_json::from_str(&text).expect("the section parses");
+            match ObjectMap::try_from(dto) {
+                Err(ConfigError::Objects(issue)) => issue,
+                other => panic!("expected an objects refusal, got {other:?}"),
+            }
+        };
+        // A reliability with no judgement, and a judgement of both kinds, are refused.
+        let refused = [
+            r#""reliability":"high""#,
+            r#""tier":"public","accepts_public":true"#,
+            r#""tier":"public","accepts_public":true,"reliability":"high""#,
+        ];
+        for fields in refused {
+            assert_eq!(
+                refusal(fields),
+                ObjectsIssue {
+                    place: ObjectsPlace::Slot(0),
+                    reason: Some(ObjectsReason::TierInvalid),
+                },
+                "{fields}"
+            );
+        }
+        assert_eq!(ObjectsReason::TierInvalid.code(), "tier_invalid");
+        // A judgement may come without its reliability, which then reads as low.
+        let bare = r#"{"classes":[{"id":"patient","name":"患者"}],"slots":[{"key":"GET /api/search results[].id","class":"patient","source":"admin","tier":"public"}]}"#;
+        let bare = map(bare).unwrap();
+        assert_eq!(
+            bare.reliability_of("GET /api/search results[].id"),
+            Some(Reliability::Low)
+        );
+        let complete = r#"{"classes":[{"id":"patient","name":"患者"}],"slots":[{"key":"GET /api/search results[].id","class":"patient","source":"admin","tier":"public","reliability":"low"}]}"#;
+        assert!(map(complete).is_ok());
+        // A tier outside the four words, or a reliability outside the three, does not parse.
+        assert!(map(&complete.replace(r#""public""#, r#""friend""#)).is_err());
+        assert!(map(&complete.replace(r#""low""#, r#""certain""#)).is_err());
+    }
+
+    #[test]
+    fn writing_a_kind_keeps_the_tier_of_the_position() {
+        let tiered = map(TIERED).unwrap();
+        let rewritten =
+            tiered.with_entry("GET /api/search results[].id", "patient", SlotSource::Agent);
+        assert_eq!(
+            rewritten.tier_of("GET /api/search results[].id"),
+            Some(Tier::Public)
+        );
+        assert_eq!(
+            rewritten.reliability_of("GET /api/search results[].id"),
+            Some(Reliability::High)
+        );
+        assert_eq!(rewritten.slots().len(), 3);
+        let added =
+            rewritten.with_entry("GET /api/other results[].id", "patient", SlotSource::Admin);
+        assert_eq!(added.tier_of("GET /api/other results[].id"), None);
     }
 
     /// Lower-case letters for a number, so that kind ids stay distinct.

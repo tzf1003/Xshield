@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::objects::{PublicAccess, Reliability, Tier};
+
 /// Largest serialized trace; [`Trace::fit`] trims anything bigger.
 pub const TRACE_BYTES_MAX: usize = 16 * 1024;
 /// Longest value text kept before it is clipped.
@@ -138,6 +140,34 @@ pub struct TraceValue {
     /// Where `object` came from. Only `map` (a confirmed map entry) is recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_from: Option<ObjectFrom>,
+    /// Whether the request position takes a value that only a public response
+    /// showed, and how sure the map is. Absent when the map gives no such entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_access: Option<PublicAccess>,
+    /// `over_privilege` when the gateway found the value to be an attempt: every
+    /// response that showed it was public, and the position takes none of those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<Attempt>,
+}
+
+/// What the gateway found a request value to be (docs/01 section 1.4, step 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attempt {
+    /// The value was shown to the session only by public responses, and the
+    /// position it is used at takes no value from a public response: an attempt
+    /// to act on an object the session has no right to.
+    OverPrivilege,
+}
+
+impl Attempt {
+    /// The word the judge's state and the trace use for the attempt.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OverPrivilege => "over_privilege",
+        }
+    }
 }
 
 /// A response that showed a value to the session.
@@ -161,6 +191,12 @@ pub struct TraceSource {
     /// Where `object` came from; see [`TraceValue::object_from`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_from: Option<ObjectFrom>,
+    /// The tier the map gives that response position, when it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    /// How sure the map is of `tier`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliability: Option<Reliability>,
 }
 
 /// Where a recorded object kind came from.
@@ -361,11 +397,15 @@ mod tests {
                     slot: None,
                     object: None,
                     object_from: None,
+                    tier: None,
+                    reliability: None,
                 })
                 .collect(),
             slot: None,
             object: None,
             object_from: None,
+            public_access: None,
+            attempt: None,
         }
     }
 
@@ -455,6 +495,27 @@ mod tests {
         assert_eq!(back, row);
         let old: TraceValue = serde_json::from_str(&plain).unwrap();
         assert_eq!(old.slot, None);
+    }
+
+    #[test]
+    fn an_attempt_and_a_public_access_are_written_only_when_present() {
+        let mut row = value("path[2]", "7005", false, 1);
+        let plain = serde_json::to_string(&row).unwrap();
+        assert!(!plain.contains("attempt") && !plain.contains("public_access"));
+        row.public_access = Some(PublicAccess {
+            accepts: false,
+            reliability: Reliability::High,
+        });
+        row.attempt = Some(Attempt::OverPrivilege);
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(
+            json.contains(r#""public_access":{"accepts":false,"reliability":"high"}"#),
+            "{json}"
+        );
+        assert!(json.contains(r#""attempt":"over_privilege""#), "{json}");
+        let back: TraceValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
+        assert_eq!(Attempt::OverPrivilege.as_str(), "over_privilege");
     }
 
     #[test]

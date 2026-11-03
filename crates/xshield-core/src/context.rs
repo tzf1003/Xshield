@@ -16,10 +16,10 @@ pub use config::{ConfigError, Mode, OnJevUnavailable, PathPattern, SessionCreden
 pub use log::{Conclusion, ContextKind, DecisionPath, DecisionRecord, JevRecord, Outcome};
 pub use objects::{
     LearningSettings, ObjectClass, ObjectMap, ObjectSlot, ObjectsIssue, ObjectsPlace,
-    ObjectsReason, SlotSource,
+    ObjectsReason, PublicAccess, Reliability, SlotSource, Tier,
 };
 pub use route::{Api, Body, RequestView, Resolved, Route, UnknownReason, header_names};
 pub use trace::{
-    FieldCount, ObjectFrom, ObservationSummary, Observed, SHAPE_FIELDS_MAX, ShapeField, Skip,
-    Timing, Trace, TraceEntry, TraceRecent, TraceSession, TraceSource, TraceValue,
+    Attempt, FieldCount, ObjectFrom, ObservationSummary, Observed, SHAPE_FIELDS_MAX, ShapeField,
+    Skip, Timing, Trace, TraceEntry, TraceRecent, TraceSession, TraceSource, TraceValue,
 };

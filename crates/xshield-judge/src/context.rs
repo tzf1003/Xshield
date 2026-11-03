@@ -250,6 +250,33 @@ impl Seen {
         })
     }
 
+    /// The origins that show the value as the kind of object the request names for it: the
+    /// ones [`Seen::is_shown_as`] counts, one by one. The tiers judge these, since a public
+    /// sighting may count for some requests and not for others.
+    #[must_use]
+    pub fn shown_origins<'a>(
+        &self,
+        used: Used<'_>,
+        rules: &Rules,
+        request_object: Option<&str>,
+        origin_object: impl Fn(&Origin) -> Option<&'a str>,
+    ) -> Vec<&Origin> {
+        let long = used.value.chars().count() >= LONG_VALUE_CHARS;
+        self.origins
+            .iter()
+            .filter(|origin| {
+                shown_as(
+                    used,
+                    as_shown(origin),
+                    request_object,
+                    origin_object(origin),
+                    rules,
+                    long,
+                )
+            })
+            .collect()
+    }
+
     /// The origins ordered for the model, most useful last: ones of the same
     /// kind of object as the request, then id fields, then the rest. The
     /// model sees only the last few, so a recent unrelated match (a stock

@@ -204,7 +204,7 @@ GET /api/patients ──响应里出现 id=7──┐
 网关写出 trace 时省略下面这些键，读取方（控制台、导出）把缺省的键当作 null、false 或空列表处理。上面的示例为了看清结构把所有键都列了出来，所以和实际输出不完全一致。
 
 - 顶层 `entry`、`bypass`、`refused`、`cache_source`、`session`、`response`、`upstream_error` 为 null 时省略；`values_truncated`、`trimmed` 为 false 时省略；`values` 为空时省略。
-- `values[].len` 为空、`values[].clipped` 为 false 时省略；`response.skip` 为空时省略；`session.entries_passed`、`session.recent` 为空时省略。
+- `values[].len` 为空、`values[].clipped` 为 false 时省略；`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability` 为空时省略；`response.skip` 为空时省略；`session.entries_passed`、`session.recent` 为空时省略。
 - 其余的 null 照常写出，例如 `values[].key`、`sources[].request_id`、`timing.origin_ms`、`response.content_type`。
 
 | 字段 | 说明 |
@@ -215,6 +215,9 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values[].kind` | `reference` / `route` / `input`，与 `state` 里的 `kind` 同一函数（`values::value_kind`） |
 | `values[].seen` / `verified` | 会话里见过这个值 / 网关已按同类对象核验（快速放行的依据） |
 | `values[].sources[]` | 最多 3 个来源，顺序与 `state` 里的 `seen_as` 相同（最相关的在前，[7.5.2](#752-state-与追溯信息的对齐)）；`request_id`、`at_millis` 正常情况下都有（上下文随网关重启清空，[7.3.2](#732-追溯链路)），只有导入的旧格式记录和测试数据可能为 null；同一 `(field, request)` 再次出现时保留最早的那次（[7.7.1](#771-会话上下文增加请求-id)） |
+| `values[].public_access` | 请求位置在对象表里的公共来源设定（[7.4.7](#747-档位字段)），形如 `{ "accepts": false, "reliability": "high" }`；位置没有 `accepts_public` 时不写 |
+| `values[].attempt` | `over_privilege`：尝试越权。值只由公共档响应展示过，请求位置不接受公共来源，所以不快速放行、不查缓存，交 Jev 并要求 DENY（[01 1.4](01-request-flow.md#14-判定步骤) 第 4 步）。没有时不写 |
+| `values[].sources[].tier` / `reliability` | 来源响应位置的档位和可靠性，与 `state` 里 `seen_as` 括号中的文字对应；位置没有标档位时不写 |
 | `values_truncated` | 请求体未结构化、超过 64 KiB 解析上限或值数到上限（即 `ExtractedRequest::truncated`） |
 | `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条）；`known_values` 是会话已见值数量 |
 | `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
@@ -252,6 +255,28 @@ GET /api/patients ──响应里出现 id=7──┐
 
 这不是控制台能修的问题，记录在这里交给判定线程决定（例如本应拦截的响应不学习）。控制台的做法：用 `trace.response.after_would_block` 标出这种学习，模式切换前的就绪检查里单列“由本应拦截请求学到的值被后续请求引用 N 次”。
 
+### 7.4.7 档位字段
+
+站点的对象表（配置键 `objects`，[03](03-admin-config-audit.md)）的 `slots` 可以给位置标注档位。下面三个字段名是 W3（配置）和 W4（判定）共用的，改名需要两边同时改。
+
+| 字段 | 标在哪个位置 | 取值 | 含义 |
+|---|---|---|---|
+| `tier` | 响应位置，如 `GET /api/search results[].id` | `self`、`org`、`admin`、`public` | 这个响应的数据给谁：`self` 是会话本人的记录，`org` 是本机构的记录，`admin` 只有管理员会收到，`public` 是任何登录会话都会收到的搜索或列表 |
+| `accepts_public` | 请求位置，如 `DELETE /api/patients/{id} path[2]` | `true`、`false` | 这个位置是否接受公共来源的值。删除、私密读取一般为 `false`；备注这类子路径一般为 `true` |
+| `reliability` | 同一个位置，与 `tier` 或 `accepts_public` 一起写 | `high`、`medium`、`low`，省略为 `low` | 对这个标注的把握。只有 `high` 参与收紧 |
+
+规则：
+
+- `tier` 和 `accepts_public` 至少写一个，`reliability` 只能与它们一起写；两者都没有的位置配置无效（`tier_invalid`）。暂停的条目不参与判定。
+- 收紧条件（[01 §1.4](01-request-flow.md#14-判定步骤) 第 4 步）：请求位置 `accepts_public: false` 且 `reliability: high`，并且值的每个来源都是 `tier: public` 且 `reliability: high` 的响应位置。满足时值记为尝试越权。只要有一个来源是 `self`、`org`、`admin`、没有标档位，或可靠性不是 `high`，就不收紧。
+- 核验（“已见”的判定）：收紧条件成立时，`public` 响应不证明会话有权操作对象；`self` 只用来排除收紧，从不单独核验，因此不快速放行；`org` 与没有标档位的响应照旧核验；`admin` 见下。
+- 管理员：管理档响应对管理员会话算正证，按正常逻辑判；管理员没见过的对象照常拦。角色只是辅助，不是放行理由。会话是否为管理员由身份位置决定（W1），只认对象表声明的身份位置，不从请求里取。在 W1 合入之前，所有会话都按非管理员处理，管理档来源不算正证，值照常交给 Jev。
+
+`state` 与 `trace` 里的对应字段：
+
+- `state`：`seen_as` 每一项在括号里附上来源位置的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`；请求值带 `public_access`；尝试越权的值带 `"attempt": "over_privilege"`（[02 §2.2](02-jev.md#22-调用内容)）。没有标档位的站点，`state` 的内容与之前相同。
+- `trace`：`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability`，见 [7.4.3](#743-trace-结构)。
+
 ## 7.5 Jev 调用上下文的保存
 
 ### 7.5.1 JevRecord v2
@@ -280,6 +305,7 @@ GET /api/patients ──响应里出现 id=7──┐
 
 - `state.request.values` 由非惰性值按提取顺序构成，所以 `state.request.values[i]` 对应 `trace.values` 中第 i 个 `inert == false` 的元素。不用 `at` 对齐，因为数组元素会共享同一个 `at`（`body.ids[]`）。
 - `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`：`seen_as` 是 `sources` 的前缀，裁剪级别 3、4 只发 1 个来源，所以可以更短，不要求等长。
+- `seen_as[j]` 括号中的档位和可靠性对应 `sources[j].tier` 和 `sources[j].reliability`（[7.4.7](#747-档位字段)）。
 - `state.recent` 是最近访问的最后 N 条（N 由裁剪级别决定），对应 `trace.session.recent` 的最后 N 条。
 - `state.session.entries_passed[k]` 对应 `trace.session.entries_passed[k]`。
 - `state.entry` 只有 `matched`（布尔值），没有规则原文：命中的是哪条入口规则只在 `trace.entry`，结构化视图的“入口”一行以 `trace.entry` 为准。`state` 里的值也没有 `key` 字段，字段名取 `trace.values[].key`。
