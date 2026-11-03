@@ -260,6 +260,24 @@ test("the wizard's last step opens the new site on its object map, and confirmin
   await expect(page.getByRole("dialog", { name: "保存 yaml-shop 的配置" })).toBeVisible();
 });
 
+test("a declared position offers no mark-ambiguous button", async ({ page }) => {
+  await openMap(page, "/sites/emr?tab=objects&view=slot");
+  await page.locator("#slot-s1").click();
+  const drawer = page.getByRole("dialog");
+  await expect(drawer.locator(".obj-foot")).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "标为有歧义" })).toHaveCount(0);
+});
+
+test("a paused path position offers neither reject nor mark-ambiguous", async ({ page }) => {
+  // Its entry is still in the configuration, so the backend refuses both until a save removes it.
+  await openMap(page, "/sites/emr?tab=objects&view=slot&slot=s3");
+  const drawer = page.getByRole("dialog");
+  await expect(drawer).toContainText("判定退回名字推断");
+  await expect(drawer.getByRole("button", { name: "重新确认为医生…" })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "驳回" })).toHaveCount(0);
+  await expect(drawer.getByRole("button", { name: "标为有歧义" })).toHaveCount(0);
+});
+
 test("a paused position is named in the banner, and its drawer re-confirms it through the save dialog", async ({
   page,
 }) => {
