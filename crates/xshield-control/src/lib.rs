@@ -33,6 +33,7 @@ mod static_files;
 mod stats;
 mod status;
 mod system;
+mod tightening;
 
 #[cfg(test)]
 mod contract;
