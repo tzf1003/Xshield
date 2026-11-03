@@ -2,8 +2,15 @@
 // of each card, when the card polls, and which gateways count as not loaded in the overview. Pure functions, no
 // React, so the unit tests can pin the wording and the timing.
 
-import type { AgentModelsState, JevModelsState, ModelLoad } from "../api/types.ts";
-import { MODEL_LOAD_ERROR_TEXT, MODEL_TEXT } from "./vocab.ts";
+import type {
+  AgentModelsState,
+  AgentUsage,
+  JevModelsState,
+  ModelFailure,
+  ModelLoad,
+} from "../api/types.ts";
+import { fmtInt } from "./format.ts";
+import { MODEL_LOAD_ERROR_TEXT, MODEL_TEXT, OBJECT_AGENT_TEXT } from "./vocab.ts";
 
 /** A saved version has this long to reach the gateways before it counts as not loaded (design 2.5, 3.6). */
 export const LOAD_GRACE_MS = 60_000;
@@ -98,8 +105,44 @@ export function notLoadedSummary(loads: ModelLoad[]): { edges: string; reason: s
   };
 }
 
-/** The agent card's line: configured or not, and which saved version runs. The agent's calls are not reported yet. */
+/**
+ * The agent card's line from its latest calls (design 2.1): configured or not, no call yet, the newest answer, or
+ * the failures in a row with the reason the newest one ended with.
+ */
 export function agentStatusLine(agent: AgentModelsState): StatusLine {
   if (!agent.configured) return { tone: "neutral", icon: "–", text: MODEL_TEXT.unset };
-  return { tone: "ok", icon: "●", text: MODEL_TEXT.agentConfigured(agent.version) };
+  const [newest] = agent.recent_failures;
+  if (newest === undefined) return { tone: "neutral", icon: "–", text: MODEL_TEXT.agentNoCalls };
+  if (newest === null) return { tone: "ok", icon: "●", text: MODEL_TEXT.agentLastOk };
+  return {
+    tone: "warn",
+    icon: "▲",
+    text: MODEL_TEXT.agentFailing(failingStreak(agent.recent_failures), agentFailureWord(newest)),
+  };
+}
+
+/** How many of the newest calls failed in a row, counting from the newest. */
+export function failingStreak(outcomes: (ModelFailure | null)[]): number {
+  const answered = outcomes.indexOf(null);
+  return answered === -1 ? outcomes.length : answered;
+}
+
+/** A learning call's failure code in words; a code the console does not know is kept in brackets. */
+export function agentFailureWord(code: ModelFailure): string {
+  const words: Record<string, string> = OBJECT_AGENT_TEXT.failure;
+  return words[code] ?? `回答不可用（${code}）`;
+}
+
+/** Today's line under the agent card: the calls, the answers, the failures with the reason most of them had, and the sites on. */
+export function agentTodayLine(usage: AgentUsage): string {
+  const failed =
+    usage.top_failure === null
+      ? fmtInt(usage.failed)
+      : `${fmtInt(usage.failed)}${MODEL_TEXT.todayTopFailure(agentFailureWord(usage.top_failure))}`;
+  return MODEL_TEXT.todayCounts(
+    fmtInt(usage.calls),
+    fmtInt(usage.ok),
+    failed,
+    fmtInt(usage.enabled_sites),
+  );
 }

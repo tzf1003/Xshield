@@ -46,6 +46,7 @@ import {
 } from "../../lib/model-form.ts";
 import {
   agentStatusLine,
+  agentTodayLine,
   jevNotLoaded,
   jevStatusLine,
   notLoadedSummary,
@@ -53,6 +54,7 @@ import {
 } from "../../lib/model-status.ts";
 import { errorText, MODEL_PROVIDER_LABEL, MODEL_ROUTE_LABEL, MODEL_TEXT } from "../../lib/vocab.ts";
 import { Card, Kv, Notice } from "../../ui/Page.tsx";
+import { AgentUsageTable } from "./AgentUsageTable.tsx";
 import { ModelForm } from "./ModelForm.tsx";
 import { ModelHistory } from "./ModelHistory.tsx";
 import { ModelSaveDialog } from "./ModelSaveDialog.tsx";
@@ -473,6 +475,7 @@ export function AgentModelCard({
   const valid = Object.keys(problems).length === 0;
   const tested = test.passed !== null && sameForm(test.passed.form, form);
   const status = agentStatusLine(agent);
+  const [sitesOpen, setSitesOpen] = useState(false);
 
   const keySummary = agent.key.shared_with_jev
     ? MODEL_TEXT.keyShared
@@ -601,8 +604,23 @@ export function AgentModelCard({
           [MODEL_TEXT.rowKey, keySummary],
           [MODEL_TEXT.rowTimeout, MODEL_TEXT.timeoutAgent(Math.round(agent.timeout_ms / 1000))],
           [MODEL_TEXT.rowSource, sourceText],
+          [
+            MODEL_TEXT.rowToday,
+            <>
+              {agentTodayLine(agent.usage)}{" "}
+              <button
+                type="button"
+                className="linkbtn"
+                aria-expanded={sitesOpen}
+                onClick={() => setSitesOpen((open) => !open)}
+              >
+                {sitesOpen ? MODEL_TEXT.sitesOpen : MODEL_TEXT.sitesClosed}
+              </button>
+            </>,
+          ],
         ]}
       />
+      {sitesOpen ? <AgentUsageTable sites={agent.sites} /> : null}
       <div className="sys-actions">
         <button type="button" className="linkbtn" onClick={() => setHistoryOpen((open) => !open)}>
           {MODEL_TEXT.btnHistory}
