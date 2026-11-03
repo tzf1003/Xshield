@@ -313,6 +313,8 @@ export function useSiteObjects(
     enabled: name !== null && (options.enabled ?? true),
     staleTime: 30_000,
     placeholderData: keepPreviousData,
+    // While a learning run is going, the map is read again every few seconds, so the status line follows it.
+    refetchInterval: (query) => (query.state.data?.learning_run.running ? 3_000 : false),
   });
 }
 
@@ -347,6 +349,61 @@ export function useSlotLearning() {
       void client.invalidateQueries({ queryKey: ["objects", args.name] });
       void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
     },
+  });
+}
+
+/** The learning runs of a site, newest first (console design 3.3). */
+export function useLearningRuns(name: string | null, options: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: ["object-runs", name ?? ""] as const,
+    queryFn: () => api.learningRuns(name ?? ""),
+    enabled: name !== null && (options.enabled ?? true),
+    staleTime: 15_000,
+  });
+}
+
+/** One run with its calls, read when the run is opened (console design 3.3). */
+export function useLearningRun(name: string | null, id: number | null) {
+  return useQuery({
+    queryKey: ["object-run", name ?? "", id ?? -1] as const,
+    queryFn: () => api.learningRun(name ?? "", id ?? -1),
+    enabled: name !== null && id !== null,
+    staleTime: 60_000,
+  });
+}
+
+/** Starts a learning run now. The map, its status line and the run list are read again when it ends (3.2). */
+export function useRunObjects() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string }) => api.runObjects(args.name),
+    onSettled: (_result, _error, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-runs", args.name] });
+    },
+  });
+}
+
+/** Asks the learning agent about one position again: queued for the next pass or a run now (console design 3.4). */
+export function useAskAgent() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; id: string }) => api.askAgent(args.name, args.id),
+    onSettled: (_result, _error, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
+    },
+  });
+}
+
+/** One waiting position as the agent would see it (console design 3.1), read when the sample is opened. */
+export function useAgentSample(name: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["object-agent-sample", name ?? ""] as const,
+    queryFn: () => api.agentSample(name ?? ""),
+    enabled: name !== null && enabled,
+    staleTime: 60_000,
+    retry: false,
   });
 }
 

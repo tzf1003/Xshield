@@ -64,7 +64,9 @@ import summaryJson from "../fixtures/summary.json" with { type: "json" };
 import systemJson from "../fixtures/system.json" with { type: "json" };
 import timeseriesJson from "../fixtures/timeseries.json" with { type: "json" };
 import objectSlotS2Json from "../fixtures/object-slot-s2.json" with { type: "json" };
+import objectSlotS8Json from "../fixtures/object-slot-s8.json" with { type: "json" };
 import objectsBootstrapJson from "../fixtures/objects-bootstrap.json" with { type: "json" };
+import objectsRunsJson from "../fixtures/objects-runs.json" with { type: "json" };
 import objectsEmptyJson from "../fixtures/objects-empty.json" with { type: "json" };
 import objectsEmrJson from "../fixtures/objects-emr.json" with { type: "json" };
 import versionsEmrJson from "../fixtures/versions-emr.json" with { type: "json" };
@@ -114,5 +116,9 @@ export const objectsEmr: ObjectsResponse = wire(objectsEmrJson);
 export const objectsEmpty: ObjectsResponse = wire(objectsEmptyJson);
 /** The drawer of position s2 of emr: a proposal with its flows, examples, shape and impact. */
 export const objectSlotS2: ObjectSlotDetail = wire(objectSlotS2Json);
+/** The drawer of position s8 of emr: an agent answer that disagrees with the rule, so the position is ambiguous. */
+export const objectSlotS8: ObjectSlotDetail = wire(objectSlotS8Json);
+/** The learning runs of emr, and the run 40 with its calls: one answered, one failed (console design 3.3). */
+export const objectRuns: { runs: unknown[]; detail: unknown } = wire(objectsRunsJson);
 /** The cold start candidates read from the last 24 hours of juice's requests. */
 export const bootstrapCandidates: BootstrapResponse = wire(objectsBootstrapJson);
