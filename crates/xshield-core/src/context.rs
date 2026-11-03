@@ -16,7 +16,7 @@ pub use config::{ConfigError, Mode, OnJevUnavailable, PathPattern, SessionCreden
 pub use log::{Conclusion, ContextKind, DecisionPath, DecisionRecord, JevRecord, Outcome};
 pub use objects::{
     LearningSettings, ObjectClass, ObjectMap, ObjectSlot, ObjectsIssue, ObjectsPlace,
-    ObjectsReason, SlotSource,
+    ObjectsReason, Reliability, SlotSource, Tier,
 };
 pub use route::{Api, Body, RequestView, Resolved, Route, UnknownReason, header_names};
 pub use trace::{
