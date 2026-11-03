@@ -38,7 +38,7 @@
 | `web/console` | 按 [06](06-console-ui.md) 重写：总览、请求追溯、会话、Jev 调用、站点、系统（[03.5](03-admin-config-audit.md#35-控制台范围)） |
 | `sensor/` | 已删除（浏览器探针，连同其 CI 作业与验收脚本） |
 | `deploy/` | 已删除（含 `compose`）；v4 尚无参考部署，这是已知且接受的缺口（[04](04-deployment-testing.md)），不在本次改造中补上 |
-| `schemas/`、`examples/`、`validation/`、`templates/` | 换成 v4 的站点配置和判定日志样例，删除 v3 契约及其校验 |
+| `schemas/`、`examples/`、`validation/`、`templates/` | 已换成 v4 的站点配置和判定日志样例：契约为 `schemas/site-config.schema.json` 和 `schemas/decision-record.schema.json`，样例为 `examples/site-emr.yaml`、`examples/sites-dev.json`、`examples/decision-log.jsonl`，模板为 `templates/site.yaml`。v3 的契约、证据与清单样例、验收用例目录和对应校验已删除；`scripts/validate_library.py` 按 v4 重写，报告写入 `validation/`，`crates/xshield-core/tests/v4_samples.rs` 用代码解析同一批样例 |
 | `tests/`、`scripts/` | IDOR 靶场改造成 [04.3](04-deployment-testing.md#43-验收场景) 的场景；删除只服务于已删机制的回归脚本 |
 | `fuzz/` | 保留 `path_shape`、`site_config`、`page_fingerprint`、`upstream_address`；`seal_manifest` 随 `xshield-audit` 删除 |
 

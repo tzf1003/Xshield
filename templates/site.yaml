@@ -1,0 +1,15 @@
+# 新建站点的模板（docs/03 第 3.2 节）。复制后修改 name、hosts、origin 和 session，再按源站补全 entries。
+# 站点配置保存在 PostgreSQL，每次保存产生一个新版本，可以在控制台对比和回滚。
+name: my-site                  # 小写字母、数字、- 和 _，全部部署内唯一
+hosts: [app.example.com]       # 客户端访问的域名，网关按 Host 头分配站点，可写多个
+origin: http://127.0.0.1:8080  # 源站地址，只能是 http:// 或 https://
+session:
+  cookie: SESSIONID            # 源站会话凭证所在的 Cookie 名；或者改为 header: Authorization，二选一
+entries:                       # 不需要会话即可访问的入口：登录、首页、起始列表、分享兑换接口；以 * 结尾为前缀
+  - /login
+# bypass:                      # 可选：静态资源等不需要判定的路径
+#   - /static/*
+mode: observe                  # 新站点先用 observe（只记录，本应拦截的也转发）；确认误判可接受后改为 enforce
+on_jev_unavailable: deny       # Jev 超时或不可用时：deny 拦截（默认）；allow 放行，并在判定日志里标注"未经判定"
+# advanced:                    # 可选：站点级判定参数，省略的取代码默认值（见 docs/07 第 7.6 节）
+#   jev_timeout_ms: 2000
