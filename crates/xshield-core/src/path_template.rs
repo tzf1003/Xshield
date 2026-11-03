@@ -26,7 +26,7 @@ const PLACEHOLDER: &str = "{id}";
 /// [`MAX_PATH_BYTES`] returns `None`.
 #[must_use]
 pub fn normalize(path: &str) -> Option<String> {
-    if !is_plain(path) {
+    if !is_plain(path) || path.len() > MAX_PATH_BYTES {
         return None;
     }
     let mut template = String::with_capacity(path.len());
@@ -43,11 +43,11 @@ pub fn normalize(path: &str) -> Option<String> {
     Some(template)
 }
 
-/// Whether `path` is a plain, bounded absolute path the heuristics can describe: the
-/// refusals [`normalize`] makes.
+/// Whether `path` is a plain absolute path the heuristics can describe: the refusals
+/// [`normalize`] makes, apart from its length bound. The bound applies to the template, so a
+/// long spelling is folded to its canonical path before it is bounded.
 fn is_plain(path: &str) -> bool {
     !path.is_empty()
-        && path.len() <= MAX_PATH_BYTES
         && path.starts_with('/')
         && !path.contains(['?', '#'])
         && !path.bytes().any(|byte| byte.is_ascii_control())
@@ -60,7 +60,8 @@ fn is_plain(path: &str) -> bool {
 /// digits. Every other character is kept, so a spelling that may route differently (an encoded
 /// slash, another case) is not folded into another one.
 ///
-/// Returns `None` for a path [`normalize`] refuses, and for a malformed escape.
+/// Returns `None` for a path that is not absolute, or carries a query or a control byte, and for
+/// a malformed escape.
 #[must_use]
 pub fn canonical_path(path: &str) -> Option<String> {
     if !is_plain(path) {
@@ -143,7 +144,16 @@ fn is_canonical_uuid(segment: &str) -> bool {
 
 #[cfg(test)]
 mod canonical_tests {
-    use super::{canonical_path, position_template};
+    use super::{MAX_PATH_BYTES, canonical_path, position_template};
+
+    #[test]
+    fn a_long_spelling_of_a_short_path_names_its_position() {
+        // Extra slashes take the spelling past the length bound, but they fold away first.
+        let long = format!("/api/patients/7005{}", "/".repeat(240));
+        assert!(long.len() > MAX_PATH_BYTES);
+        assert_eq!(canonical_path(&long).as_deref(), Some("/api/patients/7005"));
+        assert_eq!(position_template(&long), "/api/patients/{id}");
+    }
 
     #[test]
     fn equivalent_spellings_share_one_canonical_path() {

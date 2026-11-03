@@ -490,7 +490,9 @@ impl<J: JevPort> Judge<J> {
             let ranked = seen
                 .map(|seen| seen.ranked(used, &tuning.rules))
                 .unwrap_or_default();
-            let slot = request_slot(request.method, request.path, &value.at);
+            // The position is named by the logical path, as the response positions are: the URL
+            // path plus the interface name of a routed request (docs/07 section 7.4.7).
+            let slot = request_slot(request.method, turn.resolved.logical_path(), &value.at);
             let request_object = tuning.objects.class_of(&slot);
             let access = request_access(tuning.objects, &slot);
             // The origins that show the value as the kind of object the request names for
@@ -795,6 +797,10 @@ impl<J: JevPort> Judge<J> {
             (Vec::new(), None)
         };
         self.count_values(site, observation, resolved, &values, &mut summary);
+        // The exposure alert reads the response as the origin sent it, echo included: an origin
+        // that returns another user's contact details with the id the client asked for still
+        // discloses them. Learning and the identity claims read it without the echo.
+        let as_sent = values.clone();
         self.without_echo(&mut values, observation.echo);
 
         let request = format!("{} {}", observation.method, resolved.logical_path());
@@ -853,7 +859,7 @@ impl<J: JevPort> Judge<J> {
                     site.objects(),
                     observation.method,
                     resolved.logical_path(),
-                    &values,
+                    &as_sent,
                     |value| session.identity().is_other_user(&self.key, value),
                 );
             }
@@ -1449,6 +1455,36 @@ mod tests {
             headers: &headers,
             body: xshield_core::context::Body::Unread,
         })
+    }
+
+    #[tokio::test]
+    async fn a_routed_delete_is_placed_by_its_logical_path() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = routed_site(
+            r#","mode":"enforce","objects":{"classes":[{"id":"patient","name":"患者"}],"slots":[
+                {"key":"GET /api/search results[].id","class":"patient","source":"admin","tier":"public","reliability":"high"},
+                {"key":"POST /api/rpc/deletePatient body.patient_id","class":"patient","source":"admin","accepts_public":false,"reliability":"high"}
+            ]}"#,
+        );
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let delete = resolved(&site, "/api/rpc", Some("deletePatient"));
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    route: Some(&delete),
+                    method: "POST",
+                    content_type: Some("application/json"),
+                    body: br#"{"patient_id":"7005"}"#,
+                    ..get("/api/rpc", None, Some("alice"), 2_000)
+                },
+            )
+            .await;
+        // The public search showed the patient, and the routed delete names the closed position
+        // at its logical path, so the sighting is an attempt: Jev judges it, no fast allow.
+        assert_ne!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1);
     }
 
     #[tokio::test]
@@ -4187,6 +4223,29 @@ mod tests {
         assert_eq!(
             judge.observe(&plain, &comments_for("dave", by_b)).exposure,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn an_id_the_request_named_still_raises_the_exposure_alert() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = comment_site();
+        judge.observe(&site, &home_for("alice", br#"{"doctor":{"id":"DR-A"}}"#));
+        // The client named DR-B, a turned-down value, so the response echoes it. The echo keeps
+        // the value out of learning, but the origin still discloses DR-B's contact details.
+        let echoed = [judge.key.mac("value", b"DR-B")];
+        let by_b = br#"{"comments":[{"id":"CM-1","author":{"id":"DR-B","name":"B","phone":"13800000002","email":"dr-b@emr.example"}}]}"#;
+        let shown = judge.observe(
+            &site,
+            &Observation {
+                echo: &echoed,
+                ..comments_for("alice", by_b)
+            },
+        );
+        assert!(
+            shown.exposure.is_some(),
+            "an echoed id still discloses its contact details"
         );
     }
 
