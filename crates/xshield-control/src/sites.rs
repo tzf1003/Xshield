@@ -397,6 +397,15 @@ pub(crate) fn expected_version(body: &Value) -> ApiResult<i64> {
         .ok_or_else(|| ApiError::invalid_body("expected_version"))
 }
 
+/// The optional `object_event` of a write: the automatic change the write undoes or re-confirms.
+fn event_from(body: &Value) -> ApiResult<Option<String>> {
+    match body.get("object_event") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(event)) if !event.is_empty() => Ok(Some(event.to_owned())),
+        Some(_) => Err(ApiError::invalid_body("object_event")),
+    }
+}
+
 /// Refuses a configuration whose host names another site already uses. The
 /// gateway would keep only the first site to claim a host and log the rest to
 /// stderr, so the control plane refuses the write instead (section 7.9.12).
@@ -496,9 +505,21 @@ pub async fn update(
     }
     let expected = expected_version(&body)?;
     let note = note_from(&body)?;
+    let event = match event_from(&body)? {
+        Some(id) => {
+            let record = crate::object_map::site_of(&state, &name).await?;
+            Some(crate::object_map::check_save_event(&state, &record, &id).await?)
+        }
+        None => None,
+    };
     check_hosts_free(&state.pool, &spec).await?;
     match site_spec_store::update(&state.pool, &name, &spec, expected, note.as_deref()).await? {
-        WriteOutcome::Applied(record) => Ok(Json(detail_view(&state, &record).await?)),
+        WriteOutcome::Applied(record) => {
+            if let Some(event) = &event {
+                crate::object_map::mark_saved(&state, event, record.version).await;
+            }
+            Ok(Json(detail_view(&state, &record).await?))
+        }
         WriteOutcome::NotFound => Err(site_not_found()),
         WriteOutcome::VersionConflict { current } => Err(version_conflict(current)),
     }

@@ -449,7 +449,13 @@ async fn tighten_split(
     };
     let rules = Rules::of(record.spec.advanced());
     let word_of = |key: &str| name_word(key, &rules);
-    let splits = plan_splits(map, &votes, &word_of);
+    // A split an administrator undid is not planned again: its positions stay as the administrator
+    // left them, so a split that moves any of them is left out.
+    let undone = store::undone_slots(pool, site, generation).await?;
+    let splits: Vec<_> = plan_splits(map, &votes, &word_of)
+        .into_iter()
+        .filter(|split| split.moves.iter().all(|(key, _)| !undone.contains(key)))
+        .collect();
     let moved: usize = splits.iter().map(|split| split.moves.len()).sum();
     let Some((first, _)) = splits.first().and_then(|split| split.moves.first()) else {
         return Ok(());
@@ -1251,6 +1257,48 @@ pub(crate) mod pass_tests {
         .expect("create the site");
         partitions(&pool, now).await;
         record_two_flows(&pool, now).await;
+        learn_once(&pool, None, now).await;
+        let record = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        assert_eq!(record.version, 1);
+        assert_eq!(
+            record.spec.objects().class_of("GET /document/{id} path[1]"),
+            Some("entity")
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_split_the_administrator_undid_is_not_planned_again() {
+        let Some((admin, pool, name)) = scratch("undone_split").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        let created =
+            site_spec_store::create(&pool, &clinic_with_two_flows(serde_json::Value::Null), None)
+                .await
+                .expect("create the site");
+        partitions(&pool, now).await;
+        record_two_flows(&pool, now).await;
+        // The administrator undid the split of the document position, so the event is handled.
+        xshield_postgres::object_learning_store::record_event(
+            &pool,
+            "clinic",
+            created.created_at,
+            &xshield_postgres::object_learning_store::EventStatus {
+                event: "v1-0".to_owned(),
+                status: "undone".to_owned(),
+                kind: "auto_tighten".to_owned(),
+                slot: "GET /document/{id} path[1]".to_owned(),
+                handled_by: "administrator".to_owned(),
+                handled_millis: now,
+                handled_version: Some(2),
+            },
+        )
+        .await
+        .expect("record the undo");
         learn_once(&pool, None, now).await;
         let record = site_spec_store::get(&pool, "clinic")
             .await
