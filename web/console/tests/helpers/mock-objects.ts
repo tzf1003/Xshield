@@ -9,7 +9,14 @@ import type {
   ObjectState,
   ObjectsResponse,
 } from "../../src/api/types.ts";
-import { bootstrapCandidates, objectSlotS2, objectsEmpty, objectsEmr } from "./fixtures.ts";
+import {
+  bootstrapCandidates,
+  objectRuns,
+  objectSlotS2,
+  objectSlotS8,
+  objectsEmpty,
+  objectsEmr,
+} from "./fixtures.ts";
 
 /** A status and a body, as mock-api.ts answers a call. */
 export type ObjectAnswer = { status: number; body?: unknown };
@@ -94,8 +101,21 @@ export function objectSlotAnswer(site: string, id: string, owner: object): Objec
   const detail: ObjectSlotDetail =
     id === objectSlotS2.id
       ? { ...objectSlotS2, state: row.state, dismissed: row.dismissed }
-      : { ...row, flows_in: [], examples: [], shape: [], history: [], impact: [] };
+      : id === objectSlotS8.id
+        ? { ...objectSlotS8, state: row.state, dismissed: row.dismissed }
+        : { ...row, flows_in: [], examples: [], shape: [], history: [], impact: [], agent: null };
   return { status: 200, body: detail };
+}
+
+/** `GET .../objects/runs`: the newest learning runs of the site (console design 3.3). */
+export function runsAnswer(): ObjectAnswer {
+  return { status: 200, body: { runs: objectRuns.runs } };
+}
+
+/** `GET .../objects/runs/{id}`: one run with its calls. Only run 40 is kept, so any other id is not found. */
+export function runDetailAnswer(id: string): ObjectAnswer {
+  if (id !== "40") return { status: 404, body: { error: "RUN_NOT_FOUND" } };
+  return { status: 200, body: objectRuns.detail };
 }
 
 /** `POST .../slots/{id}/dismiss` (学习中) and `/ambiguous` (有歧义): the position's state moves, the counts follow. */

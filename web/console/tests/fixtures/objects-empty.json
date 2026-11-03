@@ -16,9 +16,16 @@
     "auto_pause": true,
     "path_confirm": true
   },
-  "learning_status": {
-    "last_pass_at": "2026-11-03T05:00:00Z",
-    "auto_tighten_7d": 0,
-    "auto_pause_7d": 0
-  }
+  "learning_run": {
+    "last": null,
+    "next_at": "2026-11-03T06:00:00Z",
+    "running": false,
+    "agent_today": {
+      "used": 0,
+      "limit": 200
+    },
+    "agent_waiting": 0,
+    "agent_failed": 0
+  },
+  "agent_health": "unknown"
 }

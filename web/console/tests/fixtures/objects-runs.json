@@ -1,0 +1,88 @@
+{
+  "runs": [
+    {
+      "id": 41,
+      "at": "2026-11-03T05:00:00Z",
+      "trigger": "scheduled",
+      "duration_ms": 12000,
+      "proposals": 3,
+      "tightened": 2,
+      "paused": 0,
+      "agent": { "asked": 0, "answered": 0, "failed": 0, "skipped": 0 },
+      "error": null
+    },
+    {
+      "id": 40,
+      "at": "2026-11-03T04:00:00Z",
+      "trigger": "manual",
+      "duration_ms": 9000,
+      "proposals": 1,
+      "tightened": 0,
+      "paused": 0,
+      "agent": { "asked": 2, "answered": 1, "failed": 1, "skipped": 0 },
+      "error": null
+    },
+    {
+      "id": 39,
+      "at": "2026-11-03T03:00:00Z",
+      "trigger": "scheduled",
+      "duration_ms": null,
+      "proposals": 0,
+      "tightened": 0,
+      "paused": 0,
+      "agent": { "asked": 0, "answered": 0, "failed": 0, "skipped": 0 },
+      "error": "读取判定日志超时"
+    }
+  ],
+  "detail": {
+    "id": 40,
+    "at": "2026-11-03T04:00:00Z",
+    "trigger": "manual",
+    "duration_ms": 9000,
+    "proposals": 1,
+    "tightened": 0,
+    "paused": 0,
+    "agent": { "asked": 2, "answered": 1, "failed": 1, "skipped": 0 },
+    "error": null,
+    "calls": [
+      {
+        "id": 1,
+        "key": "GET /api/appointments [].doc_id",
+        "position": "s2",
+        "votes": 3,
+        "latency_ms": 820,
+        "status": "answered",
+        "asked_at": "2026-11-03T04:00:00Z",
+        "model": "example/model",
+        "attempts": 1,
+        "choice": "doctor",
+        "new_class": null,
+        "confidence": 0.86,
+        "cites": ["f1"],
+        "reason": "预约列表里 doc_id 的值之后 87% 用在医生详情",
+        "rule_choice": "doctor",
+        "failure": null,
+        "input": null
+      },
+      {
+        "id": 2,
+        "key": "GET /doctor/{id} path[1]",
+        "position": null,
+        "votes": 0,
+        "latency_ms": 30000,
+        "status": "failed",
+        "asked_at": "2026-11-03T04:00:01Z",
+        "model": "example/model",
+        "attempts": 1,
+        "choice": null,
+        "new_class": null,
+        "confidence": null,
+        "cites": [],
+        "reason": null,
+        "rule_choice": null,
+        "failure": "timeout",
+        "input": null
+      }
+    ]
+  }
+}

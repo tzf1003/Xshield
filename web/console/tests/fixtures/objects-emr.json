@@ -84,7 +84,8 @@
       "source": "rule",
       "basis": "名字明确 · 31 会话 · 0 拒绝",
       "last_seen": "2026-11-01T13:16:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     },
     {
       "in_effect": true,
@@ -97,7 +98,8 @@
       "source": "rule",
       "basis": "流向 87% · 23 会话 · 0 拒绝",
       "last_seen": "2026-11-01T13:15:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     },
     {
       "in_effect": false,
@@ -146,7 +148,8 @@
       "source": "admin",
       "basis": "404 比例 1% → 18%",
       "last_seen": "2026-11-01T13:10:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     },
     {
       "in_effect": true,
@@ -159,7 +162,8 @@
       "source": "rule",
       "basis": "名字明确 · 44 会话 · 0 拒绝",
       "last_seen": "2026-11-01T13:12:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     },
     {
       "in_effect": true,
@@ -172,7 +176,8 @@
       "source": "rule",
       "basis": "路径参数 · 38 会话 · 0 拒绝",
       "last_seen": "2026-11-01T13:05:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     },
     {
       "in_effect": true,
@@ -185,7 +190,8 @@
       "source": "rule",
       "basis": "学习中 · 6 次 · 2 会话",
       "last_seen": "2026-11-01T12:40:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     },
     {
       "in_effect": true,
@@ -198,7 +204,8 @@
       "source": "rule",
       "basis": "名字是缩写 · 12 会话 · 0 拒绝",
       "last_seen": "2026-11-01T13:00:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     },
     {
       "in_effect": true,
@@ -211,7 +218,8 @@
       "source": "agent",
       "basis": "有歧义，交给 Jev",
       "last_seen": "2026-11-01T11:00:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": "answered"
     },
     {
       "in_effect": true,
@@ -224,7 +232,8 @@
       "source": "admin",
       "basis": "管理员声明 · 9 会话 · 0 拒绝",
       "last_seen": null,
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     },
     {
       "in_effect": true,
@@ -237,7 +246,8 @@
       "source": "rule",
       "basis": "流向 92% · 6 会话 · 0 拒绝",
       "last_seen": "2026-10-31T20:30:00Z",
-      "dismissed": false
+      "dismissed": false,
+      "agent_status": null
     }
   ],
   "events": [
@@ -287,9 +297,31 @@
     "auto_pause": true,
     "path_confirm": true
   },
-  "learning_status": {
-    "last_pass_at": "2026-11-03T05:00:00Z",
-    "auto_tighten_7d": 0,
-    "auto_pause_7d": 0
-  }
+  "learning_run": {
+    "last": {
+      "id": 41,
+      "at": "2026-11-03T05:00:00Z",
+      "trigger": "scheduled",
+      "duration_ms": 12000,
+      "proposals": 3,
+      "tightened": 2,
+      "paused": 0,
+      "agent": {
+        "asked": 0,
+        "answered": 0,
+        "failed": 0,
+        "skipped": 0
+      },
+      "error": null
+    },
+    "next_at": "2026-11-03T06:00:00Z",
+    "running": false,
+    "agent_today": {
+      "used": 0,
+      "limit": 200
+    },
+    "agent_waiting": 0,
+    "agent_failed": 0
+  },
+  "agent_health": "unknown"
 }
