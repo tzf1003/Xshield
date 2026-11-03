@@ -21,6 +21,7 @@ import { PathSlotLabel } from "./PathSlotLabel.tsx";
 import {
   type BootstrapChoice,
   type BootstrapPlan,
+  candidateName,
   entriesOf,
   fieldOfKey,
   planBootstrap,
@@ -77,7 +78,7 @@ export function useBootstrapSelection(
   for (const item of classes) names.set(item.id, item.name);
   for (const item of working.objects?.classes ?? []) names.set(item.id, item.name);
   for (const candidate of candidates) {
-    if (!names.has(candidate.kind)) names.set(candidate.kind, candidate.name);
+    if (!names.has(candidate.kind)) names.set(candidate.kind, candidateName(candidate));
   }
 
   const rows: RowView[] = candidates.map((candidate) => {
@@ -89,7 +90,7 @@ export function useBootstrapSelection(
     const name =
       select === NEW_CLASS
         ? newName.trim() || (names.get(kind) ?? "")
-        : (names.get(kind) ?? candidate.name);
+        : (names.get(kind) ?? candidateName(candidate));
     const problem =
       select === NEW_CLASS && checkKind(kind) !== null
         ? DECLARE_TEXT.kindFormat
@@ -190,7 +191,7 @@ export function BootstrapList({ selection, classes, windowHours, records }: Prop
       needle.length === 0 ||
       row.candidate.key.toLowerCase().includes(needle) ||
       row.candidate.kind.toLowerCase().includes(needle) ||
-      row.candidate.name.toLowerCase().includes(needle),
+      candidateName(row.candidate).toLowerCase().includes(needle),
   );
   const selectable = (row: RowView) => row.blocked === null && row.problem === null;
   const pickable = visible.filter(selectable);
@@ -202,7 +203,7 @@ export function BootstrapList({ selection, classes, windowHours, records }: Prop
     groups.set(row.candidate.kind, [...(groups.get(row.candidate.kind) ?? []), row]);
   // The classes on offer: the proposals of this list, then the classes the site already has.
   const offered = new Map<string, string>();
-  for (const row of selection.rows) offered.set(row.candidate.kind, row.candidate.name);
+  for (const row of selection.rows) offered.set(row.candidate.kind, candidateName(row.candidate));
   for (const item of classes) offered.set(item.id, item.name);
   const classOptions = [...offered.entries()].map(([id, name]) => ({ id, name }));
   const plan = selection.plan;
@@ -252,7 +253,7 @@ export function BootstrapList({ selection, classes, windowHours, records }: Prop
             const groupPickable = rows.filter(selectable);
             const groupPicked = groupPickable.filter((row) => row.picked).length;
             const open = collapsed[kind] !== true;
-            const groupName = rows[0]?.candidate.name ?? kind;
+            const groupName = rows[0] === undefined ? kind : candidateName(rows[0].candidate);
             return (
               <li key={kind} className="obj-group">
                 <div className="obj-group-head">
@@ -395,7 +396,10 @@ function RowLine({
           </span>
         ) : null}
         {row.changed && row.select !== NEW_CLASS ? (
-          <span className="small muted" title={OBJECT_TEXT.coldStart.changedFrom(candidate.name)}>
+          <span
+            className="small muted"
+            title={OBJECT_TEXT.coldStart.changedFrom(candidateName(candidate))}
+          >
             {OBJECT_TEXT.coldStart.changed}
           </span>
         ) : null}

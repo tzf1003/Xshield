@@ -20,6 +20,11 @@ import type {
 } from "../../../api/types.ts";
 import { declarationKey, fieldKey, kindKey, pathSlotOf } from "../../../lib/objects-validate.ts";
 
+/** The name a candidate goes by: its class's name, or its kind while the map has no class for it yet. */
+export function candidateName(candidate: BootstrapCandidate): string {
+  return candidate.name ?? candidate.kind;
+}
+
 export type KeyParts = { method: string; path: string; where: string };
 
 /** A position key, e.g. `GET /api/appointments [].doc_id`, read into its method, path and the rest of the position. */

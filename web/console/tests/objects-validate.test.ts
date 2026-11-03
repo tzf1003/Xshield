@@ -10,6 +10,7 @@ import type {
 import {
   type BootstrapChoice,
   bannerGroups,
+  candidateName,
   declarationFor,
   fieldOfKey,
   flowSearch,
@@ -256,6 +257,12 @@ const candidate = (key: string, kind: string, name: string): BootstrapCandidate 
   sessions: 3,
   note: null,
   conflict: null,
+});
+
+test("a candidate with no class yet is named by its kind", () => {
+  const unnamed = { ...candidate("GET /api/docs [].id", "doc", "文档"), name: null };
+  assert.equal(candidateName(unnamed), "doc");
+  assert.equal(candidateName(candidate("GET /api/docs [].id", "doc", "文档")), "文档");
 });
 
 /** An automatic change for the tests: a pause of a path position unless `over` says otherwise. */
