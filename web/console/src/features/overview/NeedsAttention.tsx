@@ -102,6 +102,7 @@ export function NeedsAttention() {
       insights: reads.insights,
       evidence: reads.evidence,
       jevModels: models.data?.jev ?? null,
+      agentModels: models.data?.agent ?? null,
     });
     if (items.length > 0) {
       body = (
@@ -145,7 +146,7 @@ export function NeedsAttention() {
       ) : null}
       {models.isError ? (
         <Notice tone="warn">
-          模型配置读取失败，网关没有加载最新配置的提醒暂时不列出。
+          模型配置读取失败，网关配置和学习代理的提醒暂时不列出。
           <button type="button" className="linkbtn" onClick={() => void models.refetch()}>
             重试
           </button>

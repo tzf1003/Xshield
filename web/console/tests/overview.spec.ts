@@ -5,7 +5,7 @@
 
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
-import { siteEmr, statusDown } from "./helpers/fixtures.ts";
+import { siteEmr, statusDown, systemModels } from "./helpers/fixtures.ts";
 import { FIXTURE_NOW_MS, mockApi, reply, servedRequests } from "./helpers/mock-api.ts";
 import { changeSite, healthyStatus, quietSites, statusWith } from "./helpers/overview.ts";
 
@@ -168,6 +168,39 @@ test("a version that stays unloaded on a gateway is serious and opens the gatewa
   await expect(behind).toContainText("严重");
   await follow(behind, "查看系统");
   await expectAt(page, "/system", { tab: "edges" });
+});
+
+test("five learning-agent calls in a row that all failed are a warning that opens the model configuration", async ({
+  page,
+}) => {
+  const models = structuredClone(systemModels);
+  models.agent.recent_failures = ["timeout", "timeout", "timeout", "timeout", "timeout"];
+  await mockApi(page, { models });
+  await openOverview(page);
+
+  const failing = rowWith(page, "学习代理最近 5 次调用失败：超时");
+  await expect(failing).toContainText("警告");
+  await expect(failing).toContainText("2 个站点的学习暂时只按规则进行");
+  await follow(failing, "查看模型配置");
+  await expectAt(page, "/system", { tab: "models" });
+  await expect(page.getByRole("tab", { name: "模型", selected: true })).toBeVisible();
+});
+
+test("a site that used its whole learning-agent limit three days running is a warning that opens its objects", async ({
+  page,
+}) => {
+  const models = structuredClone(systemModels);
+  models.agent.sites = models.agent.sites.map((site) =>
+    site.site === "emr" ? { ...site, full_days: 3 } : site,
+  );
+  await mockApi(page, { models });
+  await openOverview(page);
+
+  const limit = rowWith(page, "emr 的学习代理连续 3 天用完 200 次上限");
+  await expect(limit).toContainText("警告");
+  await follow(limit, "调整上限");
+  await expectAt(page, "/sites/emr", { tab: "objects" });
+  await expect(page.getByRole("tab", { name: "对象表", selected: true })).toBeVisible();
 });
 
 test("a log gap that lost decision records is serious and opens the gap list", async ({ page }) => {
