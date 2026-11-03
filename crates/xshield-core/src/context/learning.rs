@@ -406,17 +406,26 @@ pub const COMMON_PUBLIC_PER_MILLE: u32 = 200;
 const HIGH_AGREEMENT_PER_MILLE: u32 = 980;
 
 /// What the control plane counted at one response position. The units are the user
-/// identities the site declares, or the sessions when it declares none.
+/// identities the site declares, or the sessions when it declares none. A value is one
+/// fingerprint: the same value fingerprints alike in every record, so counting the units
+/// that saw a fingerprint counts the units that saw the value.
+///
+/// The records keep at most eight fingerprints per position, the smallest. A value that a
+/// unit's list did not keep may still have been seen by another unit, so a value seen by one
+/// unit is evidence of `self` only when no other unit's record at the position was full.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResponseStats {
     /// Whether the units are user identities rather than sessions.
     pub identified: bool,
     /// Non-admin units that got a 2xx carrying values at the position.
     pub units: u32,
-    /// Distinct values those units saw at the position.
+    /// Distinct fingerprints those units saw at the position, however many units saw each.
     pub values: u32,
-    /// Of `values`, the ones two or more units saw.
+    /// Of `values`, the ones two or more units saw. Such a count is real sharing.
     pub shared: u32,
+    /// Of `values`, the ones exactly one unit saw while every other unit's records at the
+    /// position were complete, so no other unit could have seen them unkept.
+    pub complete_single: u32,
     /// Admin units that got a 2xx at the position.
     pub admin_units: u32,
     /// Non-admin units refused at the position (no 2xx).
@@ -457,16 +466,12 @@ pub fn judge_tier(stats: &ResponseStats, thresholds: Thresholds) -> Option<TierJ
             agreement_per_mille: 0,
         });
     }
-    if stats.units < thresholds.sessions || stats.values < thresholds.votes {
+    if stats.units < thresholds.sessions {
         return None;
     }
-    let shared = share_of(stats.shared, stats.values);
-    let (tier, agreement) = if shared >= thresholds.share_per_mille {
-        (Tier::Public, shared)
-    } else if shared <= SELF_SHARE_MAX_PER_MILLE {
-        (Tier::Own, 1_000 - shared)
-    } else {
-        return None;
+    let (tier, agreement) = match public_agreement(stats, thresholds) {
+        Some(agreement) => (Tier::Public, agreement),
+        None => (Tier::Own, own_agreement(stats, thresholds)?),
     };
     let strong =
         stats.units >= doubled(thresholds.sessions) && agreement >= HIGH_AGREEMENT_PER_MILLE;
@@ -476,6 +481,31 @@ pub fn judge_tier(stats: &ResponseStats, thresholds: Thresholds) -> Option<TierJ
         reliability,
         agreement_per_mille: agreement,
     })
+}
+
+/// The agreement of `public`: the share of values, in thousandths, that two or more units
+/// saw, when the position has enough values and the share reaches the threshold. Values
+/// seen by one unit only, which may have been kept off other lists, dilute the share on
+/// purpose: they are not counted for `public`.
+fn public_agreement(stats: &ResponseStats, thresholds: Thresholds) -> Option<u32> {
+    if stats.values < thresholds.votes {
+        return None;
+    }
+    let shared = share_of(stats.shared, stats.values);
+    (shared >= thresholds.share_per_mille).then_some(shared)
+}
+
+/// The agreement of `self`: the share, in thousandths, of the values the rules can decide
+/// (those two or more units saw, and those one unit saw with complete records around them)
+/// that nobody else saw. Needs enough complete single-unit values, and at most the self
+/// share of the decided ones shared.
+fn own_agreement(stats: &ResponseStats, thresholds: Thresholds) -> Option<u32> {
+    if stats.complete_single < thresholds.votes {
+        return None;
+    }
+    let decided = stats.shared.saturating_add(stats.complete_single);
+    let shared = share_of(stats.shared, decided);
+    (shared <= SELF_SHARE_MAX_PER_MILLE).then_some(1_000 - shared)
 }
 
 /// What the rules give a request position: whether normal traffic sends values from public
@@ -615,6 +645,47 @@ mod tier_tests {
         }
     }
 
+    /// Stats for `units` identities whose `values` values were each seen by one unit only,
+    /// with complete records around them.
+    fn own_stats(units: u32, values: u32) -> ResponseStats {
+        ResponseStats {
+            identified: true,
+            units,
+            values,
+            complete_single: values,
+            ..ResponseStats::default()
+        }
+    }
+
+    #[test]
+    fn single_unit_values_count_for_self_only_when_records_were_complete() {
+        // Thirty values seen by one unit each, but another unit's full record may have
+        // kept some of them back: no evidence either way.
+        let truncated = ResponseStats {
+            identified: true,
+            units: 10,
+            values: 30,
+            complete_single: 0,
+            ..ResponseStats::default()
+        };
+        assert_eq!(judge_tier(&truncated, thresholds()), None);
+    }
+
+    #[test]
+    fn sharing_among_the_decided_values_blocks_self() {
+        // One value of 31 decided values is seen by two units: 32 per mille, above the
+        // self limit, and far below the public share.
+        let shared_one = ResponseStats {
+            identified: true,
+            units: 10,
+            values: 31,
+            shared: 1,
+            complete_single: 30,
+            ..ResponseStats::default()
+        };
+        assert_eq!(judge_tier(&shared_one, thresholds()), None);
+    }
+
     #[test]
     fn values_all_seen_by_many_identities_are_public_and_high() {
         let judged = judge_tier(&stats(12, 40, 40), thresholds()).unwrap();
@@ -634,10 +705,10 @@ mod tier_tests {
 
     #[test]
     fn disjoint_units_are_self_and_high_only_with_enough_units() {
-        let few = judge_tier(&stats(6, 30, 0), thresholds()).unwrap();
+        let few = judge_tier(&own_stats(6, 30), thresholds()).unwrap();
         assert_eq!(few.tier, Tier::Own);
         assert_eq!(few.reliability, Reliability::Medium);
-        let many = judge_tier(&stats(10, 30, 0), thresholds()).unwrap();
+        let many = judge_tier(&own_stats(10, 30), thresholds()).unwrap();
         assert_eq!(many.reliability, Reliability::High);
         assert_eq!(many.agreement_per_mille, 1_000);
     }
@@ -656,7 +727,7 @@ mod tier_tests {
 
     #[test]
     fn a_weak_judgement_without_identities_is_not_returned() {
-        let mut weak = stats(6, 30, 0);
+        let mut weak = own_stats(6, 30);
         weak.identified = false;
         assert_eq!(judge_tier(&weak, thresholds()), None);
     }
