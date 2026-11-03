@@ -160,7 +160,7 @@ test("改回 Jev 写出靠名字认错的类别，说清楚原来认成了什么
     {
       kind: "back_to_jev",
       count: 14,
-      detail: { name_kind: "document", object_kind: "doctor" },
+      detail: { approximate: true, name_kind: "document", object_kind: "doctor" },
       top: [["GET", "/docs/{id}", 14]],
       sample: SAMPLE,
     },
@@ -169,6 +169,9 @@ test("改回 Jev 写出靠名字认错的类别，说清楚原来认成了什么
   await expect(dialog.getByText("改回 Jev：14 次快速放行会改回调用 Jev")).toBeVisible();
   await expect(
     dialog.getByText("这些请求原本靠名字把医生编号当成了文档编号", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    dialog.getByText("来源只记录了前 3 个，结果是近似值", { exact: true }),
   ).toBeVisible();
 });
 
