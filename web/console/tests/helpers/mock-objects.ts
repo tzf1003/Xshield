@@ -125,6 +125,6 @@ export function learnAnswer(
 export function bootstrapAnswer(site: string): ObjectAnswer {
   return {
     status: 200,
-    body: site === "emr" ? { window_hours: 24, candidates: [] } : bootstrapCandidates,
+    body: site === "emr" ? { window_hours: 24, records: 0, candidates: [] } : bootstrapCandidates,
   };
 }

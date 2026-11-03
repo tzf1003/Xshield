@@ -10,5 +10,15 @@
   "agent_configured": false,
   "classes": [],
   "slots": [],
-  "events": []
+  "events": [],
+  "features": {
+    "auto_tighten": true,
+    "auto_pause": true,
+    "path_confirm": true
+  },
+  "learning_status": {
+    "last_pass_at": "2026-11-03T05:00:00Z",
+    "auto_tighten_7d": 0,
+    "auto_pause_7d": 0
+  }
 }

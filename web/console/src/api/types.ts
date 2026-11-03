@@ -579,14 +579,33 @@ export interface FieldKindDeclaration {
   in?: string[];
 }
 
+/** A class of the object map (`objects.classes`): its id and the name the console shows. */
+export interface ObjectClassEntry {
+  id: string;
+  name: string;
+  description?: string;
+}
+
 /**
- * The object map section (object-map design 1). The learning settings are edited in the console; `classes` and `slots`
- * belong to the gateway and are kept exactly as they are, so that a save never changes them.
+ * A confirmed position (`objects.slots`): the class the judge uses for it. The learning task sets `paused` when it
+ * pauses the position: the judge stops using the class, and a save keeps the flag. A confirmation writes a plain entry
+ * without it, which restores the position (console design 4.3, 6 C1).
+ */
+export interface ObjectSlotEntry {
+  key: string;
+  class: string;
+  source: ObjectSource;
+  paused?: boolean;
+}
+
+/**
+ * The object map section (object-map design 1). The learning settings, the classes and the confirmed positions are
+ * written by the console: a save writes what the draft holds (console design 4.3).
  */
 export interface ObjectsSpec {
   learning?: LearningSettings;
-  classes?: unknown;
-  slots?: unknown;
+  classes?: ObjectClassEntry[];
+  slots?: ObjectSlotEntry[];
 }
 
 export interface SiteSpec {
@@ -679,6 +698,8 @@ export interface SiteWriteBody {
   /** Required on update; the server answers 409 VERSION_CONFLICT when it is stale. */
   expected_version?: number;
   note?: string;
+  /** The automatic change this save undoes or re-confirms (console design 6 A3). */
+  object_event?: string;
 }
 
 export interface SiteRollbackBody {
@@ -1020,9 +1041,9 @@ export interface Rollout {
 }
 
 // ------------------------------------------------------------------ 对象表（接口）
-// Provisional: the objects endpoints (console design section 7) are not implemented yet, so these shapes
-// follow the design's names and will be replaced by the backend's JSON. Times follow the file's rule:
-// `*_millis` are Unix milliseconds, the rest RFC 3339 UTC strings.
+// The objects endpoints (console design 6). Times follow the file's rule: RFC 3339 UTC strings, and `*_millis` for
+// Unix milliseconds. The shapes follow console design 6; a field the backend has not shipped yet is still typed here,
+// and the backend's batches say which endpoint starts to fill it.
 
 /** Learning state of a position (object-map design 1). */
 export type ObjectState =
@@ -1067,6 +1088,32 @@ export interface ObjectClass {
   uses_24h: number;
   /** Route templates the class is used in, e.g. `/doctor/{id}`. */
   routes: string[];
+  /** Positions of the class that are paused; the class list marks them with ▲ (console design 3.2). Read as 0 when absent. */
+  suspended_count?: number;
+}
+
+/** The name rule that named a class from a position: the same words the judge uses (console design 6 B). */
+export type NameReasonCode = "field_name" | "parent_name" | "endpoint_name" | "route_word";
+
+/** The evidence of an automatic change or a pause (console design 6 C2). Only the fields its code names are set. */
+export type ObjectReasonCode = "evidence_drift" | "origin_4xx_rise" | "jev_deny_rise" | "split";
+
+export interface ObjectReason {
+  code: ObjectReasonCode;
+  /** The days of evidence the reason counts over. Each field the gateway does not send is absent, not null. */
+  days?: number | null;
+  /** Before and after the change: shares from 0 to 1 for evidence drift, counts for the others. */
+  before?: number | null;
+  after?: number | null;
+  /** The status counted by origin_4xx_rise: 403 or 404. */
+  status?: number | null;
+  total?: number | null;
+  hits?: number | null;
+  /** The position the evidence moved to, and the one it was before (evidence drift). */
+  key?: string | null;
+  key_before?: string | null;
+  /** The two classes a split took apart. */
+  classes?: string[] | null;
 }
 
 /** One row of the position table. */
@@ -1085,21 +1132,91 @@ export interface ObjectSlotRow {
   last_seen: string | null;
   /** The proposal was ignored: the position stays listed, and the learning task does not propose it again. */
   dismissed: boolean;
+  /** Whether the saved configuration still has this position's entry, so the judge still uses it (console design 6 D). */
+  in_effect: boolean;
+  /** Only while the position is suspended (state `suspended`); null otherwise. */
+  suspension: ObjectSuspension | null;
 }
 
-/** An automatic change of the learning task, shown in the banner (object-map design 5). */
-export interface ObjectEvent {
-  kind: "auto_pause" | "auto_tighten";
-  /** RFC 3339 UTC. */
+/** Why a position is paused, and what the judge does with it now (console design 3.2, 6 D). */
+export interface ObjectSuspension {
+  /** RFC 3339 UTC: when it was paused. */
   at: string;
-  /**
-   * The banner's words after the event's name and time. A pause reads `已自动暂停：{text}`, e.g.
-   * `GET /doctor/{id} path[1]，快速放行后源站 404 比例从 1% 升到 18%`. A tightening reads `学习任务 HH:mm {text}`,
-   * e.g. `自动收紧了 2 个位置`.
-   */
-  text: string;
-  /** The version the change made, for the 撤销 link; null when none. */
+  /** Paused by the learning task (true) or by an administrator (false). */
+  auto: boolean;
   version: number | null;
+  event_id: string | null;
+  reason: ObjectReason | null;
+  /** The confirmed entry before the pause. */
+  previous: {
+    class: string | null;
+    source: ObjectSource;
+    confirmed_at: string | null;
+    confirmed_by: string | null;
+  } | null;
+  /** What name inference gives now. `kind` is null and `basis` `none` when no name is left. */
+  fallback: { kind: string | null; basis: NameReasonCode | "none"; word: string | null };
+  /** The classes the position's values belong to now, by share (0 to 1). */
+  evidence_now: Array<{ class: string; share: number }>;
+  acknowledged: boolean;
+}
+
+/** A position's entry in the configuration: a field declaration (`advanced.field_kinds`) or an object slot. */
+export type ObjectConfigEntry = FieldKindDeclaration | ObjectSlotEntry;
+
+export type ObjectEventKind = "auto_tighten" | "auto_pause" | "anomaly";
+
+export type ObjectEventStatus = "open" | "acknowledged" | "undone" | "superseded";
+
+/** One automatic change or anomaly of the learning task (console design 2.3, 6 C2). */
+export interface ObjectEvent {
+  id: string;
+  kind: ObjectEventKind;
+  /** RFC 3339 UTC: the learning pass that made it. */
+  at: string;
+  /** The version the change made; null for an anomaly, which changes nothing. */
+  version: number | null;
+  slot_id: string | null;
+  key: string;
+  side: ObjectSide;
+  /** The class and the entry before the change; null when there was none. */
+  before: { class: string | null; entry: ObjectConfigEntry | null } | null;
+  /** The class and the entry after the change. A pause keeps its entry, which then carries `paused: true`. */
+  after: { class: string | null; entry: ObjectConfigEntry | null } | null;
+  reason: ObjectReason | null;
+  impact: ImpactChange[];
+  /** Sample request ids, at most three. */
+  examples: RequestId[];
+  status: ObjectEventStatus;
+  handled: { by: string; at: string; version: number | null } | null;
+  /** The note of the version the change made, as the history shows it. */
+  note: string | null;
+}
+
+/** `GET /api/sites/{name}/objects/events`: the events of the window, newest first. */
+export interface ObjectEventsResponse {
+  events: ObjectEvent[];
+}
+
+/** Query of `GET /api/sites/{name}/objects/events`: open or all events, one kind, and the days they span. */
+export type ObjectEventsFilter = {
+  status?: "open" | "all";
+  kind?: ObjectEventKind;
+  days?: number;
+};
+
+/** What the gateway runs now, so the console says what is in effect; a false flag is a part it does not run yet. */
+export interface ObjectFeatures {
+  auto_tighten: boolean;
+  auto_pause: boolean;
+  path_confirm: boolean;
+}
+
+/** When the learning task last ran, and how often it tightened or paused in the last 7 days. */
+export interface LearningStatus {
+  last_pass_at: string | null;
+  auto_tighten_7d: number;
+  auto_pause_7d: number;
 }
 
 /** `GET /api/sites/{name}/objects`: counts of the whole map, the classes, and the slots the filter matches. */
@@ -1109,7 +1226,10 @@ export interface ObjectsResponse {
   agent_configured: boolean;
   classes: ObjectClass[];
   slots: ObjectSlotRow[];
+  /** The automatic changes of the last 30 days, newest first; the banner and the list show the open ones. */
   events: ObjectEvent[];
+  features: ObjectFeatures;
+  learning_status: LearningStatus;
 }
 
 /** Where a position's values travel: the other end of each flow, with its share and evidence. */
@@ -1175,20 +1295,31 @@ export interface ObjectSlotDetail extends ObjectSlotRow {
   impact: ImpactChange[];
 }
 
-/** A class the cold start can propose, with the named positions it is read from. */
+/** A candidate of the cold start: one named position and the class the rules read from it (console design 6 B). */
 export interface BootstrapCandidate {
+  /** Stable within one response. */
+  id: string;
+  /** Position key, e.g. `GET /doctor/{id} path[1]`. */
+  key: string;
+  side: ObjectSide;
   /** Proposed class id, e.g. `doctor`. */
   kind: string;
   /** Proposed name in words, e.g. `医生`. */
   name: string;
-  /** Position keys, e.g. `GET /api/doctors [].id`. */
-  slots: string[];
+  reason: { code: NameReasonCode; word: string | null; field: string | null };
+  /** Requests and sessions of the position in the window. */
+  uses: number;
+  sessions: number;
   /** Why the candidate needs a look, e.g. the name is an abbreviation; null when it is clear. */
   note: string | null;
+  /** The class the saved configuration already gives this position, when it is not `kind`; null otherwise. */
+  conflict: string | null;
 }
 
 /** `GET /api/sites/{name}/objects/bootstrap`: the candidates from the last `window_hours` of requests. */
 export interface BootstrapResponse {
   window_hours: number;
+  /** The decision records of the site in the window: tells "no traffic" from "no candidates". */
+  records: number;
   candidates: BootstrapCandidate[];
 }

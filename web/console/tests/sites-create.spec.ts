@@ -7,6 +7,12 @@ import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
 import { mockApi } from "./helpers/mock-api.ts";
 import { callsTo, freezeClock } from "./helpers/sites-flow.ts";
 
+/** Creates the site with the object-map step left off: these tests are about the creation itself. */
+async function createWithoutObjectStep(page: Page): Promise<void> {
+  await page.getByRole("checkbox", { name: "创建后确认对象表起点（可跳过）" }).uncheck();
+  await page.getByRole("button", { name: "创建站点" }).click();
+}
+
 const EDITOR = "站点配置，YAML 或 JSON";
 
 const YAML_SITE = `name: yaml-shop
@@ -70,7 +76,7 @@ test("the wizard checks the configuration on the server, then creates the site, 
     spec: { name: "shop", hosts: ["shop.example.com"] },
   });
 
-  await page.getByRole("button", { name: "创建站点" }).click();
+  await createWithoutObjectStep(page);
 
   await expect(page).toHaveURL(/\/sites\/shop$/);
   await expect(page.getByText("已创建 v1。下一步：把 Host")).toBeVisible();
@@ -158,7 +164,7 @@ test("a configuration pasted as YAML goes to the confirmation step once it is va
   await page.getByRole("textbox", { name: EDITOR }).fill(YAML_SITE);
   await expect(page).toHaveURL(/\/sites\/new\?step=4$/);
   await expect(page.getByText("✓ 服务端校验通过")).toBeVisible();
-  await page.getByRole("button", { name: "创建站点" }).click();
+  await createWithoutObjectStep(page);
 
   await expect(page).toHaveURL(/\/sites\/yaml-shop$/);
   const [created] = callsTo(page, "POST", "/api/sites");
@@ -180,7 +186,7 @@ test("a YAML that names enforce creates an enforce site, and the new site says w
   await expect(page.getByText("✓ 服务端校验通过")).toBeVisible();
   // The hint never stops the save: the create button is enabled before it is pressed.
   await expect(page.getByRole("button", { name: "创建站点" })).toBeEnabled();
-  await page.getByRole("button", { name: "创建站点" }).click();
+  await createWithoutObjectStep(page);
 
   await expect(page).toHaveURL(/\/sites\/yaml-shop$/);
   const [created] = callsTo(page, "POST", "/api/sites");
@@ -202,7 +208,7 @@ test("a YAML that names enforce can be set to observe on the confirmation step, 
   await expect(page.getByText(ENFORCE_NOTE)).toHaveCount(0);
   await expect(page.getByText("观察模式", { exact: true })).toBeVisible();
   await expect(page.locator("pre.codeblock")).toContainText("mode: observe");
-  await page.getByRole("button", { name: "创建站点" }).click();
+  await createWithoutObjectStep(page);
 
   await expect(page).toHaveURL(/\/sites\/yaml-shop$/);
   const [created] = callsTo(page, "POST", "/api/sites");
@@ -219,7 +225,7 @@ test("a YAML without a mode creates an observe site, and no enforce hint is show
 
   await page.getByRole("textbox", { name: EDITOR }).fill(YAML_SITE.replace("mode: observe\n", ""));
   await expect(page.getByText("✓ 服务端校验通过")).toBeVisible();
-  await page.getByRole("button", { name: "创建站点" }).click();
+  await createWithoutObjectStep(page);
 
   await expect(page).toHaveURL(/\/sites\/yaml-shop$/);
   await expect(page.getByText("已创建 v1。下一步：把 Host")).toBeVisible();
@@ -257,7 +263,7 @@ test("a copy of an enforcing site opens the wizard in observe, and the copy is c
   await expect(page.getByText("观察模式", { exact: true })).toBeVisible();
   await expect(page.getByText("拦截", { exact: true })).toHaveCount(0);
   await expect(page.getByText("✓ 服务端校验通过")).toBeVisible();
-  await page.getByRole("button", { name: "创建站点" }).click();
+  await createWithoutObjectStep(page);
 
   await expect(page).toHaveURL(/\/sites\/emr-copy$/);
   const [created] = callsTo(page, "POST", "/api/sites");
@@ -334,7 +340,7 @@ for (const theme of ["light", "dark"] satisfies Theme[]) {
 
     await page.getByRole("textbox", { name: EDITOR }).fill(YAML_ENFORCE);
     await expect(page.getByText("✓ 服务端校验通过")).toBeVisible();
-    await page.getByRole("button", { name: "创建站点" }).click();
+    await createWithoutObjectStep(page);
 
     await expect(page.getByText(ENFORCE_HINT)).toBeVisible();
     await expectNoAxeViolations(page);

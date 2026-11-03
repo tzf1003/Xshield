@@ -21,6 +21,10 @@ type Props = {
   draft: SiteSpec;
   /** The version the draft was started from; its configuration is the base of a re-apply. */
   baseVersion: number;
+  /** The note the dialog opens with, e.g. `撤销自动收紧 v18` (console design 2.4). */
+  initialNote?: string;
+  /** The automatic change this save undoes or re-confirms; the server marks it undone (console design 6 A3). */
+  objectEvent?: string;
   onClose: () => void;
   onSaved: (spec: SiteSpec, version: number) => void;
   onDiscard: () => void;
@@ -34,12 +38,21 @@ type Rebase = {
   choices: Choices;
 };
 
-export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDiscard }: Props) {
+export function SaveDialog({
+  site,
+  draft,
+  baseVersion,
+  initialNote,
+  objectEvent,
+  onClose,
+  onSaved,
+  onDiscard,
+}: Props) {
   const save = useSaveSite();
   const validate = useValidate();
   const latest = useSite(site.name);
   const versions = useVersions(site.name);
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState(initialNote ?? "");
   const [view, setView] = useState<"unified" | "split">("unified");
   const [conflict, setConflict] = useState<number | null>(null);
   const [showLatest, setShowLatest] = useState(false);
@@ -99,7 +112,12 @@ export function SaveDialog({ site, draft, baseVersion, onClose, onSaved, onDisca
       {
         name: site.name,
         spec: working,
-        body: { spec: working, expected_version: expected, note: note.trim() || undefined },
+        body: {
+          spec: working,
+          expected_version: expected,
+          note: note.trim() || undefined,
+          object_event: objectEvent,
+        },
       },
       {
         onSuccess: (saved) => onSaved(working, saved.version),

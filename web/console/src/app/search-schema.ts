@@ -199,7 +199,17 @@ export type SiteSearch = GlobalSearch & {
   /** The declaration dialog, opened with this field and scope (console design 3.3). */
   declare?: string;
   in?: string;
+  /** The automatic changes list: open events only, or all of them (console design 2.3). */
+  objevents?: "open" | "all";
+  /** The changes list's type filter, opened from a banner line or the learning settings. */
+  objkind?: (typeof OBJECT_EVENT_KINDS)[number];
+  /** The wizard's hand-off: the draft is saved at once, with this many positions confirmed (console design 1.4). */
+  save?: "1";
+  bootstrap?: number;
 };
+
+/** The kinds of automatic change the list filters on (console design 2.3). */
+export const OBJECT_EVENT_KINDS = ["auto_tighten", "auto_pause", "anomaly"] as const;
 
 export function validateSite(raw: Record<string, unknown>): SiteSearch {
   return {
@@ -216,20 +226,39 @@ export function validateSite(raw: Record<string, unknown>): SiteSearch {
     slot: str(raw.slot),
     declare: str(raw.declare),
     in: str(raw.in),
+    objevents: oneOf(raw.objevents, ["open", "all"] as const),
+    objkind: oneOf(raw.objkind, OBJECT_EVENT_KINDS),
+    save: oneOf(raw.save, ["1"] as const),
+    bootstrap: countOf(raw.bootstrap),
   };
 }
 
+/** A count from the URL: a number, or digits as the router keeps them; anything else reads as absent. */
+function countOf(raw: unknown): number | undefined {
+  const value =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && /^\d{1,5}$/.test(raw)
+        ? Number(raw)
+        : Number.NaN;
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
 export type WizardSearch = GlobalSearch & {
+  /** 1 to 4 are the form steps; 5 is the object map's start, once the site exists (console design 1.1). */
   step?: number;
   from?: "yaml";
+  /** The site the fifth step works on. */
+  site?: string;
 };
 
 export function validateWizard(raw: Record<string, unknown>): WizardSearch {
   const step = Number(raw.step);
   return {
     ...validateGlobal(raw),
-    step: Number.isInteger(step) && step >= 1 && step <= 4 ? step : undefined,
+    step: Number.isInteger(step) && step >= 1 && step <= 5 ? step : undefined,
     from: oneOf(raw.from, ["yaml"] as const),
+    site: typeof raw.site === "string" && isSiteName(raw.site) ? raw.site : undefined,
   };
 }
 
