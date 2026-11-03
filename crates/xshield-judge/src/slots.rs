@@ -48,11 +48,15 @@ pub fn origin_object<'a>(objects: &'a ObjectMap, origin: &Origin) -> Option<&'a 
 }
 
 /// The tier the map gives the response position an origin was seen at, with how sure the
-/// map is of it. `None` when the map gives no tier there.
+/// map is of it (an absent reliability counts as low, docs/07 section 7.9.16). `None` when
+/// the map gives no tier there.
 #[must_use]
 pub fn origin_tier(objects: &ObjectMap, origin: &Origin) -> Option<(Tier, Reliability)> {
     let slot = origin_slot(origin)?;
-    Some((objects.tier_of(&slot)?, objects.reliability_of(&slot)?))
+    Some((
+        objects.tier_of(&slot)?,
+        objects.reliability_of(&slot).unwrap_or(Reliability::Low),
+    ))
 }
 
 /// What the map says of a request position about public sources, with how sure it is.
@@ -61,8 +65,29 @@ pub fn origin_tier(objects: &ObjectMap, origin: &Origin) -> Option<(Tier, Reliab
 pub fn request_access(objects: &ObjectMap, slot: &str) -> Option<PublicAccess> {
     Some(PublicAccess {
         accepts: objects.accepts_public_of(slot)?,
-        reliability: objects.reliability_of(slot)?,
+        reliability: objects.reliability_of(slot).unwrap_or(Reliability::Low),
     })
+}
+
+/// The name of a tier as the state and the trace write it (docs/07 section 7.9.16).
+#[must_use]
+pub fn tier_name(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Own => "self",
+        Tier::Org => "org",
+        Tier::Admin => "admin",
+        Tier::Public => "public",
+    }
+}
+
+/// The name of a reliability as the state and the trace write it.
+#[must_use]
+pub fn reliability_name(reliability: Reliability) -> &'static str {
+    match reliability {
+        Reliability::Low => "low",
+        Reliability::Medium => "medium",
+        Reliability::High => "high",
+    }
 }
 
 #[cfg(test)]

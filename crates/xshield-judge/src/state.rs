@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use xshield_core::context::{Attempt, Conclusion, PublicAccess};
 
 use crate::context::Recent;
+use crate::slots::reliability_name;
 
 /// Largest serialized `state` sent to Jev.
 pub const STATE_BYTES_MAX: usize = 8 * 1024;
@@ -148,7 +149,7 @@ fn render_value(
     if let Some(access) = value.public_access {
         rendered["public_access"] = json!({
             "accepts": access.accepts,
-            "reliability": access.reliability.as_str(),
+            "reliability": reliability_name(access.reliability),
         });
     }
     if let Some(attempt) = value.attempt {

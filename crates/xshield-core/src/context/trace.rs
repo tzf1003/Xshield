@@ -2,9 +2,11 @@
 //! let the console follow it to the requests that supplied the evidence
 //! (docs/07 section 7.4.3).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
-use super::objects::{PublicAccess, Reliability, Tier};
+use super::objects::{Reliability, Tier};
 
 /// Largest serialized trace; [`Trace::fit`] trims anything bigger.
 pub const TRACE_BYTES_MAX: usize = 16 * 1024;
@@ -12,6 +14,12 @@ pub const TRACE_BYTES_MAX: usize = 16 * 1024;
 pub const VALUE_CHARS_MAX: usize = 256;
 /// Value text length after [`Trace::fit`] has run out of gentler cuts.
 const FIT_VALUE_CHARS: usize = 64;
+/// Most response positions whose value fingerprints one response records. The
+/// first ones in the order the response shows them are kept.
+pub const FINGERPRINT_SLOTS_MAX: usize = 16;
+/// Fingerprints kept for one response position: the smallest, so the choice does
+/// not depend on the order in which the response lists its values.
+pub const FINGERPRINTS_PER_SLOT_MAX: usize = 8;
 
 /// The trace of one decision.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -148,6 +156,17 @@ pub struct TraceValue {
     /// response that showed it was public, and the position takes none of those.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<Attempt>,
+}
+
+/// What a request position says of public sources, with how sure the map is: whether
+/// normal traffic sends values from public positions there, and the reliability of that
+/// judgement (docs/07 section 7.9.16). Written into the trace and the judge's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicAccess {
+    /// `false` marks a position that takes no value from a public response.
+    pub accepts: bool,
+    /// How sure the map is of `accepts`. Only `high` tightens a decision.
+    pub reliability: Reliability,
 }
 
 /// What the gateway found a request value to be (docs/01 section 1.4, step 4).
@@ -304,6 +323,14 @@ pub struct ObservationSummary {
     /// values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<Vec<ShapeField>>,
+    /// Keyed fingerprints of the values the response showed, per response
+    /// position (`GET /api/appointments [].doc_id`): at most
+    /// [`FINGERPRINTS_PER_SLOT_MAX`] per position, the smallest ones, and at most
+    /// [`FINGERPRINT_SLOTS_MAX`] positions. Each is 16 hex digits of a hash keyed
+    /// per site, so the same value fingerprints alike in every session of one
+    /// site and apart in another. The values themselves are not kept.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fingerprints: BTreeMap<String, Vec<String>>,
 }
 
 impl ObservationSummary {
@@ -322,6 +349,7 @@ impl ObservationSummary {
             entry_passed: false,
             after_would_block: false,
             shape: None,
+            fingerprints: BTreeMap::new(),
         }
     }
 }
@@ -469,6 +497,29 @@ mod tests {
         assert!(trace.values_truncated);
         assert!(trace.values.is_empty());
         assert!(trace.trimmed);
+    }
+
+    #[test]
+    fn fingerprints_stay_out_of_summaries_that_have_none() {
+        let plain = ObservationSummary::new(None, 0, Observed::Json);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("fingerprints"));
+        let old: ObservationSummary = serde_json::from_str(&json).unwrap();
+        assert!(old.fingerprints.is_empty());
+
+        let mut with = plain;
+        with.fingerprints.insert(
+            "GET /api/patients items[].id".to_owned(),
+            vec!["0123456789abcdef".to_owned()],
+        );
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(
+            json.contains(
+                r#""fingerprints":{"GET /api/patients items[].id":["0123456789abcdef"]}"#
+            )
+        );
+        let back: ObservationSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, with);
     }
 
     #[test]

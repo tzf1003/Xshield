@@ -77,6 +77,7 @@ fn proves(tier: Option<(Tier, Reliability)>, closed: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slots::request_access;
 
     const TIERED: &str = r#"{
         "classes": [{"id": "patient", "name": "患者"}],
@@ -88,7 +89,10 @@ mod tests {
             {"key": "GET /api/org/patients patients[].id", "class": "patient", "source": "admin", "tier": "org", "reliability": "high"},
             {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "source": "admin", "accepts_public": false, "reliability": "high"},
             {"key": "DELETE /api/records/{id} path[2]", "class": "patient", "source": "admin", "accepts_public": false, "reliability": "low"},
-            {"key": "POST /api/patients/{id}/notes path[2]", "class": "patient", "source": "admin", "accepts_public": true, "reliability": "high"}
+            {"key": "POST /api/patients/{id}/notes path[2]", "class": "patient", "source": "admin", "accepts_public": true, "reliability": "high"},
+            {"key": "GET /api/search/none results[].id", "class": "patient", "source": "admin", "tier": "public"},
+            {"key": "GET /api/mine patients[].id", "class": "patient", "source": "admin", "tier": "self"},
+            {"key": "PUT /api/notes/{id} path[2]", "class": "patient", "source": "admin", "accepts_public": false}
         ]
     }"#;
 
@@ -108,7 +112,9 @@ mod tests {
 
     const SEARCH: (&str, &str) = ("GET /api/search", "results[].id");
     const SEARCH_LOW: (&str, &str) = ("GET /api/search/low", "results[].id");
+    const SEARCH_UNRATED: (&str, &str) = ("GET /api/search/none", "results[].id");
     const OWN: (&str, &str) = ("GET /api/patients", "patients[].id");
+    const OWN_UNRATED: (&str, &str) = ("GET /api/mine", "patients[].id");
     const ADMIN: (&str, &str) = ("GET /api/admin/patients", "patients[].id");
     const ORG: (&str, &str) = ("GET /api/org/patients", "patients[].id");
     const UNTIERED: (&str, &str) = ("GET /api/other", "items[].id");
@@ -276,5 +282,65 @@ mod tests {
             }
         );
         assert!(judge(&refs(&untiered), &refs(&untiered), None, &objects).verified);
+    }
+
+    #[test]
+    fn a_public_sighting_without_a_reliability_counts_as_low_and_does_not_tighten() {
+        let objects = map(TIERED);
+        // An absent reliability is low (docs/07 section 7.9.16): the sighting still proves the
+        // value where the position is closed, and it is no attempt.
+        let unrated = sightings(&[SEARCH_UNRATED]);
+        assert_eq!(
+            judge(&refs(&unrated), &refs(&unrated), CLOSED, &objects),
+            Judged {
+                verified: true,
+                attempt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_self_sighting_without_a_reliability_never_allows_and_is_no_attempt() {
+        let objects = map(TIERED);
+        let own = sightings(&[OWN_UNRATED]);
+        assert_eq!(
+            judge(&refs(&own), &refs(&own), CLOSED, &objects),
+            Judged {
+                verified: false,
+                attempt: None,
+            }
+        );
+        // Beside a public sighting it keeps the value from being an attempt, as a rated one does.
+        let sources = sightings(&[SEARCH, OWN_UNRATED]);
+        assert_eq!(
+            judge(&refs(&sources), &refs(&sources), CLOSED, &objects),
+            Judged {
+                verified: false,
+                attempt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_position_without_a_reliability_is_not_closed_enough_to_tighten() {
+        let objects = map(TIERED);
+        // The map says the position takes no public source, but without a reliability it is
+        // only low on that, so the sure public sighting still proves the value.
+        let access = request_access(&objects, "PUT /api/notes/{id} path[2]");
+        assert_eq!(
+            access,
+            Some(PublicAccess {
+                accepts: false,
+                reliability: Reliability::Low,
+            })
+        );
+        let search = sightings(&[SEARCH]);
+        assert_eq!(
+            judge(&refs(&search), &refs(&search), access, &objects),
+            Judged {
+                verified: true,
+                attempt: None,
+            }
+        );
     }
 }

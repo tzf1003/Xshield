@@ -2,14 +2,15 @@
 //! decision (docs/07 sections 7.4 and 7.5).
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use xshield_core::context::{
-    Conclusion, ContextKind, DecisionPath, DecisionRecord, FieldCount, JevRecord, Mode, ObjectMap,
-    ObservationSummary, Observed, OnJevUnavailable, Outcome, Reliability, Resolved,
-    SessionCredential, ShapeField, SiteSpec, Skip, Tier, Trace, TraceSession, TraceValue,
+    Conclusion, ContextKind, DecisionPath, DecisionRecord, FINGERPRINT_SLOTS_MAX,
+    FINGERPRINTS_PER_SLOT_MAX, FieldCount, JevRecord, Mode, ObjectMap, ObservationSummary,
+    Observed, OnJevUnavailable, Outcome, Reliability, Resolved, SessionCredential, ShapeField,
+    SiteSpec, Skip, Tier, Trace, TraceSession, TraceValue,
 };
 use xshield_core::kind::{Rules, Used};
 
@@ -18,7 +19,10 @@ use crate::context::{
     SentRecord, SessionContext, Source, label, request_number, request_text,
 };
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
-use crate::slots::{origin_object, origin_tier, request_access, request_slot, route_template};
+use crate::slots::{
+    origin_object, origin_tier, reliability_name, request_access, request_slot, response_slot,
+    route_template, tier_name,
+};
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
 };
@@ -742,6 +746,7 @@ impl<J: JevPort> Judge<J> {
         };
         summary.values = values.len();
         summary.fields = field_counts(&values);
+        summary.fingerprints = fingerprints(&self.key, site, observation, resolved, &values);
 
         let request = format!("{} {}", observation.method, resolved.logical_path());
         let request_id = request_number(observation.request_id);
@@ -954,8 +959,8 @@ fn seen_text(origin: &Origin, object: Option<&str>, tier: Option<(Tier, Reliabil
     match tier {
         Some((tier, reliability)) => format!(
             "{base} (tier {}, reliability {})",
-            tier.as_str(),
-            reliability.as_str()
+            tier_name(tier),
+            reliability_name(reliability)
         ),
         None => base,
     }
@@ -1128,6 +1133,47 @@ fn field_counts(values: &[ResponseValue]) -> Vec<FieldCount> {
     ranked.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.field.cmp(&b.field)));
     ranked.truncate(FIELDS_IN_SUMMARY);
     ranked
+}
+
+/// The fingerprints of the values a response showed, per response position
+/// (docs/07 section 7.4.3): the first positions in the order the response shows
+/// them, and of each position's values the smallest fingerprints.
+fn fingerprints(
+    key: &ContextKey,
+    site: &SiteSpec,
+    observation: &Observation<'_>,
+    resolved: &Resolved,
+    values: &[ResponseValue],
+) -> BTreeMap<String, Vec<String>> {
+    let (method, path) = (observation.method, resolved.logical_path());
+    let mut kept: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for value in values {
+        let Some(slot) = response_slot(method, path, &value.at) else {
+            continue;
+        };
+        if !kept.contains_key(&slot) && kept.len() >= FINGERPRINT_SLOTS_MAX {
+            continue;
+        }
+        let digests = kept.entry(slot).or_default();
+        digests.insert(site_fingerprint(key, site.name(), &value.value));
+        if digests.len() > FINGERPRINTS_PER_SLOT_MAX {
+            digests.pop_last();
+        }
+    }
+    kept.into_iter()
+        .map(|(slot, digests)| (slot, digests.into_iter().collect::<Vec<String>>()))
+        .collect()
+}
+
+/// The keyed fingerprint of a response value at one site: 16 hex digits, the
+/// form the log uses for labels. The site is part of the keyed message, so the
+/// same value fingerprints differently at another site.
+fn site_fingerprint(key: &ContextKey, site: &str, value: &str) -> String {
+    let mut message = Vec::with_capacity(8 + site.len() + value.len());
+    message.extend_from_slice(&u64::try_from(site.len()).unwrap_or(u64::MAX).to_be_bytes());
+    message.extend_from_slice(site.as_bytes());
+    message.extend_from_slice(value.as_bytes());
+    label(&key.mac("fingerprint", &message))
 }
 
 fn elapsed_millis(started: Instant) -> u32 {
@@ -2969,6 +3015,85 @@ mod tests {
             .map(|field| (field.field.as_str(), field.count))
             .collect();
         assert_eq!(fields, [("id", 2), ("name", 2), ("age", 1)]);
+    }
+
+    /// The same site under another name: its values fingerprint differently.
+    fn other_site() -> SiteSpec {
+        SiteSpec::from_json(
+            r#"{"name":"clinic","hosts":["clinic.test"],"origin":"http://o:1","session":{"cookie":"SID"},
+               "entries":["/login","/api/home","/api/patients","/share/*"],"bypass":["/static/*"],"mode":"enforce"}"#,
+        )
+        .unwrap()
+    }
+
+    const ITEM_ID_SLOT: &str = "GET /api/patients items[].id";
+
+    #[test]
+    fn a_value_fingerprints_alike_in_every_session_of_a_site_and_apart_across_sites() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let alice = judge.observe(&site, &list_response("alice", 0));
+        let bob = judge.observe(&site, &list_response("bob", 1));
+        assert_eq!(alice.fingerprints.get(ITEM_ID_SLOT).map(Vec::len), Some(2));
+        assert_eq!(alice.fingerprints, bob.fingerprints);
+        let clinic = judge.observe(&other_site(), &list_response("alice", 2));
+        assert!(clinic.fingerprints.keys().eq(alice.fingerprints.keys()));
+        assert_ne!(clinic.fingerprints, alice.fingerprints);
+    }
+
+    #[test]
+    fn a_position_keeps_its_smallest_fingerprints_whatever_order_they_come_in() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let items: Vec<String> = (0..20).map(|i| format!(r#"{{"id":"id-{i}"}}"#)).collect();
+        let listed = format!(r#"{{"items":[{}]}}"#, items.join(","));
+        let together = Observation {
+            body: listed.as_bytes(),
+            ..list_response("alice", 0)
+        };
+        let summary = judge.observe(&site, &together);
+        // Each id observed alone, in a session of its own, gives every
+        // fingerprint the position has; the smallest eight of them are expected.
+        let mut alone = Vec::new();
+        for i in 0..20 {
+            let single_body = format!(r#"{{"items":[{{"id":"id-{i}"}}]}}"#);
+            let credential = format!("solo-{i}");
+            let single = Observation {
+                body: single_body.as_bytes(),
+                ..list_response(&credential, 1)
+            };
+            alone.extend(judge.observe(&site, &single).fingerprints[ITEM_ID_SLOT].clone());
+        }
+        alone.sort();
+        alone.truncate(FINGERPRINTS_PER_SLOT_MAX);
+        assert_eq!(summary.fingerprints[ITEM_ID_SLOT], alone);
+    }
+
+    #[test]
+    fn a_response_records_at_most_sixteen_positions_and_never_the_values() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        let fields: Vec<String> = (0..20)
+            .map(|i| format!(r#""field{i:02}":"Ada Lovelace {i}""#))
+            .collect();
+        let body = format!("{{{}}}", fields.join(","));
+        let observed = Observation {
+            body: body.as_bytes(),
+            ..list_response("alice", 0)
+        };
+        let summary = judge.observe(&site, &observed);
+        assert_eq!(summary.values, 20);
+        assert_eq!(summary.fingerprints.len(), FINGERPRINT_SLOTS_MAX);
+        assert!(summary.fingerprints.values().all(|digests| {
+            digests.len() == 1
+                && digests[0].len() == 16
+                && digests[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+        }));
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(!json.contains("Ada Lovelace"));
     }
 
     #[test]
