@@ -1,10 +1,10 @@
-// The "需要处理" list of the overview (docs/06 6.4.2). The gateway rows and the Jev row come from
-// GET /api/status; the site rows come from the site list: observation misses, open suggestions,
-// unjudged requests, and Jev timeouts or call-limit hits at 1% of a site's Jev calls. Two sentences
-// need more than the list carries, and NeedsAttention reads them (attention-reads.ts): the
-// on_jev_unavailable of a site with unjudged requests, and the breakdowns of a site's misses and
-// suggestions. The gateway sentences come from lib/health.ts, so this list and the top-bar light use
-// the same words. Pure functions, no React.
+// The "需要处理" list (docs/06 6.4.2), shown by the bell of the top bar and summarised on the overview.
+// The gateway rows and the Jev row come from GET /api/status; the site rows come from the site list:
+// observation misses, open suggestions, unjudged requests, and Jev timeouts or call-limit hits at 1% of
+// a site's Jev calls. Two sentences need more than the list carries, and attention-reads.ts reads them:
+// the on_jev_unavailable of a site with unjudged requests, and the breakdowns of a site's misses and
+// suggestions. The gateway sentences come from lib/health.ts, so this list and the top-bar light use the
+// same words. Pure functions, no React.
 
 import type {
   AgentModelsState,
@@ -450,4 +450,32 @@ export function buildAttention(input: AttentionInput): AttentionItem[] {
     ...input.sites.flatMap((site) => siteItems(site, input)),
   ];
   return items.sort((a, b) => RANK[a.level] - RANK[b.level]);
+}
+
+/** What the bell's badges count (docs/06 6.3.2). */
+export type AttentionCounts = {
+  /** Rows that need handling: 严重 and 警告. */
+  alert: number;
+  /** Rows that are hints (提示). They are counted apart, so a hint never reads as an alert. */
+  hint: number;
+  /** Whether one alert is 严重, which sets the badge's mark and tint. */
+  serious: boolean;
+};
+
+export function attentionCounts(items: readonly AttentionItem[]): AttentionCounts {
+  let alert = 0;
+  let hint = 0;
+  for (const item of items) {
+    if (item.level === "info") hint += 1;
+    else alert += 1;
+  }
+  return { alert, hint, serious: items.some((item) => item.level === "serious") };
+}
+
+/** "3 项，2 条提示" for the bell's name and its panel; "没有事项" when no row shows. */
+export function countsText(counts: AttentionCounts): string {
+  const parts: string[] = [];
+  if (counts.alert > 0) parts.push(`${fmtInt(counts.alert)} 项`);
+  if (counts.hint > 0) parts.push(`${fmtInt(counts.hint)} 条提示`);
+  return parts.length > 0 ? parts.join("，") : "没有事项";
 }

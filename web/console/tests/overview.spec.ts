@@ -1,5 +1,6 @@
-// The overview at "/" (docs/06 6.4.2): the "需要处理" rows with their levels and links, the metric
-// cards and the hourly trend. Each warning is set up with mockApi overrides for the status and the
+// The overview at "/" (docs/06 6.4.2): the "需要处理" rows with their levels and links (read from the bell
+// of the top bar, which a test opens with openBell), the one-line summary, the metric cards and the hourly
+// trend. Each warning is set up with mockApi overrides for the status and the
 // site list, and for the one site detail or insights that its row reads, so every test states its
 // condition and nothing else. Each link is followed to the page it names.
 
@@ -7,7 +8,14 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
 import { siteEmr, statusDown, systemModels } from "./helpers/fixtures.ts";
 import { FIXTURE_NOW_MS, mockApi, reply, servedRequests } from "./helpers/mock-api.ts";
-import { changeSite, healthyStatus, quietSites, statusWith } from "./helpers/overview.ts";
+import {
+  bellPanel,
+  changeSite,
+  healthyStatus,
+  openBell,
+  quietSites,
+  statusWith,
+} from "./helpers/overview.ts";
 
 /** Opens the overview on the frozen clock (the fixtures are written around FIXTURE_NOW_MS). */
 async function openOverview(page: Page, theme?: Theme): Promise<void> {
@@ -76,7 +84,7 @@ test("a metric card opens the request list filtered to its figure", async ({ pag
   await expect(page.getByRole("button", { name: /本应拦截/, pressed: true })).toBeVisible();
 });
 
-test("with nothing to handle the card says all is well, with the last check time", async ({
+test("with nothing to handle the overview says all is well, and so does the bell", async ({
   page,
 }) => {
   await mockApi(page, {
@@ -85,12 +93,15 @@ test("with nothing to handle the card says all is well, with the last check time
   await openOverview(page);
   await expect(page.getByText("一切正常")).toBeVisible();
   await expect(page.getByText("最后检查 21:20:00")).toBeVisible();
+  await openBell(page);
+  await expect(bellPanel(page)).toContainText("一切正常");
   await expect(attention(page)).toHaveCount(0);
 });
 
 test("the default fixtures list five rows, most serious first", async ({ page }) => {
   await mockApi(page);
   await openOverview(page);
+  await openBell(page);
 
   const rows = attention(page).getByRole("listitem");
   await expect(rows).toHaveCount(5);
@@ -110,6 +121,12 @@ test("the default fixtures list five rows, most serious first", async ({ page })
   await expect(rows.nth(4)).toContainText("提示");
 });
 
+test("the overview's line counts the rows and points at the bell", async ({ page }) => {
+  await mockApi(page);
+  await openOverview(page);
+  await expect(page.getByText("需要处理 3 项，另有 2 条提示，点顶栏的铃铛查看")).toBeVisible();
+});
+
 test("no online gateway is serious and opens the gateway tab; a partition that runs short warns", async ({
   page,
 }) => {
@@ -117,6 +134,7 @@ test("no online gateway is serious and opens the gateway tab; a partition that r
     overrides: { "/api/status": statusDown, "/api/sites": { sites: quietSites() } },
   });
   await openOverview(page);
+  await openBell(page);
 
   const offline = rowWith(page, "没有在线的网关：3 个实例在 24 小时内上报过心跳，现在都已离线");
   await expect(offline).toContainText("严重");
@@ -125,6 +143,7 @@ test("no online gateway is serious and opens the gateway tab; a partition that r
   await expect(page.getByRole("tab", { name: "网关", selected: true })).toBeVisible();
 
   await openOverview(page);
+  await openBell(page);
   const partition = rowWith(page, "判定日志分区不足，未来只有 1 天");
   await expect(partition).toContainText("警告");
   await follow(partition, "查看存储");
@@ -150,6 +169,7 @@ test("a site the gateway refused to load is serious and opens its configuration"
     },
   });
   await openOverview(page);
+  await openBell(page);
 
   const refused = rowWith(page, "edge-2 加载 emr 失败");
   await expect(refused).toContainText("严重");
@@ -163,6 +183,7 @@ test("a version that stays unloaded on a gateway is serious and opens the gatewa
 }) => {
   await mockApi(page);
   await openOverview(page);
+  await openBell(page);
 
   const behind = rowWith(page, "emr v13 保存后未生效，edge-2 仍是 v12");
   await expect(behind).toContainText("严重");
@@ -177,6 +198,7 @@ test("five learning-agent calls in a row that all failed are a warning that open
   models.agent.recent_failures = ["timeout", "timeout", "timeout", "timeout", "timeout"];
   await mockApi(page, { models });
   await openOverview(page);
+  await openBell(page);
 
   const failing = rowWith(page, "学习代理最近 5 次调用失败：超时");
   await expect(failing).toContainText("警告");
@@ -195,6 +217,7 @@ test("a site that used its whole learning-agent limit three days running is a wa
   );
   await mockApi(page, { models });
   await openOverview(page);
+  await openBell(page);
 
   const limit = rowWith(page, "emr 的学习代理连续 3 天用完 200 次上限");
   await expect(limit).toContainText("警告");
@@ -206,6 +229,7 @@ test("a site that used its whole learning-agent limit three days running is a wa
 test("a log gap that lost decision records is serious and opens the gap list", async ({ page }) => {
   await mockApi(page);
   await openOverview(page);
+  await openBell(page);
 
   const gap = rowWith(page, "edge-1 21:10–21:12 有 31 条判定记录未写入（队列满）");
   await expect(gap).toContainText("严重");
@@ -218,6 +242,7 @@ test("a log gap that lost decision records is serious and opens the gap list", a
 test("the requests of a log gap open over the gap's own window", async ({ page }) => {
   await mockApi(page);
   await openOverview(page);
+  await openBell(page);
 
   await follow(rowWith(page, "21:10–21:12"), "查看这段请求");
   await expectAt(page, "/requests", {
@@ -248,6 +273,7 @@ test("bypass records dropped under queue pressure are a note, not a gap", async 
     },
   });
   await openOverview(page);
+  await openBell(page);
 
   const note = rowWith(page, "在队列压力下丢弃了 1,204 条绕过记录（静态资源），判定记录不受影响");
   await expect(note).toContainText("提示");
@@ -266,6 +292,7 @@ test("a degraded Jev is a warning that opens the Jev page", async ({ page }) => 
     },
   });
   await openOverview(page);
+  await openBell(page);
 
   const jev = rowWith(page, "Jev 降级：最近 5 分钟失败 9 次（超时 7、服务限流 2）");
   await expect(jev).toContainText("警告");
@@ -282,6 +309,7 @@ test("a Jev that is down is serious", async ({ page }) => {
     },
   });
   await openOverview(page);
+  await openBell(page);
 
   const jev = rowWith(page, "Jev 不可用：最近 5 分钟失败 9 次（超时 9）");
   await expect(jev).toContainText("严重");
@@ -294,6 +322,7 @@ test("an observed site with would-block requests is a warning, with its breakdow
 }) => {
   await mockApi(page);
   await openOverview(page);
+  await openBell(page);
 
   const observe = rowWith(page, "juice 观察中 6 天");
   await expect(observe).toContainText("juice 观察中 6 天：本应拦截 14 条（Jev 拒绝 11、无会话 3）");
@@ -304,6 +333,7 @@ test("an observed site with would-block requests is a warning, with its breakdow
   await expect(page.getByRole("button", { name: /本应拦截/, pressed: true })).toBeVisible();
 
   await openOverview(page);
+  await openBell(page);
   await follow(rowWith(page, "juice 观察中 6 天"), "就绪检查");
   await expectAt(page, "/sites/juice", { tab: "insights" });
   await expect(page.getByRole("tab", { name: /调优建议/, selected: true })).toBeVisible();
@@ -316,6 +346,7 @@ test("an observation row keeps its count, without the breakdown, when the insigh
     overrides: { "/api/sites/juice/insights": reply(500, { error: "INTERNAL" }) },
   });
   await openOverview(page);
+  await openBell(page);
 
   const observe = rowWith(page, "juice 观察中 6 天");
   await expect(
@@ -333,6 +364,7 @@ test("a site that is not observing, or has no misses, has no observation row", a
     },
   });
   await openOverview(page);
+  await openBell(page);
 
   await expect(rowWith(page, "调优建议")).toBeVisible();
   await expect(rowWith(page, "观察中")).toHaveCount(0);
@@ -343,6 +375,7 @@ test("open suggestions are a note that names each kind and opens the insights ta
 }) => {
   await mockApi(page);
   await openOverview(page);
+  await openBell(page);
 
   const suggest = rowWith(page, "juice 有 2 条调优建议");
   await expect(suggest).toContainText("登记入口 1、加入绕过 1");
@@ -363,6 +396,7 @@ test("unjudged requests on a site that allows them are a warning that lists them
     },
   });
   await openOverview(page);
+  await openBell(page);
 
   const unjudged = rowWith(page, "emr 有 5 个请求未经判定就放行了");
   await expect(unjudged).toContainText("警告");
@@ -379,9 +413,10 @@ test("unjudged requests on a site that denies them have no row", async ({ page }
     },
   });
   await openOverview(page);
+  await openBell(page);
 
-  // The card says all is well only after the detail has answered, so this also waits for it.
-  await expect(page.getByText("一切正常")).toBeVisible();
+  // The panel says all is well only after the detail has answered, so this also waits for it.
+  await expect(bellPanel(page)).toContainText("一切正常");
   await expect(rowWith(page, "未经判定")).toHaveCount(0);
 });
 
@@ -395,6 +430,7 @@ test("Jev timeouts at one percent of the calls are a note that opens the site's 
     },
   });
   await openOverview(page);
+  await openBell(page);
 
   const evidence = rowWith(page, "emr Jev 超时 9 次 / 412 次调用");
   await expect(evidence).toContainText("提示");
@@ -413,13 +449,14 @@ test("call-limit hits at one percent of the calls are a note too", async ({ page
     },
   });
   await openOverview(page);
+  await openBell(page);
 
   const evidence = rowWith(page, "emr 触发调用上限 6 次 / 412 次调用");
   await expect(evidence).toContainText("提示");
   await expect(evidence.getByRole("link", { name: "查看证据", exact: true })).toBeVisible();
 });
 
-test("three Jev timeouts in 412 calls are under the line, so the card says all is well", async ({
+test("three Jev timeouts in 412 calls are under the line, so nothing is listed and all is well", async ({
   page,
 }) => {
   // The site list of the fixtures: emr has 3 timeouts in 412 calls, 0.7 percent.
@@ -431,19 +468,22 @@ test("three Jev timeouts in 412 calls are under the line, so the card says all i
   });
   await openOverview(page);
   await expect(page.getByText("一切正常")).toBeVisible();
+  await openBell(page);
+  await expect(bellPanel(page)).toContainText("一切正常");
   await expect(rowWith(page, "Jev 超时")).toHaveCount(0);
 });
 
 test("a failed site list says so, and the gateway rows still show", async ({ page }) => {
   await mockApi(page, { overrides: { "/api/sites": reply(500, { error: "INTERNAL" }) } });
   await openOverview(page);
+  await openBell(page);
 
   await expect(page.getByText("站点数据读取失败")).toBeVisible();
   await expect(rowWith(page, "emr v13 保存后未生效")).toBeVisible();
   await expect(page.getByText("一切正常")).toHaveCount(0);
 });
 
-test("a site detail that cannot be read says so, and the card does not claim all is well", async ({
+test("a site detail that cannot be read says so, and the list does not claim all is well", async ({
   page,
 }) => {
   await mockApi(page, {
@@ -455,13 +495,18 @@ test("a site detail that cannot be read says so, and the card does not claim all
   });
   await openOverview(page);
 
-  await expect(page.getByText("部分站点的详情读取失败")).toBeVisible();
+  // The overview's line says the list is incomplete; the bell's panel says which read failed.
+  await expect(page.getByText("部分需要处理的事项读取失败")).toBeVisible();
   await expect(page.getByText("一切正常")).toHaveCount(0);
+  await openBell(page);
+  await expect(bellPanel(page).getByText("部分站点的详情读取失败")).toBeVisible();
+  await expect(bellPanel(page).getByText("一切正常")).toHaveCount(0);
 });
 
 test("a site's detail and insights are read only where its row needs them", async ({ page }) => {
   await mockApi(page);
   await openOverview(page);
+  await openBell(page);
   await expect(rowWith(page, "juice 有 2 条调优建议")).toContainText("登记入口 1、加入绕过 1");
 
   const reads = servedRequests(page)
@@ -474,6 +519,7 @@ for (const theme of ["light", "dark"] satisfies Theme[]) {
   test(`the overview with its rows passes axe in the ${theme} theme`, async ({ page }) => {
     await mockApi(page);
     await openOverview(page, theme);
+    await openBell(page);
     await expect(rowWith(page, "登记入口 1、加入绕过 1")).toBeVisible();
     await expectNoAxeViolations(page);
   });
