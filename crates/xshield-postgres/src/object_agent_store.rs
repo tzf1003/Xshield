@@ -217,6 +217,47 @@ pub async fn day_usage_by_site(
         .collect()
 }
 
+/// The questions one site asked on one day.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteDayCount {
+    /// The site's name.
+    pub site: String,
+    /// The UTC day, counted from the epoch.
+    pub day: u64,
+    /// Questions asked on the day.
+    pub used: i64,
+}
+
+/// The questions every site asked on the days from `first` to `last`, both included. A site
+/// and day without questions has no row.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn calls_by_site_and_day(
+    pool: &PgPool,
+    first: u64,
+    last: u64,
+) -> Result<Vec<SiteDayCount>, LearningStoreError> {
+    let rows = sqlx::query(
+        "SELECT site, day, count(*) AS used FROM object_agent_calls
+         WHERE day BETWEEN $1 AND $2 GROUP BY site, day",
+    )
+    .bind(day_i64(first))
+    .bind(day_i64(last))
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| -> Result<SiteDayCount, LearningStoreError> {
+            let day: i64 = row.try_get("day")?;
+            Ok(SiteDayCount {
+                site: row.try_get("site")?,
+                day: u64::try_from(day).unwrap_or(0),
+                used: row.try_get("used")?,
+            })
+        })
+        .collect()
+}
+
 /// Asks the agent again about a position, at the next pass that reaches it. Returns
 /// `false` when the position is not a request position of the site.
 ///
@@ -1026,6 +1067,39 @@ mod tests {
                 failed: 0,
                 last_call_millis: Some(start - 5),
             })
+        );
+        clear(&pool, &sites).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn the_history_counts_each_site_on_each_day_of_the_range() {
+        let pool = connect_test_pool().await;
+        let sites = ["history-a", "history-b"];
+        clear(&pool, &sites).await;
+        let first: u64 = 60_121;
+        let start = day_i64(first) * DAY_MILLIS;
+        insert_call(&pool, sites[0], first, start + 1, None).await;
+        insert_call(&pool, sites[0], first, start + 2, Some("timeout")).await;
+        insert_call(&pool, sites[0], first + 1, start + DAY_MILLIS, None).await;
+        insert_call(&pool, sites[0], first + 5, start + 5 * DAY_MILLIS, None).await;
+        insert_call(&pool, sites[1], first, start + 3, None).await;
+
+        let mut rows: Vec<(String, u64, i64)> = calls_by_site_and_day(&pool, first, first + 2)
+            .await
+            .expect("the history")
+            .into_iter()
+            .filter(|row| sites.contains(&row.site.as_str()))
+            .map(|row| (row.site, row.day, row.used))
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                (sites[0].to_owned(), first, 2),
+                (sites[0].to_owned(), first + 1, 1),
+                (sites[1].to_owned(), first, 1),
+            ]
         );
         clear(&pool, &sites).await;
     }

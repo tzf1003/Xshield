@@ -43,7 +43,7 @@ use xshield_postgres::{
         self as store, AgentRecord, AgentSave, HistoryEntry, JevRecord, JevSave, ModelConfigError,
         ModelRows,
     },
-    object_agent_store::{self as agent_calls, SiteDay},
+    object_agent_store::{self as agent_calls, SiteDay, SiteDayCount},
     site_spec_store::{self, SiteRecord},
 };
 
@@ -186,6 +186,8 @@ pub struct AgentSiteBody {
     pub failed: i64,
     /// When the site's latest question was asked, on any day.
     pub last_call_at: Option<String>,
+    /// The days in a row, counting back from yesterday, on which the site used its whole limit: a week at most.
+    pub full_days: i64,
 }
 
 /// A key's status. The key itself is never in a response.
@@ -563,6 +565,12 @@ async fn agent_state(state: &ControlState, rows: &ModelRows) -> ApiResult<AgentG
     let day = day_of(u64::try_from(now).unwrap_or(0));
     let totals = agent_calls::day_usage(pool, day).await?;
     let per_site = agent_calls::day_usage_by_site(pool, day).await?;
+    let history = agent_calls::calls_by_site_and_day(
+        pool,
+        day.saturating_sub(FULL_DAYS_LOOKBACK),
+        day.saturating_sub(1),
+    )
+    .await?;
     let sites = site_spec_store::list(pool).await?;
     let recent = agent_calls::recent_outcomes(pool, RECENT_CALLS).await?;
     let usage = AgentUsageBody {
@@ -577,7 +585,7 @@ async fn agent_state(state: &ControlState, rows: &ModelRows) -> ApiResult<AgentG
         rows,
         recent,
         usage,
-        agent_sites(&sites, &per_site),
+        agent_sites(&sites, &per_site, &history, day),
     ))
 }
 
@@ -586,16 +594,25 @@ fn agent_on(site: &SiteRecord) -> bool {
     site.spec.objects().learning().agent.enabled
 }
 
-/// The sites with the agent on, and the sites that asked it today, in name order, with
-/// their share of today's questions.
-fn agent_sites(sites: &[SiteRecord], per_site: &[SiteDay]) -> Vec<AgentSiteBody> {
+/// The days before today that a site's run of full days can count: a week.
+const FULL_DAYS_LOOKBACK: u64 = 7;
+
+/// The sites with the agent on, and the sites that asked it today, in name order, with their
+/// share of today's questions and their run of full days.
+fn agent_sites(
+    sites: &[SiteRecord],
+    per_site: &[SiteDay],
+    history: &[SiteDayCount],
+    today: u64,
+) -> Vec<AgentSiteBody> {
     sites
         .iter()
         .filter_map(|record| {
             let name = record.spec.name();
             let enabled = agent_on(record);
-            let today = per_site.iter().find(|row| row.site == name);
-            let used = today.map_or(0, |row| row.used);
+            let limit = i64::from(record.spec.objects().learning().agent.daily_limit);
+            let current = per_site.iter().find(|row| row.site == name);
+            let used = current.map_or(0, |row| row.used);
             if !enabled && used == 0 {
                 return None;
             }
@@ -603,12 +620,38 @@ fn agent_sites(sites: &[SiteRecord], per_site: &[SiteDay]) -> Vec<AgentSiteBody>
                 site: name.to_owned(),
                 enabled,
                 used,
-                limit: i64::from(record.spec.objects().learning().agent.daily_limit),
-                failed: today.map_or(0, |row| row.failed),
-                last_call_at: today.and_then(|row| row.last_call_millis).and_then(rfc3339),
+                limit,
+                failed: current.map_or(0, |row| row.failed),
+                last_call_at: current
+                    .and_then(|row| row.last_call_millis)
+                    .and_then(rfc3339),
+                full_days: full_days(name, limit, history, today),
             })
         })
         .collect()
+}
+
+/// The run of full days a site has: counting back from yesterday, the days on which it asked as
+/// many questions as its limit, at most [`FULL_DAYS_LOOKBACK`]. A site without a limit has none.
+fn full_days(site: &str, limit: i64, history: &[SiteDayCount], today: u64) -> i64 {
+    if limit <= 0 {
+        return 0;
+    }
+    let mut run = 0;
+    for back in 1..=FULL_DAYS_LOOKBACK {
+        let Some(day) = today.checked_sub(back) else {
+            break;
+        };
+        let used = history
+            .iter()
+            .find(|row| row.site == site && row.day == day)
+            .map_or(0, |row| row.used);
+        if used < limit {
+            break;
+        }
+        run += 1;
+    }
+    run
 }
 
 /// The Jev values of a request body: route, endpoint, model and timeout.
@@ -925,7 +968,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            agent_sites(&sites, &per_site),
+            agent_sites(&sites, &per_site, &[], 60_000),
             vec![
                 AgentSiteBody {
                     site: "alpha".to_owned(),
@@ -934,6 +977,7 @@ mod tests {
                     limit: 50,
                     failed: 0,
                     last_call_at: None,
+                    full_days: 0,
                 },
                 AgentSiteBody {
                     site: "beta".to_owned(),
@@ -942,8 +986,42 @@ mod tests {
                     limit: 20,
                     failed: 1,
                     last_call_at: rfc3339(1_000),
+                    full_days: 0,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_site_counts_its_full_days_back_from_yesterday_and_stops_at_the_first_short_day() {
+        let sites = [
+            site("alpha", r#"{"enabled": true, "daily_limit": 50}"#),
+            site("beta", r#"{"enabled": true, "daily_limit": 20}"#),
+        ];
+        let history: Vec<SiteDayCount> = [
+            ("alpha", 60_000, 50),
+            ("alpha", 59_999, 50),
+            ("alpha", 59_998, 50),
+            ("alpha", 59_997, 49),
+            ("alpha", 59_996, 50),
+        ]
+        .into_iter()
+        .chain((59_993..=59_999).map(|day| ("beta", day, 20)))
+        .map(|(site, day, used)| SiteDayCount {
+            site: site.to_owned(),
+            day,
+            used,
+        })
+        .collect();
+
+        let rows = agent_sites(&sites, &[], &history, 60_000);
+        let full = |name: &str| {
+            rows.iter()
+                .find(|row| row.site == name)
+                .map(|row| row.full_days)
+        };
+        // Today does not count, the short day ends alpha's run, and beta's run stops at a week.
+        assert_eq!(full("alpha"), Some(2));
+        assert_eq!(full("beta"), Some(7));
     }
 }
