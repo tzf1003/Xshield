@@ -1332,6 +1332,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_paused_entry_leaves_its_position_to_the_name() {
+        let entry = |paused: &str| {
+            site(&format!(
+                r#","mode":"enforce","objects":{{
+                    "classes":[{{"id":"patient","name":"患者"}},{{"id":"document","name":"文档"}}],
+                    "slots":[{{"key":"GET /api/patients/{{id}} path[2]","class":"document","source":"admin"{paused}}}]}}"#
+            ))
+        };
+        // Declared as a document, the position is not a patient the list showed: Jev decides.
+        let declared_fake = FakeJev::new();
+        let declared_judge = judge(&declared_fake);
+        let declared = entry("");
+        declared_judge.observe(&declared, &list_response("alice", 0));
+        let verdict = declared_judge
+            .judge(
+                &declared,
+                &get("/api/patients/7", None, Some("alice"), 1_000),
+            )
+            .await;
+        assert_ne!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(declared_fake.calls(), 1);
+        // Paused, the entry is not used, so the position is judged by its name as it was before.
+        let paused_fake = FakeJev::new();
+        let paused_judge = judge(&paused_fake);
+        let paused = entry(r#","paused":true"#);
+        paused_judge.observe(&paused, &list_response("alice", 0));
+        let verdict = paused_judge
+            .judge(&paused, &get("/api/patients/7", None, Some("alice"), 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(paused_fake.calls(), 0);
+    }
+
+    #[tokio::test]
     async fn a1_objects_shown_by_the_list_are_allowed_without_jev() {
         let fake = FakeJev::new();
         let judge = judge(&fake);

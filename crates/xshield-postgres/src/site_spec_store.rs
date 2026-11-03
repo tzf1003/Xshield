@@ -44,6 +44,10 @@ pub enum Change {
     Delete,
     /// The configuration was imported.
     Import,
+    /// The learning task tightened an object position on its own.
+    AutoTighten,
+    /// The learning task paused a confirmed object position on its own.
+    AutoPause,
 }
 
 impl Change {
@@ -56,6 +60,8 @@ impl Change {
             Self::Rollback => "rollback",
             Self::Delete => "delete",
             Self::Import => "import",
+            Self::AutoTighten => "auto_tighten",
+            Self::AutoPause => "auto_pause",
         }
     }
 
@@ -68,6 +74,8 @@ impl Change {
             "rollback" => Self::Rollback,
             "delete" => Self::Delete,
             "import" => Self::Import,
+            "auto_tighten" => Self::AutoTighten,
+            "auto_pause" => Self::AutoPause,
             _ => return None,
         })
     }
@@ -342,6 +350,22 @@ pub async fn update(
     expected_version: i64,
     note: Option<&str>,
 ) -> Result<WriteOutcome, SiteSpecStoreError> {
+    write(pool, name, spec, expected_version, Change::Update, note).await
+}
+
+/// Replaces a site's configuration as a version recorded as `change`, when the site is
+/// still at `expected_version`. The learning task records its automatic changes this way.
+///
+/// # Errors
+/// Returns [`SiteSpecStoreError`] on a database or serialization failure.
+pub async fn write(
+    pool: &PgPool,
+    name: &str,
+    spec: &SiteSpec,
+    expected_version: i64,
+    change: Change,
+    note: Option<&str>,
+) -> Result<WriteOutcome, SiteSpecStoreError> {
     let after = spec_to_json(spec)?;
     let mut transaction = pool.begin().await?;
     let current = lock_current_version(&mut transaction, name).await?;
@@ -368,7 +392,7 @@ pub async fn update(
         &mut transaction,
         name,
         version,
-        Change::Update,
+        change,
         None,
         Some(&after),
         note,
@@ -525,6 +549,30 @@ pub async fn history(
     )
     .bind(name)
     .bind(before.unwrap_or(i64::MAX))
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_history).collect()
+}
+
+/// Lists a site's automatic versions, newest first: the versions the learning task recorded, as
+/// [`Change::AutoTighten`] or [`Change::AutoPause`].
+///
+/// # Errors
+/// Returns [`SiteSpecStoreError`] on a database or serialization failure.
+pub async fn automatic_history(
+    pool: &PgPool,
+    name: &str,
+    limit: i64,
+) -> Result<Vec<HistoryEntry>, SiteSpecStoreError> {
+    let limit = limit.clamp(1, 200);
+    let rows = sqlx::query(
+        "SELECT version, change, rollback_of, note, changed_at, spec
+         FROM site_config_history
+         WHERE site = $1 AND change IN ('auto_tighten', 'auto_pause')
+         ORDER BY version DESC LIMIT $2",
+    )
+    .bind(name)
     .bind(limit)
     .fetch_all(pool)
     .await?;

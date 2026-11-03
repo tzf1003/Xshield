@@ -46,6 +46,10 @@ const DIGEST_BYTES: usize = 8;
 const FLOWS_MAX: usize = 20;
 /// Most sample requests a drawer lists for one position.
 const EXAMPLES_MAX: i64 = 3;
+/// Days of automatic changes the object map lists.
+const EVENTS_DAYS: i64 = 30;
+/// Most automatic versions one object map response reads.
+const EVENTS_MAX: i64 = 20;
 
 /// The learning state of a position, as the console names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -137,6 +141,9 @@ struct SlotRow {
     basis: String,
     last_seen: Option<String>,
     dismissed: bool,
+    /// Whether the saved configuration uses the position's kind: a declared entry that is
+    /// not paused. A learned position is never in effect, since the judge does not use it.
+    in_effect: bool,
 }
 
 /// The counts of the whole map: `ObjectCounts`. Retired positions are not counted.
@@ -172,9 +179,27 @@ pub(crate) struct ObjectsBody {
     agent_configured: bool,
     classes: Vec<ClassBody>,
     slots: Vec<SlotRow>,
-    /// The automatic changes the banner shows. None are recorded yet, so empty.
+    /// Which automatic behaviours this build runs, so the console can say which are off.
+    features: Features,
+    /// The automatic changes of the last 30 days, newest first: one event per entry changed.
     events: Vec<Value>,
 }
+
+/// The automatic behaviours this build runs: `features` of the object map's response.
+#[derive(Debug, Serialize)]
+pub(crate) struct Features {
+    auto_tighten: bool,
+    auto_pause: bool,
+    path_confirm: bool,
+}
+
+/// What this build runs. Tightening is not applied on its own yet, and path positions cannot be
+/// confirmed from the console yet.
+const FEATURES: Features = Features {
+    auto_tighten: false,
+    auto_pause: true,
+    path_confirm: false,
+};
 
 /// One other end of a position's flows: `ObjectFlow`.
 #[derive(Debug, Serialize)]
@@ -279,7 +304,8 @@ pub async fn list(
         agent_configured: false,
         classes: classes_of(&record.spec, &rows),
         slots: rows.into_iter().filter(|row| filter.matches(row)).collect(),
-        events: Vec::new(),
+        features: FEATURES,
+        events: automatic_events(&state, &name).await?,
     }))
 }
 
@@ -385,6 +411,94 @@ pub async fn bootstrap(
     }))
 }
 
+/// The automatic changes of the last [`EVENTS_DAYS`] days, newest first: one event for each entry a
+/// version changed, with the entry it replaced and the entry it became. Every event is `open`: the
+/// console's acknowledgements are not recorded yet.
+///
+/// # Errors
+/// A 500 when a read of the configuration history fails.
+async fn automatic_events(state: &ControlState, name: &str) -> ApiResult<Vec<Value>> {
+    let since = now_millis().saturating_sub(EVENTS_DAYS.saturating_mul(DAY_MILLIS));
+    let versions = site_spec_store::automatic_history(&state.pool, name, EVENTS_MAX).await?;
+    let mut events = Vec::new();
+    for version in versions {
+        if version.changed_at.timestamp_millis() < since {
+            break;
+        }
+        let Some(spec) = version.spec.as_ref() else {
+            continue;
+        };
+        let before = match version.version.checked_sub(1) {
+            Some(earlier) if earlier > 0 => site_spec_store::version(&state.pool, name, earlier)
+                .await?
+                .and_then(|entry| entry.spec),
+            _ => None,
+        };
+        for (index, (previous, slot)) in
+            changed_slots(before.as_ref(), spec).into_iter().enumerate()
+        {
+            events.push(automatic_event(&version, index, previous, slot));
+        }
+    }
+    Ok(events)
+}
+
+/// One automatic change in the shape the console reads: the entry it replaced and the entry it
+/// became, the side of the position, and the reason. A pause is for evidence that points at other
+/// kinds. The status is `open` until the console acknowledges or undoes the event, which is not
+/// recorded yet.
+fn automatic_event(
+    version: &site_spec_store::HistoryEntry,
+    index: usize,
+    previous: Option<&ObjectSlot>,
+    slot: &ObjectSlot,
+) -> Value {
+    let reason = (version.change == site_spec_store::Change::AutoPause)
+        .then(|| serde_json::json!({ "code": "evidence_drift" }));
+    serde_json::json!({
+        "id": format!("v{}-{index}", version.version),
+        "kind": version.change.as_str(),
+        "at": version.changed_at.to_rfc3339(),
+        "version": version.version,
+        "key": slot.key,
+        "side": side_of_key(&slot.key).as_str(),
+        "before": { "class": previous.map(|entry| entry.class.as_str()), "entry": previous },
+        "after": { "class": slot.class, "entry": slot },
+        "reason": reason,
+        "impact": [],
+        "examples": [],
+        "status": "open",
+        "handled": null,
+        "note": version.note,
+    })
+}
+
+/// The entries of `after` that `before` does not hold as they are, each with the entry it replaced.
+/// With no earlier configuration, every paused entry counts as changed.
+fn changed_slots<'a>(
+    before: Option<&'a SiteSpec>,
+    after: &'a SiteSpec,
+) -> Vec<(Option<&'a ObjectSlot>, &'a ObjectSlot)> {
+    after
+        .objects()
+        .slots()
+        .iter()
+        .filter_map(|slot| {
+            let previous = before.and_then(|spec| {
+                spec.objects()
+                    .slots()
+                    .iter()
+                    .find(|earlier| earlier.key == slot.key)
+            });
+            match (before, previous) {
+                (Some(_), Some(earlier)) if earlier == slot => None,
+                (Some(_), previous) => Some((previous, slot)),
+                (None, _) => slot.paused.then_some((None, slot)),
+            }
+        })
+        .collect()
+}
+
 /// The site's record: its configuration, and the generation the writes are checked against.
 ///
 /// # Errors
@@ -419,7 +533,7 @@ async fn learned_request(
     let row = store::position(&state.pool, name, row_id)
         .await?
         .ok_or_else(slot_not_found)?;
-    if spec.objects().class_of(&row.slot).is_some() {
+    if spec.objects().declared_class_of(&row.slot).is_some() {
         return Err(ApiError::new(StatusCode::CONFLICT, "SLOT_IS_DECLARED"));
     }
     if Side::parse(&row.side) != Some(Side::Request) {
@@ -452,7 +566,7 @@ fn merged(spec: &SiteSpec, learned: &[PositionRow]) -> ApiResult<Vec<SlotRow>> {
         .map(|slot| declared_row(slot, by_key.get(slot.key.as_str()).copied()))
         .collect();
     for row in learned {
-        if objects.class_of(&row.slot).is_none() {
+        if objects.declared_class_of(&row.slot).is_none() {
             rows.push(learned_row(row)?);
         }
     }
@@ -462,9 +576,11 @@ fn merged(spec: &SiteSpec, learned: &[PositionRow]) -> ApiResult<Vec<SlotRow>> {
 /// A declared position: confirmed, or suspended when the learned row says its evidence now
 /// points at other kinds. Its side comes from the learned row when there is one.
 fn declared_row(slot: &ObjectSlot, learned: Option<&PositionRow>) -> SlotRow {
-    let state = match learned {
-        Some(row) if row.state == "suspended" => PositionState::Suspended,
-        _ => PositionState::Confirmed,
+    let suspended = slot.paused || learned.is_some_and(|row| row.state == "suspended");
+    let state = if suspended {
+        PositionState::Suspended
+    } else {
+        PositionState::Confirmed
     };
     let side = learned
         .and_then(|row| Side::parse(&row.side))
@@ -483,6 +599,7 @@ fn declared_row(slot: &ObjectSlot, learned: Option<&PositionRow>) -> SlotRow {
         basis,
         last_seen: learned.and_then(|row| last_seen(row.last_day)),
         dismissed: false,
+        in_effect: !slot.paused,
     }
 }
 
@@ -512,6 +629,7 @@ fn learned_row(row: &PositionRow) -> ApiResult<SlotRow> {
         basis,
         last_seen: last_seen(row.last_day),
         dismissed: row.dismissed,
+        in_effect: false,
     })
 }
 
@@ -1021,6 +1139,62 @@ mod tests {
         let now = 10 * DAY_MILLIS + 5 * 60_000;
         let window = i64::try_from(WINDOW_DAYS).expect("a small window");
         assert_eq!(window_start_millis(now), (10 - (window - 1)) * DAY_MILLIS);
+    }
+
+    /// A site declaring the given entries, for the entries an automatic change touched.
+    fn site_with_slots(slots: &str) -> SiteSpec {
+        let text = format!(
+            r#"{{"name": "clinic", "hosts": ["clinic.example.com"], "origin": "http://10.0.0.5:8080",
+                "session": {{"cookie": "SESSIONID"}}, "entries": ["/login"],
+                "objects": {{"classes": [{{"id": "doctor", "name": "医生"}}], "slots": [{slots}]}}}}"#
+        );
+        SiteSpec::from_json(&text).expect("test spec")
+    }
+
+    #[test]
+    fn an_automatic_pause_event_names_its_entries_its_side_and_its_reason() {
+        let entry = r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule"}"#;
+        let before = site_with_slots(entry);
+        let paused = site_with_slots(&entry.replace("\"rule\"", "\"rule\", \"paused\": true"));
+        let version = site_spec_store::HistoryEntry {
+            version: 3,
+            change: site_spec_store::Change::AutoPause,
+            rollback_of: None,
+            note: Some("学习任务自动暂停了 1 个位置".to_owned()),
+            changed_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("the epoch"),
+            spec: Some(paused.clone()),
+        };
+        let event = automatic_event(
+            &version,
+            0,
+            Some(&before.objects().slots()[0]),
+            &paused.objects().slots()[0],
+        );
+        assert_eq!(event["id"], "v3-0");
+        assert_eq!(event["kind"], "auto_pause");
+        assert_eq!(event["status"], "open");
+        assert_eq!(event["side"], "request");
+        assert_eq!(event["before"]["class"], "doctor");
+        // An unpaused entry has no `paused` key, and the paused one says so.
+        assert_eq!(event["before"]["entry"]["paused"], Value::Null);
+        assert_eq!(event["after"]["entry"]["paused"], true);
+        assert_eq!(event["reason"]["code"], "evidence_drift");
+    }
+
+    #[test]
+    fn an_automatic_pause_shows_the_entry_it_paused_and_the_entry_before_it() {
+        let entry = r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule"}"#;
+        let before = site_with_slots(entry);
+        let paused = site_with_slots(&entry.replace("\"rule\"", "\"rule\", \"paused\": true"));
+        let changed = changed_slots(Some(&before), &paused);
+        assert_eq!(changed.len(), 1);
+        let (previous, slot) = changed[0];
+        assert_eq!(previous.map(|entry| entry.paused), Some(false));
+        assert!(slot.paused);
+        // The same configuration changes nothing, and a version with no earlier one shows its pauses.
+        assert!(changed_slots(Some(&paused), &paused).is_empty());
+        assert_eq!(changed_slots(None, &paused).len(), 1);
+        assert!(changed_slots(None, &before).is_empty());
     }
 }
 
