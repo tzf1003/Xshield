@@ -36,6 +36,7 @@ use xshield_postgres::{
     object_agent_store::{self as runs},
     object_judgement_store::{self as judgements, Proposal},
     object_learning_store::{self as store, Flow, JevFlow, PositionRow},
+    object_tier_judgement_store::{self as tier_judgements, TierProposal},
     site_spec_store::{self, Change, SiteRecord, WriteOutcome},
 };
 
@@ -526,6 +527,7 @@ pub async fn list(
     let view = AgentView::load(&state, &record, now).await?;
     let mut rows = merged(&record.spec, &learned, &view)?;
     let proposals = judgements::proposals(&state.pool, &name).await?;
+    let tiers = tier_judgements::proposals(&state.pool, &name).await?;
     let events = automatic_events(&state, &record, now).await?;
     for row in &mut rows {
         row.suspension = suspension_of(&state, &record, &events, row, now).await?;
@@ -554,7 +556,7 @@ pub async fn list(
         learning_run,
         classes: classes_of(&record.spec, &rows),
         slots: rows.into_iter().filter(|row| filter.matches(row)).collect(),
-        judgements: judgement_bodies(&record.spec, proposals),
+        judgements: judgement_bodies(&record.spec, proposals, tiers),
         features: FEATURES,
         events: events
             .into_iter()
@@ -762,39 +764,73 @@ pub async fn ambiguous(
     changed_or_conflict(changed)
 }
 
-/// The body of a judgement confirmation: the value and reliability the administrator saw. They must be
-/// the proposal's own, so a proposal the rules have changed since is not confirmed by accident.
+/// The body of a judgement confirmation: the judgement and the reliability the administrator saw. They
+/// must be the proposal's own, so a proposal the rules have changed since is not confirmed by accident.
+/// A request position's judgement is `accepts_public` and a response position's is `tier`; the body names
+/// the one its position takes and leaves the other out.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfirmJudgement {
-    accepts_public: bool,
+    accepts_public: Option<bool>,
+    tier: Option<Tier>,
     reliability: Reliability,
 }
 
-/// The note the configuration history keeps for a confirmed judgement.
+/// The note the configuration history keeps for a confirmed acceptance judgement.
 const JUDGEMENT_NOTE: &str = "管理员确认了请求位置是否接受公共来源的判定";
 
-/// One acceptance proposal the console lists: `ObjectJudgement`.
+/// The note the configuration history keeps for a confirmed tier judgement.
+const TIER_NOTE: &str = "管理员确认了响应位置的归属层级判定";
+
+/// One proposal the console lists: `ObjectJudgement`. A request position's proposal says whether normal
+/// traffic sends public sources to it; a response position's says whose objects it shows.
 #[derive(Debug, Serialize)]
 pub(crate) struct JudgementBody {
     /// The declared position's id, which the confirm and dismiss actions take.
     id: String,
     key: String,
-    /// Whether normal traffic sends public sources to the position, by the rules.
-    accepts_public: bool,
+    #[serde(flatten)]
+    judgement: JudgementFields,
+    /// How sure the rules are.
     reliability: Reliability,
-    votes: u32,
-    sessions: u32,
-    /// The share of the votes sent from public positions, in thousandths.
-    public_per_mille: u32,
     last_seen: Option<String>,
 }
 
-/// The proposals the console lists: those the configuration does not carry already, for a position it
-/// declares in effect. A proposal the configuration has since taken in is left out.
-fn judgement_bodies(spec: &SiteSpec, proposals: Vec<Proposal>) -> Vec<JudgementBody> {
+/// The judgement a proposal makes, by the kind of position it is for.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum JudgementFields {
+    /// A request position: whether normal traffic sends public sources to it, and what the rules counted.
+    Acceptance {
+        /// `false`: normal traffic rarely sends public sources here. `true`: it commonly does.
+        accepts_public: bool,
+        votes: u32,
+        sessions: u32,
+        /// The share of the votes sent from public positions, in thousandths.
+        public_per_mille: u32,
+    },
+    /// A response position: whose objects it shows, and what the rules counted.
+    Tier {
+        tier: Tier,
+        /// The units the judgement counts.
+        units: u32,
+        /// The distinct values among them.
+        seen_values: u32,
+        /// The share of values, in thousandths, that agree with the tier.
+        agreement_per_mille: u32,
+    },
+}
+
+/// The proposals the console lists: the acceptance proposals of declared request positions and the tier
+/// proposals of declared response positions, each where the configuration does not carry the judgement
+/// already. A paused entry, an undeclared key and an identity position are left out of the tiers.
+fn judgement_bodies(
+    spec: &SiteSpec,
+    proposals: Vec<Proposal>,
+    tiers: Vec<TierProposal>,
+) -> Vec<JudgementBody> {
     let map = spec.objects();
-    proposals
+    let acceptances = proposals
         .into_iter()
         .filter(|proposal| {
             map.declared_class_of(&proposal.slot).is_some() && !map.is_paused(&proposal.slot)
@@ -806,46 +842,82 @@ fn judgement_bodies(spec: &SiteSpec, proposals: Vec<Proposal>) -> Vec<JudgementB
         .map(|proposal| JudgementBody {
             id: declared_id(&proposal.slot),
             key: proposal.slot,
-            accepts_public: proposal.accepts_public,
+            judgement: JudgementFields::Acceptance {
+                accepts_public: proposal.accepts_public,
+                votes: proposal.votes,
+                sessions: proposal.sessions,
+                public_per_mille: proposal.public_per_mille,
+            },
             reliability: proposal.reliability,
-            votes: proposal.votes,
-            sessions: proposal.sessions,
-            public_per_mille: proposal.public_per_mille,
             last_seen: last_seen(i64::try_from(proposal.last_day).unwrap_or(i64::MAX)),
+        });
+    let judged_tiers = tiers
+        .into_iter()
+        .filter(|proposal| {
+            map.declared_class_of(&proposal.slot).is_some()
+                && !map.is_paused(&proposal.slot)
+                && map.identity_of(&proposal.slot).is_none()
+                && !is_request_key(&proposal.slot)
         })
-        .collect()
+        .filter(|proposal| {
+            map.tier_of(&proposal.slot) != Some(proposal.tier)
+                || map.reliability_of(&proposal.slot) != Some(proposal.reliability)
+        })
+        .map(|proposal| JudgementBody {
+            id: declared_id(&proposal.slot),
+            key: proposal.slot,
+            judgement: JudgementFields::Tier {
+                tier: proposal.tier,
+                units: proposal.units,
+                seen_values: proposal.seen_values,
+                agreement_per_mille: proposal.agreement_per_mille,
+            },
+            reliability: proposal.reliability,
+            last_seen: last_seen(i64::try_from(proposal.last_day).unwrap_or(i64::MAX)),
+        });
+    acceptances.chain(judged_tiers).collect()
 }
 
-/// The key of the declared request position an id names, for the judgement actions.
+/// The declared position an id names, for the judgement actions. A request position takes an acceptance
+/// judgement and a response position takes a tier.
 ///
 /// # Errors
-/// `SLOT_NOT_FOUND` (404) for an id that names no declared position, and `SLOT_NOT_REQUEST` (409) for
-/// a response position, which has no acceptance judgement.
-fn judged_key(spec: &SiteSpec, id: &str) -> ApiResult<String> {
+/// `SLOT_NOT_FOUND` (404) for an id that names no declared position, and `SLOT_NOT_JUDGED` (409) for an
+/// identity position: it states who the session is, and carries no judgement.
+fn judged_slot<'a>(spec: &'a SiteSpec, id: &str) -> ApiResult<&'a ObjectSlot> {
     let slot = declared_of(spec, id).ok_or_else(slot_not_found)?;
-    if !is_request_key(&slot.key) {
-        return Err(ApiError::new(StatusCode::CONFLICT, "SLOT_NOT_REQUEST"));
+    if slot.identity.is_some() {
+        return Err(ApiError::new(StatusCode::CONFLICT, "SLOT_NOT_JUDGED"));
     }
-    Ok(slot.key.clone())
+    Ok(slot)
 }
 
 fn judgement_not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "JUDGEMENT_NOT_FOUND")
 }
 
-/// `POST /api/sites/{name}/objects/slots/{id}/judgement/confirm`: confirms the acceptance proposal of a
-/// declared request position. The body names the value and reliability the administrator saw, and they
-/// must be the proposal's own. The judgement enters the configuration as one new version, and the
-/// proposal is cleared. The judge reads it from there, so a proposal confirmed here changes nothing
-/// until the configuration is saved.
+fn judgement_changed() -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, "JUDGEMENT_CHANGED")
+}
+
+fn slot_state_conflict() -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, "SLOT_STATE_CONFLICT")
+}
+
+/// `POST /api/sites/{name}/objects/slots/{id}/judgement/confirm`: confirms the proposal of a declared
+/// position. A request position's proposal is an acceptance judgement, and a response position's is a
+/// tier. The body names the value and reliability the administrator saw, and they must be the proposal's
+/// own. The judgement enters the configuration as one new version, and the proposal is cleared. The judge
+/// reads it from there, so a proposal confirmed here changes nothing until the configuration is saved.
 ///
 /// # Errors
 /// `SITE_NOT_FOUND` and `SLOT_NOT_FOUND` (404) for an unknown site or an id that names no declared
-/// position; `UNSUPPORTED_MEDIA_TYPE` and `INVALID_BODY` for a body that is not the confirmation;
-/// `JUDGEMENT_NOT_FOUND` (404) when the position has no proposal; `SLOT_NOT_REQUEST` (409) for a
-/// response position; `JUDGEMENT_CHANGED` (409) when the body names a value other than the proposal's;
-/// `SLOT_STATE_CONFLICT` (409) when the entry carries a tier; `VERSION_CONFLICT` (409, with
-/// `current_version`) when a save moved the site on meanwhile; a 500 when a write fails.
+/// position; `SLOT_NOT_JUDGED` (409) for an identity position; `UNSUPPORTED_MEDIA_TYPE` and `INVALID_BODY`
+/// for a body that is not the confirmation; `JUDGEMENT_NOT_FOUND` (404) when the position has no proposal;
+/// `JUDGEMENT_CHANGED` (409) when the body names a value other than the proposal's, or the other kind of
+/// judgement; `SLOT_STATE_CONFLICT` (409) when the entry carries the other kind of judgement;
+/// `VERSION_CONFLICT` (409, with `current_version`) when a save moved the site on meanwhile; a 500 when a
+/// write fails.
 pub async fn confirm_judgement(
     State(state): State<Arc<ControlState>>,
     Path((name, id)): Path<(String, String)>,
@@ -854,56 +926,112 @@ pub async fn confirm_judgement(
 ) -> ApiResult<StatusCode> {
     let confirmation: ConfirmJudgement = json_body(&headers, &body)?;
     let record = site_of(&state, &name).await?;
-    let key = judged_key(&record.spec, &id)?;
-    let proposal = judgements::proposal(&state.pool, &name, &key)
+    let key = judged_slot(&record.spec, &id)?.key.clone();
+    if is_request_key(&key) {
+        confirm_acceptance(&state, &name, &record, &key, &confirmation).await
+    } else {
+        confirm_tier(&state, &name, &record, &key, &confirmation).await
+    }
+}
+
+/// Confirms the acceptance proposal of a request position. The body names an acceptance, and its value and
+/// reliability must be the proposal's own.
+async fn confirm_acceptance(
+    state: &ControlState,
+    name: &str,
+    record: &SiteRecord,
+    key: &str,
+    confirmation: &ConfirmJudgement,
+) -> ApiResult<StatusCode> {
+    let proposal = judgements::proposal(&state.pool, name, key)
         .await?
         .ok_or_else(judgement_not_found)?;
-    if proposal.accepts_public != confirmation.accepts_public
-        || proposal.reliability != confirmation.reliability
+    let (Some(accepts_public), None) = (confirmation.accepts_public, confirmation.tier) else {
+        return Err(judgement_changed());
+    };
+    if proposal.accepts_public != accepts_public || proposal.reliability != confirmation.reliability
     {
-        return Err(ApiError::new(StatusCode::CONFLICT, "JUDGEMENT_CHANGED"));
+        return Err(judgement_changed());
     }
     let map = record.spec.objects();
-    if map.accepts_public_of(&key) == Some(confirmation.accepts_public)
-        && map.reliability_of(&key) == Some(confirmation.reliability)
+    if map.accepts_public_of(key) != Some(accepts_public)
+        || map.reliability_of(key) != Some(confirmation.reliability)
     {
-        // The configuration carries the judgement already, so there is nothing to write.
-        judgements::clear_confirmed(
-            &state.pool,
-            &name,
-            &key,
-            confirmation.accepts_public,
-            confirmation.reliability,
-        )
-        .await?;
-        return Ok(StatusCode::NO_CONTENT);
+        let objects = map
+            .clone()
+            .with_accepts_public(key, accepts_public, confirmation.reliability)
+            .ok_or_else(slot_state_conflict)?;
+        write_judgement(state, name, record, objects, JUDGEMENT_NOTE).await?;
     }
-    let objects = map
-        .clone()
-        .with_accepts_public(&key, confirmation.accepts_public, confirmation.reliability)
-        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "SLOT_STATE_CONFLICT"))?;
+    // Either the configuration carries the judgement already, or the write above put it there.
+    judgements::clear_confirmed(
+        &state.pool,
+        name,
+        key,
+        accepts_public,
+        confirmation.reliability,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Confirms the tier proposal of a response position. The body names a tier, and its tier and reliability
+/// must be the proposal's own.
+async fn confirm_tier(
+    state: &ControlState,
+    name: &str,
+    record: &SiteRecord,
+    key: &str,
+    confirmation: &ConfirmJudgement,
+) -> ApiResult<StatusCode> {
+    let proposal = tier_judgements::proposal(&state.pool, name, key)
+        .await?
+        .ok_or_else(judgement_not_found)?;
+    let (Some(tier), None) = (confirmation.tier, confirmation.accepts_public) else {
+        return Err(judgement_changed());
+    };
+    if proposal.tier != tier || proposal.reliability != confirmation.reliability {
+        return Err(judgement_changed());
+    }
+    let map = record.spec.objects();
+    if map.tier_of(key) != Some(tier) || map.reliability_of(key) != Some(confirmation.reliability) {
+        let objects = map
+            .clone()
+            .with_tier(key, tier, confirmation.reliability)
+            .ok_or_else(slot_state_conflict)?;
+        write_judgement(state, name, record, objects, TIER_NOTE).await?;
+    }
+    // Either the configuration carries the tier already, or the write above put it there.
+    tier_judgements::clear_confirmed(&state.pool, name, key, tier, confirmation.reliability)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Writes a configuration that carries a confirmed judgement as one new version, with the note the history
+/// keeps for it. The write names the version the administrator's record was read at.
+///
+/// # Errors
+/// `SITE_NOT_FOUND` (404) when the site is gone, `VERSION_CONFLICT` (409, with `current_version`) when a
+/// save moved the site on meanwhile, and a 500 when the write fails.
+async fn write_judgement(
+    state: &ControlState,
+    name: &str,
+    record: &SiteRecord,
+    objects: ObjectMap,
+    note: &str,
+) -> ApiResult<()> {
     let spec = record.spec.clone().with_objects(objects);
     match site_spec_store::write(
         &state.pool,
-        &name,
+        name,
         &spec,
         record.version,
         Change::Update,
-        Some(JUDGEMENT_NOTE),
+        Some(note),
     )
     .await?
     {
-        WriteOutcome::Applied(_) => {
-            judgements::clear_confirmed(
-                &state.pool,
-                &name,
-                &key,
-                confirmation.accepts_public,
-                confirmation.reliability,
-            )
-            .await?;
-            Ok(StatusCode::NO_CONTENT)
-        }
+        WriteOutcome::Applied(_) => Ok(()),
         WriteOutcome::NotFound => Err(ApiError::new(StatusCode::NOT_FOUND, "SITE_NOT_FOUND")),
         WriteOutcome::VersionConflict { current } => {
             Err(ApiError::new(StatusCode::CONFLICT, "VERSION_CONFLICT").at_version(current))
@@ -911,9 +1039,8 @@ pub async fn confirm_judgement(
     }
 }
 
-/// `POST /api/sites/{name}/objects/slots/{id}/judgement/dismiss`: dismisses the acceptance proposal of a
-/// declared request position. The rules propose the same value again only once their evidence reaches
-/// the other value.
+/// `POST /api/sites/{name}/objects/slots/{id}/judgement/dismiss`: dismisses the proposal of a declared
+/// position. The rules propose the same judgement again only once their evidence reaches another one.
 ///
 /// # Errors
 /// As [`confirm_judgement`] for the site and the position; `JUDGEMENT_NOT_FOUND` (404) when the position
@@ -923,9 +1050,13 @@ pub async fn dismiss_judgement(
     Path((name, id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     let record = site_of(&state, &name).await?;
-    let key = judged_key(&record.spec, &id)?;
-    let changed =
-        judgements::dismiss(&state.pool, &name, record.created_at, &key, now_millis()).await?;
+    let key = judged_slot(&record.spec, &id)?.key.clone();
+    let now = now_millis();
+    let changed = if is_request_key(&key) {
+        judgements::dismiss(&state.pool, &name, record.created_at, &key, now).await?
+    } else {
+        tier_judgements::dismiss(&state.pool, &name, record.created_at, &key, now).await?
+    };
     if changed {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -2769,6 +2900,67 @@ mod tests {
         );
         assert_eq!(confirmed.class_of(NEW), Some("document"));
     }
+
+    #[test]
+    fn a_judgement_is_asked_of_a_response_or_request_position_but_not_of_an_identity() {
+        let spec = site_with_slots(
+            r#"{"key": "GET /api/home doctor.id", "class": "doctor", "source": "admin", "identity": "user"},
+               {"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "admin", "tier": "self"}"#,
+        );
+        let identity = judged_slot(&spec, &declared_id("GET /api/home doctor.id"))
+            .expect_err("an identity position states who the session is, and has no judgement");
+        assert_eq!(identity.code(), "SLOT_NOT_JUDGED");
+        assert_eq!(identity.status(), StatusCode::CONFLICT);
+        let response = judged_slot(&spec, &declared_id("GET /api/appointments [].doc_id"))
+            .expect("a response position takes a tier");
+        assert_eq!(response.key, "GET /api/appointments [].doc_id");
+        let unknown = judged_slot(&spec, "a0000000000000000")
+            .expect_err("an id that names no position is not found");
+        assert_eq!(unknown.code(), "SLOT_NOT_FOUND");
+    }
+
+    #[test]
+    fn a_tier_proposal_is_listed_with_its_fields_unless_the_entry_carries_it() {
+        let spec = site_with_slots(
+            r#"{"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "admin", "tier": "self"},
+               {"key": "GET /api/notes [].id", "class": "doctor", "source": "admin", "tier": "self", "reliability": "medium"},
+               {"key": "GET /api/home doctor.id", "class": "doctor", "source": "admin", "identity": "user"}"#,
+        );
+        let proposal = |slot: &str, tier: Tier| TierProposal {
+            slot: slot.to_owned(),
+            tier,
+            reliability: Reliability::Medium,
+            units: 30,
+            seen_values: 12,
+            agreement_per_mille: 950,
+            last_day: 20_000,
+        };
+        let listed = judgement_bodies(
+            &spec,
+            Vec::new(),
+            vec![
+                // The entry says `self`: `public` is a change to propose.
+                proposal("GET /api/appointments [].doc_id", Tier::Public),
+                // The entry carries this judgement already.
+                proposal("GET /api/notes [].id", Tier::Own),
+                // An identity position has no tier to propose.
+                proposal("GET /api/home doctor.id", Tier::Public),
+            ],
+        );
+        assert_eq!(listed.len(), 1, "only the change is listed");
+        let row = serde_json::to_value(&listed[0]).expect("the row serializes");
+        assert_eq!(row["key"], "GET /api/appointments [].doc_id");
+        assert_eq!(row["tier"], "public");
+        assert_eq!(row["reliability"], "medium");
+        assert_eq!(row["units"], 30);
+        assert_eq!(row["seen_values"], 12);
+        assert_eq!(row["agreement_per_mille"], 950);
+        assert!(
+            row.get("accepts_public").is_none(),
+            "a tier carries no acceptance"
+        );
+        assert!(row.get("votes").is_none(), "a tier counts units, not votes");
+    }
 }
 
 /// Passes against a migrated PostgreSQL database, which they need `XSHIELD_DATABASE_URL` for.
@@ -3831,8 +4023,7 @@ mod live_tests {
 
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
-    async fn a_dismissed_acceptance_proposal_leaves_the_list_and_only_response_positions_are_refused()
-     {
+    async fn a_dismissed_acceptance_proposal_leaves_the_list() {
         let (state, name) = judged_site("judgement-dismiss").await;
         let id = declared_id(SLOT);
         let status = dismiss_judgement(State(Arc::clone(&state)), Path((name.clone(), id.clone())))
@@ -3847,7 +4038,7 @@ mod live_tests {
         };
         assert_eq!(gone.code(), "JUDGEMENT_NOT_FOUND");
 
-        // A response position has no acceptance judgement, and an unknown id names no position.
+        // A response position with no tier proposal has nothing to confirm, and an unknown id names no position.
         let Err(response) = confirm_judgement(
             State(Arc::clone(&state)),
             Path((name.clone(), declared_id(APPOINTMENTS))),
@@ -3856,9 +4047,9 @@ mod live_tests {
         )
         .await
         else {
-            panic!("a response position has no acceptance judgement");
+            panic!("a response position with no tier proposal has nothing to confirm");
         };
-        assert_eq!(response.code(), "SLOT_NOT_REQUEST");
+        assert_eq!(response.code(), "JUDGEMENT_NOT_FOUND");
         let Err(unknown) = dismiss_judgement(
             State(Arc::clone(&state)),
             Path((name.clone(), "a0000000000000000".to_owned())),
@@ -3868,6 +4059,148 @@ mod live_tests {
             panic!("an unknown id names no position");
         };
         assert_eq!(unknown.code(), "SLOT_NOT_FOUND");
+        assert_eq!(version_of(&state, &name).await, 1);
+    }
+
+    /// A tier proposal of `APPOINTMENTS`, the response position `judged_site` declares at the self tier.
+    fn tier_proposal(tier: Tier, reliability: Reliability) -> TierProposal {
+        TierProposal {
+            slot: APPOINTMENTS.to_owned(),
+            tier,
+            reliability,
+            units: 30,
+            seen_values: 12,
+            agreement_per_mille: 950,
+            last_day: day_of(u64::try_from(now_millis()).unwrap_or(0)),
+        }
+    }
+
+    fn tier_body(tier: &str, reliability: &str) -> Bytes {
+        Bytes::from(json!({"tier": tier, "reliability": reliability}).to_string())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_tier_proposal_is_listed_then_confirmed_into_the_entry() {
+        let (state, name) = judged_site("tier-confirm").await;
+        let generation = site_of(&state, &name).await.expect("the site").created_at;
+        tier_judgements::put(
+            &state.pool,
+            &name,
+            generation,
+            &tier_proposal(Tier::Public, Reliability::High),
+            now_millis(),
+        )
+        .await
+        .expect("propose the tier");
+        let id = declared_id(APPOINTMENTS);
+
+        let listing = listed(&state, &name, &[]).await;
+        let proposed = listing["judgements"]
+            .as_array()
+            .expect("the proposals")
+            .iter()
+            .find(|row| row["key"] == APPOINTMENTS)
+            .expect("the tier proposal is listed")
+            .clone();
+        assert_eq!(proposed["id"], id);
+        assert_eq!(proposed["tier"], "public");
+        assert_eq!(proposed["reliability"], "high");
+        assert_eq!(proposed["units"], 30);
+        assert_eq!(proposed["seen_values"], 12);
+        assert_eq!(proposed["agreement_per_mille"], 950);
+        assert!(
+            proposed.get("accepts_public").is_none(),
+            "a tier carries no acceptance"
+        );
+
+        // A body naming another tier, or another reliability, than the proposal's confirms nothing.
+        for body in [tier_body("self", "high"), tier_body("public", "medium")] {
+            let Err(changed) = confirm_judgement(
+                State(Arc::clone(&state)),
+                Path((name.clone(), id.clone())),
+                json_headers(),
+                body,
+            )
+            .await
+            else {
+                panic!("a changed tier proposal is refused");
+            };
+            assert_eq!(changed.code(), "JUDGEMENT_CHANGED");
+            assert_eq!(changed.status(), StatusCode::CONFLICT);
+        }
+        assert_eq!(version_of(&state, &name).await, 1);
+
+        let status = confirm_judgement(
+            State(Arc::clone(&state)),
+            Path((name.clone(), id.clone())),
+            json_headers(),
+            tier_body("public", "high"),
+        )
+        .await
+        .expect("confirm the tier");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(version_of(&state, &name).await, 2);
+        let record = site_of(&state, &name).await.expect("the site");
+        assert_eq!(
+            record.spec.objects().tier_of(APPOINTMENTS),
+            Some(Tier::Public)
+        );
+        assert_eq!(
+            record.spec.objects().reliability_of(APPOINTMENTS),
+            Some(Reliability::High)
+        );
+
+        // The entry carries the tier, so its proposal is gone. The acceptance proposal stays.
+        let after = listed(&state, &name, &[]).await;
+        let rows = after["judgements"].as_array().expect("the proposals");
+        assert!(
+            rows.iter().all(|row| row["key"] != APPOINTMENTS),
+            "the confirmed tier is no longer proposed"
+        );
+        assert!(
+            rows.iter().any(|row| row["key"] == SLOT),
+            "the acceptance proposal of the request position stays"
+        );
+        let again = confirm_judgement(
+            State(Arc::clone(&state)),
+            Path((name.clone(), id)),
+            json_headers(),
+            tier_body("public", "high"),
+        )
+        .await
+        .expect_err("a confirmed tier has nothing left to confirm");
+        assert_eq!(again.code(), "JUDGEMENT_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_dismissed_tier_proposal_leaves_the_list() {
+        let (state, name) = judged_site("tier-dismiss").await;
+        let generation = site_of(&state, &name).await.expect("the site").created_at;
+        tier_judgements::put(
+            &state.pool,
+            &name,
+            generation,
+            &tier_proposal(Tier::Public, Reliability::High),
+            now_millis(),
+        )
+        .await
+        .expect("propose the tier");
+        let id = declared_id(APPOINTMENTS);
+        let status = dismiss_judgement(State(Arc::clone(&state)), Path((name.clone(), id.clone())))
+            .await
+            .expect("dismiss the tier proposal");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let after = listed(&state, &name, &[]).await;
+        let rows = after["judgements"].as_array().expect("the proposals");
+        assert!(rows.iter().all(|row| row["key"] != APPOINTMENTS));
+        let Err(gone) =
+            dismiss_judgement(State(Arc::clone(&state)), Path((name.clone(), id))).await
+        else {
+            panic!("a dismissed tier proposal has nothing to dismiss");
+        };
+        assert_eq!(gone.code(), "JUDGEMENT_NOT_FOUND");
         assert_eq!(version_of(&state, &name).await, 1);
     }
 }

@@ -17,5 +17,7 @@ pub mod model_config_store;
 pub mod object_agent_store;
 pub mod object_judgement_store;
 pub mod object_learning_store;
+pub mod object_tier_judgement_store;
+pub mod object_tier_store;
 pub mod partitions;
 pub mod site_spec_store;

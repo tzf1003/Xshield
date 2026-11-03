@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- 对象表学习新增接受公共来源的提议（[docs/07](docs/07-console-architecture.md) 7.9.16）：学习为声明的请求位置判断正常流量是否接受公共来源，提议存入 `object_judgements`（迁移 0009）。管理员在 `POST …/judgement/confirm` 确认后，判断写入站点配置的 `accepts_public` 与 `reliability`，成功保存为一个新版本；`…/judgement/dismiss` 驳回后同一个值不再提议。对象表的 `judgements` 列出待确认的提议，位置行显示已有的判断。响应位置的档位提议仍待 W1 身份与响应指纹的学习实现。
+- 对象表学习新增响应位置的档位提议（[docs/07](docs/07-console-architecture.md) 7.9.16）：学习按各单位在窗口内见到的值（响应指纹；站点声明用户身份时按用户计，否则按会话）判断位置是 `public`、`self` 还是 `admin`，并给出可靠性。证据存入 `object_response_evidence`，提议存入 `object_tier_judgements`（迁移 0010，只由控制面写入，7 天窗口）。管理员在 `POST …/judgement/confirm` 确认后，`tier` 与 `reliability` 写入站点配置，成功保存为一个新版本；`…/judgement/dismiss` 驳回后同一档位不再提议。`org` 与学习代理的档位判断留待后续，判定侧尚未读取档位。
+- 对象表学习新增接受公共来源的提议（[docs/07](docs/07-console-architecture.md) 7.9.16）：学习为声明的请求位置判断正常流量是否接受公共来源，提议存入 `object_judgements`（迁移 0009）。管理员在 `POST …/judgement/confirm` 确认后，判断写入站点配置的 `accepts_public` 与 `reliability`，成功保存为一个新版本；`…/judgement/dismiss` 驳回后同一个值不再提议。对象表的 `judgements` 列出待确认的提议，位置行显示已有的判断。
 - 属性越权告警（W6）：响应里有一个不属于本会话的用户类对象（站点里声明为身份位置的类别），同时带手机号、邮箱或身份证号类属性（按字段名或值的格式识别）时，判定记录的 `trace.response.exposure` 记一条告警，只写位置和类别、不存值；请求照常放行，字段不遮挡（[docs/07](docs/07-console-architecture.md#7917-属性越权告警w6) 7.9.17）。控制台请求详情的学习步骤显示“疑似属性越权，仅告警未拦截”。没有身份位置的站点与未见过身份的会话不写该字段，判定与日志与之前一致。靶场新增 W6 场景（评论接口）。
 - 超长的位置名不再清空整条记录的值（[docs/07](docs/07-console-architecture.md#743-trace-结构) 7.4.3）：`values[].at`、`key` 和位置标识超过 256 字节时截断，截断前的 `at` 长度记在 `values[].at_len`。此前一个超长的键名会把整条请求的值推过 16 KiB 而被清空。控制台对齐时两边都截到 256 字节再比较，截断过的行标“已裁剪”，不再显示为对不上；裁剪过的记录和被清空的记录各有提示，“超过 64 KiB”的旧提示已删除（网关只拆 48 KiB 以内的请求体）。只影响记录的内容，不改变任何判定。
 - 判定记录真正不超过 16 KiB（[docs/07](docs/07-console-architecture.md#744-脱敏与上限) 7.4.4）：会话的 `recent` 与 `entries_passed` 里的请求路径超过 256 字节时截断（此前没有上限，长路径会让一条记录远超上限）。`Trace::fit` 在值之外增加了两步：仅去掉响应的结构和指纹就够时只去掉它们、保留值；仍超出时再去掉余下的响应细节、字段计数、内容类型，以及会话的最近访问与入口；剩下的部分只有两个路径模式（各不超过 256 字节）、长度有上限的身份标签（角色至多 32 字节）和固定长度的字段，体积有上限。只影响记录的体积，不改变任何判定。

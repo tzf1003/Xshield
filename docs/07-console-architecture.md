@@ -618,12 +618,12 @@ CREATE TABLE jev_prompts (
 | `POST /api/sites/{name}/preview` | 改动的影响预估（7.9.10） |
 | `GET /api/sites/{name}/insights` | 调优建议和切换模式的就绪检查（7.9.11） |
 | `GET /api/sites/{name}/evidence` | 判定参数旁边显示的证据：最近 24 小时 Jev 耗时 p50/p95/p99、超时次数、调用上限触发次数和每分钟最高调用数、缓存放行次数 |
-| `GET /api/sites/{name}/objects` | 对象表：各状态计数、声明的类别、位置列表，可按 `state`、`class`、`q` 过滤；位置行在条目带有判断时带 `tier`、`accepts_public`、`reliability`；`judgements` 列出待确认的接受公共来源提议（7.9.16）；声明的位置和学习到的位置各一行，默认不列已退役的位置；已退役的位置在最后一次使用后保留 90 天（`KEEP_RETIRED_DAYS`），之后学习任务删除它们，再次出现时从头学习。学习位置的 id 是 `s<行号>`，声明位置的 id 是 `a` 加上键的 SHA-256 前 8 字节（十六进制），控制台只把 id 当不透明字符串 |
+| `GET /api/sites/{name}/objects` | 对象表：各状态计数、声明的类别、位置列表，可按 `state`、`class`、`q` 过滤；位置行在条目带有判断时带 `tier`、`accepts_public`、`reliability`；`judgements` 列出待确认的提议，请求位置的接受公共来源与响应位置的档位（7.9.16）；声明的位置和学习到的位置各一行，默认不列已退役的位置；已退役的位置在最后一次使用后保留 90 天（`KEEP_RETIRED_DAYS`），之后学习任务删除它们，再次出现时从头学习。学习位置的 id 是 `s<行号>`，声明位置的 id 是 `a` 加上键的 SHA-256 前 8 字节（十六进制），控制台只把 id 当不透明字符串 |
 | `GET /api/sites/{name}/objects/slots/{id}` | 一个位置的抽屉：流入的流向（份额、次数、会话，以及 Jev 通过和拒绝的次数）；有证据的流向最多 20 条，之后另列最多 20 条只有 Jev 判定的流向；示例请求（最多 3 个，最近的在前：请求位置列出用到它的请求，响应位置按返回值的观察时间列出返回过这个值的响应）。Jev 次数和示例都从决策记录读取，只统计学习窗口内且站点创建之后的记录（站点删除后决策记录保留，同名重建的站点不读旧记录），Jev 次数只看调用过 Jev 的记录（部分索引）。结构和历史待后续实现，当前为空。`impact` 是位置主操作（确认提议、恢复暂停的条目、暂停生效中的条目）让快速放行改变的数量，按最近一天计算，只读站点创建之后的记录，路径参数有值；字段位置的主操作暂不估计，此时 `impact_estimated` 为 false（`impact_complete` 同为 false）。`impact_complete` 为 false 表示窗口没有读完，数量可能偏小 |
 | `POST /api/sites/{name}/objects/slots/{id}/dismiss` | 驳回学习中的提议或学习中的位置，成功返回 204。409：`SLOT_IS_DECLARED`（声明的位置）、`SLOT_NOT_REQUEST`（响应侧的位置）、`SLOT_STATE_CONFLICT`（状态不接受驳回） |
 | `POST /api/sites/{name}/objects/slots/{id}/ambiguous` | 标为歧义，规则不再提议，成功返回 204；错误码同上 |
-| `POST /api/sites/{name}/objects/slots/{id}/judgement/confirm` | 确认声明的请求位置的接受公共来源提议（7.9.16）。请求体 `{"accepts_public": bool, "reliability": "high" \| "medium"}` 必须与当前提议一致，成功写入站点配置的一个新版本并返回 204。409：`JUDGEMENT_CHANGED`（请求体与提议不一致）、`SLOT_NOT_REQUEST`（响应侧的位置）、`SLOT_STATE_CONFLICT`（条目带着档位）、`VERSION_CONFLICT`（保存已让站点前进）；404：`JUDGEMENT_NOT_FOUND`（没有提议）、`SLOT_NOT_FOUND` |
-| `POST /api/sites/{name}/objects/slots/{id}/judgement/dismiss` | 驳回接受公共来源提议，成功返回 204；同一个值不再提议（7.9.16）。错误码：`JUDGEMENT_NOT_FOUND`（404）、`SLOT_NOT_REQUEST`（409）、`SLOT_NOT_FOUND`（404） |
+| `POST /api/sites/{name}/objects/slots/{id}/judgement/confirm` | 确认声明的位置的提议（7.9.16）。请求位置的请求体为 `{"accepts_public": bool, "reliability": "high" \| "medium"}`，响应位置的为 `{"tier": "self" \| "org" \| "admin" \| "public", "reliability": "high" \| "medium"}`，必须与当前提议一致，成功写入站点配置的一个新版本并返回 204。409：`JUDGEMENT_CHANGED`（请求体与提议不一致，或判断的种类不对）、`SLOT_NOT_JUDGED`（身份位置）、`SLOT_STATE_CONFLICT`（条目带着另一种判断）、`VERSION_CONFLICT`（保存已让站点前进）；404：`JUDGEMENT_NOT_FOUND`（没有提议）、`SLOT_NOT_FOUND` |
+| `POST /api/sites/{name}/objects/slots/{id}/judgement/dismiss` | 驳回位置的提议（请求位置的接受公共来源，或响应位置的档位），成功返回 204；同一个判断不再提议（7.9.16）。错误码：`JUDGEMENT_NOT_FOUND`（404）、`SLOT_NOT_JUDGED`（409，身份位置）、`SLOT_NOT_FOUND`（404） |
 | `GET /api/sites/{name}/objects/bootstrap` | 冷启动的类别候选（24 小时窗口）；候选尚未计算，当前为空 |
 | `GET /api/status` | 顶栏状态灯和“配置生效”需要的轻量状态，每 15 秒轮询一次（7.9.13） |
 | `GET /api/system` | 网关实例、日志存储、运行参数（7.9.8）；只在系统页按需读取，不轮询 |
@@ -900,6 +900,8 @@ CREATE TABLE jev_prompts (
 
 学习在对象表的位置上给出两类判断：响应位置的档位（`tier`），以及请求位置是否接受公共来源（`accepts_public`）。判断写在位置的条目里，学习只提议，管理员确认后才写入站点配置。判定读取这些字段（判定侧的约定见本节末尾）。没有这些字段的站点，判定与日志和现在一致。
 
+新增的表（迁移 0010）：`object_response_evidence` 与 `object_tier_judgements`。理由：学习按游标增量读取决策记录，一个单位在窗口内见到的值必须跨次保存才能判断，而 `decision_log` 的 trace 只保存每条记录的前 8 个指纹，无法按单位汇总；提议与请求位置的提议一样，需要按站点代际保护的写入和驳回记录。
+
 新增字段的理由（AGENTS.md 要求写明）：现在没有任何地方记录一个响应位置展示的是谁的对象，也没有地方记录一个请求位置在正常流量里接不接受公共来源。对象表的条目已经按位置保存确认结果，判断挂在条目上，不另起顶层配置。
 
 字段（`objects.slots[]` 的可选字段，与 `key`、`class`、`source`、`paused` 并列）：
@@ -909,6 +911,8 @@ CREATE TABLE jev_prompts (
 | `tier` | 响应位置 | `self`、`org`、`admin`、`public` | 这个响应位置展示的对象：`self` 是本会话用户自己的，`org` 是本机构的，`admin` 只有管理员会话能拿到 2xx，`public` 是许多用户都能看到的 |
 | `accepts_public` | 请求位置 | `true`、`false` | 正常流量里，这个请求位置的目标值是否来自公共位置。`false` 表示几乎不接受 |
 | `reliability` | 与上面二者之一同在 | `high`、`medium`、`low` | 对 `tier` 或 `accepts_public` 的把握。缺省按 `low` 处理。判定只在 `high` 时收紧 |
+
+字段名与取值在本次定稿，判定侧（W4）按 `tier_of`、`accepts_public_of`、`reliability_of` 读取它们。
 
 约束（校验失败时返回 `field` 与 `reason`，见 7.9.12）：
 
@@ -937,9 +941,24 @@ CREATE TABLE jev_prompts (
 - 确认（`POST …/judgement/confirm`）：请求体必须与当前提议一致，否则 409 `JUDGEMENT_CHANGED`。通过后判断写入条目，站点保存为一个新版本（变更类别 `update`，备注写明是确认），提议被清除。条目已带同样的判断时只清除提议，不写版本。
 - 列表（`GET …/objects`）的 `judgements` 只列出未驳回、且与条目现有判断不同的提议。
 
-本次实现还有两处缺口：没有身份位置（W1 尚未合入），所以会话都按单位计，可靠性最高为 `medium`，管理员会话集合为空；学习代理不判断 `org`。
+提议与确认（响应位置的 `tier`，已实现）：
 
-实现状态：字段、校验与纯函数已实现；请求位置的提议、确认与驳回已实现。响应位置的证据、提议与确认依赖 W1 的身份位置和 W2 的响应指纹，后续实现，在那之前档位只能手写到配置里。
+- 证据存放在表 `object_response_evidence`，只由控制面写入。每个站点、响应位置、单位和 UTC 日一行，记该单位当天在该位置见到的指纹（每条记录至多保留 8 个最小的，一天至多 64 个），以及 `complete` 标记：某条记录因只留了最小的 8 个而可能漏掉值时为 `false`。同一表还记管理员单位（`admin`）、被拒绝的非管理员单位（`refused`，按路由记）和记录只留了部分位置的单位（`capped`）。超过 7 天学习窗口的行每次学习删除；站点被删除时同一事务删除（`forget_site`）。
+- 每次学习在站点配置的当前版本上，对声明、未暂停、不是身份且不是请求位置的响应位置各判断一次（`judge_tiers`）。规则给出档位，且条目还没有同样的 `tier` 与 `reliability` 时写一条提议；规则不给判断，或条目已带同样的判断时撤回提议。不再被声明的位置，它的行被删去。写入带站点代际，与接受公共来源的提议相同。
+- 驳回后，同一档位不再提议，哪怕可靠性变了；规则转到另一档位时，提议重新出现；规则转到条目已有的档位时，驳回失效。
+- 确认：请求体 `{"tier", "reliability"}` 必须与当前提议一致，否则 409 `JUDGEMENT_CHANGED`。通过后 `tier` 与 `reliability` 作为站点配置的一个新版本写入（备注说明是确认），提议被清除。条目已带同样的判断时只清除提议，不写版本。
+- 身份位置没有档位，对它确认或驳回返回 409 `SLOT_NOT_JUDGED`。
+- 列表（`GET …/objects`）的 `judgements` 同时列出两种提议。档位提议的行带 `tier`、`units`（判断计入的单位数）、`seen_values`（其中的不同值数）和 `agreement_per_mille`（与档位一致的份额），不带 `accepts_public`、`votes` 与 `sessions`。
+
+规则的限制（本次实现）：
+
+- `org` 不判断，学习代理也还不为档位提问；介于两者之间的情况不提议。
+- 一个值只有在其他每个单位的记录都完整保留了该位置的值时，才计入 `self`。所以只要该位置窗口内有单位的记录被截断，别的单位的单值就都不计，`self` 不会被提议，直到截断的记录滚出窗口。
+- 一条响应的位置数达到 16 个时只留了前 16 个，该单位当天在所有位置都记为不完整。一个被拒绝的单位只在它的请求带着一个已知位置的值时计入，路由取自那个值的位置。
+- 请求位置的 `accepts_public` 仍按会话计票，管理员集合为空，所以管理员的票也计入。
+- 判定侧（W4）尚未读取档位，控制台的档位界面（W5）也尚未实现。
+
+实现状态：字段名与取值已定稿。请求位置的提议、确认与驳回，以及响应位置的证据、提议、确认与驳回均已实现。依赖的身份位置（W1）与响应指纹（W2）已合入。
 
 ### 7.9.17 属性越权告警（W6）
 

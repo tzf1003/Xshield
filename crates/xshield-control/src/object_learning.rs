@@ -19,9 +19,9 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use xshield_core::context::learning::{
     Evidence, KEEP_RETIRED_DAYS, RETIRE_DAYS, Thresholds, WINDOW_DAYS, contradicts, day_of,
-    judge_accepts_public, kind_share, observe, propose,
+    judge_accepts_public, judge_tier, kind_share, observe, observe_tiers, propose, response_stats,
 };
-use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec};
+use xshield_core::context::{IdentityRole, LearningSettings, ObjectMap, SiteSpec};
 use xshield_core::kind::Rules;
 use xshield_postgres::key_seal::KeySealer;
 use xshield_postgres::object_agent_store::{self as runs, CALLS_KEEP_DAYS, Trigger};
@@ -29,6 +29,8 @@ use xshield_postgres::object_judgement_store::{self as judgements, Proposal};
 use xshield_postgres::object_learning_store::{
     self as store, Cursor, Judgement, LearnedState, Source,
 };
+use xshield_postgres::object_tier_judgement_store::{self as tier_judgements, TierProposal};
+use xshield_postgres::object_tier_store::{self as tier_store, TierRead};
 use xshield_postgres::site_spec_store::{self, Change, SiteRecord, WriteOutcome};
 
 use crate::agent_model::AgentModel;
@@ -168,6 +170,7 @@ async fn learn_site(
         // stays where it was, and the window below starts the next pass in range.
         return Ok(());
     }
+    let identified = identified_by(spec.objects());
     let horizon = now_millis - LAG_MILLIS;
     // The cursor once a pass has read every row up to the horizon.
     let end = Cursor {
@@ -195,12 +198,15 @@ async fn learn_site(
         let next = next_cursor(after, end, complete, batch.newest);
         let mut votes = Vec::new();
         let mut denials = Vec::new();
+        let mut tiers = Vec::new();
         for facts in &batch.facts {
             let observed = observe(facts);
             votes.extend(observed.votes);
             denials.extend(observed.denials);
+            tiers.extend(observe_tiers(facts, identified));
         }
         store::record_evidence(pool, site, generation, &votes, &denials).await?;
+        tier_store::record_tier_facts(pool, site, generation, &tiers).await?;
         let slots: Vec<String> = votes
             .iter()
             .map(|vote| vote.slot.clone())
@@ -231,6 +237,7 @@ async fn learn_site(
         }
     }
     store::prune_evidence(pool, site, oldest_day).await?;
+    tier_store::prune_tier_evidence(pool, site, oldest_day).await?;
     runs::prune_calls(pool, site, today.saturating_sub(CALLS_KEEP_DAYS)).await?;
     rejudge_proposals(run, pool, spec, generation, oldest_day, today, now_millis).await?;
     let requested = runs::requested_slots(pool, site).await?;
@@ -253,6 +260,7 @@ async fn learn_site(
     pause_drifted(run, pool, site, generation).await?;
     tighten_split(run, pool, site, generation, oldest_day).await?;
     judge_accepts(pool, site, generation, oldest_day, now_millis).await?;
+    judge_tiers(pool, site, generation, oldest_day, now_millis).await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
     store::prune_retired(pool, site, today.saturating_sub(KEEP_RETIRED_DAYS)).await?;
     Ok(())
@@ -525,8 +533,9 @@ async fn judge_accepts(
         return Ok(());
     }
     let evidence = store::load_evidence(pool, site, &slots, oldest_day).await?;
-    // No identities are declared yet, so every session is a user, and the admin role has no
-    // sessions to leave out. Reliability drops one step for the same reason.
+    // The votes count sessions, not users, so a session stands for a user here, whether or not
+    // the site declares identities. The admin sessions are not counted by role yet, and
+    // reliability drops one step for the same reason.
     let admins = BTreeSet::new();
     for slot in &slots {
         let Some(evidence) = evidence.get(slot) else {
@@ -561,6 +570,79 @@ async fn judge_accepts(
                     .await?;
             }
             None => judgements::withdraw(pool, site, generation, slot, None).await?,
+        }
+    }
+    Ok(())
+}
+
+/// Whether the site declares a user identity the responses show, so its response units are users
+/// and not sessions. A paused entry shows none, as the judge reads it.
+fn identified_by(map: &ObjectMap) -> bool {
+    map.slots()
+        .iter()
+        .any(|slot| !slot.paused && slot.identity == Some(IdentityRole::User))
+}
+
+/// Judges the tier of each declared response position from the response evidence of the window: the
+/// tier the rules give, and how sure they are. A proposal waits for an administrator, as the acceptance
+/// judgement does. Request positions, positions that state an identity and paused entries are left out.
+/// A position the rules cannot judge loses its proposal, and so does one the configuration no longer
+/// declares. The writes are read against the configuration the site holds now and name its generation,
+/// so a site deleted meanwhile gets none. Nothing here changes the configuration.
+async fn judge_tiers(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    oldest_day: u64,
+    now_millis: i64,
+) -> Result<(), store::LearningStoreError> {
+    let record = match site_spec_store::get(pool, site).await {
+        Ok(Some(record)) if record.created_at == generation => record,
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            eprintln!("xshield-control: tier judgement skipped for site {site}, {error}");
+            return Ok(());
+        }
+    };
+    let map = record.spec.objects();
+    let thresholds = thresholds_of(map.learning());
+    let identified = identified_by(map);
+    let slots: Vec<String> = map
+        .slots()
+        .iter()
+        .filter(|slot| !slot.paused && slot.identity.is_none() && !is_request_key(&slot.key))
+        .map(|slot| slot.key.clone())
+        .collect();
+    tier_judgements::retain(pool, site, generation, &slots).await?;
+    if slots.is_empty() {
+        return Ok(());
+    }
+    let reads = tier_store::load_tier_evidence(pool, site, &slots, oldest_day).await?;
+    let empty = TierRead::default();
+    for slot in &slots {
+        let read = reads.get(slot).unwrap_or(&empty);
+        let stats = response_stats(&read.evidence, identified);
+        match judge_tier(&stats, thresholds) {
+            Some(judged)
+                if map.tier_of(slot) != Some(judged.tier)
+                    || map.reliability_of(slot) != Some(judged.reliability) =>
+            {
+                let proposal = TierProposal {
+                    slot: slot.clone(),
+                    tier: judged.tier,
+                    reliability: judged.reliability,
+                    units: stats.units,
+                    seen_values: stats.values,
+                    agreement_per_mille: judged.agreement_per_mille,
+                    last_day: read.last_day,
+                };
+                tier_judgements::put(pool, site, generation, &proposal, now_millis).await?;
+            }
+            Some(judged) => {
+                // The rules reach the tier the entry carries, so a dismissal of another tier lapses.
+                tier_judgements::withdraw(pool, site, generation, slot, Some(judged.tier)).await?;
+            }
+            None => tier_judgements::withdraw(pool, site, generation, slot, None).await?,
         }
     }
     Ok(())
@@ -1892,6 +1974,206 @@ mod judgement_pass_tests {
                 .await
                 .expect("count the judgements");
         assert_eq!(rows, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+}
+
+/// The tier pass: response positions judged from what their units saw, and proposed as tiers. Each test
+/// runs against a scratch database and returns at once without `XSHIELD_TEST_DATABASE_BASE_URL`.
+#[cfg(test)]
+mod tier_pass_tests {
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+    use xshield_core::context::{Reliability, SiteSpec, Tier};
+    use xshield_postgres::{object_tier_judgement_store as tier_judgements, site_spec_store};
+
+    use super::learn_once;
+    use super::pass_tests::{drop_scratch, partitions, scratch};
+    use crate::params::DAY_MILLIS;
+
+    /// A response position whose units see the same values: a public one.
+    const SHARED: &str = "GET /api/search [].id";
+    /// A response position whose units each see values of their own: a self one.
+    const OWN: &str = "GET /api/patients [].id";
+    /// A response position shown the same values as `SHARED`, whose entry already says so.
+    const CARRIED: &str = "GET /api/feed [].id";
+
+    /// A clinic whose response positions are declared as given, each with the fields its entry states.
+    fn clinic(positions: &[(&str, Value)]) -> SiteSpec {
+        let slots: Vec<Value> = positions
+            .iter()
+            .map(|(key, judgement)| {
+                let mut entry = json!({"key": key, "class": "patient", "source": "admin"});
+                if let Value::Object(fields) = judgement {
+                    for (field, value) in fields {
+                        entry[field] = value.clone();
+                    }
+                }
+                entry
+            })
+            .collect();
+        let spec = json!({
+            "name": "clinic",
+            "hosts": ["clinic.example.com"],
+            "origin": "http://10.0.0.5:8080",
+            "session": {"cookie": "SESSIONID"},
+            "entries": ["/login"],
+            "objects": {
+                "classes": [{"id": "patient", "name": "患者"}],
+                "slots": slots,
+                "learning": {"auto_tighten": false, "auto_pause": false}
+            }
+        });
+        SiteSpec::from_json(&spec.to_string()).expect("test spec")
+    }
+
+    /// One allowed request of `session` at `at_millis` whose response showed `values` at `slot`. Each
+    /// request has an id of its own, `index` numbers them.
+    async fn shown(
+        pool: &PgPool,
+        index: i64,
+        session: i64,
+        at_millis: i64,
+        slot: &str,
+        values: &[String],
+    ) {
+        let trace = json!({
+            "v": 1,
+            "values_truncated": false,
+            "values": [],
+            "timing": {"judge_ms": 1},
+            "response": {
+                "bytes": 64,
+                "observed": "json",
+                "values": values.len(),
+                "new_values": 0,
+                "fields": [],
+                "entry_passed": false,
+                "after_would_block": false,
+                "fingerprints": {slot: values}
+            }
+        });
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace)
+             VALUES ($1, $2, 'clinic', 'edge-1', 'clinic.example.com', '10.0.0.1', $3,
+                'GET', '/api/feed', 200, 'fast_allow', 'allowed', $4)",
+        )
+        .bind(at_millis)
+        .bind(format!("tier_{index:08}"))
+        .bind(format!("s{session}"))
+        .bind(trace)
+        .execute(pool)
+        .await
+        .expect("insert a decision row");
+    }
+
+    /// Ten sessions, five requests each. `SHARED` and `CARRIED` show every session the same 25 values, five
+    /// per request. `OWN` shows each session 25 values of its own.
+    async fn traffic(pool: &PgPool, at_millis: i64, positions: &[&str]) {
+        let shared: Vec<String> = (0..25).map(|index| format!("shared-{index}")).collect();
+        for session in 0..10_i64 {
+            for request in 0..5_usize {
+                let row = session * 5 + i64::try_from(request).unwrap_or(0);
+                let chunk = &shared[request * 5..request * 5 + 5];
+                let own: Vec<String> = (0..5)
+                    .map(|value| format!("own-{session}-{request}-{value}"))
+                    .collect();
+                for position in positions {
+                    let values = if *position == OWN { &own[..] } else { chunk };
+                    let offset = match *position {
+                        SHARED => 0,
+                        CARRIED => 100,
+                        _ => 200,
+                    };
+                    shown(pool, row + offset, session, at_millis, position, values).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_position_its_units_share_is_proposed_public_and_one_they_keep_apart_self() {
+        let Some((admin, pool, name)) = scratch("tiers_judged").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&[
+                // The entry says `self`, but every unit sees the same values here.
+                (SHARED, json!({"tier": "self"})),
+                // The entry says nothing, and every unit sees values of its own.
+                (OWN, json!({})),
+                // The entry carries what the rules give for it: nothing is proposed.
+                (CARRIED, json!({"tier": "public", "reliability": "medium"})),
+            ]),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        traffic(&pool, now - 2 * DAY_MILLIS, &[SHARED, OWN, CARRIED]).await;
+        learn_once(&pool, None, now).await;
+
+        let shared = tier_judgements::proposal(&pool, "clinic", SHARED)
+            .await
+            .expect("read the proposal")
+            .expect("the shared position is proposed");
+        assert_eq!(shared.tier, Tier::Public);
+        // Without declared identities the rules grade one step lower than the evidence.
+        assert_eq!(shared.reliability, Reliability::Medium);
+        assert_eq!((shared.units, shared.seen_values), (10, 25));
+        assert_eq!(shared.agreement_per_mille, 1000);
+
+        let own = tier_judgements::proposal(&pool, "clinic", OWN)
+            .await
+            .expect("read the proposal")
+            .expect("the unit-own position is proposed");
+        assert_eq!(own.tier, Tier::Own);
+        assert_eq!(own.reliability, Reliability::Medium);
+        assert_eq!((own.units, own.seen_values), (10, 250));
+        assert_eq!(own.agreement_per_mille, 1000);
+
+        assert!(
+            tier_judgements::proposal(&pool, "clinic", CARRIED)
+                .await
+                .expect("read the proposal")
+                .is_none(),
+            "a tier the entry carries is not proposed again"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_tier_proposal_whose_evidence_ages_out_is_withdrawn() {
+        let Some((admin, pool, name)) = scratch("tiers_aged").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(&[(SHARED, json!({"tier": "self"}))]), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        traffic(&pool, now - 2 * DAY_MILLIS, &[SHARED]).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            tier_judgements::proposal(&pool, "clinic", SHARED)
+                .await
+                .expect("read the proposal")
+                .is_some(),
+            "the shared position is proposed first"
+        );
+
+        // Eight days on, the evidence is outside the window: the rules judge nothing, and the proposal goes.
+        learn_once(&pool, None, now + 8 * DAY_MILLIS).await;
+        assert!(
+            tier_judgements::proposal(&pool, "clinic", SHARED)
+                .await
+                .expect("read the proposal")
+                .is_none(),
+            "a proposal whose evidence aged out is withdrawn"
+        );
         drop_scratch(admin, pool, name).await;
     }
 }
