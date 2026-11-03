@@ -15,8 +15,6 @@ import { OBJECT_AGENT_TEXT } from "../../../lib/vocab.ts";
 /** A hand-started run waits this long after the last one: the gateway's rule, which the console shows before the click. */
 export const RUN_COOLDOWN_MS = 5 * 60_000;
 
-const WEEK_MS = 7 * 24 * 3_600_000;
-
 /** Whether the agent named another kind than the rules did. Such a position is ambiguous until someone decides. */
 export function disagrees(agent: ObjectAgent): boolean {
   return agent.rule_choice !== null && agent.choice !== null && agent.rule_choice !== agent.choice;
@@ -83,16 +81,6 @@ export function refusalWord(error: unknown, fallback: string): string {
     return words[error.message] ?? error.message;
   }
   return fallback;
-}
-
-/** How many automatic changes of one kind happened in the last week: the settings' counts. */
-export function weekCount(
-  events: readonly { kind: string; at: string }[],
-  kind: string,
-  now: number,
-): number {
-  return events.filter((event) => event.kind === kind && now - Date.parse(event.at) < WEEK_MS)
-    .length;
 }
 
 function pad(value: number): string {

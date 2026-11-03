@@ -9,10 +9,10 @@ import { type ReactNode, useState } from "react";
 import type {
   LearningSettings as Learning,
   ObjectAgentHealth,
-  ObjectEvent,
   ObjectEventKind,
   ObjectFeatures,
   ObjectLearningState,
+  ObjectLearningStatus,
   SiteSpec,
 } from "../../../api/types.ts";
 import { hm } from "../../../features/system/clock.ts";
@@ -20,7 +20,6 @@ import { effectiveLearning } from "../../../lib/objects-validate.ts";
 import { OBJECT_AGENT_TEXT, OBJECT_TEXT } from "../../../lib/vocab.ts";
 import { AgentSampleDialog } from "./AgentSampleDialog.tsx";
 import { ModelsLink } from "./ModelsLink.tsx";
-import { weekCount } from "./objects-agent.ts";
 import { withLearning } from "./objects-model.ts";
 
 type Props = {
@@ -33,9 +32,8 @@ type Props = {
   /** What the gateway runs now: a part it does not run yet still saves, and its line says so. */
   features: ObjectFeatures;
   learning: ObjectLearningState;
-  /** The automatic changes the map lists: the counts of the last week come from them. */
-  events: readonly ObjectEvent[];
-  now: number;
+  /** When the last pass ran, and the automatic changes of the last week. */
+  status: ObjectLearningStatus;
   /** Opens the list of automatic changes filtered to one kind (the counts in the status lines link to it). */
   onOpenEvents: (kind: ObjectEventKind) => void;
   onClose: () => void;
@@ -106,8 +104,7 @@ export function LearningSettings({
   agentHealth,
   features,
   learning,
-  events,
-  now,
+  status,
   onOpenEvents,
   onClose,
   onApply,
@@ -133,12 +130,13 @@ export function LearningSettings({
   const canTurnOn = AGENT_SAVE_READY && agentConfigured;
   const agentSwitchDisabled = !editable || (!agentOn && !canTurnOn);
 
-  const last = learning.last;
   const lastPass =
-    last === null ? text.status.never : text.status.schedule(hm(Date.parse(last.at)));
+    status.last_pass_at === null
+      ? text.status.never
+      : text.status.schedule(hm(Date.parse(status.last_pass_at)));
   const next = learning.next_at === null ? null : hm(Date.parse(learning.next_at));
-  const tightened = weekCount(events, "auto_tighten", now);
-  const paused = weekCount(events, "auto_pause", now);
+  const tightened = status.auto_tighten_7d;
+  const paused = status.auto_pause_7d;
 
   // The agent's state under its switch (console design 3.1): no model, a failing model, or the positions it waits for.
   const agentNotes: ReactNode[] = [];

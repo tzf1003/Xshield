@@ -14,7 +14,6 @@ import {
   refusalWord,
   runBlock,
   stampOf,
-  weekCount,
 } from "../src/features/sites/objects/objects-agent.ts";
 
 const NOW = Date.parse("2026-11-03T12:00:00Z");
@@ -127,18 +126,6 @@ test("a failure code reads in words, and an unknown code is kept as itself", () 
   assert.equal(failureWord("timeout"), "超时");
   assert.equal(failureWord("not_json"), "回答不能解析");
   assert.equal(failureWord("made_up"), "回答不可用（made_up）");
-});
-
-test("the week's count of one kind of automatic change leaves out the older ones", () => {
-  const day = 24 * 3_600_000;
-  const events = [
-    { kind: "auto_tighten", at: new Date(NOW - day).toISOString() },
-    { kind: "auto_tighten", at: new Date(NOW - 8 * day).toISOString() },
-    { kind: "auto_pause", at: new Date(NOW - day).toISOString() },
-  ];
-  assert.equal(weekCount(events, "auto_tighten", NOW), 1);
-  assert.equal(weekCount(events, "auto_pause", NOW), 1);
-  assert.equal(weekCount(events, "anomaly", NOW), 0);
 });
 
 test("a time reads as month-day and hour-minute, and a time that does not read is a dash", () => {

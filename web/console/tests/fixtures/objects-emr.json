@@ -323,5 +323,10 @@
     "agent_waiting": 0,
     "agent_failed": 0
   },
+  "learning_status": {
+    "last_pass_at": "2026-11-03T05:00:00Z",
+    "auto_tighten_7d": 0,
+    "auto_pause_7d": 1
+  },
   "agent_health": "unknown"
 }
