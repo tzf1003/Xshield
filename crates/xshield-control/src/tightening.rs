@@ -268,6 +268,9 @@ mod tests {
             source: SlotSource::Rule,
             paused: false,
             identity: None,
+            tier: None,
+            accepts_public: None,
+            reliability: None,
         }
     }
 

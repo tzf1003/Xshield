@@ -804,7 +804,7 @@ CREATE TABLE jev_prompts (
 - `name` 与路径参数不一致：400 `SITE_NAME_MISMATCH`。
 - `hosts` 中有其他站点已占用的主机名：409 `SITE_HOST_TAKEN`，`field` 指出哪一项。现状是网关按站点名顺序先到先得、落选站点只写 stderr，控制面在保存时就拒绝。
 - 请求体最大 64 KiB；`note` 最长 500 字符。
-- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复）、`key_invalid`（位置格式不对或过长）、`too_many`（超过 64 个类别或 2,048 个位置）、`class_id_invalid`（类别 id 格式不对）；其余对象表错误只带 `field`。
+- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复）、`key_invalid`（位置格式不对或过长）、`too_many`（超过 64 个类别或 2,048 个位置）、`class_id_invalid`（类别 id 格式不对）、`judgement_conflict`（一个条目同时带 `tier` 和 `accepts_public`）、`reliability_without_judgement`（`reliability` 没有 `tier` 或 `accepts_public` 与之同在）；其余对象表错误只带 `field`。
 
 ### 7.9.13 状态灯与配置生效
 
@@ -891,6 +891,41 @@ CREATE TABLE jev_prompts (
 - 每次身份响应都会更新对应的类别：换机构不重新登录，下一次身份响应即生效。
 - 暂停的条目不声明身份。确认或恢复条目的类别时保留它的身份。
 - 站点没有身份位置、或会话还没见过身份时，`trace.session` 不写 `identity`，判定与日志和之前一致。
+
+### 7.9.16 对象表的档位与可靠性（W3）
+
+学习在对象表的位置上给出两类判断：响应位置的档位（`tier`），以及请求位置是否接受公共来源（`accepts_public`）。判断写在位置的条目里，学习只提议，管理员确认后才写入站点配置。判定读取这些字段（判定侧的约定见本节末尾）。没有这些字段的站点，判定与日志和现在一致。
+
+新增字段的理由（AGENTS.md 要求写明）：现在没有任何地方记录一个响应位置展示的是谁的对象，也没有地方记录一个请求位置在正常流量里接不接受公共来源。对象表的条目已经按位置保存确认结果，判断挂在条目上，不另起顶层配置。
+
+字段（`objects.slots[]` 的可选字段，与 `key`、`class`、`source`、`paused` 并列）：
+
+| 字段 | 出现的位置 | 取值 | 含义 |
+| --- | --- | --- | --- |
+| `tier` | 响应位置 | `self`、`org`、`admin`、`public` | 这个响应位置展示的对象：`self` 是本会话用户自己的，`org` 是本机构的，`admin` 只有管理员会话能拿到 2xx，`public` 是许多用户都能看到的 |
+| `accepts_public` | 请求位置 | `true`、`false` | 正常流量里，这个请求位置的目标值是否来自公共位置。`false` 表示几乎不接受 |
+| `reliability` | 与上面二者之一同在 | `high`、`medium`、`low` | 对 `tier` 或 `accepts_public` 的把握。缺省按 `low` 处理。判定只在 `high` 时收紧 |
+
+约束（校验失败时返回 `field` 与 `reason`，见 7.9.12）：
+
+- 一个条目最多带一个判断。`tier` 与 `accepts_public` 同时出现时，`reason` 为 `judgement_conflict`。
+- `reliability` 必须与 `tier` 或 `accepts_public` 同在。否则 `reason` 为 `reliability_without_judgement`。
+- 条目仍必须有 `class`。判断只挂在已确认类别的位置上，学习不为没有类别的位置提议判断。
+- 暂停（`paused: true`）的条目保留判断，但不被使用：`tier_of`、`accepts_public_of`、`reliability_of` 对暂停条目都返回空。
+- 确认类别（`with_entry`，即管理员或规则确认一个位置的类别）时，保留该条目已有的判断。
+
+学习规则（控制面读决策记录，纯函数在 `xshield-core` 的 `context::learning`）。“单位”是站点声明了身份位置（W1 的 `identity` 字段，见 §7.9.15）时的用户，否则是会话。没有身份时，判断的可靠性降一档。阈值沿用 `objects.learning.thresholds`：`uses` 为“至少见到的值数”，`sessions` 为“至少的单位数”，90% 的一致程度固定为 900‰。值按指纹计：同一个值在各条记录里的指纹相同，控制面按（位置，指纹）统计见到它的单位数。不比较单位之间的集合相似度，因为不同查询得到的搜索结果集合也会互不相交。每条记录的每个位置最多带 8 个指纹（`trace.response.fingerprints`，取最小的 8 个）。列表满 8 个说明可能被截断，截断的值可能藏起另一个单位见到的同一个值，所以被两个单位或更多见到的计数是真实共享，只被一个单位见到的计数只在上述完整条件下才作证据。
+
+- `public`：非管理员单位不少于 `sessions` 个，见到的值不少于 `uses` 个，其中 900‰ 以上被两个单位或更多见到。
+- `self`：只被一个单位见到、且证据完整的值不少于 `uses` 个；在这些值与被两个单位或更多见到的值之和里，后者不超过 10‰（1%）。“证据完整”指该位置其他单位的记录都未满 8 个指纹。`self` 只用来排除收紧（目标值的来源里有 `self`，就不收紧），从不用来放行。误判只让位置维持现状，但会让搜索类接口漏检（按查询得到的互不相交的结果也会像自身），所以 `self` 的提议同样需要管理员确认。
+- `admin`：至少一个管理员单位拿到 2xx；非管理员单位没有任何 2xx；被拒绝的非管理员单位不少于 `sessions` 个。
+- `org` 与介于两者之间的情况：规则不判断，不提议。`org` 需要每个单位的机构，留给学习代理，本次不实现。
+- 可靠性：单位数不少于阈值的两倍且一致程度不低于 980‰（`admin` 为被拒绝单位数不少于阈值的两倍）为 `high`；满足阈值但未达到这些条件为 `medium`；`low` 不提议。
+- `accepts_public`：只看会话的投票（一个会话在一天内计一票）。管理员会话的票不计，被拦截的会话的票不计，档位未知的位置不计。一票只要它的已知档位全部是 `public`，就算公共票。公共票占已判定票的 10‰ 以下为 `false`，200‰ 以上为 `true`，之间不提议。`high` 的条件是票数与会话数都达到阈值的两倍，且公共票占比在 `false` 时不超过 5‰、在 `true` 时不低于 400‰。
+
+判定侧的约定（由 W4 实现，这里只写契约）：只有 `reliability` 为 `high` 的 `tier` 与 `accepts_public` 参与收紧。收紧条件是：目标值的全部来源位置都是 `public` 且为 `high`，并且请求位置的 `accepts_public` 为 `false` 且为 `high`。缺少任一判断、可靠性不是 `high`、或条目被暂停时，判定维持现状。
+
+实现状态：字段、校验、纯函数与其测试已实现。证据的写入、提议、管理员确认写配置，依赖 W1 的身份位置和 W2 的响应指纹，后续实现。
 
 ## 7.10 控制台前端架构
 
