@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use xshield_core::context::{DecisionRecord, SiteSpec};
 
 fn example(name: &str) -> String {
@@ -45,4 +45,54 @@ fn decision_log_rows_load() {
         rows += 1;
     }
     assert!(rows > 0);
+}
+
+/// A site with one object position, on the sample site of `scripts/validate_library.py`.
+fn site_with_slot(slot: &Value) -> Value {
+    json!({
+        "name": "emr",
+        "hosts": ["emr.example.com"],
+        "origin": "http://10.0.0.5:8080",
+        "session": {"cookie": "SESSIONID"},
+        "entries": ["/login"],
+        "objects": {"classes": [{"id": "patient", "name": "患者"}], "slots": [slot]}
+    })
+}
+
+#[test]
+fn object_judgements_load_and_the_refused_forms_do_not() {
+    let judged = json!({
+        "name": "emr",
+        "hosts": ["emr.example.com"],
+        "origin": "http://10.0.0.5:8080",
+        "session": {"cookie": "SESSIONID"},
+        "entries": ["/login"],
+        "objects": {
+            "classes": [{"id": "doctor", "name": "医生"}, {"id": "patient", "name": "患者"}],
+            "slots": [
+                {"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin", "identity": "user"},
+                {"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "rule", "tier": "admin", "reliability": "high"},
+                {"key": "GET /api/search q", "class": "patient", "source": "agent", "tier": "public", "reliability": "medium"},
+                {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "source": "admin", "accepts_public": false, "reliability": "high", "paused": true}
+            ]
+        }
+    });
+    SiteSpec::from_value(&judged).unwrap_or_else(|error| panic!("{judged}: {error}"));
+
+    let refused = [
+        json!({"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin", "tier": "admin", "accepts_public": false, "reliability": "high"}),
+        json!({"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin", "reliability": "high"}),
+        json!({"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin", "tier": "everyone", "reliability": "high"}),
+        json!({"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin", "tier": "public", "reliability": "certain"}),
+        json!({"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin", "identity": "tenant"}),
+        json!({"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin", "tier": "public", "reliability": "high", "paused": "yes"}),
+        json!({"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin", "accepts_public": "no", "reliability": "high"}),
+    ];
+    for slot in refused {
+        let site = site_with_slot(&slot);
+        assert!(
+            SiteSpec::from_value(&site).is_err(),
+            "{slot} should be refused"
+        );
+    }
 }

@@ -34,6 +34,14 @@ OUTCOMES_BY_PATH = {
     'jev_unavailable': {'blocked', 'would_block', 'unjudged'},
     'no_session': {'blocked', 'would_block'},
 }
+def slot_site(**fields: object):
+    """A mutation that gives the emr sample one object position carrying the given fields."""
+    def mutate(site: dict) -> None:
+        slot = {'key': 'GET /api/patients/{id} path[2]', 'class': 'patient', 'source': 'admin', **fields}
+        site.update(objects={'classes': [{'id': 'patient', 'name': '患者'}], 'slots': [slot]})
+    return mutate
+
+
 # Each mutation of the emr sample must be refused by the site configuration schema.
 SITE_NEGATIVES = [
     ('unknown_key', lambda site: site.update(owner='admin')),
@@ -52,6 +60,13 @@ SITE_NEGATIVES = [
     ('jev_timeout_out_of_range', lambda site: site.update(advanced={'jev_timeout_ms': 50})),
     ('unknown_advanced_key', lambda site: site.update(advanced={'retry': 3})),
     ('too_many_hosts', lambda site: site.update(hosts=[f'h{i}.example.com' for i in range(17)])),
+    ('tier_with_accepts_public', slot_site(tier='admin', accepts_public=False, reliability='high')),
+    ('reliability_without_judgement', slot_site(reliability='high')),
+    ('unknown_tier', slot_site(tier='everyone', reliability='high')),
+    ('unknown_reliability', slot_site(tier='public', reliability='certain')),
+    ('undeclared_identity', slot_site(identity='tenant')),
+    ('paused_not_boolean', slot_site(tier='public', reliability='high', paused='yes')),
+    ('accepts_public_not_boolean', slot_site(accepts_public='no', reliability='high')),
 ]
 
 checks: list[dict[str, object]] = []
@@ -127,6 +142,20 @@ def check_sites(schema: dict) -> list[str]:
     minimal = {'name': 'emr', 'hosts': ['emr.example.com'], 'origin': 'http://10.0.0.5:8080',
                'session': {'cookie': 'SESSIONID'}, 'entries': ['/login']}
     check('site:minimal_accepted', valid(schema, minimal), errors(schema, minimal))
+    judged = copy.deepcopy(emr)
+    judged['objects'] = {
+        'classes': [{'id': 'doctor', 'name': '医生'}, {'id': 'patient', 'name': '患者'}],
+        'slots': [
+            {'key': 'GET /doctor/{id} path[1]', 'class': 'doctor', 'source': 'admin', 'identity': 'user'},
+            {'key': 'GET /api/patients/{id} path[2]', 'class': 'patient', 'source': 'rule',
+             'tier': 'admin', 'reliability': 'high'},
+            {'key': 'GET /api/search q', 'class': 'patient', 'source': 'agent',
+             'tier': 'public', 'reliability': 'medium'},
+            {'key': 'DELETE /api/patients/{id} path[2]', 'class': 'patient', 'source': 'admin',
+             'accepts_public': False, 'reliability': 'high', 'paused': True},
+        ],
+    }
+    check('site:judgements_accepted', valid(schema, judged), errors(schema, judged))
     for label, mutate in SITE_NEGATIVES:
         site = copy.deepcopy(emr)
         mutate(site)
