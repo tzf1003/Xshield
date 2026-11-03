@@ -24,7 +24,10 @@ use axum::{
 use serde::Serialize;
 use serde_json::Value;
 use xshield_core::{
-    context::config::{Mode, OnJevUnavailable},
+    context::{
+        config::{Mode, OnJevUnavailable},
+        learning::day_of,
+    },
     model::{
         AGENT_TIMEOUT_MS, AgentProvider, AgentSpec, ApiKey, ConfigError, JEV_TIMEOUT_MS, JevRoute,
         JevSpec,
@@ -40,6 +43,7 @@ use xshield_postgres::{
         self as store, AgentRecord, AgentSave, HistoryEntry, JevRecord, JevSave, ModelConfigError,
         ModelRows,
     },
+    object_agent_store::{self as agent_calls, SiteDay},
     site_spec_store::{self, SiteRecord},
 };
 
@@ -144,6 +148,44 @@ pub struct AgentGroupBody {
     pub timeout_ms: i64,
     pub share_key_with_jev: bool,
     pub key: KeyBody,
+    /// The failure of each of the latest five calls, newest first; `null` for an answer.
+    pub recent_failures: Vec<Option<String>>,
+    /// The agent's calls today.
+    pub usage: AgentUsageBody,
+    /// Every site with the agent on, and every site that asked it today, in name order.
+    pub sites: Vec<AgentSiteBody>,
+}
+
+/// The learning agent's calls on one day, counted in UTC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentUsageBody {
+    /// Always `today`: the day the calls are counted on.
+    pub window: &'static str,
+    pub calls: i64,
+    /// Calls that gave an accepted answer.
+    pub ok: i64,
+    /// Calls without one.
+    pub failed: i64,
+    /// The failure most of the failed calls ended with.
+    pub top_failure: Option<String>,
+    /// The sites that have the agent on.
+    pub enabled_sites: usize,
+}
+
+/// One site's learning agent use: today's questions against its daily limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentSiteBody {
+    pub site: String,
+    /// Whether the site has the agent on.
+    pub enabled: bool,
+    /// Questions the site asked the agent today.
+    pub used: i64,
+    /// The questions the site may ask in a day.
+    pub limit: i64,
+    /// Today's questions without an accepted answer.
+    pub failed: i64,
+    /// When the site's latest question was asked, on any day.
+    pub last_call_at: Option<String>,
 }
 
 /// A key's status. The key itself is never in a response.
@@ -348,7 +390,7 @@ pub async fn list(State(state): State<Arc<ControlState>>) -> ApiResult<Json<Mode
     let rows = store::read(&state.pool).await?;
     Ok(Json(ModelsBody {
         jev: jev_state(&state, &rows.jev).await?,
-        agent: agent_group(&rows),
+        agent: agent_state(&state, &rows).await?,
     }))
 }
 
@@ -466,7 +508,12 @@ fn jev_group(
 }
 
 /// The learning agent group. Its key is the Jev key when the agent shares it.
-fn agent_group(rows: &ModelRows) -> AgentGroupBody {
+fn agent_group(
+    rows: &ModelRows,
+    recent_failures: Vec<Option<String>>,
+    usage: AgentUsageBody,
+    sites: Vec<AgentSiteBody>,
+) -> AgentGroupBody {
     let record: &AgentRecord = &rows.agent;
     let spec = &record.spec;
     let shared = spec.share_key_with_jev();
@@ -499,7 +546,69 @@ fn agent_group(rows: &ModelRows) -> AgentGroupBody {
             updated_at: key_at.and_then(|at| rfc3339(at.timestamp_millis())),
             shared_with_jev: shared,
         },
+        recent_failures,
+        usage,
+        sites,
     }
+}
+
+/// The calls the agent's health reads: the latest five.
+const RECENT_CALLS: i64 = 5;
+
+/// The learning agent group as it reads now: the saved record, the failures of the latest
+/// calls, today's calls and each site's share of them.
+async fn agent_state(state: &ControlState, rows: &ModelRows) -> ApiResult<AgentGroupBody> {
+    let pool = &state.pool;
+    let now = chrono::Utc::now().timestamp_millis();
+    let day = day_of(u64::try_from(now).unwrap_or(0));
+    let totals = agent_calls::day_usage(pool, day).await?;
+    let per_site = agent_calls::day_usage_by_site(pool, day).await?;
+    let sites = site_spec_store::list(pool).await?;
+    let recent = agent_calls::recent_outcomes(pool, RECENT_CALLS).await?;
+    let usage = AgentUsageBody {
+        window: "today",
+        calls: totals.calls,
+        ok: totals.calls - totals.failed,
+        failed: totals.failed,
+        top_failure: totals.top_failure,
+        enabled_sites: sites.iter().filter(|site| agent_on(site)).count(),
+    };
+    Ok(agent_group(
+        rows,
+        recent,
+        usage,
+        agent_sites(&sites, &per_site),
+    ))
+}
+
+/// Whether a site has the learning agent on.
+fn agent_on(site: &SiteRecord) -> bool {
+    site.spec.objects().learning().agent.enabled
+}
+
+/// The sites with the agent on, and the sites that asked it today, in name order, with
+/// their share of today's questions.
+fn agent_sites(sites: &[SiteRecord], per_site: &[SiteDay]) -> Vec<AgentSiteBody> {
+    sites
+        .iter()
+        .filter_map(|record| {
+            let name = record.spec.name();
+            let enabled = agent_on(record);
+            let today = per_site.iter().find(|row| row.site == name);
+            let used = today.map_or(0, |row| row.used);
+            if !enabled && used == 0 {
+                return None;
+            }
+            Some(AgentSiteBody {
+                site: name.to_owned(),
+                enabled,
+                used,
+                limit: i64::from(record.spec.objects().learning().agent.daily_limit),
+                failed: today.map_or(0, |row| row.failed),
+                last_call_at: today.and_then(|row| row.last_call_millis).and_then(rfc3339),
+            })
+        })
+        .collect()
 }
 
 /// The Jev values of a request body: route, endpoint, model and timeout.
@@ -768,4 +877,73 @@ pub async fn history(
     let group = Group::parse(&group)?;
     let entries = store::history(&state.pool, group.name(), HISTORY_LIMIT).await?;
     Ok(Json(entries.iter().map(HistoryBody::from).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::DateTime;
+    use xshield_core::context::config::SiteSpec;
+
+    use super::*;
+
+    fn site(name: &str, agent: &str) -> SiteRecord {
+        let text = format!(
+            r#"{{
+                "name": "{name}", "hosts": ["{name}.example.com"], "origin": "http://127.0.0.1:3000",
+                "session": {{"cookie": "SESSIONID"}}, "entries": ["/login"], "bypass": [],
+                "mode": "observe", "objects": {{"learning": {{"agent": {agent}}}}}
+            }}"#
+        );
+        let now = DateTime::from_timestamp_millis(1_793_538_000_000).expect("time");
+        SiteRecord {
+            spec: SiteSpec::from_json(&text).expect("valid spec"),
+            version: 1,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn the_sites_with_the_agent_on_or_asking_today_are_listed_with_their_share() {
+        let sites = [
+            site("alpha", r#"{"enabled": true, "daily_limit": 50}"#),
+            site("beta", r#"{"enabled": false, "daily_limit": 20}"#),
+            site("gamma", r#"{"enabled": false, "daily_limit": 20}"#),
+        ];
+        let per_site = [
+            SiteDay {
+                site: "beta".to_owned(),
+                used: 3,
+                failed: 1,
+                last_call_millis: Some(1_000),
+            },
+            SiteDay {
+                site: "removed".to_owned(),
+                used: 9,
+                failed: 0,
+                last_call_millis: Some(2_000),
+            },
+        ];
+        assert_eq!(
+            agent_sites(&sites, &per_site),
+            vec![
+                AgentSiteBody {
+                    site: "alpha".to_owned(),
+                    enabled: true,
+                    used: 0,
+                    limit: 50,
+                    failed: 0,
+                    last_call_at: None,
+                },
+                AgentSiteBody {
+                    site: "beta".to_owned(),
+                    enabled: false,
+                    used: 3,
+                    limit: 20,
+                    failed: 1,
+                    last_call_at: rfc3339(1_000),
+                },
+            ]
+        );
+    }
 }

@@ -141,6 +141,82 @@ pub async fn recent_outcomes(
     Ok(outcomes)
 }
 
+/// The model's calls on one day, for every site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayUsage {
+    /// Questions asked.
+    pub calls: i64,
+    /// Questions without an accepted answer.
+    pub failed: i64,
+    /// The failure most of the failed questions ended with; the smaller code when two tie.
+    pub top_failure: Option<String>,
+}
+
+/// The model's use on `day`, for every site.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn day_usage(pool: &PgPool, day: u64) -> Result<DayUsage, LearningStoreError> {
+    let row = sqlx::query(
+        "SELECT count(*) AS calls,
+             count(*) FILTER (WHERE failure IS NOT NULL) AS failed,
+             (SELECT failure FROM object_agent_calls WHERE day = $1 AND failure IS NOT NULL
+                 GROUP BY failure ORDER BY count(*) DESC, failure LIMIT 1) AS top_failure
+         FROM object_agent_calls WHERE day = $1",
+    )
+    .bind(day_i64(day))
+    .fetch_one(pool)
+    .await?;
+    Ok(DayUsage {
+        calls: row.try_get("calls")?,
+        failed: row.try_get("failed")?,
+        top_failure: row.try_get("top_failure")?,
+    })
+}
+
+/// One site's use of the model on a day, and when it last asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteDay {
+    /// The site's name.
+    pub site: String,
+    /// Questions asked on the day.
+    pub used: i64,
+    /// Questions on the day without an accepted answer.
+    pub failed: i64,
+    /// When the site's latest question was asked, on any day, in milliseconds.
+    pub last_call_millis: Option<i64>,
+}
+
+/// Every site that has asked the model, with its use on `day`.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn day_usage_by_site(
+    pool: &PgPool,
+    day: u64,
+) -> Result<Vec<SiteDay>, LearningStoreError> {
+    let rows = sqlx::query(
+        "SELECT site,
+             count(*) FILTER (WHERE day = $1) AS used,
+             count(*) FILTER (WHERE day = $1 AND failure IS NOT NULL) AS failed,
+             max(asked_millis) AS last_call
+         FROM object_agent_calls GROUP BY site ORDER BY site",
+    )
+    .bind(day_i64(day))
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| -> Result<SiteDay, LearningStoreError> {
+            Ok(SiteDay {
+                site: row.try_get("site")?,
+                used: row.try_get("used")?,
+                failed: row.try_get("failed")?,
+                last_call_millis: row.try_get("last_call")?,
+            })
+        })
+        .collect()
+}
+
 /// Asks the agent again about a position, at the next pass that reaches it. Returns
 /// `false` when the position is not a request position of the site.
 ///
@@ -836,4 +912,121 @@ fn small(value: i32) -> u32 {
 
 fn day_i64(day: u64) -> i64 {
     i64::try_from(day).unwrap_or(i64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One day in milliseconds, as the calls' `asked_millis` count them.
+    const DAY_MILLIS: i64 = 86_400_000;
+
+    async fn connect_test_pool() -> PgPool {
+        let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
+        PgPool::connect(&url).await.expect("connect")
+    }
+
+    /// Removes the calls of the given sites, so a test starts from nothing it did not write.
+    async fn clear(pool: &PgPool, sites: &[&str]) {
+        let names: Vec<String> = sites.iter().map(|site| (*site).to_owned()).collect();
+        sqlx::query("DELETE FROM object_agent_calls WHERE site = ANY($1)")
+            .bind(names)
+            .execute(pool)
+            .await
+            .expect("clear the calls");
+    }
+
+    /// A call of `site` asked on `day` at `asked_millis`: answered, or failed with `failure`.
+    async fn insert_call(
+        pool: &PgPool,
+        site: &str,
+        day: u64,
+        asked_millis: i64,
+        failure: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO object_agent_calls (site, slot, day, asked_millis, votes, choice, class, failure)
+             VALUES ($1, 'slot', $2, $3, 0,
+                 CASE WHEN $4::text IS NULL THEN 'existing' END,
+                 CASE WHEN $4::text IS NULL THEN 'doctor' END,
+                 $4::text)",
+        )
+        .bind(site)
+        .bind(day_i64(day))
+        .bind(asked_millis)
+        .bind(failure)
+        .execute(pool)
+        .await
+        .expect("insert a call");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn the_day_counts_its_answers_and_the_failure_most_of_them_ended_with() {
+        let pool = connect_test_pool().await;
+        let sites = ["day-usage-a", "day-usage-b"];
+        clear(&pool, &sites).await;
+        let day: u64 = 60_101;
+        let start = day_i64(day) * DAY_MILLIS;
+        insert_call(&pool, sites[0], day, start + 1, None).await;
+        insert_call(&pool, sites[0], day, start + 2, Some("timeout")).await;
+        insert_call(&pool, sites[1], day, start + 3, Some("timeout")).await;
+        insert_call(&pool, sites[1], day, start + 4, Some("not_json")).await;
+        insert_call(&pool, sites[0], day - 1, start - 1, Some("unavailable")).await;
+
+        let usage = day_usage(&pool, day).await.expect("the day's usage");
+        assert_eq!(
+            usage,
+            DayUsage {
+                calls: 4,
+                failed: 3,
+                top_failure: Some("timeout".to_owned()),
+            }
+        );
+        let idle = day_usage(&pool, day + 1).await.expect("an idle day");
+        assert_eq!(
+            idle,
+            DayUsage {
+                calls: 0,
+                failed: 0,
+                top_failure: None,
+            }
+        );
+        clear(&pool, &sites).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn each_site_counts_its_day_and_keeps_its_latest_question() {
+        let pool = connect_test_pool().await;
+        let sites = ["site-use-busy", "site-use-quiet"];
+        clear(&pool, &sites).await;
+        let day: u64 = 60_111;
+        let start = day_i64(day) * DAY_MILLIS;
+        insert_call(&pool, sites[0], day, start + 10, None).await;
+        insert_call(&pool, sites[0], day, start + 20, Some("timeout")).await;
+        insert_call(&pool, sites[1], day - 1, start - 5, None).await;
+
+        let rows = day_usage_by_site(&pool, day).await.expect("the sites' use");
+        let find = |name: &str| rows.iter().find(|found| found.site == name).cloned();
+        assert_eq!(
+            find(sites[0]),
+            Some(SiteDay {
+                site: sites[0].to_owned(),
+                used: 2,
+                failed: 1,
+                last_call_millis: Some(start + 20),
+            })
+        );
+        assert_eq!(
+            find(sites[1]),
+            Some(SiteDay {
+                site: sites[1].to_owned(),
+                used: 0,
+                failed: 0,
+                last_call_millis: Some(start - 5),
+            })
+        );
+        clear(&pool, &sites).await;
+    }
 }
