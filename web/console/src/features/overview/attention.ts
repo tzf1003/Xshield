@@ -11,6 +11,7 @@ import type {
   Evidence,
   GatewayProblem,
   Insights,
+  JevModelsState,
   OnJevUnavailable,
   SiteSummary,
   StatusResponse,
@@ -21,7 +22,14 @@ import type { ChipId, RequestsSearch, SiteTab, SystemTab } from "../../app/searc
 import { fmtInt, fmtMs } from "../../lib/format.ts";
 import { lostReasons, problemText } from "../../lib/health.ts";
 import { isSiteName } from "../../lib/ids.ts";
-import { DECISION_INFO, FAILURE_INFO, HEALTH_LABEL, SUGGESTION_INFO } from "../../lib/vocab.ts";
+import { jevNotLoaded, notLoadedSummary } from "../../lib/model-status.ts";
+import {
+  DECISION_INFO,
+  FAILURE_INFO,
+  HEALTH_LABEL,
+  MODEL_TEXT,
+  SUGGESTION_INFO,
+} from "../../lib/vocab.ts";
 import { hm } from "./clock.ts";
 
 export type Level = "serious" | "warn" | "info";
@@ -48,6 +56,8 @@ export type AttentionInput = {
   insights: ReadonlyMap<string, Insights>;
   /** The evidence of each site whose evidence row shows, once it has loaded. A row waits for none. */
   evidence: ReadonlyMap<string, Evidence>;
+  /** The Jev model configuration, once it has loaded: gateways that run another version are listed (design 3.6). */
+  jevModels?: JevModelsState | null;
 };
 
 const RANK: Record<Level, number> = { serious: 0, warn: 1, info: 2 };
@@ -357,11 +367,28 @@ function siteItems(site: SiteSummary, input: AttentionInput): AttentionItem[] {
   ].filter((item): item is AttentionItem => item !== null);
 }
 
+/** A gateway that does not run the Jev configuration the console has, for more than a minute (design 3.6). */
+function modelItems(jev: JevModelsState | null | undefined, now: number): AttentionItem[] {
+  if (jev === null || jev === undefined || jev.version === null) return [];
+  const behind = jevNotLoaded(jev, now);
+  if (behind.length === 0) return [];
+  const summary = notLoadedSummary(behind);
+  return [
+    {
+      key: "jev-model-not-loaded",
+      level: "warn",
+      text: MODEL_TEXT.attentionNotLoaded(jev.version, summary.edges, summary.reason),
+      actions: [{ label: MODEL_TEXT.attentionAction, target: { kind: "system", tab: "models" } }],
+    },
+  ];
+}
+
 /** Everything that needs handling, most serious first. An empty list means nothing does. */
 export function buildAttention(input: AttentionInput): AttentionItem[] {
   const items = [
     ...gatewayItems(input.status),
     ...jevItems(input.status.jev),
+    ...modelItems(input.jevModels, input.now),
     ...input.sites.flatMap((site) => siteItems(site, input)),
   ];
   return items.sort((a, b) => RANK[a.level] - RANK[b.level]);

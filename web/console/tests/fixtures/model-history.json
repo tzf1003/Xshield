@@ -1,0 +1,94 @@
+{
+  "jev": {
+    "items": [
+      {
+        "version": 14,
+        "at": "2026-11-01T12:40:00.000Z",
+        "note": "换成新密钥",
+        "tested": true,
+        "config": {
+          "route": "gateway",
+          "endpoint": "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
+          "model": "typesafe-ai/jev",
+          "timeout_ms": 2000
+        },
+        "changes": [{ "field": "key", "old": "1c2e", "new": "9f3a" }]
+      },
+      {
+        "version": 13,
+        "at": "2026-10-29T16:05:00.000Z",
+        "note": "线路改回 Vercel AI Gateway",
+        "tested": true,
+        "config": {
+          "route": "gateway",
+          "endpoint": "https://ai-gateway.vercel.sh/typesafe/v1/systemone",
+          "model": "typesafe-ai/jev",
+          "timeout_ms": 2000
+        },
+        "changes": [
+          { "field": "route", "old": "direct", "new": "gateway" },
+          {
+            "field": "endpoint",
+            "old": "https://api.typesafe.ai/v1/systemone",
+            "new": "https://ai-gateway.vercel.sh/typesafe/v1/systemone"
+          },
+          { "field": "timeout_ms", "old": 3000, "new": 2000 }
+        ]
+      },
+      {
+        "version": 12,
+        "at": "2026-10-27T09:30:00.000Z",
+        "note": "",
+        "tested": false,
+        "config": {
+          "route": "direct",
+          "endpoint": "https://api.typesafe.ai/v1/systemone",
+          "model": "typesafe-ai/jev",
+          "timeout_ms": 3000
+        },
+        "changes": [{ "field": "model", "old": "typesafe-ai/jev-v1", "new": "typesafe-ai/jev" }]
+      }
+    ]
+  },
+  "agent": {
+    "items": [
+      {
+        "version": 3,
+        "at": "2026-10-30T09:00:00.000Z",
+        "note": "换到 Vercel AI Gateway",
+        "tested": true,
+        "config": {
+          "provider": "vercel_gateway",
+          "endpoint": "https://ai-gateway.vercel.sh/v1",
+          "model": "openai/gpt-4.1-mini",
+          "timeout_ms": 30000,
+          "share_key_with_jev": false
+        },
+        "changes": [
+          { "field": "provider", "old": "custom", "new": "vercel_gateway" },
+          {
+            "field": "endpoint",
+            "old": "https://llm.example.com/v1",
+            "new": "https://ai-gateway.vercel.sh/v1"
+          },
+          { "field": "model", "old": "qwen-plus", "new": "openai/gpt-4.1-mini" },
+          { "field": "timeout_ms", "old": 60000, "new": 30000 }
+        ]
+      },
+      {
+        "version": 2,
+        "at": "2026-10-20T10:00:00.000Z",
+        "note": "",
+        "tested": false,
+        "config": {
+          "provider": "custom",
+          "endpoint": "https://llm.example.com/v1",
+          "model": "qwen-plus",
+          "timeout_ms": 60000,
+          "share_key_with_jev": false
+        },
+        "changes": [{ "field": "model", "old": "qwen-turbo", "new": "qwen-plus" }]
+      }
+    ]
+  }
+}

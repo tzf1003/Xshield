@@ -13,7 +13,17 @@ import type {
   JevPrompt,
   JevStats,
   JevStatus,
+  AgentModelsState,
+  JevModelsState,
+  JevModelValues,
+  AgentModelValues,
   LookupResponse,
+  ModelHistoryResponse,
+  ModelKind,
+  ModelsState,
+  ModelTestBody,
+  ModelTestResult,
+  ModelWrite,
   RequestCounts,
   RequestDetail,
   RequestListResponse,
@@ -70,6 +80,7 @@ async function call<T>(
   body?: string,
   contentType?: string,
   answers: readonly number[] = [],
+  signal?: AbortSignal,
 ): Promise<T> {
   const headers: Record<string, string> = {};
   if (contentType) headers["Content-Type"] = contentType;
@@ -79,6 +90,7 @@ async function call<T>(
     body,
     credentials: "same-origin",
     cache: "no-store",
+    signal,
   });
   const answered = answers.includes(response.status);
   if (response.status === 401 && !answered) {
@@ -160,6 +172,29 @@ export const api = {
 
   status: () => get<StatusResponse>("/status"),
   system: () => get<SystemInfo>("/system"),
+
+  // The model configuration of the system page (design agent-model-ui 2, 5.1). Keys travel only in the
+  // body of a save or a test; no call returns one.
+  systemModels: () => get<ModelsState>("/system/models"),
+  saveJevModel: (body: ModelWrite<JevModelValues>) =>
+    put<JevModelsState>("/system/models/jev", body),
+  saveAgentModel: (body: ModelWrite<AgentModelValues>) =>
+    put<AgentModelsState>("/system/models/agent", body),
+  testModel: (kind: ModelKind, body: ModelTestBody, signal?: AbortSignal) =>
+    call<ModelTestResult>(
+      "POST",
+      `/system/models/${kind}/test`,
+      JSON.stringify(body),
+      "application/json",
+      [],
+      signal,
+    ),
+  deleteJevModel: (expectedVersion: number) =>
+    call<JevModelsState>(
+      "DELETE",
+      `/system/models/jev${qs({ expected_version: expectedVersion })}`,
+    ),
+  modelHistory: (kind: ModelKind) => get<ModelHistoryResponse>(`/system/models/${kind}/history`),
 };
 
 /** Builds a query string from defined values only. */

@@ -504,6 +504,12 @@ export interface JevConfig {
   model: string;
   default_timeout_ms: number;
   prompt: string;
+  /** Where the instance's Jev configuration comes from (design agent-model-ui 2.1). Absent before models existed. */
+  config_source?: ModelSource;
+  /** The console version the instance runs; null when it runs the environment's configuration. */
+  config_version?: number | null;
+  /** A stable error code when the instance refused the console version it was sent. */
+  config_error?: string | null;
 }
 
 export interface JevStats {
@@ -900,6 +906,169 @@ export interface SystemInfo {
     };
     fixed: FixedParams;
   };
+}
+
+// ------------------------------------------------------------------ models (系统 · 模型; design agent-model-ui 2, 5.1)
+
+/** Which configuration a gateway or the console uses: a saved console version, or the environment. */
+export type ModelSource = "console" | "env";
+/** The agent's provider: the Vercel AI Gateway (OpenAI-compatible) or a custom OpenAI-compatible address. */
+export type AgentProvider = "vercel_gateway" | "custom";
+/** A failure code of a call or a test: a JEV_* code, or `dns`, `tls`, `answer_invalid` (design 7). */
+export type ModelFailure = string;
+export type ModelKind = "jev" | "agent";
+
+/** The key is write-only: the API returns whether one is set, its last four characters and when it changed. */
+export interface ModelKey {
+  set: boolean;
+  last4: string | null;
+  updated_at: string | null;
+}
+
+/** One gateway instance and the Jev configuration version it runs. Only online instances are in the list. */
+export interface ModelLoad {
+  edge: string;
+  online: boolean;
+  /** The console version the gateway runs; null when it has none loaded. */
+  version: number | null;
+  /** A stable error code when the gateway refused the version it was sent (e.g. the key cannot be read). */
+  error: string | null;
+}
+
+export interface ModelCall {
+  at: string;
+  ok: boolean;
+  /** The HTTP status the model service answered with; null when it did not answer. */
+  status: number | null;
+  failure: ModelFailure | null;
+}
+
+/** The values a model form edits, without the key. Jev sends `route`; the agent sends `provider`. */
+export interface JevModelValues {
+  route: JevRoute;
+  endpoint: string;
+  model: string;
+  timeout_ms: number;
+}
+
+export interface AgentModelValues {
+  provider: AgentProvider;
+  endpoint: string;
+  model: string;
+  timeout_ms: number;
+  share_key_with_jev: boolean;
+}
+
+export type ModelValues = JevModelValues | AgentModelValues;
+
+export interface JevModelsState extends JevModelValues {
+  source: ModelSource;
+  /**
+   * The console's version counter: the last version saved, null before the first save. It keeps its number when
+   * the environment takes over again, so the next save gets the next number. `source` says which one is in use.
+   */
+  version: number | null;
+  /** When the last version was saved. */
+  updated_at: string | null;
+  key: ModelKey;
+  /** The environment variable the gateways read the key from when the console has none. */
+  key_env: string | null;
+  /** Environment variables that the console configuration overrides (names only, never values). */
+  env_overridden: string[];
+  /** The console can switch back to the environment: it has no configuration and an env key exists. */
+  env_available: boolean;
+  loaded: ModelLoad[];
+  usage: { window: "1h"; calls: number; failed: number; p95_ms: number | null };
+  last_call: ModelCall | null;
+  impact: {
+    sites: number;
+    /** Sites in enforce mode whose on_jev_unavailable is deny: they refuse requests when Jev fails. */
+    fail_closed: string[];
+    /** Sites that override the Jev timeout (advanced.jev_timeout_ms). */
+    timeout_overrides: number;
+  };
+}
+
+export interface AgentSiteUsage {
+  site: string;
+  enabled: boolean;
+  used: number;
+  limit: number;
+  failed: number;
+  last_call_at: string | null;
+}
+
+export interface AgentModelsState extends AgentModelValues {
+  configured: boolean;
+  version: number | null;
+  updated_at: string | null;
+  key: ModelKey & { shared_with_jev: boolean };
+  /** `failing` when the last five calls all failed. */
+  health: "ok" | "failing" | "unknown";
+  usage: {
+    window: "today";
+    calls: number;
+    ok: number;
+    failed: number;
+    top_failure: ModelFailure | null;
+    enabled_sites: number;
+  };
+  sites: AgentSiteUsage[];
+  last_call: ModelCall | null;
+}
+
+/** `GET /api/system/models` (design 5.1). */
+export interface ModelsState {
+  jev: JevModelsState;
+  agent: AgentModelsState;
+}
+
+/** A save: the form's values, the key only when it is replaced, and the version the form was read at. */
+export type ModelWrite<V extends ModelValues> = V & {
+  /** Omitted or null keeps the saved key; a string replaces it. */
+  key?: string | null;
+  /** 0 when the console has no version of this configuration yet. */
+  expected_version: number;
+  note: string;
+  /** Whether this exact configuration tested successfully before it was saved. Recorded, not enforced. */
+  tested: boolean;
+};
+
+/** A test: the form's values; without a key, the saved one is used. */
+export type ModelTestBody = Partial<ModelValues> & { key?: string | null };
+
+export interface ModelTestResult {
+  ok: boolean;
+  latency_ms: number | null;
+  /** The HTTP status the model service answered with; null when it did not answer. */
+  status: number | null;
+  failure: ModelFailure | null;
+  /** The error body the model service returned: at most 300 characters, untrusted text. */
+  detail: string | null;
+  answer_valid: boolean | null;
+  /** A short reason made by the server when the answer did not parse. It is not model output. */
+  answer_reason: string | null;
+  at: string;
+}
+
+export interface ModelChange {
+  field: string;
+  old: string | number | boolean | null;
+  new: string | number | boolean | null;
+}
+
+/** One saved version of a model configuration. `config` is the snapshot a restore starts from (no key). */
+export interface ModelVersion {
+  version: number;
+  at: string;
+  note: string;
+  tested: boolean;
+  config: ModelValues;
+  changes: ModelChange[];
+}
+
+export interface ModelHistoryResponse {
+  items: ModelVersion[];
 }
 
 // ------------------------------------------------------------------ import (7.9.9)

@@ -9,7 +9,16 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { api } from "./client.ts";
-import type { ObjectsFilter, SiteSpec, SiteWriteBody } from "./types.ts";
+import type {
+  AgentModelValues,
+  JevModelValues,
+  ModelKind,
+  ModelsState,
+  ModelWrite,
+  ObjectsFilter,
+  SiteSpec,
+  SiteWriteBody,
+} from "./types.ts";
 
 export const keys = {
   session: ["session"] as const,
@@ -21,6 +30,8 @@ export const keys = {
   counts: (query: string) => ["counts", query] as const,
   detail: (id: string) => ["request", id] as const,
   system: ["system"] as const,
+  models: ["system", "models"] as const,
+  modelHistory: (kind: ModelKind) => ["system", "models", "history", kind] as const,
   jevStatus: ["jev-status"] as const,
   status: ["status"] as const,
   jevStats: (query: string) => ["jev-stats", query] as const,
@@ -346,5 +357,64 @@ export function useSlotLearning() {
       void client.invalidateQueries({ queryKey: ["objects", args.name] });
       void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
     },
+  });
+}
+
+// ------------------------------------------------------------------ models (系统 · 模型, design 2, 5.1)
+
+/**
+ * Both model configurations. `poll` decides the refresh from the data already read: the card asks every five
+ * seconds while a saved version is still on its way to the gateways (design 2.5).
+ */
+export function useSystemModels(poll?: (data: ModelsState | undefined) => number | false) {
+  return useQuery({
+    queryKey: keys.models,
+    queryFn: api.systemModels,
+    refetchInterval: poll ? (query) => poll(query.state.data) : false,
+  });
+}
+
+/** Saves the Jev configuration as a new version. The version list and the gateway status are re-read. */
+export function useSaveJevModel() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ModelWrite<JevModelValues>) => api.saveJevModel(body),
+    onSuccess: (jev) => {
+      client.setQueryData<ModelsState>(keys.models, (old) => (old ? { ...old, jev } : old));
+      void client.invalidateQueries({ queryKey: keys.models });
+    },
+  });
+}
+
+/** Saves the learning agent's configuration as a new version. */
+export function useSaveAgentModel() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ModelWrite<AgentModelValues>) => api.saveAgentModel(body),
+    onSuccess: (agent) => {
+      client.setQueryData<ModelsState>(keys.models, (old) => (old ? { ...old, agent } : old));
+      void client.invalidateQueries({ queryKey: keys.models });
+    },
+  });
+}
+
+/** Switches Jev back to the environment's configuration. */
+export function useDeleteJevModel() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (expectedVersion: number) => api.deleteJevModel(expectedVersion),
+    onSuccess: (jev) => {
+      client.setQueryData<ModelsState>(keys.models, (old) => (old ? { ...old, jev } : old));
+      void client.invalidateQueries({ queryKey: keys.models });
+    },
+  });
+}
+
+/** The last twenty versions of one configuration; read only when the card opens its history. */
+export function useModelHistory(kind: ModelKind, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.modelHistory(kind),
+    queryFn: () => api.modelHistory(kind),
+    enabled,
   });
 }

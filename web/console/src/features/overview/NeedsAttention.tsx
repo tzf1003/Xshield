@@ -4,12 +4,15 @@
 
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { useSites, useStatus } from "../../api/queries.ts";
+import { useSites, useStatus, useSystemModels } from "../../api/queries.ts";
 import { useNowBucket } from "../../app/scope.ts";
 import { Card, ErrorBar, Loading, Notice } from "../../ui/Page.tsx";
 import { type Action, type AttentionItem, buildAttention, type Level } from "./attention.ts";
 import { useAttentionReads } from "./attention-reads.ts";
 import { hms } from "./clock.ts";
+
+/** How often the overview re-reads the model configuration (design 3.6). */
+const MODEL_RECHECK_MS = 30_000;
 
 const LEVEL: Record<Level, { glyph: string; word: string; cls: string }> = {
   serious: { glyph: "■", word: "严重", cls: "lvl-serious" },
@@ -79,6 +82,8 @@ function AttentionRow({ item }: { item: AttentionItem }) {
 export function NeedsAttention() {
   const status = useStatus();
   const sites = useSites();
+  // A gateway that falls behind the console's Jev configuration shows up here within a minute (design 3.6).
+  const models = useSystemModels(() => MODEL_RECHECK_MS);
   const now = useNowBucket();
   const list = sites.data?.sites ?? [];
   const reads = useAttentionReads(list);
@@ -96,6 +101,7 @@ export function NeedsAttention() {
       onJevUnavailable: reads.onJevUnavailable,
       insights: reads.insights,
       evidence: reads.evidence,
+      jevModels: models.data?.jev ?? null,
     });
     if (items.length > 0) {
       body = (
@@ -105,9 +111,9 @@ export function NeedsAttention() {
           ))}
         </ul>
       );
-    } else if (sites.isPending || reads.pending) {
+    } else if (sites.isPending || reads.pending || models.isPending) {
       body = <Loading height={44} />;
-    } else if (!sites.isError && !reads.failed) {
+    } else if (!sites.isError && !reads.failed && !models.isError) {
       body = (
         <div className="all-good ov-all-good">
           <span aria-hidden="true" className="ov-ok-mark">
@@ -133,6 +139,14 @@ export function NeedsAttention() {
         <Notice tone="warn">
           部分站点的详情读取失败，未经判定就放行的提醒暂时不列出。
           <button type="button" className="linkbtn" onClick={reads.retry}>
+            重试
+          </button>
+        </Notice>
+      ) : null}
+      {models.isError ? (
+        <Notice tone="warn">
+          模型配置读取失败，网关没有加载最新配置的提醒暂时不列出。
+          <button type="button" className="linkbtn" onClick={() => void models.refetch()}>
             重试
           </button>
         </Notice>

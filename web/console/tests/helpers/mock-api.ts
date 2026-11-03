@@ -7,6 +7,7 @@
 
 import type { Page } from "@playwright/test";
 import type {
+  AgentProvider,
   DecisionPath,
   EdgeLoad,
   EdgeRollout,
@@ -16,6 +17,12 @@ import type {
   JevAttack,
   JevConclusion,
   JevRecord,
+  JevRoute,
+  ModelChange,
+  ModelKind,
+  ModelsState,
+  ModelTestResult,
+  ModelVersion,
   Outcome,
   RequestDetail,
   RequestId,
@@ -36,6 +43,7 @@ import {
   insights,
   jevStats,
   jevStatus,
+  modelHistory,
   preview,
   prompt,
   requestDetails,
@@ -48,6 +56,7 @@ import {
   status,
   summary,
   system,
+  systemModels,
   timeseries,
   versionsEmr,
 } from "./fixtures.ts";
@@ -75,8 +84,13 @@ export type MockOptions = {
   signedIn?: boolean;
   /** The only password login accepts; any other answers 401 INVALID_PASSWORD. Unset accepts any. */
   password?: string;
-  /** false keeps a saved version pending on the gateways, so the rollout stays partial. Default true. */
+  /**
+   * false keeps a saved version pending on the gateways (sites and the Jev configuration), so the rollout
+   * stays partial. Default true.
+   */
   gatewaysLoadSaved?: boolean;
+  /** The model configurations the mock starts from (GET /api/system/models). Default: the fixture. */
+  models?: ModelsState;
 };
 
 const REPLY = Symbol("reply");
@@ -201,6 +215,9 @@ type State = {
   signedIn: boolean;
   sites: Map<string, SiteDetail>;
   versions: Map<string, SiteVersion[]>;
+  models: ModelsState;
+  /** The saved versions of each model configuration, newest first. */
+  modelVersions: Record<ModelKind, ModelVersion[]>;
 };
 
 function freshState(options: MockOptions): State {
@@ -219,6 +236,11 @@ function freshState(options: MockOptions): State {
   ];
   return {
     signedIn: options.signedIn ?? true,
+    models: structuredClone(options.models ?? systemModels),
+    modelVersions: {
+      jev: structuredClone(modelHistory.jev.items),
+      agent: structuredClone(modelHistory.agent.items),
+    },
     sites: new Map([
       [emr.name, emr],
       [juice.name, juice],
@@ -307,6 +329,16 @@ const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
   ],
   ["GET", /^\/api\/status$/, () => ok(status)],
   ["GET", /^\/api\/system$/, () => ok(system)],
+  ["GET", /^\/api\/system\/models$/, (_m, _c, s) => ok(s.models)],
+  ["PUT", /^\/api\/system\/models\/jev$/, (_m, c, s, o) => saveJev(c, s, o)],
+  ["PUT", /^\/api\/system\/models\/agent$/, (_m, c, s) => saveAgent(c, s)],
+  ["POST", /^\/api\/system\/models\/(?:jev|agent)\/test$/, () => ok(modelTestResult())],
+  ["DELETE", /^\/api\/system\/models\/jev$/, (_m, c, s) => backToEnvironment(c, s)],
+  [
+    "GET",
+    /^\/api\/system\/models\/(jev|agent)\/history$/,
+    (m, _c, s) => ok({ items: s.modelVersions[modelKindOf(m)].slice(0, 20) }),
+  ],
 ];
 
 function dispatch(call: Call, state: State, options: MockOptions): Answer {
@@ -937,4 +969,192 @@ function importLines(call: Call): Answer {
     errors: errorLines.length,
     error_lines: errorLines.slice(0, 20),
   });
+}
+
+// ------------------------------------------------------------------ models (系统 · 模型, design 5.1)
+
+/** Every save is stamped with the clock the specs freeze (FIXTURE_NOW_MS), so the rows line up with the page. */
+const MODEL_STAMP = new Date(FIXTURE_NOW_MS).toISOString();
+
+/** What a save or a test sends: the form's values, the key only when it is typed, and the version read. */
+type ModelWriteBody = {
+  route?: JevRoute;
+  provider?: AgentProvider;
+  endpoint?: string;
+  model?: string;
+  timeout_ms?: number;
+  share_key_with_jev?: boolean;
+  key?: string | null;
+  expected_version?: number;
+  note?: string;
+  tested?: boolean;
+};
+
+function modelKindOf(match: RegExpMatchArray): ModelKind {
+  return match[1] === "agent" ? "agent" : "jev";
+}
+
+/** A save or a switch back names the version it was read at; a stale one answers 409 with the current one. */
+function checkModelVersion(current: number | null, expected: number | undefined): void {
+  if ((expected ?? 0) !== (current ?? 0)) {
+    throw new ApiFailure(409, "VERSION_CONFLICT", { current_version: current });
+  }
+}
+
+/** One above the highest version ever saved, so a version number is never reused. */
+function nextModelVersion(state: State, kind: ModelKind): number {
+  const saved = state.modelVersions[kind].map((item) => item.version);
+  return Math.max(0, state.models[kind].version ?? 0, ...saved) + 1;
+}
+
+/** The fields that differ between two configurations, as the history lists them (design 2.6). */
+function modelChanges(
+  before: Record<string, string | number | boolean>,
+  after: Record<string, string | number | boolean>,
+): ModelChange[] {
+  return Object.keys(after)
+    .filter((field) => before[field] !== after[field])
+    .map((field) => ({ field, old: before[field] ?? null, new: after[field] ?? null }));
+}
+
+/** The key a save carries, or null when it keeps the saved one (design 5.1). */
+function typedKey(body: ModelWriteBody): string | null {
+  return typeof body.key === "string" && body.key.length > 0 ? body.key : null;
+}
+
+function saveJev(call: Call, state: State, options: MockOptions): Answer {
+  const body = (call.body ?? {}) as ModelWriteBody;
+  const jev = state.models.jev;
+  checkModelVersion(jev.version, body.expected_version);
+  const key = typedKey(body);
+  if (key === null && !jev.key.set) throw new ApiFailure(400, "MODEL_KEY_REQUIRED");
+  const version = nextModelVersion(state, "jev");
+  const values = {
+    route: body.route ?? jev.route,
+    endpoint: body.endpoint ?? jev.endpoint,
+    model: body.model ?? jev.model,
+    timeout_ms: body.timeout_ms ?? jev.timeout_ms,
+  };
+  const changes = modelChanges(
+    { route: jev.route, endpoint: jev.endpoint, model: jev.model, timeout_ms: jev.timeout_ms },
+    values,
+  );
+  if (key !== null) changes.push({ field: "key", old: jev.key.last4, new: key.slice(-4) });
+  state.models.jev = {
+    ...jev,
+    ...values,
+    source: "console",
+    version,
+    updated_at: MODEL_STAMP,
+    key: key === null ? jev.key : { set: true, last4: key.slice(-4), updated_at: MODEL_STAMP },
+    // A gateway that does not load the version keeps the one it runs, which leaves the rollout partial.
+    loaded:
+      options.gatewaysLoadSaved === false
+        ? jev.loaded
+        : jev.loaded.map((load) => ({ ...load, version, error: null })),
+  };
+  state.modelVersions.jev = [
+    {
+      version,
+      at: MODEL_STAMP,
+      note: body.note ?? "",
+      tested: body.tested === true,
+      config: values,
+      changes,
+    },
+    ...state.modelVersions.jev,
+  ];
+  return ok(state.models.jev);
+}
+
+function saveAgent(call: Call, state: State): Answer {
+  const body = (call.body ?? {}) as ModelWriteBody;
+  const agent = state.models.agent;
+  checkModelVersion(agent.version, body.expected_version);
+  const shared = body.share_key_with_jev === true;
+  const key = shared ? null : typedKey(body);
+  if (!shared && key === null && !agent.key.set) {
+    throw new ApiFailure(400, "MODEL_KEY_REQUIRED");
+  }
+  const version = nextModelVersion(state, "agent");
+  const values = {
+    provider: body.provider ?? agent.provider,
+    endpoint: body.endpoint ?? agent.endpoint,
+    model: body.model ?? agent.model,
+    timeout_ms: body.timeout_ms ?? agent.timeout_ms,
+    share_key_with_jev: shared,
+  };
+  const changes = modelChanges(
+    {
+      provider: agent.provider,
+      endpoint: agent.endpoint,
+      model: agent.model,
+      timeout_ms: agent.timeout_ms,
+      share_key_with_jev: agent.share_key_with_jev,
+    },
+    values,
+  );
+  if (key !== null) changes.push({ field: "key", old: agent.key.last4, new: key.slice(-4) });
+  const jevKey = state.models.jev.key;
+  state.models.agent = {
+    ...agent,
+    ...values,
+    configured: true,
+    version,
+    updated_at: MODEL_STAMP,
+    key: shared
+      ? {
+          set: jevKey.set,
+          last4: jevKey.last4,
+          updated_at: jevKey.updated_at,
+          shared_with_jev: true,
+        }
+      : key === null
+        ? { ...agent.key, shared_with_jev: false }
+        : { set: true, last4: key.slice(-4), updated_at: MODEL_STAMP, shared_with_jev: false },
+  };
+  state.modelVersions.agent = [
+    {
+      version,
+      at: MODEL_STAMP,
+      note: body.note ?? "",
+      tested: body.tested === true,
+      config: values,
+      changes,
+    },
+    ...state.modelVersions.agent,
+  ];
+  return ok(state.models.agent);
+}
+
+/**
+ * A healthy answer to a test. A spec that wants a failure overrides the test route with `reply`
+ * (MockOptions.overrides), so the page shows the failure the server would name.
+ */
+function modelTestResult(): ModelTestResult {
+  return {
+    ok: true,
+    latency_ms: 812,
+    status: 200,
+    failure: null,
+    detail: null,
+    answer_valid: true,
+    answer_reason: null,
+    at: MODEL_STAMP,
+  };
+}
+
+/** 改回环境变量: the console's configuration goes, the gateways read the environment again (design 2.3). */
+function backToEnvironment(call: Call, state: State): Answer {
+  const jev = state.models.jev;
+  if (!jev.env_available) throw new ApiFailure(409, "ENV_KEY_MISSING");
+  checkModelVersion(jev.version, numberParam(call.params, "expected_version"));
+  state.models.jev = {
+    ...jev,
+    source: "env",
+    key: { set: true, last4: null, updated_at: null },
+    env_overridden: [],
+    loaded: jev.loaded.map((load) => ({ ...load, version: null, error: null })),
+  };
+  return ok(state.models.jev);
 }

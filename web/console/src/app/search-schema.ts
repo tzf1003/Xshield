@@ -233,7 +233,7 @@ export function validateWizard(raw: Record<string, unknown>): WizardSearch {
   };
 }
 
-export const SYSTEM_TABS = ["edges", "storage", "params", "import"] as const;
+export const SYSTEM_TABS = ["edges", "storage", "params", "models", "import"] as const;
 export type SystemTab = (typeof SYSTEM_TABS)[number];
 
 export type SystemSearch = GlobalSearch & {
