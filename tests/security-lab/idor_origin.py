@@ -27,6 +27,15 @@ PATIENTS = {
     "PT-7003": {"id": "PT-7003", "name": "患者 C", "doctor": "DR-A"},
     "PT-7004": {"id": "PT-7004", "name": "患者 D", "doctor": "DR-B"},
 }
+# Comments on a patient, each with its author's contact details (docs/07 section 7.9.17). The
+# list is never checked against the caller: a colleague's comment, with the colleague's phone
+# number and email, reaches any doctor who names the patient.
+COMMENTS = {
+    "PT-7001": [{"id": "CM-1", "body": "请复查血糖。", "author": {
+        "id": "DR-B", "name": "医生 B", "phone": "13800000002", "email": "dr-b@emr.example"}}],
+    "PT-7002": [{"id": "CM-2", "body": "术后恢复良好。", "author": {
+        "id": "DR-A", "name": "医生 A", "phone": "13800000001", "email": "dr-a@emr.example"}}],
+}
 
 
 class EmrOrigin:
@@ -169,6 +178,8 @@ class _Handler(BaseHTTPRequestHandler):
         if method == "GET" and url.path == "/api/search":
             text = query.get("q", [""])[0]
             return 200, {"results": [p for p in origin.patients.values() if text in p["name"]]}, {}
+        if method == "GET" and url.path == "/api/comments":
+            return 200, {"comments": COMMENTS.get(query.get("patient", [""])[0], [])}, {}
         if method == "POST" and url.path == "/api/notes":
             return 201, {"saved": True}, {}
         return 404, {"error": "not_found"}, {}

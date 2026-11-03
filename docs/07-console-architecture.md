@@ -219,9 +219,9 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values[].attempt` | `over_privilege`：尝试越权。值只由公共档响应展示过，请求位置不接受公共来源，所以不快速放行、不查缓存，交 Jev 并要求 DENY（[01 1.4](01-request-flow.md#14-判定步骤) 第 4 步）。没有时不写 |
 | `values[].sources[].tier` / `reliability` | 来源响应位置的档位和可靠性，与 `state` 里 `seen_as` 括号中的文字对应；位置没有标档位时不写 |
 | `values_truncated` | 请求体未结构化、超过 64 KiB 解析上限或值数到上限（即 `ExtractedRequest::truncated`），或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4） |
-| `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条）；`known_values` 是会话已见值数量 |
+| `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条），其中的请求路径超过 256 字节时截到 256 字节（`TRACE_PATH_BYTES_MAX`）；`known_values` 是会话已见值数量 |
 | `session.identity` | 站点声明了身份位置且会话已见身份时才有：`user`、`org` 为键控哈希标签，`role` 为角色标签，规则见 [7.9.15](#7915-对象表的身份位置w1)。没有身份位置的站点不写这一段 |
-| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
+>| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
 | `timing` | `total_ms` 从收到请求头到响应写完；`judge_ms` 是判定耗时（含 Jev）；`origin_ms` 从发出上游请求到收到响应头 |
 | `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
 | `response.values` / `new_values` | 从响应里取出的值数、其中会话原先没有的值数 |
@@ -230,12 +230,13 @@ GET /api/patients ──响应里出现 id=7──┐
 | `response.issued_session` | 响应下发了新凭证（登录）时，新会话的标签 |
 | `response.entry_passed` | 这个响应让会话第一次经过某个入口 |
 | `response.after_would_block` | 这次请求是“本应拦截”但在观察模式下被转发，它的响应仍被学进上下文（[7.4.6](#746-附带发现观察模式下本应拦截请求的响应仍进入上下文)） |
+| `response.exposure` | 属性越权告警（W6，[7.9.17](#7917-属性越权告警w6)）：响应里有一个不属于本会话的用户类对象，同时有手机号、邮箱或身份证号类属性。`users` 为用户类位置（至多 4 个），`attributes` 为敏感属性的位置、`kind`（`phone`、`email`、`id_card`）和识别方式 `by`（`name` 按字段名，`format` 按值的格式）（至多 8 个），`truncated` 表示被截断。只记位置和类别，不存值。没有身份位置的站点、未见过身份的会话，以及没有告警的响应都不写这一项。只告警，不影响判定 |
 
 ### 7.4.4 脱敏与上限
 
 - 值和查询串的脱敏与 `state` 用同一函数：字段名或位置含内置 9 个词（`password`、`passwd`、`pwd`、`secret`、`token`、`otp`、`credential`、`authorization`、`cvv`）或站点 `advanced.secret_fields` 中的词的值，以及含会话凭证原文的值，写成 `<redacted>`，另记 `len`。查询串按 `k=v` 逐对脱敏后重新拼接。
 - 单个值最长保存 256 个字符，超出截断并标 `clipped: true`、原长 `len`。
-- `trace` 序列化后不超过 16 KiB；网关在写出记录前裁剪（`Trace::fit`，每条记录都经过）：超出时依次去掉惰性值、把来源减到 1 个、值截到 64 字符，并标 `trimmed: true`；仍超出时清空 `values` 并标 `values_truncated: true`。
+- `trace` 序列化后不超过 16 KiB；网关在写出记录前裁剪（`Trace::fit`，每条记录都经过）。超出时依次去掉惰性值、把来源减到 1 个、值截到 64 字符，并标 `trimmed: true`；仍超出时，若只去掉响应的结构（`shape`）和指纹（`fingerprints`）就够，就只去掉它们，保留值；否则清空 `values` 并标 `values_truncated: true`；还超出时去掉余下的响应结构和指纹、字段计数、内容类型，以及会话的 `recent` 与 `entries_passed`。这样剩下的部分只有两个路径模式（各不超过 256 字节）、长度有上限的身份标签（角色至多 32 字节）和固定长度的字段，体积有上限，单条记录不会超过 16 KiB。
 - 响应只存字段名、计数和值指纹（`response.fingerprints`），不存响应里的值；请求头只存 `Host`。
 - 响应指纹每条记录最多 16 个位置、每个位置 8 个，指纹定长，所以一条记录里增加的字节数有上限。
 
@@ -967,6 +968,26 @@ CREATE TABLE jev_prompts (
 判定侧的约定（W4，已实现，规则与核验见 [7.4.7](#747-档位在判定中的使用)）：只有 `reliability` 为 `high` 的 `tier` 与 `accepts_public` 参与收紧。收紧条件是：目标值的全部来源位置都是 `public` 且为 `high`，并且请求位置的 `accepts_public` 为 `false` 且为 `high`。缺少任一判断、可靠性不是 `high`、或条目被暂停时，该位置不收紧。
 
 实现状态：字段、校验、纯函数与其测试已实现（W3）；判定侧的收紧与核验已实现（W4，见 [7.4.7](#747-档位在判定中的使用)）。证据的写入、提议、管理员确认写配置，后续实现；它依赖的 W1 身份位置与 W2 响应指纹已合入。
+
+### 7.9.17 属性越权告警（W6）
+
+身份位置（[7.9.15](#7915-对象表的身份位置w1)）说明了会话的用户之后，网关能发现一类比对象越权更细的问题：响应里有一个**不属于本会话的用户类对象**，同时带着它的手机号、邮箱或身份证号。典型的是评论作者的资料。这种情况只记一条告警，请求照常放行，字段不遮挡。
+
+判定在 `xshield-judge` 的 `exposure` 模块里，`observe` 对每个成功的 JSON 响应执行。规则如下，不新增任何配置：
+
+- **用户类**：站点里声明了身份位置（`identity: user`）的条目的类别。身份位置说明它携带的是会话的用户，所以它的类别就是用户类。暂停的条目不算。
+- **不属于本会话**：用户类位置的取值，其键控哈希（与 `identity.user` 同域）不同于会话的用户标签。会话还没有见过身份时，没有任何取值算不属于本会话，所以没有身份的站点和会话不告警。
+- **敏感属性**：响应里的值满足下列任一条。按字段名：字段名拆成词（驼峰和分隔符都拆）后含 `phone`、`mobile`、`telephone`、`tel`、`cellphone`、`mobilephone`、`shouji`，或含 `email`、`mail`，或含 `idcard`、`identitycard`、`citizenid`、`nationalid`、`sfz`、`shenfenzheng`，或含 `id` 或 `identity` 且同时含 `card`、`no`、`number`；字段名含“手机”“邮箱”“邮件”“身份证”也算。按值的格式：11 位数字、以 `1` 开头且第二位为 `3`～`9`（手机号）；只有一个 `@`、域名末段至少两个字母的邮箱；18 位、末位校验码符合 ISO 7064 mod 11-2、出生日期在 1900 至 2099 年之间的身份证号。空白值不算。
+- **告警条件**：同一个响应里，用户类位置有不属于本会话的取值，并且有敏感属性。每个响应至多一条。
+
+记录（`trace.response.exposure`，见 7.4.3）只写位置和类别，不写值，也不写身份的原文。`users` 为用户类位置，`attributes` 为敏感属性的位置、类别和识别方式。两个列表都按字典序排列，分别至多 4 个和 8 个，超出时 `truncated` 为真。
+
+边界：
+
+- 只告警。判定、放行与拦截、响应的转发都不变；`response.exposure` 不进入 `state`，也不影响学习。
+- 告警说的是“同一个响应里同时有这两类内容”，不判断敏感属性属于哪一个对象。字段遮挡和拦截要等有数据再定，因为改响应体比拦请求风险大。
+- 请求里自己发出的值（回声）不排除。
+- 控制台的请求详情在学习步骤里显示“疑似属性越权，仅告警未拦截”，只列出类别，不显示值。
 
 ## 7.10 控制台前端架构
 

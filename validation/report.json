@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, JSON Schema and synthetic sample checks only. Not Rust behaviour (cargo test runs crates/xshield-core/tests/v4_samples.rs over the same samples), not WAF effectiveness and not model accuracy.",
   "passed": true,
-  "checks_total": 295,
-  "passed_count": 295,
+  "checks_total": 299,
+  "passed_count": 299,
   "checks": [
     {
       "name": "json:examples/sites-dev.json",
@@ -765,6 +765,16 @@
       "detail": ""
     },
     {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:CHANGELOG.md:docs/06-console-ui.md",
       "passed": true,
       "detail": ""
@@ -925,6 +935,11 @@
       "detail": ""
     },
     {
+      "name": "link:docs/01-request-flow.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/01-request-flow.md:02-jev.md",
       "passed": true,
       "detail": ""
@@ -1061,6 +1076,11 @@
     },
     {
       "name": "link:docs/04-deployment-testing.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/04-deployment-testing.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },

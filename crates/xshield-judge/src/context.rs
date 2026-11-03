@@ -409,6 +409,15 @@ impl SessionIdentity {
             role: self.role.clone(),
         })
     }
+
+    /// Whether `value`, at a user-class position, is an id other than the session's own user
+    /// (W6). Nothing is other while the session has shown no user, so a site without an identity
+    /// position states no exposure.
+    #[must_use]
+    pub fn is_other_user(&self, key: &ContextKey, value: &str) -> bool {
+        self.user
+            .is_some_and(|user| user != key.mac(USER_DOMAIN, value.as_bytes()))
+    }
 }
 
 /// The one member of a set, or `None` when the set is empty or holds several.

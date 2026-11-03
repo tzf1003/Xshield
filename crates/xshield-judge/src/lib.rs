@@ -6,6 +6,7 @@
 
 pub mod context;
 pub mod engine;
+mod exposure;
 pub mod jev;
 pub mod probe;
 pub mod slot;

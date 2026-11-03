@@ -18,6 +18,7 @@ use crate::context::{
     CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Origin, Recent, SENT_MAX,
     SentRecord, SessionContext, Source, label, request_number, request_text,
 };
+use crate::exposure;
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
 use crate::slots::{
     identity_claims, origin_object, origin_tier, reliability_name, request_access, request_slot,
@@ -739,6 +740,9 @@ impl<J: JevPort> Judge<J> {
     /// Only 2xx responses teach values. A redirect that issues a credential (a
     /// login form answering `302` with `Set-Cookie`) creates the new session,
     /// empty. A failed request teaches nothing.
+    // The steps for one response stay in one function, in the order they happen: learning, then
+    // the identity and the exposure alert that read what was just learned.
+    #[allow(clippy::too_many_lines)]
     pub fn observe(&self, site: &SiteSpec, observation: &Observation<'_>) -> ObservationSummary {
         let routed = routed_observation(observation);
         let resolved: &Resolved = &routed;
@@ -830,6 +834,15 @@ impl<J: JevPort> Judge<J> {
             }
             let added = session.remember(&self.key, &source, &values);
             session.declare_identity(&self.key, &claims);
+            if summary.exposure.is_none() {
+                summary.exposure = exposure::exposure(
+                    site.objects(),
+                    observation.method,
+                    resolved.logical_path(),
+                    &values,
+                    |value| session.identity().is_other_user(&self.key, value),
+                );
+            }
             if new_values.is_none() {
                 new_values = Some(added);
             }
@@ -4042,6 +4055,77 @@ mod tests {
         let switched_tag = identity_of(&switched.record).expect("alice still shows an identity");
         assert_ne!(switched_tag.user, tag.user);
         assert_eq!(switched_tag.role.as_deref(), Some("admin"));
+    }
+
+    /// A site whose comment list names each author, a doctor, as a user-class object, next to the
+    /// `GET /api/home` that declares the session's own doctor (docs/07 section 7.9.17).
+    fn comment_site() -> SiteSpec {
+        site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"doctor","name":"医生"}],
+                "slots":[
+                    {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"},
+                    {"key":"GET /api/comments comments[].author.id","class":"doctor","source":"admin"}
+                ]}"#,
+        )
+    }
+
+    /// The same site without any identity or object position.
+    fn plain_site() -> SiteSpec {
+        site("")
+    }
+
+    /// A successful `GET /api/comments` answered to `credential` with `body`.
+    fn comments_for<'a>(credential: &'a str, body: &'a [u8]) -> Observation<'a> {
+        Observation {
+            path: "/api/comments",
+            body,
+            ..list_response(credential, 0)
+        }
+    }
+
+    #[tokio::test]
+    async fn another_doctors_contact_details_are_alerted_and_nothing_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = comment_site();
+        judge.observe(&site, &home_for("alice", br#"{"doctor":{"id":"DR-A"}}"#));
+        let by_b = br#"{"comments":[{"id":"CM-1","author":{"id":"DR-B","name":"B","phone":"13800000002","email":"dr-b@emr.example"}}]}"#;
+        let shown = judge.observe(&site, &comments_for("alice", by_b));
+        let found = shown
+            .exposure
+            .clone()
+            .expect("another doctor's contact details are an exposure");
+        assert_eq!(
+            found.users,
+            vec!["GET /api/comments comments[].author.id".to_owned()]
+        );
+        assert_eq!(found.attributes.len(), 2, "the phone and the email");
+        // The alert keeps positions and kinds, never the values.
+        assert!(
+            !serde_json::to_string(&shown)
+                .unwrap()
+                .contains("13800000002")
+        );
+
+        // The session's own doctor is not another, so its contact details alert nothing.
+        let own = br#"{"comments":[{"id":"CM-2","author":{"id":"DR-A","name":"A","phone":"13800000001"}}]}"#;
+        assert_eq!(
+            judge.observe(&site, &comments_for("alice", own)).exposure,
+            None
+        );
+        // A session that has not shown its doctor cannot tell whose the author is.
+        assert_eq!(
+            judge.observe(&site, &comments_for("carol", by_b)).exposure,
+            None
+        );
+        // A site without identity positions states no exposure at all.
+        let plain = plain_site();
+        judge.observe(&plain, &home_for("dave", br#"{"doctor":{"id":"DR-D"}}"#));
+        assert_eq!(
+            judge.observe(&plain, &comments_for("dave", by_b)).exposure,
+            None
+        );
     }
 
     #[tokio::test]
