@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::ConfigError;
 use super::learning::{SESSIONS_MIN, VOTES_MIN};
+use crate::path_template::canonical_path;
 
 /// Most object kinds one site declares.
 pub const CLASSES_MAX: usize = 64;
@@ -394,6 +395,24 @@ impl ObjectMap {
         self.live(key).and_then(|slot| slot.reliability)
     }
 
+    /// The tier of a response position and how sure the map is of it: an absent reliability is
+    /// low (docs/07 section 7.9.16). `None` when the map gives no tier there.
+    #[must_use]
+    pub fn tier_judgement_of(&self, key: &str) -> Option<(Tier, Reliability)> {
+        Some((
+            self.tier_of(key)?,
+            self.reliability_of(key).unwrap_or(Reliability::Low),
+        ))
+    }
+
+    /// Whether the map is sure that a request position takes no public source: `accepts_public`
+    /// is false and its reliability high (docs/07 section 7.4.7).
+    #[must_use]
+    pub fn closed_to_public(&self, key: &str) -> bool {
+        self.accepts_public_of(key) == Some(false)
+            && self.reliability_of(key) == Some(Reliability::High)
+    }
+
     /// The entry of a position when it is not paused.
     fn live(&self, key: &str) -> Option<&ObjectSlot> {
         self.slot(key).filter(|slot| !slot.paused)
@@ -574,10 +593,33 @@ pub(crate) fn valid_class_id(id: &str) -> bool {
         && id.bytes().all(|byte| byte.is_ascii_lowercase())
 }
 
-/// `METHOD /template location`: an upper-case method, a path template that
-/// starts with `/` and carries no query or fragment, and a location with no
-/// spaces. The key is only compared, never routed, so the checks are about
-/// shape: a key that cannot be produced by the judge is refused.
+/// The role label that makes a session an administrator for the judge (docs/07 section 7.4.7): the
+/// label the site's `role` identity position declares, as [`role_label`] keeps it.
+pub const ADMIN_ROLE: &str = "admin";
+
+/// Whether a response with this tier, and how sure the map is of it, proves a right to the object
+/// it shows, at a request position that is `closed` to public sources or not, for a session that
+/// is `admin` or not (docs/07 section 7.4.7). A response the map does not classify proves it, as
+/// every response did before tiers, and so does an org response. A public response the map is sure
+/// of proves it unless the position is closed; a public response the map is not sure of proves it,
+/// as before tiers. A self response never proves on its own: a learned self label only keeps a value
+/// from being tightened. An administrator's listing proves a value to an administrator session, as
+/// an ordinary response does, and to no other session: a role is not a reason to allow, so an
+/// object an administrator never saw is still blocked.
+#[must_use]
+pub fn tier_proves(tier: Option<(Tier, Reliability)>, closed: bool, admin: bool) -> bool {
+    match tier {
+        Some((Tier::Own, _)) => false,
+        Some((Tier::Admin, _)) => admin,
+        Some((Tier::Public, Reliability::High)) => !closed,
+        None | Some((Tier::Org | Tier::Public, _)) => true,
+    }
+}
+
+/// `METHOD /template location`: an upper-case method, a path template that starts with `/`,
+/// carries no query or fragment, and is in the spelling the judge keys positions by
+/// ([`canonical_path`]), and a location with no spaces. The key is only compared, never routed,
+/// so the checks are about shape: a key that cannot be produced by the judge is refused.
 fn valid_key(key: &str) -> bool {
     let mut parts = key.split(' ');
     let (Some(method), Some(template), Some(location), None) =
@@ -591,6 +633,7 @@ fn valid_key(key: &str) -> bool {
         && template.starts_with('/')
         && !template.contains(['?', '#'])
         && !template.bytes().any(|byte| byte.is_ascii_control())
+        && canonical_path(template).as_deref() == Some(template)
         && !location.is_empty()
         && location.len() <= 128
         && location.bytes().all(|byte| byte.is_ascii_graphic())

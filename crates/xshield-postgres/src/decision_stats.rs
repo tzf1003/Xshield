@@ -839,6 +839,9 @@ pub struct SlotRow {
     pub decision_path: String,
     /// The request values of the trace, as JSON text.
     pub values: String,
+    /// The role label the session declared when the decision was made, when it declared one
+    /// (`trace.session.identity.role`). A draft reads an administrator's tier by it.
+    pub role: Option<String>,
 }
 
 /// The decisions of `scope` that were fast-allowed or called Jev, and whose trace names one of
@@ -859,7 +862,8 @@ pub async fn window_rows(
 ) -> Result<(Vec<SlotRow>, bool), sqlx::Error> {
     let mut query = QueryBuilder::<Postgres>::new(
         "SELECT request_id, method, COALESCE(logical_path, path) AS path, decision_path,
-            (trace -> 'values')::text AS values
+            (trace -> 'values')::text AS values,
+            (trace -> 'session' -> 'identity' ->> 'role') AS role
          FROM decision_log",
     );
     push_scope(&mut query, scope);
@@ -896,6 +900,7 @@ pub async fn window_rows(
             path: row.try_get("path")?,
             decision_path: row.try_get("decision_path")?,
             values: row.try_get("values")?,
+            role: row.try_get("role")?,
         });
     }
     Ok((out, complete))

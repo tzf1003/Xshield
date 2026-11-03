@@ -8,17 +8,19 @@
 //! only place a template is made for positions, so a later change to route
 //! templates changes every position in one spot.
 
-use xshield_core::context::{IdentityRole, ObjectMap};
-use xshield_core::path_template::normalize;
+use xshield_core::context::{IdentityRole, ObjectMap, PublicAccess, Reliability, Tier};
+use xshield_core::path_template::position_template;
 
 use crate::context::Origin;
 use crate::values::ResponseValue;
 
 /// The route template of `path`: numeric and UUID segments become `{id}`.
 /// A path the normalization does not accept is kept as it is.
+/// The route template of `path`: the path in its canonical spelling, with numeric and UUID
+/// segments replaced by `{id}`. A path without a canonical spelling is kept as it is.
 #[must_use]
 pub fn route_template(path: &str) -> String {
-    normalize(path).unwrap_or_else(|| path.to_owned())
+    position_template(path)
 }
 
 /// The position of a request value: `GET /doctor/{id} path[1]`.
@@ -46,6 +48,45 @@ pub fn origin_slot(origin: &Origin) -> Option<String> {
 #[must_use]
 pub fn origin_object<'a>(objects: &'a ObjectMap, origin: &Origin) -> Option<&'a str> {
     objects.class_of(&origin_slot(origin)?)
+}
+
+/// The tier the map gives the response position an origin was seen at, with how sure the
+/// map is of it (an absent reliability counts as low, docs/07 section 7.9.16). `None` when
+/// the map gives no tier there.
+#[must_use]
+pub fn origin_tier(objects: &ObjectMap, origin: &Origin) -> Option<(Tier, Reliability)> {
+    objects.tier_judgement_of(&origin_slot(origin)?)
+}
+
+/// What the map says of a request position about public sources, with how sure it is.
+/// `None` when the map says nothing about that position.
+#[must_use]
+pub fn request_access(objects: &ObjectMap, slot: &str) -> Option<PublicAccess> {
+    Some(PublicAccess {
+        accepts: objects.accepts_public_of(slot)?,
+        reliability: objects.reliability_of(slot).unwrap_or(Reliability::Low),
+    })
+}
+
+/// The name of a tier as the state and the trace write it (docs/07 section 7.9.16).
+#[must_use]
+pub fn tier_name(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Own => "self",
+        Tier::Org => "org",
+        Tier::Admin => "admin",
+        Tier::Public => "public",
+    }
+}
+
+/// The name of a reliability as the state and the trace write it.
+#[must_use]
+pub fn reliability_name(reliability: Reliability) -> &'static str {
+    match reliability {
+        Reliability::Low => "low",
+        Reliability::Medium => "medium",
+        Reliability::High => "high",
+    }
 }
 
 /// The values a response holds at the positions the map gives an identity (docs/01 section
@@ -95,6 +136,22 @@ mod tests {
             "/api/doctors/{id}/files/{id}"
         );
         assert_eq!(route_template("/api/doctors"), "/api/doctors");
+    }
+
+    #[test]
+    fn equivalent_spellings_of_a_path_name_one_position() {
+        assert_eq!(
+            request_slot("DELETE", "/api/patients/7005/", "path[2]"),
+            "DELETE /api/patients/{id} path[2]"
+        );
+        assert_eq!(
+            request_slot("DELETE", "/api/patients/%37005", "path[2]"),
+            "DELETE /api/patients/{id} path[2]"
+        );
+        assert_eq!(
+            response_slot("GET", "/api/search/", "results[].id").as_deref(),
+            Some("GET /api/search results[].id")
+        );
     }
 
     #[test]

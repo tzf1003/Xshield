@@ -7,9 +7,10 @@ use std::fmt::Write as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use xshield_core::context::Conclusion;
+use xshield_core::context::{Attempt, Conclusion, PublicAccess};
 
 use crate::context::Recent;
+use crate::slots::reliability_name;
 
 /// Largest serialized `state` sent to Jev.
 pub const STATE_BYTES_MAX: usize = 8 * 1024;
@@ -34,7 +35,7 @@ pub const ACCESS_OPTIONS: [&str; 3] = ["ALLOW", "DENY", "UNKNOWN"];
 /// The `attack` question options.
 pub const ATTACK_OPTIONS: [&str; 3] = ["BENIGN", "ATTACK", "UNKNOWN"];
 
-const ACCESS_INSTRUCTIONS: &str = "You are a web application firewall. state.request is one HTTP request from a logged-in browser session. state.session and state.recent describe what the origin server already showed this session. For every value in state.request.values that selects or names an existing business object (record id, account, owner, file, order), check state.request.values[].seen_as: it lists where the origin showed that same value to this session, with the field name. Answer ALLOW only if every object-selecting value was shown earlier as that kind of object, or if state.entry.matched is true and the values are only the input that entry needs (login form, share code, search text). Each value has kind: reference when it looks like an object reference (an id in the path, or a field named like an id, owner or file), route for a plain word in the URL path, input otherwise. A route word that is a collection name (Addresss, Cards, Users) selects no object and never needs to have been shown; it selects one only when it is plainly a person or record name. A value of kind input (couponData, cardNum, expMonth, message) is form content and does not need to have been shown, unless it plainly names someone else's account or record. seen_as may list unrelated fields because small numbers repeat everywhere: a match only counts when the field or request in seen_as is the same kind of object as the one the request selects. A field may name the object by its role instead of by the endpoint that showed it (paymentId for an id shown by /api/Cards, deliveryMethodId for /api/Deliverys, owner for a user list); that still counts as the same kind of object. A value with verified true was already matched by the gateway with a response that showed this exact value as the same kind of object: treat it as shown and judge only the other values. A value may carry object: the kind of object the site's object map gives its position. A seen_as entry in brackets gives the kind of the position that showed it. A value shown only as a different kind of object was never shown as this kind, even when its field name looks similar. Free text that a user writes (note, title, comment, message, description, search words, names typed into a new record, dates, amounts, drug names) does not select any object and never needs to have been shown. Answer DENY if any object-selecting value was never shown to this session, or was shown only as an unrelated field (for example a number that appeared only as an age, now used as a patient id), or if an entry request tries to name someone else's object. Answer UNKNOWN only if the evidence is insufficient.";
+const ACCESS_INSTRUCTIONS: &str = "You are a web application firewall. state.request is one HTTP request from a logged-in browser session. state.session and state.recent describe what the origin server already showed this session. For every value in state.request.values that selects or names an existing business object (record id, account, owner, file, order), check state.request.values[].seen_as: it lists where the origin showed that same value to this session, with the field name. Answer ALLOW only if every object-selecting value was shown earlier as that kind of object, or if state.entry.matched is true and the values are only the input that entry needs (login form, share code, search text). Each value has kind: reference when it looks like an object reference (an id in the path, or a field named like an id, owner or file), route for a plain word in the URL path, input otherwise. A route word that is a collection name (Addresss, Cards, Users) selects no object and never needs to have been shown; it selects one only when it is plainly a person or record name. A value of kind input (couponData, cardNum, expMonth, message) is form content and does not need to have been shown, unless it plainly names someone else's account or record. seen_as may list unrelated fields because small numbers repeat everywhere: a match only counts when the field or request in seen_as is the same kind of object as the one the request selects. A field may name the object by its role instead of by the endpoint that showed it (paymentId for an id shown by /api/Cards, deliveryMethodId for /api/Deliverys, owner for a user list); that still counts as the same kind of object. A value with verified true was already matched by the gateway with a response that showed this exact value as the same kind of object: treat it as shown and judge only the other values. A value may carry object: the kind of object the site's object map gives its position. A seen_as entry in brackets gives the kind of the position that showed it. A value shown only as a different kind of object was never shown as this kind, even when its field name looks similar. Free text that a user writes (note, title, comment, message, description, search words, names typed into a new record, dates, amounts, drug names) does not select any object and never needs to have been shown. A seen_as entry may end with the tier of the response that showed the value and how sure the map is of it. Tier public is a search or listing that any logged-in session receives, so a sighting there proves no right to the object it names. Tier self and tier org are the session's own records or its organisation's. Tier admin is a response that only administrator sessions receive. Reliability low is weak evidence. A value may carry public_access: accepts false marks a position that never takes a value from a public sighting, such as a write or a private read. A value with attempt over_privilege was shown to this session only by public responses, and its position takes none of them, so answer DENY for that value. Answer DENY if any object-selecting value was never shown to this session, or was shown only as an unrelated field (for example a number that appeared only as an age, now used as a patient id), or if an entry request tries to name someone else's object. Answer UNKNOWN only if the evidence is insufficient.";
 const ATTACK_INSTRUCTIONS: &str = "You are a web application firewall. Inspect every value in state.request.values and the request path for attack content: SQL injection, NoSQL injection, command or code execution, path traversal, template injection, XSS, SSRF, header or log injection. Values marked <redacted> are secrets and are not attack content. Answer ATTACK if any value carries attack content, BENIGN if none does, UNKNOWN only if the evidence is insufficient.";
 
 /// Why a state could not be built or an answer could not be used.
@@ -73,6 +74,11 @@ pub struct StateValue {
     pub verified: bool,
     /// The kind of object the site's object map gives this position, when it does.
     pub object: Option<String>,
+    /// Whether the request position takes a value that only a public response
+    /// showed, with how sure the map is. Absent when the map says nothing.
+    pub public_access: Option<PublicAccess>,
+    /// Set when the gateway found the value to be an attempt (docs/01 section 1.4).
+    pub attempt: Option<Attempt>,
 }
 
 /// Everything the `state` document is made of.
@@ -139,6 +145,15 @@ fn render_value(
     }
     if let Some(object) = &value.object {
         rendered["object"] = Value::String(object.clone());
+    }
+    if let Some(access) = value.public_access {
+        rendered["public_access"] = json!({
+            "accepts": access.accepts,
+            "reliability": reliability_name(access.reliability),
+        });
+    }
+    if let Some(attempt) = value.attempt {
+        rendered["attempt"] = Value::String(attempt.as_str().to_owned());
     }
     rendered
 }
@@ -385,6 +400,8 @@ mod tests {
             seen_as: seen.iter().map(|s| (*s).to_owned()).collect(),
             verified: false,
             object: None,
+            public_access: None,
+            attempt: None,
         }
     }
 
@@ -452,6 +469,38 @@ mod tests {
         let json: Value = serde_json::from_str(&state).unwrap();
         assert_eq!(json["request"]["values"][0]["verified"], true);
         assert!(json["request"]["values"][1].get("verified").is_none());
+    }
+
+    #[test]
+    fn a_public_access_and_an_attempt_are_rendered_only_when_set() {
+        let mut attempted = value(
+            "path[2]",
+            "7005",
+            None,
+            &["id @ GET /api/search [patient] (tier public, reliability high)"],
+        );
+        attempted.public_access = Some(PublicAccess {
+            accepts: false,
+            reliability: xshield_core::context::Reliability::High,
+        });
+        attempted.attempt = Some(Attempt::OverPrivilege);
+        let (state, _) = build_state(&input(
+            vec![attempted, value("query.q", "x", Some("q"), &[])],
+            None,
+            vec![],
+        ))
+        .unwrap();
+        let json: Value = serde_json::from_str(&state).unwrap();
+        let first = &json["request"]["values"][0];
+        assert_eq!(first["public_access"]["accepts"], false);
+        assert_eq!(first["public_access"]["reliability"], "high");
+        assert_eq!(first["attempt"], "over_privilege");
+        assert_eq!(
+            first["seen_as"][0],
+            "id @ GET /api/search [patient] (tier public, reliability high)"
+        );
+        let plain = &json["request"]["values"][1];
+        assert!(plain.get("public_access").is_none() && plain.get("attempt").is_none());
     }
 
     #[test]
@@ -565,7 +614,7 @@ mod tests {
     #[test]
     fn the_prompt_id_is_fixed_and_follows_the_questions() {
         let prompt = Prompt::new();
-        assert_eq!(prompt.id(), "jq_5153ada271f68025");
+        assert_eq!(prompt.id(), "jq_e290fa8a62172221");
         assert_eq!(Prompt::new().id(), prompt.id());
         assert!(prompt.questions_json().contains("\"access\""));
     }

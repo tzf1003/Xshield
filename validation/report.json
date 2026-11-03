@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, JSON Schema and synthetic sample checks only. Not Rust behaviour (cargo test runs crates/xshield-core/tests/v4_samples.rs over the same samples), not WAF effectiveness and not model accuracy.",
   "passed": true,
-  "checks_total": 287,
-  "passed_count": 287,
+  "checks_total": 303,
+  "passed_count": 303,
   "checks": [
     {
       "name": "json:examples/sites-dev.json",
@@ -650,6 +650,16 @@
       "detail": ""
     },
     {
+      "name": "tiered:record_schema",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "negative:unknown_tier_rejected",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "fences:00-overview.md",
       "passed": true,
       "detail": ""
@@ -726,6 +736,31 @@
     },
     {
       "name": "no_tool_tokens:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:docs/07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -875,6 +910,11 @@
       "detail": ""
     },
     {
+      "name": "link:docs/00-overview.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/00-overview.md:02-jev.md",
       "passed": true,
       "detail": ""
@@ -891,6 +931,11 @@
     },
     {
       "name": "link:docs/01-request-flow.md:06-console-ui.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/01-request-flow.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -935,7 +980,17 @@
       "detail": ""
     },
     {
+      "name": "link:docs/01-request-flow.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:docs/02-jev.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/02-jev.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -961,6 +1016,16 @@
     },
     {
       "name": "link:docs/02-jev.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/03-admin-config-audit.md:07-console-architecture.md",
       "passed": true,
       "detail": ""
     },
@@ -1331,6 +1396,21 @@
     },
     {
       "name": "link:docs/07-console-architecture.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:01-request-flow.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:docs/07-console-architecture.md:02-jev.md",
       "passed": true,
       "detail": ""
     },

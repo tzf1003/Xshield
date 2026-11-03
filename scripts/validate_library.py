@@ -178,6 +178,17 @@ def check_decision_log(schema: dict, site_names: list[str]) -> None:
     bad_id = copy.deepcopy(judged)
     bad_id['request_id'] = 'req_short'
     check('negative:bad_request_id_rejected', not valid(schema, bad_id))
+    # A tiered record: its position's public access and attempt, and its source's tier.
+    tiered = copy.deepcopy(judged)
+    tiered_value = tiered['trace']['values'][0]
+    tiered_value['public_access'] = {'accepts': False, 'reliability': 'high'}
+    tiered_value['attempt'] = 'over_privilege'
+    tiered_value['sources'] = [{'field': 'results[].id', 'request': 'GET /api/search', 'request_id': None,
+                                'at_millis': 1, 'tier': 'public', 'reliability': 'high'}]
+    check('tiered:record_schema', valid(schema, tiered), errors(schema, tiered))
+    unknown_tier = copy.deepcopy(tiered)
+    unknown_tier['trace']['values'][0]['sources'][0]['tier'] = 'owner'
+    check('negative:unknown_tier_rejected', not valid(schema, unknown_tier))
 
 
 def check_docs() -> None:
