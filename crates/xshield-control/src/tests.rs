@@ -48,7 +48,7 @@ fn lazy_pool() -> PgPool {
 
 fn state_with_console(console: &'static [ConsoleFile]) -> Arc<ControlState> {
     let hash = hash_password(TEST_PASSWORD).expect("hash_password");
-    ControlState::with_console(lazy_pool(), hash, None, false, console)
+    ControlState::with_console(lazy_pool(), hash, None, false, None, console)
         .expect("valid admin password hash")
 }
 
@@ -153,7 +153,7 @@ async fn login_sets_a_host_prefixed_session_cookie() {
 #[tokio::test]
 async fn over_plain_http_the_session_cookie_is_unprefixed_and_not_secure() {
     let hash = hash_password(TEST_PASSWORD).expect("hash_password");
-    let state = ControlState::with_console(lazy_pool(), hash, None, true, TEST_CONSOLE)
+    let state = ControlState::with_console(lazy_pool(), hash, None, true, None, TEST_CONSOLE)
         .expect("valid admin password hash");
     let app = router(state);
     let response = send(
@@ -431,7 +431,7 @@ async fn connect_live_state() -> Arc<ControlState> {
         .await
         .expect("connect to XSHIELD_DATABASE_URL");
     let hash = hash_password(TEST_PASSWORD).expect("hash_password");
-    ControlState::new(pool, hash, None, false).expect("valid admin password hash")
+    ControlState::new(pool, hash, None, false, None).expect("valid admin password hash")
 }
 
 #[tokio::test]

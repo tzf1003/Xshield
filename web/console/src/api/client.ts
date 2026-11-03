@@ -21,8 +21,11 @@ import type {
   ModelTestResult,
   ModelVersionWire,
   ModelWrite,
+  ObjectAgentInput,
   ObjectEventsFilter,
   ObjectEventsResponse,
+  ObjectRunDetail,
+  ObjectRunsResponse,
   ObjectsFilter,
   ObjectSlotDetail,
   ObjectsResponse,
@@ -178,6 +181,19 @@ export const api = {
   /** Marks an event handled: known, kept paused or kept in effect. Learning state only, no version (C3). */
   ackEvent: (site: string, id: string) =>
     post<void>(`/sites/${name(site)}/objects/events/${encodeURIComponent(id)}/ack`),
+  /** The learning runs of a site, newest first (console design 3.3). */
+  learningRuns: (site: string) =>
+    get<ObjectRunsResponse>(`/sites/${name(site)}/objects/runs?limit=48`),
+  /** One run with its calls (console design 3.3). */
+  learningRun: (site: string, id: number) =>
+    get<ObjectRunDetail>(`/sites/${name(site)}/objects/runs/${id}`),
+  /** Starts a learning run now: 202, or 409 or 429 with the reason (console design 3.2). */
+  runObjects: (site: string) => post<void>(`/sites/${name(site)}/objects/run`),
+  /** Asks the agent about one position again, at the next pass: 202, or 409 with the reason (console design 3.4). */
+  askAgent: (site: string, id: string) =>
+    post<void>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/ask`),
+  /** The question for one waiting position, as the agent gets it: positions and statistics, no values (3.1). */
+  agentSample: (site: string) => get<ObjectAgentInput>(`/sites/${name(site)}/objects/agent-sample`),
 
   status: () => get<StatusResponse>("/status"),
   system: () => get<SystemInfo>("/system"),

@@ -532,6 +532,41 @@ pub async fn load_evidence(
     Ok(evidence)
 }
 
+/// The distinct votes of `site` on or after `oldest_day`: each request position with the response
+/// positions its value was shown at. `None` when the window holds more than `limit` of them. A pass
+/// that cannot read every vote of the window must not change the configuration on part of them.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn window_votes(
+    pool: &PgPool,
+    site: &str,
+    oldest_day: u64,
+    limit: usize,
+) -> Result<Option<Vec<(String, Vec<String>)>>, LearningStoreError> {
+    let read_limit = i64::try_from(limit).unwrap_or(i64::MAX).saturating_add(1);
+    let rows = sqlx::query(
+        "SELECT DISTINCT slot, from_slots FROM object_evidence
+         WHERE site = $1 AND kind = 'vote' AND day >= $2
+         LIMIT $3",
+    )
+    .bind(site)
+    .bind(day_i64(oldest_day))
+    .bind(read_limit)
+    .fetch_all(pool)
+    .await?;
+    if rows.len() > limit {
+        return Ok(None);
+    }
+    let mut votes = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let slot: String = row.try_get("slot")?;
+        let from: Vec<String> = row.try_get("from_slots")?;
+        votes.push((slot, from));
+    }
+    Ok(Some(votes))
+}
+
 /// Deletes the evidence of `site` older than `oldest_day`, and returns the rows deleted.
 ///
 /// # Errors

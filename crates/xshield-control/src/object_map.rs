@@ -210,10 +210,10 @@ pub(crate) struct Features {
     path_confirm: bool,
 }
 
-/// What this build runs. Tightening is not applied on its own yet, and path positions cannot be
-/// confirmed from the console yet.
+/// What this build runs: the learning pass splits classes and pauses positions when the site's
+/// learning settings ask for it. Path positions cannot be confirmed from the console yet.
 const FEATURES: Features = Features {
-    auto_tighten: false,
+    auto_tighten: true,
     auto_pause: true,
     path_confirm: false,
 };
@@ -598,6 +598,12 @@ fn name_of(key: &str, rules: &Rules) -> Option<(NameReason, &'static str)> {
     }
 }
 
+/// The kind word a position's name gives, when it gives one. The learning pass compares kinds
+/// with it when it splits a class.
+pub(crate) fn name_word(key: &str, rules: &Rules) -> Option<String> {
+    name_of(key, rules).map(|(reason, _)| reason.word)
+}
+
 /// The reason code the console shows for a name's source.
 fn reason_code(source: NameSource) -> &'static str {
     match source {
@@ -642,7 +648,8 @@ async fn automatic_events(state: &ControlState, name: &str) -> ApiResult<Vec<Val
 
 /// One automatic change in the shape the console reads: the entry it replaced and the entry it
 /// became, the side of the position, and the reason. A pause is for evidence that points at other
-/// kinds. The status is `open` until the console acknowledges or undoes the event, which is not
+/// kinds. A tightening moves a position to the class its votes show, and its reason names the two
+/// classes. The status is `open` until the console acknowledges or undoes the event, which is not
 /// recorded yet.
 fn automatic_event(
     version: &site_spec_store::HistoryEntry,
@@ -650,8 +657,14 @@ fn automatic_event(
     previous: Option<&ObjectSlot>,
     slot: &ObjectSlot,
 ) -> Value {
-    let reason = (version.change == site_spec_store::Change::AutoPause)
-        .then(|| serde_json::json!({ "code": "evidence_drift" }));
+    let reason = match version.change {
+        site_spec_store::Change::AutoPause => Some(serde_json::json!({ "code": "evidence_drift" })),
+        site_spec_store::Change::AutoTighten => Some(serde_json::json!({
+            "code": "split",
+            "classes": [previous.map(|entry| entry.class.as_str()), slot.class.as_str()],
+        })),
+        _ => None,
+    };
     serde_json::json!({
         "id": format!("v{}-{index}", version.version),
         "kind": version.change.as_str(),
@@ -1459,6 +1472,44 @@ mod tests {
     }
 
     #[test]
+    fn an_automatic_tightening_names_the_two_classes_it_moved_between() {
+        let spec = |class: &str| {
+            let text = format!(
+                r#"{{"name": "clinic", "hosts": ["clinic.example.com"], "origin": "http://10.0.0.5:8080",
+                    "session": {{"cookie": "SESSIONID"}}, "entries": ["/login"],
+                    "objects": {{"classes": [{{"id": "doctor", "name": "医生"}}, {{"id": "documents", "name": "文档"}}],
+                    "slots": [{{"key": "GET /doctor/{{id}} path[1]", "class": "{class}", "source": "rule"}}]}}}}"#
+            );
+            SiteSpec::from_json(&text).expect("test spec")
+        };
+        let before = spec("doctor");
+        let moved = spec("documents");
+        let version = site_spec_store::HistoryEntry {
+            version: 4,
+            change: site_spec_store::Change::AutoTighten,
+            rollback_of: None,
+            note: Some("学习任务自动收紧了 1 个位置".to_owned()),
+            changed_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("the epoch"),
+            spec: Some(moved.clone()),
+        };
+        let event = automatic_event(
+            &version,
+            0,
+            Some(&before.objects().slots()[0]),
+            &moved.objects().slots()[0],
+        );
+        assert_eq!(event["kind"], "auto_tighten");
+        assert_eq!(event["status"], "open");
+        assert_eq!(event["before"]["class"], "doctor");
+        assert_eq!(event["after"]["class"], "documents");
+        assert_eq!(event["reason"]["code"], "split");
+        assert_eq!(
+            event["reason"]["classes"],
+            serde_json::json!(["doctor", "documents"])
+        );
+    }
+
+    #[test]
     fn an_automatic_pause_shows_the_entry_it_paused_and_the_entry_before_it() {
         let entry = r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule"}"#;
         let before = site_with_slots(entry);
@@ -1502,7 +1553,7 @@ mod live_tests {
             .await
             .expect("connect to XSHIELD_DATABASE_URL");
         let hash = crate::hash_password("object-map-test").expect("hash_password");
-        ControlState::new(pool, hash, None, false).expect("valid admin password hash")
+        ControlState::new(pool, hash, None, false, None).expect("valid admin password hash")
     }
 
     fn site_spec(name: &str) -> SiteSpec {

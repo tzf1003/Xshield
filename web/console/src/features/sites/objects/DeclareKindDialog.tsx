@@ -36,6 +36,8 @@ type Props = {
   initialField: string;
   /** The interface the field is limited to at first, when one is known. */
   initialScope: string | undefined;
+  /** A new kind the learning agent proposed for this position, by its id: the dialog starts with it (console design 3.4). */
+  initialNewKind?: string;
   onClose: () => void;
   onDraft: (spec: SiteSpec) => void;
   onSave: (spec: SiteSpec) => void;
@@ -47,13 +49,16 @@ export function DeclareKindDialog({
   classes,
   initialField,
   initialScope,
+  initialNewKind,
   onClose,
   onDraft,
   onSave,
 }: Props) {
   const [field, setField] = useState(initialField);
-  const [kindChoice, setKindChoice] = useState<string>(classes[0]?.id ?? NEW_KIND);
-  const [newKind, setNewKind] = useState("");
+  const [kindChoice, setKindChoice] = useState<string>(
+    initialNewKind !== undefined ? NEW_KIND : (classes[0]?.id ?? NEW_KIND),
+  );
+  const [newKind, setNewKind] = useState(initialNewKind ?? "");
   const [mode, setMode] = useState<"only" | "all">("only");
   const [patterns, setPatterns] = useState<string[]>(
     initialScope === undefined ? [] : [initialScope],

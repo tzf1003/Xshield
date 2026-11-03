@@ -18,6 +18,7 @@ tokio.workspace = true
 uuid.workspace = true
 xshield-core = { path = "../xshield-core" }
 xshield-judge = { path = "../xshield-judge" }
+xshield-postgres = { path = "../xshield-postgres" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net"] }

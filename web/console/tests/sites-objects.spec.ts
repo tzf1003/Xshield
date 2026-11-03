@@ -185,15 +185,15 @@ test("confirming the candidates puts their declarations and slots in the save di
   await expect(changes).toContainText("对象表 ＋ 请求 GET /doctor/{id} 第 1 个路径参数 = 医生");
 });
 
-test("the learning settings save through the save dialog, and the agent stays off", async ({
+test("the learning settings save through the save dialog, and the agent stays off without a model", async ({
   page,
 }) => {
   await openMap(page, "/sites/emr?tab=objects");
   await page.getByRole("button", { name: "学习设置 ⚙" }).click();
 
   const drawer = page.getByRole("dialog", { name: "学习设置" });
-  await expect(drawer.getByRole("switch", { name: "agent" })).toBeDisabled();
-  await expect(drawer).toContainText("没有配置模型，agent 暂不可用。");
+  await expect(drawer.getByRole("switch", { name: "学习代理" })).toBeDisabled();
+  await expect(drawer).toContainText("系统里还没有配置学习代理模型");
   await expect(drawer).not.toContainText("网关接受对象表的学习设置之后");
   const save = drawer.getByRole("button", { name: "保存…" });
   await expect(save).toBeDisabled();
@@ -213,6 +213,41 @@ test("the learning settings save through the save dialog, and the agent stays of
   await expect(dialog.getByRole("list", { name: "改动摘要" })).toContainText(
     "学习设置 自动收紧 开 → 关",
   );
+});
+
+test("the learning line shows the last run, its proposals open the positions to decide, and the source menu keeps its choice", async ({
+  page,
+}) => {
+  await openMap(page, "/sites/emr?tab=objects");
+  await expect(page.getByText("学习任务", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "新提议 3" }).click();
+  await expect(page).toHaveURL(/state=proposed/);
+  await page.getByRole("combobox", { name: /来源/ }).selectOption("agent");
+  await expect(page).toHaveURL(/source=agent/);
+});
+
+test("the run record lists the runs, and a run opens the calls the agent got", async ({ page }) => {
+  await openMap(page, "/sites/emr?tab=objects");
+  await page.getByRole("button", { name: "运行记录" }).click();
+  const drawer = page.getByRole("dialog", { name: "学习任务运行记录" });
+  await expect(drawer.getByText("✕ 失败：读取判定日志超时")).toBeVisible();
+  await drawer.getByText("手动", { exact: true }).click();
+  await expect(drawer.getByRole("table", { name: "学习代理的调用" })).toBeVisible();
+  await expect(drawer.getByText("失败：超时")).toBeVisible();
+});
+
+test("an agent answer that disagrees with the rules leaves the position to a decision, and the agent is not asked again while it is off", async ({
+  page,
+}) => {
+  await openMap(page, "/sites/emr?tab=objects&slot=s8");
+  const drawer = page.getByRole("dialog").filter({ hasText: "学习代理结论" });
+  await expect(drawer.getByText("▲ 与规则不一致")).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "按规则确认…" })).toBeEnabled();
+  await expect(drawer.getByRole("button", { name: "按学习代理确认…" })).toBeEnabled();
+  await expect(drawer.getByRole("button", { name: "重新询问" })).toBeDisabled();
+  await expect(drawer.getByText("学习代理没有开启，不能重新询问")).toBeVisible();
+  await drawer.getByRole("button", { name: "保持有歧义" }).click();
+  await expect(drawer.getByText("这个位置保持有歧义，等人处理。")).toBeVisible();
 });
 
 test("the synonym migration turns a group into declarations, and the save removes the group", async ({
@@ -258,6 +293,24 @@ test("the wizard's last step opens the new site on its object map, and confirmin
 
   await expect(page).toHaveURL(/\/sites\/yaml-shop\?tab=objects$/);
   await expect(page.getByRole("dialog", { name: "保存 yaml-shop 的配置" })).toBeVisible();
+});
+
+test("a declared position offers no mark-ambiguous button", async ({ page }) => {
+  await openMap(page, "/sites/emr?tab=objects&view=slot");
+  await page.locator("#slot-s1").click();
+  const drawer = page.getByRole("dialog");
+  await expect(drawer.locator(".obj-foot")).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "标为有歧义" })).toHaveCount(0);
+});
+
+test("a paused path position offers neither reject nor mark-ambiguous", async ({ page }) => {
+  // Its entry is still in the configuration, so the backend refuses both until a save removes it.
+  await openMap(page, "/sites/emr?tab=objects&view=slot&slot=s3");
+  const drawer = page.getByRole("dialog");
+  await expect(drawer).toContainText("判定退回名字推断");
+  await expect(drawer.getByRole("button", { name: "重新确认为医生…" })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "驳回" })).toHaveCount(0);
+  await expect(drawer.getByRole("button", { name: "标为有歧义" })).toHaveCount(0);
 });
 
 test("a paused position is named in the banner, and its drawer re-confirms it through the save dialog", async ({

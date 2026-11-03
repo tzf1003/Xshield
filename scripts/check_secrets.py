@@ -44,6 +44,10 @@ ALLOW: dict[tuple[str, str], str] = {
         "unit test input: the console must refuse an endpoint that carries a username and "
         "password; the values are made up"
     ),
+    (
+        "crates/xshield-control/src/agent_model.rs",
+        "url-credentials",
+    ): "a test endpoint with a made-up user and password, which the endpoint check must refuse",
 }
 
 

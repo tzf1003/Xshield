@@ -194,6 +194,9 @@ export type SiteSearch = GlobalSearch & {
   state?: (typeof OBJECT_STATES)[number];
   class?: string;
   q?: string;
+  /** The position table's source filter and its agent filter, the agent's offered with the agent on (console design 3.5). */
+  source?: (typeof OBJECT_SOURCES)[number];
+  agent?: (typeof OBJECT_AGENT_FILTERS)[number];
   view?: "slot";
   slot?: string;
   /** The declaration dialog, opened with this field and scope (console design 3.3). */
@@ -203,6 +206,8 @@ export type SiteSearch = GlobalSearch & {
   objevents?: "open" | "all";
   /** The changes list's type filter, opened from a banner line or the learning settings. */
   objkind?: (typeof OBJECT_EVENT_KINDS)[number];
+  /** The learning task's run record, open (console design 3.3). */
+  runs?: "1";
   /** The wizard's hand-off: the draft is saved at once, with this many positions confirmed (console design 1.4). */
   save?: "1";
   bootstrap?: number;
@@ -210,6 +215,12 @@ export type SiteSearch = GlobalSearch & {
 
 /** The kinds of automatic change the list filters on (console design 2.3). */
 export const OBJECT_EVENT_KINDS = ["auto_tighten", "auto_pause", "anomaly"] as const;
+
+/** Where a position can come from, as the position table filters it (console design 3.5). */
+export const OBJECT_SOURCES = ["admin", "rule", "agent"] as const;
+
+/** The agent's filters of the position table, offered with the agent on (console design 3.5). */
+export const OBJECT_AGENT_FILTERS = ["waiting", "failed"] as const;
 
 export function validateSite(raw: Record<string, unknown>): SiteSearch {
   return {
@@ -222,12 +233,15 @@ export function validateSite(raw: Record<string, unknown>): SiteSearch {
     state: oneOf(raw.state, OBJECT_STATES),
     class: str(raw.class),
     q: str(raw.q),
+    source: oneOf(raw.source, OBJECT_SOURCES),
+    agent: oneOf(raw.agent, OBJECT_AGENT_FILTERS),
     view: oneOf(raw.view, ["slot"] as const),
     slot: str(raw.slot),
     declare: str(raw.declare),
     in: str(raw.in),
     objevents: oneOf(raw.objevents, ["open", "all"] as const),
     objkind: oneOf(raw.objkind, OBJECT_EVENT_KINDS),
+    runs: flag(raw.runs),
     save: oneOf(raw.save, ["1"] as const),
     bootstrap: countOf(raw.bootstrap),
   };

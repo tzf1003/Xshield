@@ -36,7 +36,14 @@ import type {
   TimelineRow,
   ValidateResult,
 } from "../../src/api/types.ts";
-import { bootstrapAnswer, learnAnswer, objectSlotAnswer, objectsAnswer } from "./mock-objects.ts";
+import {
+  bootstrapAnswer,
+  learnAnswer,
+  objectSlotAnswer,
+  objectsAnswer,
+  runDetailAnswer,
+  runsAnswer,
+} from "./mock-objects.ts";
 import {
   DAY_MS,
   evidence,
@@ -308,6 +315,12 @@ const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     "GET",
     /^\/api\/sites\/([^/]+)\/objects\/bootstrap$/,
     (m, _c, s) => siteOr(s, m, (site) => bootstrapAnswer(site.name)),
+  ],
+  ["GET", /^\/api\/sites\/([^/]+)\/objects\/runs$/, (m, _c, s) => siteOr(s, m, () => runsAnswer())],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects\/runs\/([^/]+)$/,
+    (m, _c, s) => siteOr(s, m, () => runDetailAnswer(decodeURIComponent(m[2] ?? ""))),
   ],
   [
     "GET",

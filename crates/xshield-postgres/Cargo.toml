@@ -8,8 +8,13 @@ rust-version.workspace = true
 
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
+# AES-256-GCM and HMAC for the sealed model keys (key_seal.rs). Already in the tree through
+# rustls; ISC and Apache-2.0 licensed.
+ring = "0.17"
 serde_json.workspace = true
 sqlx.workspace = true
+# Clears the opened key text after use (model_config_store.rs).
+zeroize.workspace = true
 xshield-core = { path = "../xshield-core" }
 
 [dev-dependencies]

@@ -1,0 +1,37 @@
+{
+  "in_effect": true,
+  "suspension": null,
+  "id": "s8",
+  "side": "response",
+  "key": "GET /api/appointments [].patient_id",
+  "class": "patient",
+  "state": "ambiguous",
+  "source": "agent",
+  "basis": "有歧义，交给 Jev",
+  "last_seen": "2026-11-01T11:00:00Z",
+  "dismissed": false,
+  "agent_status": "answered",
+  "flows_in": [],
+  "examples": [],
+  "shape": [],
+  "history": [],
+  "impact": [],
+  "agent": {
+    "status": "answered",
+    "asked_at": "2026-11-03T04:00:00Z",
+    "model": "example/model",
+    "attempts": 1,
+    "choice": "document",
+    "new_class": null,
+    "confidence": 0.71,
+    "cites": ["f1"],
+    "reason": "预约列表里 patient_id 的值之后也出现在文档列表里",
+    "rule_choice": "patient",
+    "failure": null,
+    "input": {
+      "slot": "GET /api/appointments [].patient_id",
+      "flows_in": [],
+      "candidates": ["patient", "document"]
+    }
+  }
+}
