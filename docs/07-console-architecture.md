@@ -222,6 +222,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
 | `response.values` / `new_values` | 从响应里取出的值数、其中会话原先没有的值数 |
 | `response.fields` | 出现次数最多的 12 个字段名及次数，形如 `[{ "field": "id", "count": 3 }]`；不存值本身 |
+| `response.fingerprints` | 按响应位置记的值指纹，键是 `METHOD 路由 位置`（与 `values[].slot` 同格式），值是该位置至多 8 个指纹，取最小的。每个指纹是站点派生的键控哈希的前 8 字节，写成 16 位十六进制：同一站点里同一个值在任何会话里指纹相同，换一个站点就不同。位置至多 16 个，按响应里出现的顺序取前面的。不存值本身；没有可记的值时省略。控制面用它统计同一位置的值被多少用户共享，以学习接口档位 |
 | `response.issued_session` | 响应下发了新凭证（登录）时，新会话的标签 |
 | `response.entry_passed` | 这个响应让会话第一次经过某个入口 |
 | `response.after_would_block` | 这次请求是“本应拦截”但在观察模式下被转发，它的响应仍被学进上下文（[7.4.6](#746-附带发现观察模式下本应拦截请求的响应仍进入上下文)） |
@@ -231,7 +232,8 @@ GET /api/patients ──响应里出现 id=7──┐
 - 值和查询串的脱敏与 `state` 用同一函数：字段名或位置含内置 9 个词（`password`、`passwd`、`pwd`、`secret`、`token`、`otp`、`credential`、`authorization`、`cvv`）或站点 `advanced.secret_fields` 中的词的值，以及含会话凭证原文的值，写成 `<redacted>`，另记 `len`。查询串按 `k=v` 逐对脱敏后重新拼接。
 - 单个值最长保存 256 个字符，超出截断并标 `clipped: true`、原长 `len`。
 - `trace` 序列化后不超过 16 KiB；超出时依次去掉惰性值、把来源减到 1 个、值截到 64 字符，并标 `trimmed: true`。
-- 响应只存字段名和计数，不存响应里的值；请求头只存 `Host`。
+- 响应只存字段名、计数和值指纹（`response.fingerprints`），不存响应里的值；请求头只存 `Host`。
+- 响应指纹每条记录最多 16 个位置、每个位置 8 个，指纹定长，所以一条记录里增加的字节数有上限。
 
 ### 7.4.5 简记录示例
 
