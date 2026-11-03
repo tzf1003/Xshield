@@ -21,8 +21,10 @@ use zeroize::Zeroizing;
 
 /// Most bytes of a reply read. An answer is one small JSON object.
 const REPLY_BYTES_MAX: usize = 64 * 1024;
-/// Most tokens the model may write for one answer.
-const MAX_TOKENS: u32 = 400;
+/// Most tokens the model may write for one answer, its reasoning included. A reasoning model
+/// spends part of this budget before the answer, and a budget spent inside the reasoning leaves
+/// an empty answer, so the budget is well above what one answer needs.
+const MAX_TOKENS: u32 = 4096;
 
 /// Why a question got no answer from the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -334,7 +336,7 @@ mod tests {
         );
         assert_eq!(body["response_format"], json!({"type": "json_object"}));
         assert_eq!(body["temperature"], 0);
-        assert_eq!(body["max_tokens"], 400);
+        assert_eq!(body["max_tokens"], MAX_TOKENS);
         assert_eq!(body["stream"], json!(false));
     }
 
