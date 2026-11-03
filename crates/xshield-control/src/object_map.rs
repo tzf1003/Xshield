@@ -3710,6 +3710,54 @@ mod live_tests {
 
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_dismissal_lapses_once_the_rules_reach_the_other_value() {
+        let (state, name) = judged_site("judgement-lapse").await;
+        let generation = site_of(&state, &name).await.expect("the site").created_at;
+        let proposal = Proposal {
+            slot: SLOT.to_owned(),
+            accepts_public: true,
+            reliability: Reliability::Medium,
+            votes: 40,
+            sessions: 10,
+            public_per_mille: 1000,
+            last_day: day_of(u64::try_from(now_millis()).unwrap_or(0)),
+        };
+        assert!(
+            judgements::dismiss(&state.pool, &name, generation, SLOT, now_millis())
+                .await
+                .expect("dismiss the proposal")
+        );
+
+        // The rules cannot judge the position: the dismissed `true` stays suppressed.
+        judgements::withdraw(&state.pool, &name, generation, SLOT, None)
+            .await
+            .expect("withdraw without a judgement");
+        judgements::put(&state.pool, &name, generation, &proposal, now_millis())
+            .await
+            .expect("propose the dismissed value again");
+        assert!(
+            judgements::proposal(&state.pool, &name, SLOT)
+                .await
+                .expect("read the proposal")
+                .is_none()
+        );
+
+        // The rules reach `false`, which the entry carries: the dismissal of `true` lapses.
+        judgements::withdraw(&state.pool, &name, generation, SLOT, Some(false))
+            .await
+            .expect("withdraw once the rules reach the configured value");
+        judgements::put(&state.pool, &name, generation, &proposal, now_millis())
+            .await
+            .expect("propose the value again");
+        let again = judgements::proposal(&state.pool, &name, SLOT)
+            .await
+            .expect("read the proposal")
+            .expect("the value is proposed again");
+        assert!(again.accepts_public);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
     async fn an_acceptance_proposal_is_listed_then_confirmed_into_the_entry() {
         let (state, name) = judged_site("judgement-confirm").await;
         let listing = listed(&state, &name, &[]).await;

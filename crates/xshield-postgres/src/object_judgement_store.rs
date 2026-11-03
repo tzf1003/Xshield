@@ -82,8 +82,11 @@ pub async fn put(
     Ok(())
 }
 
-/// Withdraws the proposal of a request position of the site's `generation`, unless it is
-/// dismissed: a dismissal stays until the rules reach the other value.
+/// Withdraws the proposal of a request position of the site's `generation`. A dismissed row stays,
+/// so the rules do not propose its value again, unless the rules reached the other value: `reached`
+/// is that value when the rules judge the position and the configuration already carries it. Then the
+/// dismissal lapses, and the value may be proposed again once the rules reach it. `None` when the rules
+/// cannot judge the position, which keeps every dismissal.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -92,14 +95,17 @@ pub async fn withdraw(
     site: &str,
     generation: DateTime<Utc>,
     slot: &str,
+    reached: Option<bool>,
 ) -> Result<(), LearningStoreError> {
     sqlx::query(
-        "DELETE FROM object_judgements WHERE site = $1 AND slot = $2 AND NOT dismissed
+        "DELETE FROM object_judgements WHERE site = $1 AND slot = $2
+           AND (NOT dismissed OR ($4::boolean IS NOT NULL AND accepts_public <> $4::boolean))
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $3 FOR SHARE)",
     )
     .bind(site)
     .bind(slot)
     .bind(generation)
+    .bind(reached)
     .execute(pool)
     .await?;
     Ok(())

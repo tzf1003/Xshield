@@ -530,7 +530,7 @@ async fn judge_accepts(
     let admins = BTreeSet::new();
     for slot in &slots {
         let Some(evidence) = evidence.get(slot) else {
-            judgements::withdraw(pool, site, generation, slot).await?;
+            judgements::withdraw(pool, site, generation, slot, None).await?;
             continue;
         };
         match judge_accepts_public(
@@ -555,7 +555,12 @@ async fn judge_accepts(
                 };
                 judgements::put(pool, site, generation, &proposal, now_millis).await?;
             }
-            _ => judgements::withdraw(pool, site, generation, slot).await?,
+            Some(judged) => {
+                // The rules reach the value the entry carries, so a dismissal of the other value lapses.
+                judgements::withdraw(pool, site, generation, slot, Some(judged.accepts_public))
+                    .await?;
+            }
+            None => judgements::withdraw(pool, site, generation, slot, None).await?,
         }
     }
     Ok(())
