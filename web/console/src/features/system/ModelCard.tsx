@@ -25,6 +25,7 @@ import {
   type FormProblems,
   type ModelForm as Form,
   agentForm,
+  agentKeyRequired,
   agentProblems,
   agentValues,
   clockText,
@@ -376,7 +377,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
             <button
               type="button"
               className="btn"
-              disabled={test.busy || test.cooldown > 0}
+              disabled={test.busy || test.cooldown > 0 || jev.source === "env"}
               onClick={() => void test.run(jevValues(saved), saved, timeoutMsOf("jev", saved))}
             >
               {testLabel(test.busy, test.cooldown)}
@@ -400,6 +401,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
               </button>
             ) : null}
           </div>
+          {jev.source === "env" ? <p className="muted small">{MODEL_TEXT.testNeedsKey}</p> : null}
           {test.line === null ? null : <ModelTestResult line={test.line} />}
           {backError === null ? null : <Notice tone="bad">{backError}</Notice>}
           {historyOpen ? <ModelHistory kind="jev" onRestore={restore} /> : null}
@@ -456,7 +458,7 @@ export function AgentModelCard({
   const saved = agentForm(agent);
   // The key is shared only when both sides run on the Vercel AI Gateway (design 2.2).
   const shareAllowed = jevRoute === "gateway" && form.choice === "gateway";
-  const keyRequired = !form.shareKey && !agent.key.set;
+  const keyRequired = agentKeyRequired(form.shareKey, agent.key);
   const problems: FormProblems = agentProblems(form, keyRequired);
   const valid = Object.keys(problems).length === 0;
   const tested = test.passed !== null && sameForm(test.passed.form, form);

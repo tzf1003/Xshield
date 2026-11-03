@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type { AgentModelValues, JevModelValues, ModelTestResult } from "../src/api/types.ts";
 import {
   AGENT_TIMEOUT,
+  agentKeyRequired,
   agentProblems,
   agentValues,
   changeText,
@@ -119,6 +120,14 @@ test("agentProblems checks the timeout in seconds", () => {
   assert.deepEqual(agentProblems({ ...form, timeout: "400" }, false), {
     timeout: MODEL_TEXT.timeoutRange(5, 120, MODEL_TEXT.unitSeconds),
   });
+});
+
+test("agentKeyRequired asks for the agent's own key once a form stops sharing Jev's", () => {
+  // Sharing cleared the agent's own key, so a form that stops sharing has to bring one.
+  assert.equal(agentKeyRequired(true, { set: true, shared_with_jev: true }), false);
+  assert.equal(agentKeyRequired(false, { set: true, shared_with_jev: false }), false);
+  assert.equal(agentKeyRequired(false, { set: false, shared_with_jev: false }), true);
+  assert.equal(agentKeyRequired(false, { set: true, shared_with_jev: true }), true);
 });
 
 test("sameForm compares what a test tried, key included, ignoring blanks at the ends", () => {

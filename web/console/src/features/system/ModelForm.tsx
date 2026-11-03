@@ -202,7 +202,7 @@ export function ModelForm(props: ModelFormProps) {
         </span>
         {kind === "agent" && form.shareKey ? (
           <div className="sys-keyrow">{MODEL_TEXT.keyShared}</div>
-        ) : replacing ? (
+        ) : replacing || keyRequired ? (
           <div>
             <SecretField
               id={`${base}-key`}
@@ -241,7 +241,9 @@ export function ModelForm(props: ModelFormProps) {
           {kind === "agent" && form.shareKey
             ? MODEL_TEXT.shareKeyHelp
             : keyRequired
-              ? MODEL_TEXT.keyEnvHelp
+              ? kind === "agent"
+                ? MODEL_TEXT.keyAgentHelp
+                : MODEL_TEXT.keyEnvHelp
               : MODEL_TEXT.keyHelp}
         </div>
       </div>

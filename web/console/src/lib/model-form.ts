@@ -264,6 +264,18 @@ export function jevProblems(form: ModelForm, keyRequired: boolean): FormProblems
   ]);
 }
 
+/**
+ * Whether the agent form needs a key typed in. A form that shares Jev's key needs none. A form that stops sharing
+ * needs one: sharing cleared the agent's own key, so a save without one would leave the agent with no key at all.
+ */
+export function agentKeyRequired(
+  shareKey: boolean,
+  key: Pick<AgentModelsState["key"], "set" | "shared_with_jev">,
+): boolean {
+  if (shareKey) return false;
+  return !key.set || key.shared_with_jev;
+}
+
 export function agentProblems(form: ModelForm, keyRequired: boolean): FormProblems {
   return problems([
     ["endpoint", endpointProblem(form.endpoint)],

@@ -266,6 +266,9 @@ test("a configuration only the environment supplies can be taken over, and its k
   await expect(jev.getByText("2 个网关读取环境变量的配置")).toBeVisible();
   await expect(jev.getByText(MODEL_TEXT.sourceEnv)).toBeVisible();
   await expect(jev.getByRole("button", { name: MODEL_TEXT.btnBackToEnv })).toHaveCount(0);
+  // The read-only test needs the console's key, which an environment configuration does not have.
+  await expect(jev.getByRole("button", { name: MODEL_TEXT.btnTest })).toBeDisabled();
+  await expect(jev.getByText(MODEL_TEXT.testNeedsKey)).toBeVisible();
   await jev.getByRole("button", { name: MODEL_TEXT.btnTakeOver }).click();
 
   // The console cannot read the environment's key, so the first save needs one typed in.
@@ -394,6 +397,36 @@ test("an agent on the same gateway as Jev can share its key, and then sends none
     note: "",
     tested: false,
   });
+});
+
+test("an agent that shares Jev's key asks for its own key once it stops sharing", async ({
+  page,
+}) => {
+  const models = structuredClone(systemModels);
+  models.agent = {
+    ...models.agent,
+    share_key_with_jev: true,
+    key: {
+      set: true,
+      last4: models.jev.key.last4,
+      updated_at: models.jev.key.updated_at,
+      shared_with_jev: true,
+    },
+  };
+  await useFixtures(page, { models });
+  await page.goto("/system?tab=models");
+  const agent = card(page, "agent");
+  await agent.getByRole("button", { name: MODEL_TEXT.btnEdit }).click();
+  await expect(agent.getByText(MODEL_TEXT.keyShared, { exact: true })).toBeVisible();
+  await agent.getByRole("checkbox", { name: MODEL_TEXT.shareKeyLabel }).uncheck();
+
+  // Sharing cleared the agent's own key, so the form asks for one before it can save.
+  const key = agent.locator('input[type="password"]');
+  await expect(key).toBeVisible();
+  const save = agent.getByRole("button", { name: MODEL_TEXT.btnSave });
+  await expect(save).toBeDisabled();
+  await key.fill("sk-agent-41c8");
+  await expect(save).toBeEnabled();
 });
 
 for (const theme of ["light", "dark"] satisfies Theme[]) {
