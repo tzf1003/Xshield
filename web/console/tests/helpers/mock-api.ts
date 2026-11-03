@@ -22,7 +22,8 @@ import type {
   ModelKind,
   ModelsState,
   ModelTestResult,
-  ModelVersion,
+  ModelValues,
+  ModelVersionWire,
   Outcome,
   RequestDetail,
   RequestId,
@@ -217,7 +218,7 @@ type State = {
   versions: Map<string, SiteVersion[]>;
   models: ModelsState;
   /** The saved versions of each model configuration, newest first. */
-  modelVersions: Record<ModelKind, ModelVersion[]>;
+  modelVersions: Record<ModelKind, ModelVersionWire[]>;
 };
 
 function freshState(options: MockOptions): State {
@@ -1035,6 +1036,13 @@ function asText(value: string | number | boolean | null | undefined): string {
   return value === null || value === undefined ? "" : String(value);
 }
 
+/** A configuration as the history holds it: every value is text, and an empty one is "" (the core's values()). */
+function wireConfig(values: ModelValues): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(values).map(([field, value]) => [field, value === null ? "" : String(value)]),
+  );
+}
+
 /** The fields that differ between two configurations, as the history lists them (design 2.6). */
 function modelChanges(
   before: Record<string, string | number | boolean | null>,
@@ -1096,7 +1104,7 @@ function saveJev(call: Call, state: State, options: MockOptions): Answer {
       version,
       at: MODEL_STAMP,
       change: "save",
-      config: next,
+      config: wireConfig(next),
       changes,
       note: body.note ? body.note : null,
       tested: body.tested === true,
@@ -1159,7 +1167,7 @@ function saveAgent(call: Call, state: State): Answer {
       version,
       at: MODEL_STAMP,
       change: "save",
-      config: next,
+      config: wireConfig(next),
       changes,
       note: body.note ? body.note : null,
       tested: body.tested === true,
@@ -1227,7 +1235,7 @@ function backToEnvironment(call: Call, state: State): Answer {
       version,
       at: MODEL_STAMP,
       change: "revert_to_env",
-      config: defaults,
+      config: wireConfig(defaults),
       changes,
       note: null,
       tested: false,

@@ -19,7 +19,7 @@ import type {
   ModelsState,
   ModelTestBody,
   ModelTestResult,
-  ModelVersion,
+  ModelVersionWire,
   ModelWrite,
   ObjectEventsFilter,
   ObjectEventsResponse,
@@ -44,6 +44,7 @@ import type {
   Timeseries,
   ValidateResult,
 } from "./types.ts";
+import { modelValuesFromWire } from "../lib/model-form.ts";
 
 export class ApiError extends Error {
   readonly status: number;
@@ -201,7 +202,11 @@ export const api = {
       "DELETE",
       `/system/models/jev${qs({ expected_version: expectedVersion })}`,
     ),
-  modelHistory: (kind: ModelKind) => get<ModelVersion[]>(`/system/models/${kind}/history`),
+  // The text values of each version are read back into the form's types here, once.
+  modelHistory: (kind: ModelKind) =>
+    get<ModelVersionWire[]>(`/system/models/${kind}/history`).then((items) =>
+      items.map((item) => ({ ...item, config: modelValuesFromWire(kind, item.config) })),
+    ),
 };
 
 /** Builds a query string from defined values only. */

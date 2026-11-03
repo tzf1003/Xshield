@@ -1074,17 +1074,27 @@ export interface ModelChange {
   new: string;
 }
 
-/** One saved version of a model configuration, newest first. `config` is that version's settings, without the key. */
-export interface ModelVersion {
+/** One saved version as the API sends it, newest first. Every value of `config` is text (the core's values()). */
+export interface ModelVersionWire {
   version: number;
   at: string | null;
   /** `save`, or `revert_to_env` for the Jev group given back to the environment. */
   change: "save" | "revert_to_env";
-  config: ModelValues;
+  /** The settings of that version, without the key. Values are text: "2000", "false". */
+  config: Record<string, string>;
   changes: ModelChange[];
   /** Null when the note is empty. */
   note: string | null;
   tested: boolean;
+  /** `replaced`, `cleared`, or null when the key was kept. The page reads the key change from `changes`. */
+  key_change?: string | null;
+  /** The last four characters of a key this version set; null when it set none. */
+  key_last4?: string | null;
+}
+
+/** One saved version as the page holds it: `config` read back into the types of the form (lib/model-form.ts). */
+export interface ModelVersion extends Omit<ModelVersionWire, "config"> {
+  config: ModelValues;
 }
 
 // ------------------------------------------------------------------ import (7.9.9)

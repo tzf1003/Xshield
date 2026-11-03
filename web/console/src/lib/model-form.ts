@@ -159,6 +159,31 @@ export function withChoice(kind: ModelKind, form: ModelForm, choice: FormChoice)
   };
 }
 
+/**
+ * A saved version's settings as the API sends them: every value is text (xshield-core values()). This reads them
+ * back into the form's types, so a restored version keeps its timeout, its share flag and its blanks as they were.
+ */
+export function modelValuesFromWire(kind: ModelKind, config: Record<string, string>): ModelValues {
+  const text = (field: string): string | null => config[field] || null;
+  const timeout = Number(config.timeout_ms);
+  if (kind === "jev") {
+    const routes: readonly JevRoute[] = ["gateway", "direct", "custom"];
+    return {
+      route: routes.find((route) => route === config.route) ?? "gateway",
+      endpoint: text("endpoint"),
+      model: text("model"),
+      timeout_ms: Number.isFinite(timeout) ? timeout : JEV_TIMEOUT.fallback,
+    };
+  }
+  return {
+    provider: config.provider === "custom" ? "custom" : "gateway",
+    endpoint: config.endpoint ?? "",
+    model: text("model"),
+    timeout_ms: Number.isFinite(timeout) ? timeout : AGENT_TIMEOUT.fallback * 1000,
+    share_key_with_jev: config.share_key_with_jev === "true",
+  };
+}
+
 /** The address a line starts with, or null when the line has no preset (custom). */
 export function presetEndpoint(choice: JevRoute): string | null {
   return JEV_PRESETS[choice].endpoint;
