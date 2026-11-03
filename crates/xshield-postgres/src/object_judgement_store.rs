@@ -154,17 +154,30 @@ pub async fn dismiss(
     Ok(result.rows_affected() > 0)
 }
 
-/// Clears the proposal of a request position, once an administrator has confirmed it into the
-/// configuration. Returns whether a row was cleared.
+/// Clears the proposal of a request position once an administrator has confirmed the value it carries
+/// into the configuration. A proposal of the other value, which the rules made after the administrator
+/// read the one confirmed, stays: the next pass judges it again. Returns whether a row was cleared.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
-pub async fn clear(pool: &PgPool, site: &str, slot: &str) -> Result<bool, LearningStoreError> {
-    let result = sqlx::query("DELETE FROM object_judgements WHERE site = $1 AND slot = $2")
-        .bind(site)
-        .bind(slot)
-        .execute(pool)
-        .await?;
+pub async fn clear_confirmed(
+    pool: &PgPool,
+    site: &str,
+    slot: &str,
+    accepts_public: bool,
+    reliability: Reliability,
+) -> Result<bool, LearningStoreError> {
+    let result = sqlx::query(
+        "DELETE FROM object_judgements
+         WHERE site = $1 AND slot = $2 AND NOT dismissed
+           AND accepts_public = $3 AND reliability = $4",
+    )
+    .bind(site)
+    .bind(slot)
+    .bind(accepts_public)
+    .bind(reliability_text(reliability))
+    .execute(pool)
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 

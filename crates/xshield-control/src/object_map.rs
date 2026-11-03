@@ -868,7 +868,14 @@ pub async fn confirm_judgement(
         && map.reliability_of(&key) == Some(confirmation.reliability)
     {
         // The configuration carries the judgement already, so there is nothing to write.
-        judgements::clear(&state.pool, &name, &key).await?;
+        judgements::clear_confirmed(
+            &state.pool,
+            &name,
+            &key,
+            confirmation.accepts_public,
+            confirmation.reliability,
+        )
+        .await?;
         return Ok(StatusCode::NO_CONTENT);
     }
     let objects = map
@@ -887,7 +894,14 @@ pub async fn confirm_judgement(
     .await?
     {
         WriteOutcome::Applied(_) => {
-            judgements::clear(&state.pool, &name, &key).await?;
+            judgements::clear_confirmed(
+                &state.pool,
+                &name,
+                &key,
+                confirmation.accepts_public,
+                confirmation.reliability,
+            )
+            .await?;
             Ok(StatusCode::NO_CONTENT)
         }
         WriteOutcome::NotFound => Err(ApiError::new(StatusCode::NOT_FOUND, "SITE_NOT_FOUND")),
@@ -1864,9 +1878,16 @@ fn side_of_key(key: &str) -> Side {
     }
 }
 
-/// Whether a position key names a request position, by the side `side_of_key` reads.
+/// Whether a position key names a request position: the side `side_of_key` reads, and a top-level array
+/// body (`body[]…`), which the judge reads as a body value. `side_of_key` still shows such a position on
+/// the response side, and a response field named `body` that holds an array has the same location, as a
+/// response field named `body` already has for `body.`.
 pub(crate) fn is_request_key(key: &str) -> bool {
     side_of_key(key) == Side::Request
+        || key
+            .split(' ')
+            .nth(2)
+            .is_some_and(|location| location.starts_with("body["))
 }
 
 /// The method of a position key: `GET` in `GET /doctor/{id} path[1]`.
@@ -1979,6 +2000,18 @@ mod tests {
             Side::Response
         );
         assert_eq!(side_of_key("GET /api/me name"), Side::Response);
+    }
+
+    #[test]
+    fn a_top_level_array_body_is_a_request_position_for_acceptance_learning() {
+        // The judge reads `body[]…` as a body value, so the acceptance judgement judges it too,
+        // while the side a row shows keeps the reading of `side_of_key`.
+        assert!(is_request_key("POST /api/batch body[].id"));
+        assert!(is_request_key("POST /api/batch body[]"));
+        assert!(is_request_key("POST /api/notes body.note.text"));
+        assert!(!is_request_key("GET /api/appointments [].doc_id"));
+        assert!(!is_request_key("GET /api/me name"));
+        assert_eq!(side_of_key("POST /api/batch body[].id"), Side::Response);
     }
 
     #[test]
@@ -3644,6 +3677,35 @@ mod live_tests {
         Bytes::from(
             json!({"accepts_public": accepts_public, "reliability": reliability}).to_string(),
         )
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_confirmation_clears_only_the_proposal_of_the_value_it_confirmed() {
+        let (state, name) = judged_site("judgement-clear").await;
+        // A proposal of the other value, made after the administrator read the one confirmed, stays.
+        let cleared =
+            judgements::clear_confirmed(&state.pool, &name, SLOT, false, Reliability::Medium)
+                .await
+                .expect("clear the other value");
+        assert!(!cleared);
+        let kept = judgements::proposal(&state.pool, &name, SLOT)
+            .await
+            .expect("read the proposal")
+            .expect("the proposal of the other value stays");
+        assert!(kept.accepts_public);
+
+        let cleared =
+            judgements::clear_confirmed(&state.pool, &name, SLOT, true, Reliability::Medium)
+                .await
+                .expect("clear the confirmed value");
+        assert!(cleared);
+        assert!(
+            judgements::proposal(&state.pool, &name, SLOT)
+                .await
+                .expect("read the proposal")
+                .is_none()
+        );
     }
 
     #[tokio::test]
