@@ -8,41 +8,54 @@ compose_project=${XSHIELD_DEV_COMPOSE_PROJECT:-xshield-dev}
 console_port=${XSHIELD_CONSOLE_PORT:-55173}
 tls_port=${XSHIELD_DEV_TLS_PORT:-5443}
 idor_tls_port=${XSHIELD_DEV_IDOR_TLS_PORT:-5444}
-control_proxy=${XSHIELD_CONTROL_PROXY:-http://127.0.0.1:9443}
+control_port=9443
+control_proxy=${XSHIELD_CONTROL_PROXY:-http://127.0.0.1:$control_port}
 dev_root=${XSHIELD_DEV_ROOT:-"$repo_root/target/xshield-dev"}
+dev_admin_password='xshield-dev-password'
 console_only=0
 reset_stack=0
+control_bin=''
+edge_bin=''
+control_pid=''
+edge_pid=''
+console_pid=''
+stack_started=0
+pids=()
 
 usage() {
     cat <<'EOF'
 Usage: ./dev.sh [--all|--console-only] [--reset]
 
 Start the local development stack. The default starts:
-  - PostgreSQL with every migration under migrations/
-  - ClickHouse with sql/clickhouse.sql
-  - a local Keycloak OIDC realm
-  - xshield-control on 127.0.0.1:9443
-  - xshield-gateway with an empty bootstrap snapshot and loopback apply API
-  - a local HTTPS terminator at https://juice.local:5443 (self-signed development certificate)
+  - PostgreSQL in Docker Compose (docker-compose.dev.yml)
+  - xshield-control on http://127.0.0.1:9443; it applies migrations/ before it serves
+  - xshield-edge on https://juice.local:5443 and https://idor.local:5444
+    (self-signed development certificate; both names must resolve to 127.0.0.1)
   - the Vite console on http://127.0.0.1:55173
 
-Docker Desktop (or a compatible Docker daemon) is required for the managed
-dependencies. The stack uses development-only credentials and data volumes;
-they are never used by production configuration.
+Create sites in the console; xshield-edge reads them from PostgreSQL.
+Docker Desktop (or a compatible Docker daemon) is required for PostgreSQL.
+xshield-edge refuses to start without a Jev key: set AI_GATEWAY_API_KEY, or set
+XSHIELD_JEV_ROUTE=direct and XSHIELD_JEV_API_KEY. The development administrator
+password is xshield-dev-password. The stack uses development-only credentials
+and data volumes; they are never used by production configuration.
 
 Options:
   --all            Start the complete local stack (default).
-  --console-only  Start only the Vite console.
+  --console-only   Start only the Vite console.
   --reset          Remove this stack's development volumes before starting.
-  -h, --help      Show this help.
+                   Needed once for a database created by the v3 stack.
+  -h, --help       Show this help.
 
 Development overrides:
-  XSHIELD_CONSOLE_PORT                 Vite port (full stack uses 55173)
+  XSHIELD_CONSOLE_PORT                 Vite port (default: 55173)
   XSHIELD_CONTROL_PROXY                Control origin for the Vite proxy
   XSHIELD_DEV_ROOT                     Runtime directory (default: target/xshield-dev)
-  XSHIELD_DEV_COMPOSE_PROJECT         Docker Compose project name
-  XSHIELD_DEV_TLS_PORT                Local HTTPS port (default: 5443)
-  XSHIELD_DEV_IDOR_TLS_PORT           IDOR lab HTTPS port (default: 5444)
+  XSHIELD_DEV_COMPOSE_PROJECT          Docker Compose project name
+  XSHIELD_DEV_TLS_PORT                 Edge HTTPS port for juice.local (default: 5443)
+  XSHIELD_DEV_IDOR_TLS_PORT            Edge HTTPS port for idor.local (default: 5444)
+  XSHIELD_JEV_ROUTE, XSHIELD_JEV_API_KEY, XSHIELD_JEV_ENDPOINT, XSHIELD_JEV_MODEL,
+  XSHIELD_JEV_TIMEOUT_MS               Jev settings passed to xshield-edge (docs/02)
   XSHIELD_DEV_KEEP_DEPS=1              Keep Docker containers after Ctrl-C
   XSHIELD_DEV_AUTO_START_DOCKER=0      Do not open Docker Desktop on macOS
 EOF
@@ -80,7 +93,6 @@ while (($# > 0)); do
 done
 
 command -v node >/dev/null 2>&1 || die "node is required (web/console requires Node.js 22.12+ or 24+)"
-command -v npm >/dev/null 2>&1 || die "npm is required"
 node_version=$(node -p 'process.versions.node')
 IFS=. read -r node_major node_minor _node_patch <<<"$node_version"
 if ((node_major < 22 || node_major == 23 || (node_major == 22 && node_minor < 12))); then
@@ -94,17 +106,29 @@ fi
     die "XSHIELD_DEV_TLS_PORT must be an integer from 1 to 65535"
 [[ "$idor_tls_port" =~ ^[0-9]+$ ]] && ((idor_tls_port >= 1 && idor_tls_port <= 65535)) ||
     die "XSHIELD_DEV_IDOR_TLS_PORT must be an integer from 1 to 65535"
+[[ "$tls_port" != "$idor_tls_port" ]] ||
+    die "XSHIELD_DEV_TLS_PORT and XSHIELD_DEV_IDOR_TLS_PORT must differ"
 
 if ((console_only)); then
     [[ "$reset_stack" == 0 ]] || die "--reset requires the complete local stack"
 else
-    [[ "$console_port" == 55173 ]] ||
-        die "the managed OIDC realm is registered for console port 55173"
     command -v cargo >/dev/null 2>&1 || die "cargo is required for the complete local stack"
-    command -v curl >/dev/null 2>&1 || die "curl is required for the local OIDC readiness check"
+    command -v curl >/dev/null 2>&1 || die "curl is required for the local readiness checks"
     command -v openssl >/dev/null 2>&1 || die "openssl is required to create local development keys"
-    command -v stunnel >/dev/null 2>&1 || die "stunnel is required for the local HTTPS development entry"
     [[ -f "$compose_file" ]] || die "missing docker-compose.dev.yml"
+    case "${XSHIELD_JEV_ROUTE:-gateway}" in
+        gateway)
+            [[ -n "${AI_GATEWAY_API_KEY:-}" ]] ||
+                die "AI_GATEWAY_API_KEY is required: xshield-edge does not start without a Jev key (or set XSHIELD_JEV_ROUTE=direct and XSHIELD_JEV_API_KEY)"
+            ;;
+        direct)
+            [[ -n "${XSHIELD_JEV_API_KEY:-}" ]] ||
+                die "XSHIELD_JEV_API_KEY is required when XSHIELD_JEV_ROUTE=direct"
+            ;;
+        *)
+            die "XSHIELD_JEV_ROUTE must be gateway or direct"
+            ;;
+    esac
 fi
 
 # Probe before touching managed dependencies. The owner of an occupied port
@@ -122,9 +146,11 @@ server.listen(port, '127.0.0.1', () => server.close());
 NODE
 }
 check_local_port "$console_port"
-if (( ! console_only )); then check_local_port 9443; fi
-if (( ! console_only )); then check_local_port "$tls_port"; fi
-if (( ! console_only )); then check_local_port "$idor_tls_port"; fi
+if (( ! console_only )); then
+    check_local_port "$control_port"
+    check_local_port "$tls_port"
+    check_local_port "$idor_tls_port"
+fi
 
 compose_cmd=()
 if (( ! console_only )); then
@@ -145,141 +171,61 @@ generate_hex() {
     openssl rand -hex 32 | tr -d '\n'
 }
 
+# Prints one value from a control.env written by write_dev_env.
+env_value() {
+    (set -a && . "$1" && printf '%s' "${!2:-}")
+}
+
+build_services() {
+    printf '%s\n' 'Building xshield-control and xshield-edge'
+    (cd "$repo_root" && cargo build -p xshield-control -p xshield-edge)
+    # Run the built binaries directly: a readiness wait must not include a compile,
+    # and the process that is signalled on exit is the service itself.
+    local target_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
+    [[ "$target_dir" == /* ]] || target_dir="$repo_root/$target_dir"
+    control_bin="$target_dir/debug/xshield-control"
+    edge_bin="$target_dir/debug/xshield-edge"
+    [[ -x "$control_bin" && -x "$edge_bin" ]] ||
+        die "cargo did not produce xshield-control and xshield-edge under $target_dir/debug"
+}
+
 write_dev_env() {
     local env_file="$dev_root/control.env"
-    local dev_roles='observer,investigator,audit_administrator,sensitive_evidence_reader,sensitive_evidence_approver,policy_author,policy_approver,release_operator,system_admin'
-    local dev_oidc_roles='[{"subject":"00000000-0000-7000-8000-000000000001","roles":["observer","investigator","audit_administrator","sensitive_evidence_reader","sensitive_evidence_approver","policy_author","policy_approver","release_operator","system_admin"]}]'
+    local context_key='' admin_password_hash=''
     install -d -m 0700 "$dev_root"
-    if [[ ! -f "$env_file" ]]; then
-        local journal_key control_audit_key cursor_key idempotency_key seal_key evidence_key token api_key_hash_key edge_apply_key
-        journal_key=$(generate_hex)
-        control_audit_key=$(generate_hex)
-        cursor_key=$(generate_hex)
-        idempotency_key=$(generate_hex)
-        seal_key=$(generate_hex)
-        evidence_key=$(generate_hex)
-        token=$(generate_hex)
-        api_key_hash_key=$(generate_hex)
-        edge_apply_key=$(generate_hex)
-        umask 077
-        {
-            printf 'XSHIELD_DEV_POSTGRES_DB=%q\n' 'xshield'
-            printf 'XSHIELD_DEV_POSTGRES_USER=%q\n' 'xshield_dev'
-            printf 'XSHIELD_DEV_POSTGRES_PASSWORD=%q\n' 'xshield_dev'
-            printf 'XSHIELD_DEV_POSTGRES_PORT=%q\n' '55432'
-            printf 'XSHIELD_DEV_CLICKHOUSE_HTTP_PORT=%q\n' '58123'
-            printf 'XSHIELD_DEV_CLICKHOUSE_NATIVE_PORT=%q\n' '59000'
-            printf 'XSHIELD_CONTROL_OIDC_ISSUER=%q\n' 'http://127.0.0.1:58080/realms/xshield-dev'
-            printf 'XSHIELD_CONTROL_OIDC_CLIENT_ID=%q\n' 'xshield-console-dev'
-            printf 'XSHIELD_CONTROL_OIDC_CLIENT_SECRET=%q\n' 'xshield-dev-client-secret'
-            printf 'XSHIELD_CONTROL_OIDC_REQUIRED_ACR=%q\n' '1'
-            printf 'XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON=%q\n' \
-                '[{"subject":"00000000-0000-7000-8000-000000000001","roles":["observer","investigator","audit_administrator","sensitive_evidence_reader","sensitive_evidence_approver","system_admin"]}]'
-            printf 'XSHIELD_TENANT_ID=%q\n' 'tenant_dev'
-            printf 'XSHIELD_SITE_ID=%q\n' 'site_dev'
-            printf 'XSHIELD_CONTROL_SUBJECT=%q\n' 'dev-operator'
-            printf 'XSHIELD_CONTROL_ROLES=%q\n' 'observer,investigator,audit_administrator,sensitive_evidence_reader,sensitive_evidence_approver,system_admin'
-            printf 'XSHIELD_CONTROL_TOKEN=%q\n' "$token"
-            printf 'XSHIELD_CONTROL_CURSOR_KEY_HEX=%q\n' "$cursor_key"
-            printf 'XSHIELD_CONTROL_IDEMPOTENCY_KEY_HEX=%q\n' "$idempotency_key"
-            printf 'XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX=%q\n' "$api_key_hash_key"
-            printf 'XSHIELD_EDGE_APPLY_KEY_HEX=%q\n' "$edge_apply_key"
-            printf 'XSHIELD_EDGE_APPLY_URL=%q\n' 'http://127.0.0.1:9553/internal/v1/apply'
-            printf 'XSHIELD_EDGE_SNAPSHOT_PATH=%q\n' "$dev_root/edge-snapshot.json"
-            printf 'XSHIELD_JOURNAL_KEY_ID=%q\n' 'dev-journal-key'
-            printf 'XSHIELD_JOURNAL_KEY_HEX=%q\n' "$journal_key"
-            printf 'XSHIELD_SEAL_KEY_ID=%q\n' 'dev-seal-key'
-            printf 'XSHIELD_SEAL_PUBLIC_KEY_HEX=%q\n' "$seal_key"
-            printf 'XSHIELD_CONTROL_AUDIT_KEY_ID=%q\n' 'dev-control-audit-key'
-            printf 'XSHIELD_CONTROL_AUDIT_KEY_HEX=%q\n' "$control_audit_key"
-            printf 'XSHIELD_INDEX_TARGET_ID=%q\n' 'clickhouse-dev'
-            printf 'XSHIELD_CLICKHOUSE_URL=%q\n' 'http://127.0.0.1:58123'
-            printf 'XSHIELD_CLICKHOUSE_DATABASE=%q\n' 'xshield'
-            printf 'XSHIELD_CLICKHOUSE_USER=%q\n' 'xshield'
-            printf 'XSHIELD_CLICKHOUSE_PASSWORD=%q\n' 'xshield_dev'
-            printf 'XSHIELD_DATABASE_URL=%q\n' 'postgresql://xshield_dev:xshield_dev@127.0.0.1:55432/xshield'
-            printf 'XSHIELD_CONTROL_DATABASE_MAX_CONNECTIONS=%q\n' '8'
-            printf 'XSHIELD_CONTROL_DATABASE_ACQUIRE_TIMEOUT_MS=%q\n' '2000'
-            printf 'XSHIELD_AUDIT_METADATA_RETENTION_DAYS=%q\n' '30'
-            printf 'XSHIELD_AUDIT_MAX_SEGMENT_READ_BYTES=%q\n' '16777216'
-            printf 'XSHIELD_CONTROL_REQUESTS_PER_MINUTE=%q\n' '120'
-            printf 'XSHIELD_CONTROL_MAX_QUERY_EVENTS=%q\n' '1000'
-            printf 'XSHIELD_CONTROL_MAX_QUERY_ARTIFACTS=%q\n' '128'
-            printf 'XSHIELD_CONTROL_MAX_OPEN_CASES=%q\n' '32'
-            printf 'XSHIELD_CONTROL_MAX_PENDING_EVIDENCE_ACCESS_REQUESTS=%q\n' '32'
-            printf 'XSHIELD_CONTROL_MAX_EVIDENCE_ACCESS_TTL_SECONDS=%q\n' '120'
-            printf 'XSHIELD_EVIDENCE_ROOT=%q\n' "$dev_root/evidence"
-            printf 'XSHIELD_EVIDENCE_KEY_ID=%q\n' 'dev-evidence-key'
-            printf 'XSHIELD_EVIDENCE_KEY_HEX=%q\n' "$evidence_key"
-            printf 'XSHIELD_EVIDENCE_MAX_ARTIFACT_BYTES=%q\n' '67108864'
-            printf 'XSHIELD_EVIDENCE_MAX_RETENTION_DAYS=%q\n' '30'
-            printf 'XSHIELD_CONTROL_AUDIT_MAX_BYTES=%q\n' '16777216'
-            printf 'XSHIELD_CONTROL_AUDIT_HIGH_WATERMARK_BYTES=%q\n' '12582912'
-            printf 'XSHIELD_CONTROL_AUDIT_SEGMENT_MAX_BYTES=%q\n' '4194304'
-        } >"$env_file"
+    if [[ -f "$env_file" ]]; then
+        # Keep the secrets of an existing stack: the context key produces the context
+        # hashes that stored decisions refer to, and the password hash signs sessions.
+        context_key=$(env_value "$env_file" XSHIELD_CONTEXT_KEY_HEX)
+        admin_password_hash=$(env_value "$env_file" XSHIELD_ADMIN_PASSWORD_HASH)
     fi
-    # Upgrade fixed local role defaults without rotating any generated secret.
+    [[ -n "$context_key" ]] || context_key=$(generate_hex)
+    if [[ -z "$admin_password_hash" ]]; then
+        admin_password_hash=$(printf '%s\n' "$dev_admin_password" | "$control_bin" hash-password) ||
+            die 'could not hash the development administrator password'
+    fi
     local env_tmp="$env_file.tmp.$$"
-    local roles_seen=0
-    local oidc_roles_seen=0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        case "$line" in
-            XSHIELD_CONTROL_ROLES=*)
-                printf 'XSHIELD_CONTROL_ROLES=%q\n' "$dev_roles" >>"$env_tmp"
-                roles_seen=1
-                ;;
-            XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON=*)
-                printf 'XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON=%q\n' "$dev_oidc_roles" >>"$env_tmp"
-                oidc_roles_seen=1
-                ;;
-            *) printf '%s\n' "$line" >>"$env_tmp" ;;
-        esac
-    done <"$env_file"
-    ((roles_seen)) || printf 'XSHIELD_CONTROL_ROLES=%q\n' "$dev_roles" >>"$env_tmp"
-    ((oidc_roles_seen)) || printf 'XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON=%q\n' "$dev_oidc_roles" >>"$env_tmp"
-    chmod 600 "$env_tmp"
+    umask 077
+    {
+        printf 'XSHIELD_DEV_POSTGRES_DB=%q\n' 'xshield'
+        printf 'XSHIELD_DEV_POSTGRES_USER=%q\n' 'xshield_dev'
+        printf 'XSHIELD_DEV_POSTGRES_PASSWORD=%q\n' 'xshield_dev'
+        printf 'XSHIELD_DEV_POSTGRES_PORT=%q\n' '55432'
+        printf 'XSHIELD_DATABASE_URL=%q\n' 'postgresql://xshield_dev:xshield_dev@127.0.0.1:55432/xshield'
+        printf 'XSHIELD_CONTROL_LISTEN=%q\n' "127.0.0.1:$control_port"
+        printf 'XSHIELD_CONTROL_CONSOLE_ORIGIN=%q\n' "http://127.0.0.1:$console_port"
+        # The console is opened over plain http://127.0.0.1, where Chromium does not keep
+        # Secure cookies. Both control and console listen on loopback only.
+        printf 'XSHIELD_CONTROL_PLAIN_HTTP=%q\n' 'true'
+        printf 'XSHIELD_ADMIN_PASSWORD_HASH=%q\n' "$admin_password_hash"
+        printf 'XSHIELD_CONTEXT_KEY_HEX=%q\n' "$context_key"
+    } >"$env_tmp"
     mv "$env_tmp" "$env_file"
     set -a
     # This file is generated with mode 0600 under target/ and contains only
     # local development values; it is not a production configuration source.
     . "$env_file"
     set +a
-    if [[ -z "${XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX:-}" ]]; then
-        export XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX="$(generate_hex)"
-        printf 'XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX=%q\n' "$XSHIELD_CONTROL_API_KEY_HASH_KEY_HEX" >>"$env_file"
-    fi
-    if [[ -z "${XSHIELD_EDGE_APPLY_KEY_HEX:-}" ]]; then
-        export XSHIELD_EDGE_APPLY_KEY_HEX="$(generate_hex)"
-        printf 'XSHIELD_EDGE_APPLY_KEY_HEX=%q\n' "$XSHIELD_EDGE_APPLY_KEY_HEX" >>"$env_file"
-    fi
-    # The edge builds its identity runtime from the bootstrap configuration and needs
-    # a fingerprint key for it; without one, sites delivered by apply that use
-    # protected routes cannot be served.
-    if [[ -z "${XSHIELD_FINGERPRINT_KEY_HEX:-}" ]]; then
-        export XSHIELD_FINGERPRINT_KEY_HEX="$(generate_hex)"
-        printf 'XSHIELD_FINGERPRINT_KEY_HEX=%q\n' "$XSHIELD_FINGERPRINT_KEY_HEX" >>"$env_file"
-    fi
-    export XSHIELD_EDGE_APPLY_URL="${XSHIELD_EDGE_APPLY_URL:-http://127.0.0.1:9553/internal/v1/apply}"
-    export XSHIELD_EDGE_SNAPSHOT_PATH="${XSHIELD_EDGE_SNAPSHOT_PATH:-$dev_root/edge-snapshot.json}"
-    export XSHIELD_EDGE_APPLY_LISTEN="${XSHIELD_EDGE_APPLY_LISTEN:-127.0.0.1:9553}"
-    export XSHIELD_EDGE_LISTEN_PORTS="${XSHIELD_EDGE_LISTEN_PORTS:-127.0.0.1:6188,127.0.0.1:56188,127.0.0.1:56189}"
-    export XSHIELD_EDGE_BOOTSTRAP_ONLY=1
-    export XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1
-    chmod 600 "$env_file"
-    export XSHIELD_CONTROL_OIDC_ISSUER='http://127.0.0.1:58080/realms/xshield-dev'
-    export XSHIELD_CONTROL_OIDC_CLIENT_ID='xshield-console-dev'
-    export XSHIELD_CONTROL_OIDC_CLIENT_SECRET='xshield-dev-client-secret'
-    export XSHIELD_CONTROL_OIDC_REQUIRED_ACR='1'
-    export XSHIELD_CONTROL_ROLES="$dev_roles"
-    export XSHIELD_CONTROL_OIDC_SUBJECT_ROLES_JSON="$dev_oidc_roles"
-    export XSHIELD_CONTROL_CONSOLE_ORIGIN="http://127.0.0.1:${console_port}"
-    export XSHIELD_CONTROL_LISTEN="127.0.0.1:9443"
-    now=$(date +%s)
-    export XSHIELD_CONTROL_TOKEN_ISSUED_AT=$((now - 60))
-    export XSHIELD_CONTROL_TOKEN_EXPIRES_AT=$((now + 86340))
-    export XSHIELD_EVIDENCE_ROOT
-    install -d -m 0700 "$XSHIELD_EVIDENCE_ROOT" "$dev_root/journal" "$dev_root/manifests" \
-        "$dev_root/checkpoints" "$dev_root/control-audit"
 }
 
 ensure_docker() {
@@ -324,22 +270,8 @@ postgres_ready() {
         -d "$XSHIELD_DEV_POSTGRES_DB" >/dev/null 2>&1
 }
 
-clickhouse_ready() {
-    compose exec -T clickhouse clickhouse-client --user default \
-        --query 'SELECT 1' >/dev/null 2>&1
-}
-
-oidc_ready() {
-    curl --fail --silent --show-error \
-        'http://127.0.0.1:58080/realms/xshield-dev/.well-known/openid-configuration' \
-        >/dev/null 2>&1
-}
-
 control_ready() {
-    local status
-    status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
-        --max-time 2 http://127.0.0.1:9443/control/v1/session) || return 1
-    [[ "$status" == 401 || "$status" == 403 ]]
+    curl --fail --silent --max-time 2 "http://127.0.0.1:$control_port/health" >/dev/null 2>&1
 }
 
 wait_for_control() {
@@ -348,115 +280,71 @@ wait_for_control() {
             printf '%s\n' 'xshield-control is ready'
             return
         fi
-        if [[ -n "${control_pid:-}" ]] && ! kill -0 "$control_pid" 2>/dev/null; then
-            die 'xshield-control exited before becoming ready; inspect its output'
+        if ! kill -0 "$control_pid" 2>/dev/null; then
+            die 'xshield-control exited before becoming ready; its output above says why. A database created by the v3 stack needs ./dev.sh --reset'
         fi
         sleep 1
     done
     die 'xshield-control did not become ready'
 }
 
-check_schemas() {
-    compose exec -T postgres psql -U "$XSHIELD_DEV_POSTGRES_USER" \
-        -d "$XSHIELD_DEV_POSTGRES_DB" -Atqc \
-        "SELECT to_regclass('xshield.management_browser_sessions')" | grep -qx 'xshield.management_browser_sessions' ||
-        die 'PostgreSQL baseline migrations are incomplete; inspect the migration output before using --reset'
-    local required_site_tables=(
-        protected_site_configs site_port_leases site_apply_intents protected_sites
-        site_origins site_routes site_policy_revisions site_health_snapshots
-        site_secret_refs site_snapshot_sequences
-    )
-    local table
-    for table in "${required_site_tables[@]}"; do
-        compose exec -T postgres psql -U "$XSHIELD_DEV_POSTGRES_USER" \
-            -d "$XSHIELD_DEV_POSTGRES_DB" -Atqc \
-            "SELECT to_regclass('xshield.$table')" | grep -qx "xshield.$table" ||
-            die "PostgreSQL site schema is incomplete: xshield.$table"
-    done
-    compose exec -T postgres psql -U "$XSHIELD_DEV_POSTGRES_USER" \
-        -d "$XSHIELD_DEV_POSTGRES_DB" -Atqc \
-        "SELECT 1 FROM information_schema.columns WHERE table_schema='xshield' AND table_name='protected_site_configs' AND column_name='policy_json'" |
-        grep -qx '1' || die 'PostgreSQL site schema is incomplete: protected_site_configs.policy_json'
-    compose exec -T postgres psql -U "$XSHIELD_DEV_POSTGRES_USER" \
-        -d "$XSHIELD_DEV_POSTGRES_DB" -Atqc \
-        "SELECT 1 FROM information_schema.columns WHERE table_schema='xshield' AND table_name='site_apply_intents' AND column_name='approval_id'" |
-        grep -qx '1' || die 'PostgreSQL site schema is incomplete: site_apply_intents.approval_id'
-    compose exec -T postgres psql -U "$XSHIELD_DEV_POSTGRES_USER" \
-        -d "$XSHIELD_DEV_POSTGRES_DB" -Atqc \
-        "SELECT 1 FROM information_schema.columns WHERE table_schema='xshield' AND table_name='site_routes' AND column_name='response_config'" |
-        grep -qx '1' || die 'PostgreSQL site schema is incomplete: site_routes.response_config'
-    compose exec -T postgres psql -U "$XSHIELD_DEV_POSTGRES_USER" \
-        -d "$XSHIELD_DEV_POSTGRES_DB" -Atqc \
-        "SELECT 1 FROM pg_constraint WHERE conname='site_apply_intents_approval_id_shape'" |
-        grep -qx '1' || die 'PostgreSQL site schema is incomplete: approval constraint'
-    compose exec -T clickhouse clickhouse-client --user "$XSHIELD_CLICKHOUSE_USER" \
-        --password "$XSHIELD_CLICKHOUSE_PASSWORD" \
-        --query "SELECT 1 FROM system.tables WHERE database='xshield' AND name='audit_events'" |
-        grep -qx '1' || die 'ClickHouse schema is incomplete; retry with --reset'
+start_control() {
+    printf 'Starting xshield-control on http://127.0.0.1:%s\n' "$control_port"
+    "$control_bin" &
+    control_pid=$!
+    pids+=("$control_pid")
+    wait_for_control
 }
 
-pids=()
-control_pid=''
-tls_pid=''
-stack_started=0
+edge_ready() {
+    (exec 3<>"/dev/tcp/127.0.0.1/$tls_port") 2>/dev/null
+}
 
-start_dev_tls() {
+wait_for_edge() {
+    for _ in $(seq 1 60); do
+        if edge_ready; then
+            printf '%s\n' 'xshield-edge is ready'
+            return
+        fi
+        if ! kill -0 "$edge_pid" 2>/dev/null; then
+            die 'xshield-edge exited before becoming ready; inspect its output above'
+        fi
+        sleep 1
+    done
+    die 'xshield-edge did not become ready'
+}
+
+start_edge() {
     local tls_dir="$dev_root/tls"
-    local cert="$tls_dir/juice.local.crt"
-    local key="$tls_dir/juice.local.key"
-    local config="$tls_dir/stunnel.conf"
     "$repo_root/scripts/generate_dev_tls_cert.sh" "$tls_dir" >/dev/null
-    cat >"$config" <<EOF
-foreground = yes
-debug = 0
-output = $tls_dir/stunnel.log
-pid = $tls_dir/stunnel.pid
+    printf 'Starting xshield-edge on https://juice.local:%s and https://idor.local:%s\n' \
+        "$tls_port" "$idor_tls_port"
+    XSHIELD_EDGE_LISTEN_PORTS="$tls_port,$idor_tls_port" \
+        XSHIELD_EDGE_TLS_CERT_PATH="$tls_dir/juice.local.crt" \
+        XSHIELD_EDGE_TLS_KEY_PATH="$tls_dir/juice.local.key" \
+        "$edge_bin" &
+    edge_pid=$!
+    pids+=("$edge_pid")
+    wait_for_edge
+}
 
-[juice-local]
-accept = 127.0.0.1:$tls_port
-connect = 127.0.0.1:56188
-cert = $cert
-key = $key
-options = NO_SSLv2
-options = NO_SSLv3
-EOF
-    printf 'Starting local HTTPS entry at https://juice.local:%s\n' "$tls_port"
-    (exec stunnel "$config") &
-    tls_pid=$!
-    pids+=("$tls_pid")
-    sleep 1
-    kill -0 "$tls_pid" 2>/dev/null || die 'local HTTPS terminator exited during startup; inspect target/xshield-dev/tls/stunnel.log'
-
-    local idor_config="$tls_dir/stunnel-idor.conf"
-    cat >"$idor_config" <<EOF
-foreground = yes
-debug = 0
-output = $tls_dir/stunnel-idor.log
-pid = $tls_dir/stunnel-idor.pid
-
-[idor-local]
-accept = 127.0.0.1:$idor_tls_port
-connect = 127.0.0.1:56189
-cert = $cert
-key = $key
-options = NO_SSLv2
-options = NO_SSLv3
-EOF
-    printf 'Starting IDOR HTTPS entry at https://idor.local:%s\n' "$idor_tls_port"
-    (exec stunnel "$idor_config") &
-    local idor_pid=$!
-    pids+=("$idor_pid")
-    sleep 1
-    kill -0 "$idor_pid" 2>/dev/null || die 'IDOR HTTPS terminator exited during startup; inspect target/xshield-dev/tls/stunnel-idor.log'
+# Background jobs start with SIGINT ignored, so control and the console take SIGTERM.
+# The edge is the exception: pingora reads SIGTERM as a graceful shutdown that does not
+# finish while the stack is torn down, and SIGINT as its fast shutdown.
+stop_child() {
+    local pid="$1" signal="$2"
+    if [[ -n "$pid" ]]; then
+        kill "-$signal" "$pid" 2>/dev/null || true
+    fi
 }
 
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
+    stop_child "$control_pid" TERM
+    stop_child "$edge_pid" INT
+    stop_child "$console_pid" TERM
     if ((${#pids[@]} > 0)); then
-        for pid in "${pids[@]}"; do
-            kill "$pid" 2>/dev/null || true
-        done
         for pid in "${pids[@]}"; do
             wait "$pid" 2>/dev/null || true
         done
@@ -473,53 +361,32 @@ trap 'exit 143' TERM
 if ((console_only)); then
     :
 else
+    build_services
     write_dev_env
     ensure_docker
     if ((reset_stack)); then
         compose down --volumes --remove-orphans >/dev/null 2>&1 || true
     fi
     stack_started=1
-    compose up -d
+    compose up -d --remove-orphans
     wait_for 'PostgreSQL' postgres postgres_ready
-    wait_for 'ClickHouse' clickhouse clickhouse_ready
-    wait_for 'local OIDC' oidc oidc_ready
-    "$repo_root/scripts/migrate_dev_postgres.sh" "$compose_project" "$compose_file" \
-        "$XSHIELD_DEV_POSTGRES_USER" "$XSHIELD_DEV_POSTGRES_DB"
-    check_schemas
-    printf '%s\n' 'Starting xshield-control on http://127.0.0.1:9443'
-    (
-        cd "$repo_root"
-        exec cargo run -p xshield-control -- \
-            "$dev_root/journal" \
-            "$dev_root/manifests" \
-            "$dev_root/checkpoints" \
-            "$dev_root/control-audit"
-    ) &
-    control_pid=$!
-    pids+=("$control_pid")
-    wait_for_control
-    printf '%s\n' 'Starting xshield-gateway in bootstrap-only mode on the configured loopback listener'
-    (
-        cd "$repo_root"
-        exec cargo run -p xshield-gateway
-    ) &
-    gateway_pid=$!
-    pids+=("$gateway_pid")
-    sleep 1
-    kill -0 "$gateway_pid" 2>/dev/null || die 'xshield-gateway exited during startup; inspect its output'
-    start_dev_tls
+    start_control
+    start_edge
 fi
 
 printf 'Starting console at http://127.0.0.1:%s (proxy: %s)\n' "$console_port" "$control_proxy"
 if (( ! console_only )); then
-    printf '%s\n' 'Local OIDC account: developer / xshield-dev-password'
+    printf '%s\n' 'Development administrator password: xshield-dev-password'
 fi
+# The package's dev script is `vite --host 127.0.0.1`. Running vite directly leaves one
+# process to stop: npm and its shell would leave vite running after the stack exits.
 (
     cd "$console_dir"
     export XSHIELD_CONTROL_PROXY="$control_proxy"
-    exec npm run dev -- --host 127.0.0.1 --port "$console_port"
+    exec node_modules/.bin/vite --host 127.0.0.1 --port "$console_port"
 ) &
-pids+=("$!")
+console_pid=$!
+pids+=("$console_pid")
 
 wait_for_any_child() {
     local pid
