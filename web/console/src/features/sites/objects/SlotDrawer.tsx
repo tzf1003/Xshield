@@ -189,6 +189,9 @@ export function SlotDrawer({
     const stopped = paused && !data.in_effect;
     const inEffect = paused && data.in_effect;
     const editable = data.state !== "ambiguous" && data.state !== "retired";
+    // A declared position still has its entry in the configuration. The backend refuses to mark it ambiguous (409
+    // SLOT_IS_DECLARED) until a save removes the entry, so the button is not offered for it.
+    const declared = data.state === "confirmed" || inEffect || (stopped && path !== null);
     const slots = working.objects?.slots ?? [];
     const fields = working.advanced?.field_kinds ?? [];
     const flowsLabel =
@@ -602,7 +605,7 @@ export function SlotDrawer({
         ) : null}
 
         <div className="obj-foot">
-          {editable && !inEffect ? (
+          {editable && !declared ? (
             <button
               type="button"
               className="btn"
@@ -612,7 +615,7 @@ export function SlotDrawer({
               {OBJECT_TEXT.drawer.ambiguous}
             </button>
           ) : null}
-          {stopped ? (
+          {stopped && !declared ? (
             <button
               type="button"
               className="btn"
