@@ -39,12 +39,7 @@ KEY_ASSIGNMENT = re.compile(
 )
 
 # (path, rule) -> why a match there is not a credential.
-ALLOW: dict[tuple[str, str], str] = {
-    ("crates/xshield-evidence/src/s3/sigv4.rs", "aws-access-key-id"):
-        "the documented example access key of the AWS SigV4 test vectors the signer is checked against",
-    ("crates/xshield-evidence/src/s3/tests.rs", "url-credentials"):
-        "negative test: an S3 endpoint with embedded credentials must be rejected; user:pass is a placeholder",
-}
+ALLOW: dict[tuple[str, str], str] = {}
 
 
 def tracked_files() -> list[Path]:

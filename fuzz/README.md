@@ -9,7 +9,7 @@
 `xshield-gateway` was deleted (docs/05-v3-removal.md); the targets that exercised its
 parsers (`proxy_header`、`route_admission`、`query_pagination`、`routing_authority`、
 `request_crypto`、`auth_binding`、`strict_json`、`sensor_batch`) went with it. What is
-left only exercises `xshield-core` and `xshield-audit` parsers.
+left only exercises `xshield-core` parsers.
 
 | 目标 | 解析器 | 额外检查 |
 | --- | --- | --- |
@@ -17,7 +17,6 @@ left only exercises `xshield-core` and `xshield-audit` parsers.
 | `site_config` | 控制面收到的站点配置 | 解析、校验与拒绝分类都不 panic |
 | `page_fingerprint` | 前端构建页面指纹 | 注入偏移指向第一个小写 `</head>` |
 | `upstream_address` | 上游地址与私网放行列表 | 不 panic |
-| `seal_manifest` | 对象存储里的段封存清单 | 任意字节都不能通过签名校验 |
 
 ## 运行
 

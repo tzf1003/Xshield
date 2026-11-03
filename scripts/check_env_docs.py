@@ -4,7 +4,7 @@
 Operators configure the control plane, edge and worker only through environment
 variables, so a variable that exists in code but not in the docs is invisible to
 them (a secret nobody knows to rotate, a switch nobody can find). This is a text
-level guard like check_audit_event_coverage.py: it finds quoted names in non-test
+level guard: it finds quoted names in non-test
 Rust sources and looks for the same name in docs/*.md, README.md and the console
 README. It does not check that the documented meaning is right, only that one
 exists.

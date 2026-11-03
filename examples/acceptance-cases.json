@@ -420,18 +420,7 @@
         "延迟遥测，让业务请求先到"
       ],
       "expected": "不串配最新心跳；按缺失/prepare规则",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "sensor/test/sensor-1.1.0.test.mjs",
-          "test": "a business request that beats the telemetry is never paired with a later heartbeat"
-        },
-        {
-          "path": "sensor/test/sensor-1.1.0.test.mjs",
-          "test": "waits for the bootstrap before deciding, and still lets a late one apply"
-        }
-      ],
-      "gap": "产品没有 WSS，也没有心跳与业务请求的关联逻辑（网关只审计观测），“不串配”由结构保证而非检查；测试只在探针层断言先于遥测的业务请求不带引用和遥测标识、后到的观测 client_request_id 为空、迟到的 bootstrap 不追溯生效，没有经真实 edge 断言该请求按缺失引用规则被拒，也没有对审计记录不关联最新心跳的断言。"
+      "status": "planned"
     },
     {
       "id": "SENSOR-03",
@@ -556,10 +545,6 @@
       "expected": "confidence=null且not_applicable，不伪造100%",
       "status": "partial",
       "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/search.rs",
-          "test": "model_call_query_distinguishes_partial_pending_and_presend_failure"
-        },
         {
           "path": "scripts/validate_library.py",
           "test": "negative:noul_fake_confidence_rejected"
@@ -688,10 +673,6 @@
         {
           "path": "crates/xshield-core/src/application.rs",
           "test": "disabled_site_has_complete_not_configured_stage_tree"
-        },
-        {
-          "path": "crates/xshield-worker/src/lib.rs",
-          "test": "request_summary_is_scoped_and_validated"
         }
       ],
       "gap": "真实 edge 硬拒绝后不写模型阶段 SKIPPED 事件（模型不在请求路径），SKIPPED+原因只在仅供示例使用的 M0 核心编排器与索引校验中断言；原合成控制台夹具已随控制台精简为单管理员（docs/05 §5.2）删除。"
@@ -714,14 +695,7 @@
         "暂停ClickHouse消费者但journal健康"
       ],
       "expected": "显示watermark，必要走持久索引；不声称日志丢失",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/lib.rs",
-          "test": "reports_only_the_contiguous_publication_watermark"
-        }
-      ],
-      "gap": "未在 journal 健康时暂停真实 ClickHouse 消费者；控制面对未发布请求的本地 journal 回退没有任何测试；水位显示只用发布健康单测断言，原控制面与合成控制台断言已随控制台精简为单管理员（docs/05 §5.2）删除。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-05",
@@ -762,18 +736,7 @@
         "重新投递相同event_id"
       ],
       "expected": "逻辑去重，原始审计不覆盖，计数不重复",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/lib.rs",
-          "test": "acknowledges_then_reuses_exact_checkpoint"
-        },
-        {
-          "path": "crates/xshield-worker/src/lib.rs",
-          "test": "rejects_same_event_id_with_different_content"
-        }
-      ],
-      "gap": "相同 event_id 重投后的逻辑去重与计数不重复依赖 ClickHouse active 视图的 LIMIT 1 BY event_id，只在需要 XSHIELD_TEST_CLICKHOUSE_URL 的 CI 用例中验证，本地只断言 checkpoint 复用与异摘要冲突拒绝（模拟客户端）；outbox 发布器已随 v3 删除（docs/05 §5.2），不再是重复消费来源之一。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-09",
@@ -783,17 +746,7 @@
         "修改存储对象一字节"
       ],
       "expected": "完整性失败，禁止当作可信证据展示",
-      "status": "automated",
-      "covered_by": [
-        {
-          "path": "crates/xshield-evidence/src/lib.rs",
-          "test": "encrypts_scopes_expires_and_authenticates_evidence"
-        },
-        {
-          "path": "crates/xshield-audit/src/lib.rs",
-          "test": "rejects_tampering_and_quota_exhaustion"
-        }
-      ]
+      "status": "planned"
     },
     {
       "id": "AUDIT-10",
@@ -814,14 +767,7 @@
         "申请解密、查看敏感证据、导出"
       ],
       "expected": "均记录操作者、目的、审批、范围与结果",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/control_audit/tests.rs",
-          "test": "export_workflow_events_carry_validated_export_case_and_package_targets"
-        }
-      ],
-      "gap": "导出创建/审批/下载在 HTTP 层没有审计断言（只有发布器契约与被 CSRF 拒绝的导出 POST），审计中的目的只以摘要记录，没有测试把三类动作的操作者、目的、审批、范围与结果作为同一审计链核对；证据访问申请/决定的原控制面断言已随控制台精简为单管理员（docs/05 §5.2）删除。"
+      "status": "planned"
     },
     {
       "id": "AUDIT-12",
@@ -896,22 +842,7 @@
         "新增拒绝或异常分支无原因码事件"
       ],
       "expected": "评审与覆盖测试失败",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/reason_code_contract.rs",
-          "test": "every_edge_reason_code_is_listed_stable_unique_and_publishable"
-        },
-        {
-          "path": "scripts/test_check_audit_event_coverage.py",
-          "test": "test_new_event_missing_from_matrix_fails"
-        },
-        {
-          "path": "scripts/test_check_audit_event_coverage.py",
-          "test": "test_new_event_missing_from_supports_fails"
-        }
-      ],
-      "gap": "没有测试能发现新增拒绝或异常分支根本未写审计事件：边缘层只保证每个新 ReasonCode 变体必须登记（穷举 match 编译失败）、编码唯一、为大写蛇形且能被 worker 发布器接受；控制面只由 scripts/check_audit_event_coverage.py（其自测已接入 CI）检查端点审计事件可被 worker 发布。"
+      "status": "planned"
     },
     {
       "id": "DEV-03",
@@ -942,18 +873,7 @@
         "未知major"
       ],
       "expected": "规定的前向兼容/拒绝策略；迁移有版本测试",
-      "status": "partial",
-      "covered_by": [
-        {
-          "path": "crates/xshield-worker/src/control_audit/tests.rs",
-          "test": "authenticated_envelope_and_management_origin_are_required"
-        },
-        {
-          "path": "crates/xshield-worker/src/control_audit/tests.rs",
-          "test": "duplicate_and_unknown_payload_fields_are_rejected_before_indexing"
-        }
-      ],
-      "gap": "消费端对新增字段一律按封闭解析拒绝，没有读写兼容矩阵或 minor 前向兼容测试；迁移改为单份 v4 基线（docs/05 §5.2），不再有逐版本或遗留行回读测试。"
+      "status": "planned"
     },
     {
       "id": "DEV-06",

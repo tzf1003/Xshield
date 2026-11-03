@@ -139,7 +139,7 @@ jobs:
             echo
             echo "Deploy by digest and verify each image first (docs/19 19.7):"
             echo
-            for target in edge control worker; do
+            for target in edge control; do
               image="ghcr.io/${OWNER,,}/xshield-$target"
               digest=$(docker buildx imagetools inspect "$image:$TAG" --format '{{.Manifest.Digest}}')
               echo "- \`$image@$digest\`"
