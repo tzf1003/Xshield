@@ -204,7 +204,7 @@ GET /api/patients ──响应里出现 id=7──┐
 网关写出 trace 时省略下面这些键，读取方（控制台、导出）把缺省的键当作 null、false 或空列表处理。上面的示例为了看清结构把所有键都列了出来，所以和实际输出不完全一致。
 
 - 顶层 `entry`、`bypass`、`refused`、`cache_source`、`session`、`response`、`upstream_error` 为 null 时省略；`values_truncated`、`trimmed` 为 false 时省略；`values` 为空时省略。
-- `values[].len` 为空、`values[].clipped` 为 false 时省略；`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability` 为空时省略；`response.skip` 为空时省略；`session.entries_passed`、`session.recent` 为空时省略。
+- `values[].len` 为空、`values[].clipped` 为 false 时省略；`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability` 为空时省略，`values[].unplaced` 为 false 时省略；`response.skip` 为空时省略；`session.entries_passed`、`session.recent` 为空时省略。
 - 其余的 null 照常写出，例如 `values[].key`、`sources[].request_id`、`timing.origin_ms`、`response.content_type`。
 
 | 字段 | 说明 |
@@ -218,6 +218,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values[].sources[]` | 最多 3 个来源，顺序与 `state` 里的 `seen_as` 相同（最相关的在前，[7.5.2](#752-state-与追溯信息的对齐)）；`request_id`、`at_millis` 正常情况下都有（上下文随网关重启清空，[7.3.2](#732-追溯链路)），只有导入的旧格式记录和测试数据可能为 null；同一 `(field, request)` 再次出现时保留最早的那次（[7.7.1](#771-会话上下文增加请求-id)） |
 | `values[].public_access` | 请求位置在对象表里的公共来源设定（[7.9.16](#7916-对象表的档位与可靠性w3)），形如 `{ "accepts": false, "reliability": "high" }`；位置没有 `accepts_public` 时不写 |
 | `values[].attempt` | `over_privilege`：尝试越权。值只由公共档响应展示过，请求位置不接受公共来源，所以不快速放行、不查缓存，交 Jev 并要求 DENY（[01 1.4](01-request-flow.md#14-判定步骤) 第 4 步）。没有时不写 |
+| `values[].unplaced` | `true`：请求路径无法化为规范拼写（见 [7.4.7](#747-档位在判定中的使用)），且没有声明位置覆盖该值。这样的值不核验、不是尝试越权，请求交 Jev。没有时不写 |
 | `values[].sources[].tier` / `reliability` | 来源响应位置的档位和可靠性，与 `state` 里 `seen_as` 括号中的文字对应；位置没有标档位时不写 |
 | `values_truncated` | 请求体未结构化或值数到上限（即 `ExtractedRequest::truncated`），或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4）。网关只拆 48 KiB 以内的请求体（`REQUEST_BODY_MAX`）：更大的请求在网关直接 413 拒绝、不拆值，所以体积不是这里的原因 |
 | `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条），其中的请求路径超过 256 字节时截到 256 字节（`TRACE_PATH_BYTES_MAX`）；`known_values` 是会话已见值数量 |
@@ -264,13 +265,15 @@ GET /api/patients ──响应里出现 id=7──┐
 
 对象表的位置可以标注档位，字段与校验见 [7.9.16](#7916-对象表的档位与可靠性w3)。本节写判定怎样读这些字段（W4）。字段名 `tier`、`accepts_public`、`reliability` 由 W3（配置）与本节（判定）共用，改名需要两边同时改。没有标档位的位置，判定与之前相同。
 
-位置按规范拼写记：请求路径先化为规范拼写（`path_template::canonical_path`，即 RFC 3986 §6.2.2 的等价写法：去掉空段和 `.`，`..` 取走父段，未保留字符的百分号编码解码，其余编码保留且十六进制大写），再把数字与 UUID 段换成 `{id}`。`/api/patients/7005/`、`/api/patients//7005` 与 `/api/patients/%37005` 因此都是位置 `DELETE /api/patients/{id} path[2]`，对象表的 `key` 也只接受规范拼写。编码的保留字符（如 `%2F`）、分号参数和大小写不同的写法保持原样，不与别的写法合并；对象表没有为它们声明位置时，它们与没有标档位的位置一样，不收紧。
+位置按规范拼写记：请求路径先化为规范拼写（`path_template::canonical_path`，即 RFC 3986 §6.2.2 的等价写法：去掉空段和 `.`，`..` 取走父段，未保留字符的百分号编码解码，其余编码保留且十六进制大写），再把数字与 UUID 段换成 `{id}`。`/api/patients/7005/`、`/api/patients//7005` 与 `/api/patients/%37005` 因此都是位置 `DELETE /api/patients/{id} path[2]`，对象表的 `key` 也只接受规范拼写。编码的保留字符（如 `%2F`）、分号参数和大小写不同的写法保持原样，不与别的写法合并。在有接受公共来源设定的站点上，对象表里声明的 `{id}` 段覆盖任意一个非空段，所以 `DELETE /api/patients/PT-7004`、`DELETE /api/patients/7005;jsessionid=a` 与 `DELETE /api/patients/PT%2F7004` 的位置都是声明的 `DELETE /api/patients/{id} path[2]`，按它的档位判定。同一请求有多条声明覆盖时，精确写出该位置的声明优先；其余的按字面段更多者优先，段数相同时闭合（`accepts_public: false` 且 `reliability: high`）者优先。对象表没有任何声明覆盖它们时，它们与没有标档位的位置一样，不收紧。没有接受公共来源设定的站点只按精确写法定位，判定与日志和之前相同。
 
 判定只读可靠性为 `high` 的判断。`reliability` 省略时按 `low` 处理，所以省略可靠性的标注不参与收紧，它的 `public` 响应也照旧核验。缺少 `tier` 或 `accepts_public`、条目被暂停时，该位置不收紧。
 
 收紧条件（[01 §1.4](01-request-flow.md#14-判定步骤) 第 4 步）：请求位置 `accepts_public: false` 且 `reliability: high`，并且值的每个来源都是 `tier: public` 且 `reliability: high` 的响应位置。只要有一个来源是 `self`、`org`、`admin`、没有标档位，或可靠性不是 `high`，就不收紧。
 
 满足收紧条件的值是**尝试越权**（`attempt: over_privilege`）：这个值只由公共响应展示过，而请求位置不接受公共来源。尝试越权的值不快速放行，不进入缓存，交给 Jev；`state` 里带上 `"attempt": "over_privilege"`，指令要求 Jev 对它答 DENY。
+
+请求路径无法化为规范拼写时，它没有可核验的位置。这指路径不是绝对路径、含控制字符或 `?` 与 `#`、百分号编码不完整，或规范拼写超过 256 字节。对象表里有未暂停的位置写明了 `accepts_public` 时，这样的请求不快速放行、不查缓存，交给 Jev。其中没有任何声明覆盖的值标为 `unplaced`（`values[].unplaced`）：它既不核验，也不是尝试越权，所以 Jev 按一般判断作答，不要求 DENY。没有接受公共来源设定的站点不适用这一条。
 
 回声：请求里的值若没有被核验，网关不让它的响应教会会话任何东西，否则写操作的响应会把刚删掉的编号学成“见过”。分两类处理。其他未核验的值（包括从未见过的值）记在会话里（`sent`），之后的响应都不学它，与之前相同。被档位拒绝的值（尝试越权，或只被不证明的响应展示过的值）只记在本请求的 `echo` 里，只对本请求自己的响应生效：之后的响应可以把它学成会话自己的对象（例如会话自己的患者列表），于是它不再是尝试越权，也不会因为一次尝试而被误判。没有标档位的站点不会产生 `echo`，判定与之前相同。
 

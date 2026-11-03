@@ -429,6 +429,50 @@ impl ObjectMap {
             && self.reliability_of(key) == Some(Reliability::High)
     }
 
+    /// Whether a live entry says anything about public sources on a request position. Only such
+    /// a site is judged by where its request values sit (docs/07 section 7.4.7).
+    #[must_use]
+    pub fn judges_public_access(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| !slot.paused && slot.accepts_public.is_some())
+    }
+
+    /// The key of the position that governs a request value: `method`, the route `template` the
+    /// judge keys it by, and its location `at`. An entry with exactly that key governs it.
+    /// On a site that judges public access, an entry whose route template covers `template`
+    /// governs it too, where its `{id}` segments stand for any one segment: a declared numeric id
+    /// then also governs a slug id (`PT-7004`) or a segment with a `;` parameter at the same place.
+    /// Among covering entries the one with the most literal segments wins, then a closed one.
+    /// Paused entries count, so a paused position still places its values. Elsewhere only the
+    /// exact key governs, as it always did, so a site without public access is judged as before.
+    #[must_use]
+    pub fn request_key(&self, method: &str, template: &str, at: &str) -> Option<&str> {
+        let exact = format!("{method} {template} {at}");
+        if let Some((key, _)) = self.index.get_key_value(exact.as_str()) {
+            return Some(key.as_str());
+        }
+        if !self.judges_public_access() {
+            return None;
+        }
+        self.slots
+            .iter()
+            .filter_map(|slot| {
+                let (declared_method, rest) = slot.key.split_once(' ')?;
+                let (declared, location) = rest.rsplit_once(' ')?;
+                if declared_method != method || location != at {
+                    return None;
+                }
+                let literal = template_covers(declared, template)?;
+                Some((
+                    (literal, self.closed_to_public(&slot.key)),
+                    slot.key.as_str(),
+                ))
+            })
+            .max_by_key(|(rank, _)| *rank)
+            .map(|(_, key)| key)
+    }
+
     /// The entry of a position when it is not paused.
     fn live(&self, key: &str) -> Option<&ObjectSlot> {
         self.slot(key).filter(|slot| !slot.paused)
@@ -630,6 +674,30 @@ pub fn tier_proves(tier: Option<(Tier, Reliability)>, closed: bool, admin: bool)
         Some((Tier::Public, Reliability::High)) => !closed,
         None | Some((Tier::Org | Tier::Public, _)) => true,
     }
+}
+
+/// Whether the declared route template `declared` covers `template`: the same segments, except
+/// that a `{id}` segment of `declared` stands for any one non-empty segment of `template`. The
+/// result counts the segments that agree literally, so that a more specific entry can win.
+fn template_covers(declared: &str, template: &str) -> Option<usize> {
+    let declared: Vec<&str> = declared.split('/').collect();
+    let template: Vec<&str> = template.split('/').collect();
+    if declared.len() != template.len() {
+        return None;
+    }
+    let mut literal = 0;
+    for (name, actual) in declared.iter().zip(&template) {
+        if *name == "{id}" {
+            if actual.is_empty() {
+                return None;
+            }
+        } else if name == actual {
+            literal += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(literal)
 }
 
 /// `METHOD /template location`: an upper-case method, a path template that starts with `/`,
@@ -875,6 +943,73 @@ mod tests {
             {"key": "GET /api/records/{id} attachments[].doc_id", "class": "document", "source": "agent"}
         ]
     }"#;
+
+    #[test]
+    fn a_declared_id_governs_the_spellings_of_its_segment_and_the_most_specific_entry_wins() {
+        let objects = map(
+            r#"{"classes":[{"id":"patient","name":"患者"}],"slots":[
+                {"key":"DELETE /api/patients/{id} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"},
+                {"key":"DELETE /api/{id}/{id} path[2]","class":"patient","source":"admin","accepts_public":true,"reliability":"high"},
+                {"key":"DELETE /api/{id}/PT-7004 path[2]","class":"patient","source":"admin","accepts_public":true,"reliability":"high"},
+                {"key":"DELETE /api/patients/PT-9 path[2]","class":"patient","source":"admin","accepts_public":true,"reliability":"high","paused":true}
+            ]}"#,
+        )
+        .unwrap();
+        // The exact key of a template is the key.
+        assert_eq!(
+            objects.request_key("DELETE", "/api/patients/{id}", "path[2]"),
+            Some("DELETE /api/patients/{id} path[2]")
+        );
+        // A slug the declared id covers is governed by it. The open `{id}/PT-7004` has as many
+        // literal segments, and the closed entry wins that tie; `{id}/{id}` has fewer.
+        assert_eq!(
+            objects.request_key("DELETE", "/api/patients/PT-7004", "path[2]"),
+            Some("DELETE /api/patients/{id} path[2]")
+        );
+        // A paused entry still names its position, though it states no access.
+        assert_eq!(
+            objects.request_key("DELETE", "/api/patients/PT-9", "path[2]"),
+            Some("DELETE /api/patients/PT-9 path[2]")
+        );
+        assert_eq!(
+            objects.accepts_public_of("DELETE /api/patients/PT-9 path[2]"),
+            None
+        );
+        assert!(objects.judges_public_access());
+        // Another method, another location or another number of segments is not covered.
+        assert_eq!(
+            objects.request_key("GET", "/api/patients/PT-7004", "path[2]"),
+            None
+        );
+        assert_eq!(
+            objects.request_key("DELETE", "/api/patients/PT-7004", "path[1]"),
+            None
+        );
+        assert_eq!(
+            objects.request_key("DELETE", "/api/patients/PT-7004/notes", "path[2]"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_site_without_public_access_places_a_value_only_by_its_exact_position() {
+        let objects = map(
+            r#"{"classes":[{"id":"patient","name":"患者"}],"slots":[
+                {"key":"DELETE /api/patients/{id} path[2]","class":"patient","source":"admin"},
+                {"key":"GET /api/search results[].id","class":"patient","source":"admin","tier":"public","reliability":"high"}]}"#,
+        )
+        .unwrap();
+        assert!(!objects.judges_public_access());
+        assert_eq!(
+            objects.request_key("DELETE", "/api/patients/{id}", "path[2]"),
+            Some("DELETE /api/patients/{id} path[2]")
+        );
+        // Without a position that takes public access, a slug is not covered by the declared id.
+        assert_eq!(
+            objects.request_key("DELETE", "/api/patients/PT-7004", "path[2]"),
+            None
+        );
+    }
 
     #[test]
     fn confirmed_positions_look_up_their_kind() {

@@ -116,6 +116,14 @@ pub fn position_template(path: &str) -> String {
     }
 }
 
+/// Whether [`position_template`] replaces the variable segments of `path`: the path has a
+/// canonical spelling, and that spelling is within [`MAX_PATH_BYTES`]. A path that fails this
+/// keeps its variable segments, so no declared template is certain to name its position.
+#[must_use]
+pub fn is_templatable(path: &str) -> bool {
+    canonical_path(path).is_some_and(|canonical| normalize(&canonical).is_some())
+}
+
 /// A segment counts as variable only when it is entirely digits or a
 /// canonical (hyphenated, case-insensitive) UUID. Anything else — including a
 /// mixed alphanumeric slug — is kept literal: the heuristic would rather
@@ -144,7 +152,25 @@ fn is_canonical_uuid(segment: &str) -> bool {
 
 #[cfg(test)]
 mod canonical_tests {
-    use super::{MAX_PATH_BYTES, canonical_path, position_template};
+    use super::{MAX_PATH_BYTES, canonical_path, is_templatable, position_template};
+
+    #[test]
+    fn a_path_is_templatable_when_its_canonical_spelling_is_within_the_bound() {
+        assert!(is_templatable("/api/patients/7005/"));
+        assert!(is_templatable("/api/patients/PT%2F7004"));
+        assert!(is_templatable("/api/patients/PT-7004;jsessionid=a"));
+        // Extra slashes fold away before the bound applies.
+        assert!(is_templatable(&format!(
+            "/api/patients/7005{}",
+            "/".repeat(240)
+        )));
+        assert!(!is_templatable(&format!(
+            "/api/patients/{}",
+            "a".repeat(MAX_PATH_BYTES)
+        )));
+        assert!(!is_templatable("/api/patients/%zz"));
+        assert!(!is_templatable("orders/1"));
+    }
 
     #[test]
     fn a_long_spelling_of_a_short_path_names_its_position() {

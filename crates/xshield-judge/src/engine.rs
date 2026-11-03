@@ -13,6 +13,7 @@ use xshield_core::context::{
     SiteSpec, Skip, Tier, Trace, TraceSession, TraceValue,
 };
 use xshield_core::kind::{Rules, Used};
+use xshield_core::path_template::is_templatable;
 
 use crate::context::{
     CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Origin, Recent, SENT_MAX,
@@ -21,8 +22,8 @@ use crate::context::{
 use crate::exposure;
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
 use crate::slots::{
-    identity_claims, origin_object, origin_tier, reliability_name, request_access, request_slot,
-    response_slot, route_template, tier_name,
+    identity_claims, origin_object, origin_tier, reliability_name, request_place, response_slot,
+    route_template, tier_name,
 };
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
@@ -184,13 +185,15 @@ enum Plan {
 }
 
 /// What settling a request's values came to: the values the state lists, the
-/// values the trace lists, whether every value was verified, and whether one of
-/// them is an attempt.
+/// values the trace lists, whether every value was verified, whether one of
+/// them is an attempt, and whether the request's path cannot be templated on a
+/// site that judges public access (such a request is never fast-allowed).
 struct PlannedValues {
     values: Vec<StateValue>,
     shown: Vec<TraceValue>,
     all_known: bool,
     attempted: bool,
+    unplaceable: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -429,6 +432,7 @@ impl<J: JevPort> Judge<J> {
             shown,
             all_known,
             attempted,
+            unplaceable,
         } = self.plan_values(turn, session, sent, echo);
         trace.values = shown;
         trace.session = Some(TraceSession {
@@ -439,15 +443,16 @@ impl<J: JevPort> Judge<J> {
             identity: session.identity().tag(),
         });
         // An unknown interface always goes to Jev: neither its values nor a cached
-        // allow of another request can settle it.
+        // allow of another request can settle it. A path the map cannot place does too.
         let unknown = turn.resolved.is_unknown();
-        if all_known && !attempted && !turn.extracted.truncated && !unknown {
+        if all_known && !attempted && !unplaceable && !turn.extracted.truncated && !unknown {
             return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
         }
         // An attempt goes to Jev, whatever an earlier allow of the same request said.
         if tuning.cache_ms > 0
             && !unknown
             && !attempted
+            && !unplaceable
             && let Some(source) = session.cached_allow(turn.cache_key, request.now_ms)
         {
             trace.cache_source = request_text(source);
@@ -472,6 +477,10 @@ impl<J: JevPort> Judge<J> {
     ) -> PlannedValues {
         let request = turn.request;
         let tuning = turn.tuning;
+        let path = turn.resolved.logical_path();
+        // A path that cannot be templated has no position the map can name. On a site that judges
+        // public access such a request is never fast-allowed (docs/07 section 7.4.7).
+        let unplaceable = tuning.objects.judges_public_access() && !is_templatable(path);
         let mut all_known = true;
         let mut attempted = false;
         let mut values = Vec::new();
@@ -491,10 +500,15 @@ impl<J: JevPort> Judge<J> {
                 .map(|seen| seen.ranked(used, &tuning.rules))
                 .unwrap_or_default();
             // The position is named by the logical path, as the response positions are: the URL
-            // path plus the interface name of a routed request (docs/07 section 7.4.7).
-            let slot = request_slot(request.method, turn.resolved.logical_path(), &value.at);
+            // path plus the interface name of a routed request (docs/07 section 7.4.7). On a site
+            // that judges public access, a declared position whose route covers the path governs
+            // the value, so a slug id, a `;` parameter or an escaped slash at a declared `{id}` is
+            // judged as that position.
+            let placed = request_place(tuning.objects, request.method, path, &value.at);
+            let unplaced = !value.inert && unplaceable && placed.key.is_none();
+            let slot = placed.slot(request.method, path, &value.at);
             let request_object = tuning.objects.class_of(&slot);
-            let access = request_access(tuning.objects, &slot);
+            let access = placed.access;
             // The origins that show the value as the kind of object the request names for
             // it; the site's tiers then say which of them prove a right (docs/01 section 1.4).
             let shown_as_object = seen
@@ -505,9 +519,11 @@ impl<J: JevPort> Judge<J> {
                 })
                 .unwrap_or_default();
             let judged = tiers::judge(&ranked, &shown_as_object, access, tuning.objects, admin);
-            let verified = !value.inert && judged.verified;
+            // A value no position governs is neither verified nor an attempt: the map cannot say
+            // where it sits, so Jev decides it, and the trace labels it unplaced.
+            let verified = !value.inert && !unplaced && judged.verified;
             // An attempt goes to Jev marked as one; the gateway never allows it on its own.
-            let attempt = judged.attempt.filter(|_| !value.inert);
+            let attempt = judged.attempt.filter(|_| !value.inert && !unplaced);
             if !verified {
                 // An origin that echoes this value would otherwise teach it. A value the tiers
                 // turn down was shown to the session, so only this request's own response is kept
@@ -556,6 +572,7 @@ impl<J: JevPort> Judge<J> {
                 origin_tiers,
                 public_access: access,
                 attempt,
+                unplaced,
             };
             shown.push(value_entry(
                 value,
@@ -572,6 +589,7 @@ impl<J: JevPort> Judge<J> {
             shown,
             all_known,
             attempted,
+            unplaceable,
         }
     }
 
@@ -3647,6 +3665,146 @@ mod tests {
         assert!(!value.verified);
         assert_eq!(value.sources[0].tier, Some(Tier::Public));
         assert_eq!(value.sources[0].reliability, Some(Reliability::High));
+    }
+
+    #[tokio::test]
+    async fn a_slug_id_at_a_declared_id_is_judged_as_that_closed_position() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(
+            &site,
+            &shown_by(
+                "/api/search",
+                br#"{"results":[{"id":"PT-7004","name":"C"}]}"#,
+            ),
+        );
+        fake.answer("DENY", "BENIGN");
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/PT-7004", 1_000))
+            .await;
+        // The public search showed the slug, and the declared closed id governs it: an attempt,
+        // not a fast allow of an open read.
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 1);
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "PT-7004")
+            .expect("the slug is recorded");
+        assert_eq!(
+            value.slot.as_deref(),
+            Some("DELETE /api/patients/{id} path[2]")
+        );
+        assert_eq!(
+            value.attempt,
+            Some(xshield_core::context::Attempt::OverPrivilege)
+        );
+        assert!(!value.unplaced);
+    }
+
+    #[tokio::test]
+    async fn a_parameter_on_a_declared_id_is_judged_as_that_closed_position() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(
+            &site,
+            &shown_by(
+                "/api/search",
+                br#"{"results":[{"id":"7005;jsessionid=a","name":"B"}]}"#,
+            ),
+        );
+        fake.answer("DENY", "BENIGN");
+        let verdict = judge
+            .judge(
+                &site,
+                &call("DELETE", "/api/patients/7005;jsessionid=a", 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005;jsessionid=a")
+            .expect("the id is recorded");
+        assert_eq!(
+            value.slot.as_deref(),
+            Some("DELETE /api/patients/{id} path[2]")
+        );
+        assert_eq!(
+            value.attempt,
+            Some(xshield_core::context::Attempt::OverPrivilege)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_escaped_slash_in_a_declared_id_is_judged_as_that_closed_position() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(
+            &site,
+            &shown_by(
+                "/api/search",
+                br#"{"results":[{"id":"PT/7004","name":"C"}]}"#,
+            ),
+        );
+        fake.answer("DENY", "BENIGN");
+        let verdict = judge
+            .judge(&site, &call("DELETE", "/api/patients/PT%2F7004", 1_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "PT/7004")
+            .expect("the id is recorded");
+        assert_eq!(
+            value.slot.as_deref(),
+            Some("DELETE /api/patients/{id} path[2]")
+        );
+        assert_eq!(
+            value.attempt,
+            Some(xshield_core::context::Attempt::OverPrivilege)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_that_cannot_be_templated_goes_to_jev_and_its_id_is_labelled_unplaced() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        // Longer than the canonical bound, so the path has no template the map can name. Its
+        // other segments are route words, so the id it ends with is the only value, and the
+        // public search showed it to this session.
+        let filler = "/abcdefghijklmnopqrstuvwxyz".repeat(10);
+        let path = format!("/api/patients{filler}/7005");
+        let verdict = judge
+            .judge(&site, &get(&path, None, Some("alice"), 1_000))
+            .await;
+        assert_ne!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1, "an unplaced request goes to Jev");
+        let value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005")
+            .expect("the id is recorded");
+        assert!(value.unplaced);
+        assert!(!value.verified);
+        assert_eq!(value.attempt, None);
     }
 
     #[tokio::test]
