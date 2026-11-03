@@ -31,6 +31,7 @@ use xshield_core::{
     kind::{NameReason, NameSource, Rules, request_name, response_name},
 };
 use xshield_postgres::{
+    decision_stats::Scope,
     object_agent_store::{self as runs},
     object_learning_store::{self as store, Flow, JevFlow, PositionRow},
     site_spec_store::{self, SiteRecord},
@@ -40,7 +41,9 @@ use crate::{
     ControlState,
     error::{ApiError, ApiResult},
     object_agent_api::{self as agent_api, AgentBody, AgentPhase, AgentView, LearningRunBody},
+    object_impact,
     params::{DAY_MILLIS, Params, now_millis, rfc3339},
+    preview::ChangeBody,
 };
 
 /// The window the bootstrap candidates are read from, in hours.
@@ -352,11 +355,11 @@ pub(crate) struct Features {
 }
 
 /// What this build runs: the learning pass splits classes and pauses positions when the site's
-/// learning settings ask for it. Path positions cannot be confirmed from the console yet.
+/// learning settings ask for it, and the console confirms path positions.
 const FEATURES: Features = Features {
     auto_tighten: true,
     auto_pause: true,
-    path_confirm: false,
+    path_confirm: true,
 };
 
 /// One other end of a position's flows: `ObjectFlow`.
@@ -375,8 +378,8 @@ struct FlowBody {
     route: String,
 }
 
-/// `GET /objects/slots/{id}`: `ObjectSlotDetail`. The shape, history and impact are empty
-/// until their sources are read.
+/// `GET /objects/slots/{id}`: `ObjectSlotDetail`. The shape and history are empty until their
+/// sources are read.
 #[derive(Debug, Serialize)]
 pub(crate) struct SlotBody {
     #[serde(flatten)]
@@ -388,7 +391,11 @@ pub(crate) struct SlotBody {
     examples: Vec<String>,
     shape: Vec<Value>,
     history: Vec<Value>,
-    impact: Vec<Value>,
+    /// The fast allows the position's main action moves over the last day: confirming a
+    /// proposal, restoring a suspended entry, or pausing an entry in effect.
+    impact: Vec<ChangeBody>,
+    /// False when the impact was not read in full, or when the action's impact is not estimated.
+    impact_complete: bool,
 }
 
 /// `GET /objects/bootstrap`: `BootstrapResponse`.
@@ -581,6 +588,7 @@ pub async fn slot(
         EXAMPLES_MAX,
     )
     .await?;
+    let (impact, impact_complete) = slot_impact(&state, &record, &row, now).await?;
     Ok(Json(SlotBody {
         row,
         flows_in: flow_bodies(side.opposite(), total, flows, &decisions),
@@ -588,8 +596,97 @@ pub async fn slot(
         examples,
         shape: Vec::new(),
         history: Vec::new(),
-        impact: Vec::new(),
+        impact,
+        impact_complete,
     }))
+}
+
+/// The impact a position's drawer shows: the fast allows its main action moves over the last
+/// day, and whether that window was read in full. A path position's entry is written to the
+/// object slots, so its action is judged here. A field position's kind is written to the field
+/// kinds, which the impact does not read yet, so its action is not estimated.
+///
+/// # Errors
+/// A 500 when the decisions cannot be read.
+async fn slot_impact(
+    state: &ControlState,
+    record: &SiteRecord,
+    row: &SlotRow,
+    now: i64,
+) -> ApiResult<(Vec<ChangeBody>, bool)> {
+    let Some(action) = main_action(row) else {
+        return Ok((Vec::new(), true));
+    };
+    if !is_path_key(&row.key) {
+        return Ok((Vec::new(), false));
+    }
+    let current = &record.spec;
+    let objects = objects_after(current.objects(), &row.key, &action);
+    let proposed = current.clone().with_objects(objects);
+    let scope = Scope {
+        site: Some(current.name().to_owned()),
+        since_millis: now - DAY_MILLIS,
+        until_millis: now,
+    };
+    object_impact::changes(&state.pool, &scope, current, &proposed).await
+}
+
+/// What a position's main button does to the configuration, with the entry it writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MainAction {
+    /// Puts back the entry an automatic pause took away: the restore of a suspended position.
+    Restore { class: String, source: SlotSource },
+    /// Pauses the entry in effect, so the kind it gives is no longer used.
+    Pause,
+    /// Adds a learned proposal as an entry of its kind.
+    Confirm { class: String, source: SlotSource },
+}
+
+/// The main action of a position's drawer, when it has one (console design 3.3 and 4.2). A
+/// suspended position takes back the entry its pause took away, unless that entry is still in
+/// effect: then the action pauses it. A proposal is confirmed as its kind.
+fn main_action(row: &SlotRow) -> Option<MainAction> {
+    match row.state {
+        PositionState::Suspended if row.in_effect => Some(MainAction::Pause),
+        PositionState::Suspended => {
+            let previous = row.suspension.as_ref()?.previous.as_ref()?;
+            Some(MainAction::Restore {
+                class: previous.class.clone()?,
+                source: slot_source(previous.source?),
+            })
+        }
+        PositionState::Pending | PositionState::Proposed => Some(MainAction::Confirm {
+            class: row.class.clone()?,
+            source: slot_source(row.source),
+        }),
+        PositionState::Confirmed | PositionState::Ambiguous | PositionState::Retired => None,
+    }
+}
+
+/// The object map once `action` is taken on the position `key`.
+fn objects_after(objects: &ObjectMap, key: &str, action: &MainAction) -> ObjectMap {
+    match action {
+        MainAction::Pause => objects.clone().with_paused(&[key.to_owned()]),
+        MainAction::Restore { class, source } | MainAction::Confirm { class, source } => {
+            objects.clone().with_entry(key, class, *source)
+        }
+    }
+}
+
+/// Whether a position is a path parameter: its key ends in its segment, as
+/// `GET /doctor/{id} path[1]` does. Any other key names a response field.
+fn is_path_key(key: &str) -> bool {
+    key.rsplit_once(' ')
+        .is_some_and(|(_, location)| location.starts_with("path[") && location.ends_with(']'))
+}
+
+/// The configuration source an origin is written with.
+fn slot_source(origin: Origin) -> SlotSource {
+    match origin {
+        Origin::Admin => SlotSource::Admin,
+        Origin::Rule => SlotSource::Rule,
+        Origin::Agent => SlotSource::Agent,
+    }
 }
 
 /// `POST /api/sites/{name}/objects/slots/{id}/dismiss`: dismisses the proposal of a learned
@@ -2240,6 +2337,176 @@ mod tests {
         assert!((shares[0].share - 2.0 / 3.0).abs() < 1e-9);
         assert!(shares_of(&Evidence::default(), spec.objects()).is_empty());
     }
+
+    /// A position of `key` with no suspension: the parts a main action reads.
+    fn slot_row(
+        key: &str,
+        state: PositionState,
+        source: Origin,
+        class: Option<&str>,
+        in_effect: bool,
+    ) -> SlotRow {
+        SlotRow {
+            id: String::new(),
+            side: Side::Request,
+            key: key.to_owned(),
+            class: class.map(str::to_owned),
+            state,
+            source,
+            basis: String::new(),
+            last_seen: None,
+            dismissed: false,
+            in_effect,
+            agent_status: None,
+            suspension: None,
+        }
+    }
+
+    /// The suspension of a position whose automatic pause took `previous` away.
+    fn suspension_taking(previous: Option<PreviousBody>) -> SuspensionBody {
+        SuspensionBody {
+            at: None,
+            auto: true,
+            version: None,
+            event_id: None,
+            reason: None,
+            previous,
+            fallback: FallbackBody {
+                kind: None,
+                basis: "none",
+                word: None,
+            },
+            evidence_now: Vec::new(),
+            acknowledged: false,
+        }
+    }
+
+    #[test]
+    fn a_path_key_is_one_that_ends_in_its_segment() {
+        assert!(is_path_key("GET /doctor/{id} path[1]"));
+        assert!(!is_path_key("GET /api/appointments [].doc_id"));
+        assert!(!is_path_key("GET /doctor/{id} path"));
+        assert!(!is_path_key("GET /doctor/{id}"));
+    }
+
+    #[test]
+    fn a_position_has_the_main_action_its_state_and_entry_allow() {
+        const KEY: &str = "GET /doctor/{id} path[1]";
+        const NEW: &str = "GET /document/{id} path[1]";
+        let previous = PreviousBody {
+            class: Some("doctor".to_owned()),
+            source: Some(Origin::Admin),
+            confirmed_at: None,
+            confirmed_by: None,
+        };
+        // A stopped entry is restored from the entry its pause took away.
+        let stopped = SlotRow {
+            suspension: Some(suspension_taking(Some(previous))),
+            ..slot_row(
+                KEY,
+                PositionState::Suspended,
+                Origin::Rule,
+                Some("doctor"),
+                false,
+            )
+        };
+        assert_eq!(
+            main_action(&stopped),
+            Some(MainAction::Restore {
+                class: "doctor".to_owned(),
+                source: SlotSource::Admin,
+            })
+        );
+        // Without that entry there is nothing to restore.
+        let unknown = SlotRow {
+            suspension: Some(suspension_taking(None)),
+            ..slot_row(
+                KEY,
+                PositionState::Suspended,
+                Origin::Rule,
+                Some("doctor"),
+                false,
+            )
+        };
+        assert_eq!(main_action(&unknown), None);
+        // An entry still in effect is paused.
+        let active = SlotRow {
+            suspension: Some(suspension_taking(None)),
+            ..slot_row(
+                KEY,
+                PositionState::Suspended,
+                Origin::Rule,
+                Some("doctor"),
+                true,
+            )
+        };
+        assert_eq!(main_action(&active), Some(MainAction::Pause));
+        // A proposal is confirmed as its kind, and a pending one without a kind has nothing to
+        // confirm.
+        let proposal = slot_row(
+            NEW,
+            PositionState::Proposed,
+            Origin::Agent,
+            Some("document"),
+            false,
+        );
+        assert_eq!(
+            main_action(&proposal),
+            Some(MainAction::Confirm {
+                class: "document".to_owned(),
+                source: SlotSource::Agent,
+            })
+        );
+        let pending = slot_row(NEW, PositionState::Pending, Origin::Rule, None, false);
+        assert_eq!(main_action(&pending), None);
+        // A confirmed, ambiguous or retired position has no main action.
+        let confirmed = slot_row(
+            KEY,
+            PositionState::Confirmed,
+            Origin::Admin,
+            Some("doctor"),
+            true,
+        );
+        assert_eq!(main_action(&confirmed), None);
+        let ambiguous = slot_row(
+            KEY,
+            PositionState::Ambiguous,
+            Origin::Rule,
+            Some("doctor"),
+            false,
+        );
+        assert_eq!(main_action(&ambiguous), None);
+    }
+
+    #[test]
+    fn an_action_moves_the_kind_of_the_position_it_names() {
+        const KEY: &str = "GET /doctor/{id} path[1]";
+        const NEW: &str = "GET /document/{id} path[1]";
+        let objects = spec().objects().clone();
+        // A pause takes the kind away, and the restore that follows gives back the entry's kind.
+        let paused = objects_after(&objects, KEY, &MainAction::Pause);
+        assert_eq!(paused.class_of(KEY), None);
+        let restored = objects_after(
+            &paused,
+            KEY,
+            &MainAction::Restore {
+                class: "doctor".to_owned(),
+                source: SlotSource::Admin,
+            },
+        );
+        assert_eq!(restored.class_of(KEY), Some("doctor"));
+        // A confirmed proposal adds an entry the map did not declare.
+        assert_eq!(objects.class_of(NEW), None);
+        let confirmed = objects_after(
+            &objects,
+            NEW,
+            &MainAction::Confirm {
+                class: "document".to_owned(),
+                source: SlotSource::Rule,
+            },
+        );
+        assert_eq!(confirmed.class_of(NEW), Some("document"));
+    }
 }
 
 /// Passes against a migrated PostgreSQL database, which they need `XSHIELD_DATABASE_URL` for.
@@ -2743,6 +3010,40 @@ mod live_tests {
         let other = serde_json::to_value(other).expect("the detail as JSON");
         assert_eq!(other["examples"], json!([]));
         assert_eq!(other["flows_in"], json!([]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_proposed_path_position_previews_the_calls_its_confirmation_allows() {
+        let (state, name) = seeded_site("path-impact").await;
+        let id = id_of(&listed(&state, &name, &[]).await, OTHER);
+        // Jev allowed a call to /other/7, and the declared appointments position showed the value
+        // as a doctor. Confirming the proposal verifies the value, so the call becomes a fast allow.
+        let at = now_millis() - 1_000;
+        crate::test_support::ensure_days(&state.pool, &[at]).await;
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace, jev)
+             VALUES ($1, 'req_call', $2, 'edge-1', 'clinic.example.com', '10.0.0.1', 'a',
+                'GET', '/other/7', 200, 'jev_allow', 'allowed', $3, $4)",
+        )
+        .bind(at)
+        .bind(&name)
+        .bind(json!({"v": 1, "values": [seen_value(OTHER, APPOINTMENTS, "req_shown", Some(at))]}))
+        .bind(json!({"v": 1}))
+        .execute(&state.pool)
+        .await
+        .expect("insert a decision row");
+        let body = slot(State(Arc::clone(&state)), Path((name, id)))
+            .await
+            .expect("the drawer reads")
+            .0;
+        let body = serde_json::to_value(body).expect("the drawer as JSON");
+        assert_eq!(body["impact_complete"], json!(true));
+        assert_eq!(body["impact"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["impact"][0]["kind"], "new_fast_allow");
+        assert_eq!(body["impact"][0]["count"], 1);
+        assert_eq!(body["impact"][0]["sample"], "req_call");
     }
 
     #[tokio::test]

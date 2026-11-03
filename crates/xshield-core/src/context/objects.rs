@@ -252,6 +252,28 @@ impl ObjectMap {
         self
     }
 
+    /// The map with `key` set to `class` from `source`, and not paused. The entry the map has
+    /// for the key is replaced, paused or not. A key the map does not declare is appended, so
+    /// the index stays valid.
+    #[must_use]
+    pub fn with_entry(mut self, key: &str, class: &str, source: SlotSource) -> Self {
+        let entry = ObjectSlot {
+            key: key.to_owned(),
+            class: class.to_owned(),
+            source,
+            paused: false,
+        };
+        if let Some(&place) = self.index.get(key) {
+            if let Some(slot) = self.slots.get_mut(place) {
+                *slot = entry;
+            }
+        } else {
+            self.index.insert(key.to_owned(), self.slots.len());
+            self.slots.push(entry);
+        }
+        self
+    }
+
     /// The entry of a position, paused or not.
     fn slot(&self, key: &str) -> Option<&ObjectSlot> {
         self.index.get(key).and_then(|&place| self.slots.get(place))
@@ -464,6 +486,47 @@ mod tests {
         assert_eq!(map.class_of("GET /doctor/{id} path[2]"), None);
         assert_eq!(map.classes().len(), 2);
         assert!(!map.is_empty());
+    }
+
+    #[test]
+    fn an_entry_written_again_replaces_its_own_and_a_new_key_is_appended() {
+        let paused = map(&VALID.replace(
+            r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"}"#,
+            r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin", "paused": true}"#,
+        ))
+        .unwrap();
+        // The paused entry is written again: its kind is back, from the source it is written with.
+        let restored = paused.with_entry("GET /doctor/{id} path[1]", "doctor", SlotSource::Rule);
+        assert_eq!(
+            restored.class_of("GET /doctor/{id} path[1]"),
+            Some("doctor")
+        );
+        assert!(!restored.is_paused("GET /doctor/{id} path[1]"));
+        assert_eq!(restored.slots().len(), 3);
+        assert_eq!(
+            restored
+                .slots()
+                .iter()
+                .find(|slot| slot.key == "GET /doctor/{id} path[1]")
+                .map(|slot| slot.source),
+            Some(SlotSource::Rule)
+        );
+        // A key the map does not declare is appended, and found by its key afterwards.
+        let added = restored.with_entry("GET /other/{id} path[1]", "document", SlotSource::Agent);
+        assert_eq!(added.slots().len(), 4);
+        assert_eq!(
+            added.declared_class_of("GET /other/{id} path[1]"),
+            Some("document")
+        );
+        // The entries the write does not name keep their kind.
+        assert_eq!(
+            added.class_of("GET /api/appointments [].doc_id"),
+            Some("doctor")
+        );
+        assert_eq!(
+            added.class_of("GET /api/records/{id} attachments[].doc_id"),
+            Some("document")
+        );
     }
 
     #[test]
