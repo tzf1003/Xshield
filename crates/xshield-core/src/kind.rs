@@ -200,6 +200,52 @@ pub fn declares(shown: Shown<'_>, rules: &Rules) -> bool {
     declared_for(&rules.fields, shown.field, request_path(shown.request)).is_some()
 }
 
+/// Values at least this long are specific enough to fast-allow when seen: one that a
+/// response showed as an object of any kind counts, whatever its field is called.
+pub const LONG_VALUE_CHARS: usize = 8;
+
+/// Whether a field name reads like an object identifier.
+#[must_use]
+pub fn is_id_like(field: &str) -> bool {
+    let lower = field.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "id" | "uuid" | "guid" | "pk" | "key" | "ref" | "link"
+    ) || ["id", "_id", "no", "num", "code", "uuid", "ref"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
+/// The index of the path segment a value sits in, from its location: `path[2]`
+/// is segment 2 among the non-empty segments. `None` for any other location.
+#[must_use]
+pub fn path_segment(at: &str) -> Option<usize> {
+    at.strip_prefix("path[")?.strip_suffix(']')?.parse().ok()
+}
+
+/// Whether one place a session saw a value shows it as the object the request needs:
+/// the test the judge applies to each origin. `wanted` is the kind the object map gives
+/// the request's position and `known` the kind it gives the origin's position. Where the
+/// map is silent on a side, the name of that side decides. `long` says whether the value
+/// is long enough to be an identifier on its own ([`LONG_VALUE_CHARS`]).
+#[must_use]
+pub fn shown_as(
+    used: Used<'_>,
+    shown: Shown<'_>,
+    wanted: Option<&str>,
+    known: Option<&str>,
+    rules: &Rules,
+    long: bool,
+) -> bool {
+    let identifier = is_id_like(shown.field) || declares(shown, rules);
+    match (wanted, known) {
+        (Some(wanted), Some(kind)) => wanted == kind,
+        (None, Some(kind)) => names_kind(used, rules, kind),
+        (Some(wanted), None) => identifier && (long || shows_kind(shown, rules, wanted)),
+        (None, None) => identifier && (long || affinity(shown, used, rules)),
+    }
+}
+
 /// The kinds an origin shows a value as: the declared kind of its field when a
 /// declaration names it, else the field's own name. A bare `id` takes the kind
 /// of its parent (`Products.id`). With no parent it takes the route word nearest

@@ -821,6 +821,74 @@ pub async fn jev_state_rows(
         .collect()
 }
 
+/// Most decisions one object impact scan reads (docs/07 section 7.9.10).
+pub const SLOT_SCAN_LIMIT: i64 = 20_000;
+
+/// A decision of the window whose trace names a position an object map change moves:
+/// a request value at it, or a place the session saw a value at it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotRow {
+    /// The gateway request id.
+    pub request_id: String,
+    /// HTTP method.
+    pub method: String,
+    /// Path without the query.
+    pub path: String,
+    /// The deciding step.
+    pub decision_path: String,
+    /// The request values of the trace, as JSON text.
+    pub values: String,
+}
+
+/// The decisions of `scope` that were fast-allowed or called Jev, and whose trace names
+/// one of `slots` as a request position or as the position a value was seen at. Newest
+/// first, at most [`SLOT_SCAN_LIMIT`]. Returns the rows and whether they are all of the
+/// window. A trace written before positions were recorded has no `slot` and is not found.
+///
+/// # Errors
+/// Returns [`sqlx::Error`] when the query fails.
+pub async fn slot_rows(
+    pool: &PgPool,
+    scope: &Scope,
+    slots: &[String],
+) -> Result<(Vec<SlotRow>, bool), sqlx::Error> {
+    let mut query = QueryBuilder::<Postgres>::new(
+        "SELECT request_id, method, path, decision_path, (trace -> 'values')::text AS values
+         FROM decision_log",
+    );
+    push_scope(&mut query, scope);
+    query.push(
+        " AND decision_path IN ('fast_allow', 'jev_allow', 'jev_deny', 'jev_unavailable')
+          AND jsonb_typeof(trace -> 'values') = 'array'
+          AND EXISTS (
+              SELECT 1 FROM jsonb_array_elements(trace -> 'values') AS v
+              WHERE v ->> 'slot' = ANY(",
+    );
+    query.push_bind(slots.to_vec());
+    query.push(
+        ") OR EXISTS (
+                  SELECT 1 FROM jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
+                  WHERE s ->> 'slot' = ANY(",
+    );
+    query.push_bind(slots.to_vec());
+    query.push("))) ORDER BY at_millis DESC LIMIT ");
+    query.push_bind(SLOT_SCAN_LIMIT + 1);
+    let rows = query.build().fetch_all(pool).await?;
+    let limit = usize::try_from(SLOT_SCAN_LIMIT).unwrap_or(usize::MAX);
+    let complete = rows.len() <= limit;
+    let mut out = Vec::with_capacity(rows.len().min(limit));
+    for row in rows.iter().take(limit) {
+        out.push(SlotRow {
+            request_id: row.try_get("request_id")?,
+            method: row.try_get("method")?,
+            path: row.try_get("path")?,
+            decision_path: row.try_get("decision_path")?,
+            values: row.try_get("values")?,
+        });
+    }
+    Ok((out, complete))
+}
+
 /// Requests in `since_millis..` whose trace says they cite a value learned
 /// from a request that observe mode let through as would-be refused
 /// (docs/07 section 7.4.6).

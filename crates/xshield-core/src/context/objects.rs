@@ -258,34 +258,122 @@ impl ObjectMap {
     }
 }
 
+/// Why an object map is refused: the part that is wrong, and the reason when the rules
+/// name one. The text the API sends names the entry and never echoes a configured value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectsIssue {
+    /// Where the map is wrong.
+    pub place: ObjectsPlace,
+    /// Why, for the refusals the console can explain. `None` for the others.
+    pub reason: Option<ObjectsReason>,
+}
+
+impl ObjectsIssue {
+    /// The part the refusal is about, as the API names it: `objects.slots[3]`, counted
+    /// from 0 in the order the entries were written.
+    #[must_use]
+    pub fn field(&self) -> String {
+        match self.place {
+            ObjectsPlace::Section => "objects".to_owned(),
+            ObjectsPlace::Learning => "objects.learning".to_owned(),
+            ObjectsPlace::Classes => "objects.classes".to_owned(),
+            ObjectsPlace::Class(index) => format!("objects.classes[{index}]"),
+            ObjectsPlace::Slots => "objects.slots".to_owned(),
+            ObjectsPlace::Slot(index) => format!("objects.slots[{index}]"),
+        }
+    }
+}
+
+/// The part of the `objects` section a refusal is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectsPlace {
+    /// The section itself: it is not an object, or it holds a field it does not know.
+    Section,
+    /// `objects.learning`.
+    Learning,
+    /// The list of kinds, `objects.classes`.
+    Classes,
+    /// One kind, `objects.classes[n]`.
+    Class(usize),
+    /// The list of confirmed positions, `objects.slots`.
+    Slots,
+    /// One confirmed position, `objects.slots[n]`.
+    Slot(usize),
+}
+
+/// The reasons an object map entry is refused, as their stable codes name them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectsReason {
+    /// A position names a kind the section does not declare.
+    ClassUnknown,
+    /// A kind id or a position key is written twice.
+    DuplicateKey,
+    /// A position key is not `METHOD /template location`, or is longer than `KEY_MAX`.
+    KeyInvalid,
+    /// More kinds or positions than the map allows.
+    TooMany,
+    /// A kind id is not lower-case ASCII letters, or not 3 to 24 of them.
+    ClassIdInvalid,
+}
+
+impl ObjectsReason {
+    /// The stable code of the reason, as the API sends it in `reason`.
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ClassUnknown => "class_unknown",
+            Self::DuplicateKey => "duplicate_key",
+            Self::KeyInvalid => "key_invalid",
+            Self::TooMany => "too_many",
+            Self::ClassIdInvalid => "class_id_invalid",
+        }
+    }
+}
+
+fn refused(place: ObjectsPlace, reason: Option<ObjectsReason>) -> ConfigError {
+    ConfigError::Objects(ObjectsIssue { place, reason })
+}
+
 impl TryFrom<ObjectMapDto> for ObjectMap {
     type Error = ConfigError;
 
     fn try_from(dto: ObjectMapDto) -> Result<Self, ConfigError> {
-        if dto.classes.len() > CLASSES_MAX
-            || dto.slots.len() > SLOTS_MAX
-            || !valid_learning(&dto.learning)
-        {
-            return Err(ConfigError::Objects);
+        if dto.classes.len() > CLASSES_MAX {
+            return Err(refused(ObjectsPlace::Classes, Some(ObjectsReason::TooMany)));
+        }
+        if dto.slots.len() > SLOTS_MAX {
+            return Err(refused(ObjectsPlace::Slots, Some(ObjectsReason::TooMany)));
+        }
+        if !valid_learning(&dto.learning) {
+            return Err(refused(ObjectsPlace::Learning, None));
         }
         let mut ids = BTreeMap::new();
-        for class in &dto.classes {
-            if !valid_class_id(&class.id)
-                || class.name.is_empty()
+        for (at, class) in dto.classes.iter().enumerate() {
+            let place = ObjectsPlace::Class(at);
+            if !valid_class_id(&class.id) {
+                return Err(refused(place, Some(ObjectsReason::ClassIdInvalid)));
+            }
+            if class.name.is_empty()
                 || class.name.chars().count() > NAME_MAX
                 || class.description.chars().count() > DESCRIPTION_MAX
-                || ids.insert(class.id.as_str(), ()).is_some()
             {
-                return Err(ConfigError::Objects);
+                return Err(refused(place, None));
+            }
+            if ids.insert(class.id.as_str(), ()).is_some() {
+                return Err(refused(place, Some(ObjectsReason::DuplicateKey)));
             }
         }
         let mut index = BTreeMap::new();
-        for (place, slot) in dto.slots.iter().enumerate() {
-            if !valid_key(&slot.key)
-                || !ids.contains_key(slot.class.as_str())
-                || index.insert(slot.key.clone(), place).is_some()
-            {
-                return Err(ConfigError::Objects);
+        for (at, slot) in dto.slots.iter().enumerate() {
+            let place = ObjectsPlace::Slot(at);
+            if !valid_key(&slot.key) {
+                return Err(refused(place, Some(ObjectsReason::KeyInvalid)));
+            }
+            if !ids.contains_key(slot.class.as_str()) {
+                return Err(refused(place, Some(ObjectsReason::ClassUnknown)));
+            }
+            if index.insert(slot.key.clone(), at).is_some() {
+                return Err(refused(place, Some(ObjectsReason::DuplicateKey)));
             }
         }
         Ok(Self {
@@ -461,6 +549,94 @@ mod tests {
         }
         // the agent may be switched on: the control plane decides whether it has a model to ask
         assert!(map(r#"{"learning":{"agent":{"enabled":true}}}"#).is_ok());
+    }
+
+    #[test]
+    fn a_refusal_names_the_entry_and_the_reason() {
+        let refusal = |text: &str| -> ObjectsIssue {
+            let dto: ObjectMapDto = serde_json::from_str(text).expect("the section parses");
+            match ObjectMap::try_from(dto) {
+                Err(ConfigError::Objects(issue)) => issue,
+                other => panic!("expected an objects refusal, got {other:?}"),
+            }
+        };
+        let doctor = r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":["#;
+        let many_slots =
+            vec![r#"{"key":"GET /d path[1]","class":"doctor","source":"admin"}"#; SLOTS_MAX + 1];
+        let cases = [
+            (
+                r#"{"classes":[{"id":"Doctor","name":"医生"}]}"#.to_owned(),
+                ObjectsPlace::Class(0),
+                Some(ObjectsReason::ClassIdInvalid),
+            ),
+            (
+                r#"{"classes":[{"id":"doctor","name":"a"},{"id":"doctor","name":"b"}]}"#.to_owned(),
+                ObjectsPlace::Class(1),
+                Some(ObjectsReason::DuplicateKey),
+            ),
+            (
+                r#"{"classes":[{"id":"doctor","name":""}]}"#.to_owned(),
+                ObjectsPlace::Class(0),
+                None,
+            ),
+            (
+                format!(
+                    r#"{{"classes":[{}]}}"#,
+                    (0..=CLASSES_MAX)
+                        .map(|index| format!(r#"{{"id":"kind{}","name":"k"}}"#, letters(index)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                ObjectsPlace::Classes,
+                Some(ObjectsReason::TooMany),
+            ),
+            (
+                format!(
+                    r#"{doctor}{{"key":"GET /doctor/{{id}} path[1]","class":"patient","source":"admin"}}]}}"#
+                ),
+                ObjectsPlace::Slot(0),
+                Some(ObjectsReason::ClassUnknown),
+            ),
+            (
+                format!(
+                    r#"{doctor}{{"key":"get /doctor/{{id}} path[1]","class":"doctor","source":"admin"}}]}}"#
+                ),
+                ObjectsPlace::Slot(0),
+                Some(ObjectsReason::KeyInvalid),
+            ),
+            (
+                format!(
+                    r#"{doctor}{{"key":"GET /d path[1]","class":"doctor","source":"admin"}},{{"key":"GET /d path[1]","class":"doctor","source":"rule"}}]}}"#
+                ),
+                ObjectsPlace::Slot(1),
+                Some(ObjectsReason::DuplicateKey),
+            ),
+            (
+                format!(r"{doctor}{}]}}", many_slots.join(",")),
+                ObjectsPlace::Slots,
+                Some(ObjectsReason::TooMany),
+            ),
+            (
+                r#"{"learning":{"thresholds":{"uses":0}}}"#.to_owned(),
+                ObjectsPlace::Learning,
+                None,
+            ),
+        ];
+        for (text, place, reason) in cases {
+            assert_eq!(refusal(&text), ObjectsIssue { place, reason }, "{text}");
+        }
+        // The field names the entry as the API sends it.
+        let slot = ObjectsIssue {
+            place: ObjectsPlace::Slot(3),
+            reason: Some(ObjectsReason::ClassUnknown),
+        };
+        assert_eq!(slot.field(), "objects.slots[3]");
+        assert_eq!(slot.reason.map(ObjectsReason::code), Some("class_unknown"));
+        let class = ObjectsIssue {
+            place: ObjectsPlace::Class(1),
+            reason: None,
+        };
+        assert_eq!(class.field(), "objects.classes[1]");
     }
 
     #[test]
