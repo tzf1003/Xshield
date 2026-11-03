@@ -305,7 +305,7 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
       {search.objevents === undefined ? null : (
         <ObjectEventsDrawer
           site={site.name}
-          events={data.events}
+          openEvents={data.events}
           classes={data.classes}
           saved={site.spec}
           working={working}

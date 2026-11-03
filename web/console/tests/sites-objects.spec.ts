@@ -295,6 +295,20 @@ test("the wizard's last step opens the new site on its object map, and confirmin
   await expect(page.getByRole("dialog", { name: "保存 yaml-shop 的配置" })).toBeVisible();
 });
 
+test("the events drawer asks the server for the open changes of the kind it names", async ({
+  page,
+}) => {
+  const asked: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/objects/events")) asked.push(request.url());
+  });
+  await openMap(page, "/sites/emr?tab=objects&objevents=open&objkind=auto_pause");
+  await expect(page.getByRole("dialog")).toContainText("GET /doctor/{id} path[1]");
+  expect(asked.some((url) => url.includes("status=open") && url.includes("kind=auto_pause"))).toBe(
+    true,
+  );
+});
+
 test("a declared position offers no mark-ambiguous button", async ({ page }) => {
   await openMap(page, "/sites/emr?tab=objects&view=slot");
   await page.locator("#slot-s1").click();

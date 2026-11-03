@@ -31,6 +31,7 @@ import type {
 import {
   bootstrapAnswer,
   learnAnswer,
+  objectEventsAnswer,
   objectSlotAnswer,
   objectsAnswer,
   runDetailAnswer,
@@ -287,6 +288,11 @@ const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
     "GET",
     /^\/api\/sites\/([^/]+)\/objects$/,
     (m, c, s) => siteOr(s, m, (site) => objectsAnswer(site.name, c.params, s)),
+  ],
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects\/events$/,
+    (m, c, s) => siteOr(s, m, (site) => objectEventsAnswer(site.name, c.params)),
   ],
   [
     "GET",

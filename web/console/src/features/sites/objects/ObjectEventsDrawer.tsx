@@ -4,7 +4,7 @@
 // mark the event handled. A change that a later version overtook cannot be undone here: its position's drawer has it.
 
 import { Drawer } from "antd";
-import { useAckEvent } from "../../../api/queries.ts";
+import { useAckEvent, useObjectEvents } from "../../../api/queries.ts";
 import type { ObjectClass, ObjectEvent, ObjectEventKind, SiteSpec } from "../../../api/types.ts";
 import { OBJECT_EVENT_KINDS } from "../../../app/search-schema.ts";
 import { useSetSearch } from "../../../app/scope.ts";
@@ -16,7 +16,7 @@ import {
   OBJECT_TEXT,
   reasonText,
 } from "../../../lib/vocab.ts";
-import { ErrorBar } from "../../../ui/Page.tsx";
+import { ErrorBar, Loading } from "../../../ui/Page.tsx";
 import { RequestLink } from "../../../ui/RequestRef.tsx";
 import { SafeText } from "../../../ui/SafeText.tsx";
 import {
@@ -29,8 +29,8 @@ import {
 
 type Props = {
   site: string;
-  /** The window's events, from the map; the list filters them here. */
-  events: readonly ObjectEvent[];
+  /** The window's open changes, from the map: the header counts them whatever the list shows. */
+  openEvents: readonly ObjectEvent[];
   classes: readonly ObjectClass[];
   /** The saved configuration, and the draft: an undo is refused when the draft already changes its position. */
   saved: SiteSpec;
@@ -42,6 +42,9 @@ type Props = {
   onApply: (spec: SiteSpec, options?: ApplyOptions) => void;
   onChangeFilter: (next: { status?: "open" | "all"; kind?: ObjectEventKind }) => void;
 };
+
+/** The list covers the last 30 days, as the map's events do. */
+const WINDOW_DAYS = 30;
 
 /** The change of one event in words: a pause marks the entry as paused, a tightening moves the position to another class. */
 function changeText(event: ObjectEvent, classes: readonly ObjectClass[]): string {
@@ -60,7 +63,7 @@ function blockedOf(event: ObjectEvent, saved: SiteSpec, working: SiteSpec): stri
 
 export function ObjectEventsDrawer({
   site,
-  events,
+  openEvents,
   classes,
   saved,
   working,
@@ -73,11 +76,10 @@ export function ObjectEventsDrawer({
 }: Props) {
   const setSearch = useSetSearch();
   const ack = useAckEvent();
-  const shown = events.filter(
-    (event) =>
-      (status === "all" || event.status === "open") && (kind === undefined || event.kind === kind),
-  );
-  const openCount = events.filter((event) => event.status === "open").length;
+  // The server filters the list by status and kind; the header counts the open changes of the map.
+  const list = useObjectEvents(site, { status, kind, days: WINDOW_DAYS });
+  const shown = list.data?.events ?? [];
+  const openCount = openEvents.filter((event) => event.status === "open").length;
 
   const statusText = (event: ObjectEvent): string => {
     if (event.status === "superseded") return OBJECT_TEXT.events.superseded;
@@ -116,7 +118,7 @@ export function ObjectEventsDrawer({
   const title = (
     <span className="obj-card-title">
       <span>{OBJECT_TEXT.events.title}</span>
-      <span className="small muted">{OBJECT_TEXT.events.meta(30, openCount)}</span>
+      <span className="small muted">{OBJECT_TEXT.events.meta(WINDOW_DAYS, openCount)}</span>
     </span>
   );
 
@@ -165,7 +167,11 @@ export function ObjectEventsDrawer({
         </div>
 
         {ack.isError ? <ErrorBar error={ack.error} /> : null}
-        {shown.length === 0 ? <div className="small muted">{OBJECT_TEXT.events.empty}</div> : null}
+        {list.isError ? <ErrorBar error={list.error} onRetry={() => void list.refetch()} /> : null}
+        {list.isPending ? <Loading height={160} /> : null}
+        {list.isSuccess && shown.length === 0 ? (
+          <div className="small muted">{OBJECT_TEXT.events.empty}</div>
+        ) : null}
 
         {shown.map((event) => {
           const blocked = event.status === "open" ? blockedOf(event, saved, working) : null;
