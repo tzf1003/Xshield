@@ -29,6 +29,7 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | A6 | 接收者兑换患者 A 的分享码后打开患者 A | 兑换放行，打开放行 | `jev_allow`，`fast_allow` |
 | A7 | 接收者未兑换分享码，直接打开患者 A | 拦截 | `jev_deny` |
 | A8 | 医生 A 新建患者后打开新患者详情 | 新建放行，打开放行 | `jev_allow`，`fast_allow` |
+| A9 | 医生 A 在搜索结果里看到医生 B 的患者，然后删除它；同样删除没被搜到的患者 | **已知缺口**：搜到的患者删除放行（源站真的删除），没搜到的拦截。写操作和读操作不区分，见下方 A9 说明 | `jev_allow`，`jev_deny` |
 | B1 | 搜索框、表单里的中英文文本 | 放行；重复的搜索走放行缓存 | `jev_allow`，`cached_allow` |
 | B2 | 参数里的 SQL 注入、命令执行、路径穿越 | 拦截 | `jev_deny` |
 | C1 | Jev 返回 503 或超时，`on_jev_unavailable=deny` | 拦截，注明 `JEV_HTTP_ERROR` / `JEV_TIMEOUT` | `jev_unavailable` |
@@ -36,6 +37,10 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |
 | C4 | 登录请求 | Jev 收到的是 `<redacted>`，判定日志里也没有口令 | `jev_allow` |
 | C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拦截，`JEV_CALL_LIMIT` | `jev_unavailable` |
+
+### A9 说明：搜索结果不是拦截的依据
+
+源站的搜索接口没有按归属过滤，会把医生 B 的患者返回给医生 A。网关把这些 ID 记为"源站展示过"，之后对它们的删除（写操作）与打开（读操作）一样放行，判定路径不因 HTTP 方法改变。这是现行设计的结果（[docs/00 §0.6](../../docs/00-overview.md)）：源站在正常界面里多给了数据，网关不修复源站的授权错误。A9 把这个现状记录成预期，修改判定规则后，A9 的第一条删除预期要改为拦截。
 
 ## Fake Jev 的脚本
 

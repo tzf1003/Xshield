@@ -370,6 +370,38 @@ def a8(lab: Lab) -> None:
     lab.check("Jev was shown the new patient's name as input", kinds == ["input"], f"kinds {kinds}")
 
 
+@scenario("A9", "医生 A 搜到医生 B 的患者后删除：现状放行（已知缺口）；没被搜到的患者仍拦截")
+def a9(lab: Lab) -> None:
+    # Doctor B owns two patients. Only the first one carries the name doctor A searches for, so the
+    # only difference between the two DELETEs is whether the origin showed the patient to doctor A.
+    cookie_b = lab.login("emr.lab", "doctor_b", "A9 doctor B logs in")
+    shown_id = lab.expect("doctor B creates a patient the search will find", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "搜索靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    hidden_id = lab.expect("doctor B creates a patient the search will not find", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "隐藏靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_a = lab.login("emr.lab", "doctor_a", "A9 doctor A logs in")
+    query = "/api/search?q=" + urllib.parse.quote("搜索靶患者", safe="")
+    found = lab.expect("doctor A searches by name", lab.send(
+        "emr.lab", "GET", query, cookie=cookie_a), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the search shows doctor B's patient to doctor A", shown_id in shown, f"ids {shown}")
+    # A write to a patient the search showed is not refused: the origin showed it, and nothing in
+    # the judgement tells a DELETE from a read (docs/00 section 0.6 leaves this to the origin).
+    lab.expect("doctor A deletes the patient the search showed", lab.send(
+        "emr.lab", "DELETE", f"/api/patients/{shown_id}", cookie=cookie_a),
+        Expect(200, "jev_allow", "allowed", True))
+    lab.expect("doctor A deletes the patient the search did not show", lab.send(
+        "emr.lab", "DELETE", f"/api/patients/{hidden_id}", cookie=cookie_a),
+        Expect(403, "jev_deny", "blocked", False))
+    with lab.origin.lock:
+        gone = shown_id not in lab.origin.patients
+        kept = hidden_id in lab.origin.patients
+    lab.check("the origin lost the patient the search showed", gone, f"{shown_id} still there")
+    lab.check("the origin kept the patient the search did not show", kept, f"{hidden_id} missing")
+
+
 @scenario("B1", "搜索框、表单里输入正常中文和英文文本：放行")
 def b1(lab: Lab) -> None:
     cookie = lab.login("emr.lab", "doctor_a")
