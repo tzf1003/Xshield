@@ -13,12 +13,15 @@
 
 #![warn(missing_docs)]
 
+mod agent_model;
 mod auth;
 mod error;
 mod insights;
 mod jev;
 mod maintenance;
 mod migrations;
+mod object_agent;
+mod object_agent_api;
 mod object_learning;
 mod object_map;
 mod params;
@@ -205,6 +208,26 @@ pub fn router(state: Arc<ControlState>) -> Router {
         .route(
             "/api/sites/{name}/objects/slots/{id}/ambiguous",
             post(object_map::ambiguous),
+        )
+        .route(
+            "/api/sites/{name}/objects/slots/{id}/ask",
+            post(object_agent_api::ask),
+        )
+        .route(
+            "/api/sites/{name}/objects/runs",
+            get(object_agent_api::runs),
+        )
+        .route(
+            "/api/sites/{name}/objects/runs/{id}",
+            get(object_agent_api::run_detail),
+        )
+        .route(
+            "/api/sites/{name}/objects/run",
+            post(object_agent_api::run_now),
+        )
+        .route(
+            "/api/sites/{name}/objects/agent-sample",
+            get(object_agent_api::sample),
         )
         .route("/api/status", get(status::status))
         .route("/api/system", get(system::system))
