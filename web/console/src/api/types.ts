@@ -1304,8 +1304,8 @@ export interface BootstrapCandidate {
   side: ObjectSide;
   /** Proposed class id, e.g. `doctor`. */
   kind: string;
-  /** Proposed name in words, e.g. `医生`. */
-  name: string;
+  /** Proposed name in words, e.g. `医生`. Null while the map has no class for `kind` yet: the kind stands in for it. */
+  name: string | null;
   reason: { code: NameReasonCode; word: string | null; field: string | null };
   /** Requests and sessions of the position in the window. */
   uses: number;
