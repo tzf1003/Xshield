@@ -32,12 +32,13 @@ use crate::{
         ADDRESS_CONTEXT, BLOCKED, CACHED_ALLOW, Effective, JEV_CALL_LIMIT, SESSION_CONTEXT,
         WOULD_BLOCK, redacts, refused_count, scan_states, site_not_found, sum_rows,
     },
+    object_impact,
     params::{DAY_MILLIS, json_body, now_millis},
 };
 
 const WINDOW_HOURS: i64 = 24;
 /// Most paths listed under one change.
-const TOP_PATHS: usize = 5;
+pub(crate) const TOP_PATHS: usize = 5;
 /// Most field locations listed under the secret field change.
 const TOP_FIELDS: usize = 10;
 
@@ -614,6 +615,10 @@ pub async fn preview(
             changes.push(tally.change(kind, tally.count));
         }
     }
+    // The fast allows the object map difference moves, judged again over the window.
+    let (object_changes, objects_complete) =
+        object_impact::changes(&state.pool, &scope, &record.spec, &proposed).await?;
+    changes.extend(object_changes);
     changes.extend(
         timeout_change(
             &state.pool,
@@ -639,7 +644,7 @@ pub async fn preview(
         window_hours: WINDOW_HOURS,
         rows: total,
         groups: groups.len(),
-        complete,
+        complete: complete && objects_complete,
         changes,
         patterns: PatternsBody {
             entries: paths.entries,

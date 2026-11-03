@@ -1,0 +1,588 @@
+//! The fast allows an object map change moves over the last day of decisions: the
+//! `new_fast_allow` and `back_to_jev` changes of the impact preview (docs/07 section 7.9.10,
+//! for `objects.slots`).
+//!
+//! The judge fast-allows a request when each of its values is verified: a place that showed
+//! the value to the session shows it as the kind of object the request needs. The kind of a
+//! request position comes from the object map, or from the name when the map is silent. A
+//! draft that changes the kind of a position changes which values are verified, so each
+//! decision of the window that touched such a position is judged again under the proposed
+//! configuration, with the judge's own rule (`xshield_core::kind::shown_as`). A Jev call that
+//! would now be verified becomes a new fast allow; a fast allow that would no longer be
+//! verified goes back to Jev. The history keeps at most three places per value, so the
+//! counts are estimates.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use sqlx::PgPool;
+use xshield_core::{
+    context::{SiteSpec, TraceValue},
+    kind::{LONG_VALUE_CHARS, Rules, Shown, Used, path_segment, shown_as},
+    path_template::normalize,
+};
+use xshield_postgres::decision_stats::{self, Scope, SlotRow};
+
+use crate::{
+    error::ApiResult,
+    preview::{ChangeBody, ChangeDetailBody, PathCount, TOP_PATHS},
+};
+
+/// The change kind of Jev calls that would become fast allows.
+const NEW_FAST_ALLOW: &str = "new_fast_allow";
+/// The change kind of fast allows that would call Jev again.
+const BACK_TO_JEV: &str = "back_to_jev";
+/// The deciding step of a request whose every value was verified.
+const FAST_ALLOW: &str = "fast_allow";
+/// The deciding steps that called Jev.
+const JEV_CALLS: [&str; 3] = ["jev_allow", "jev_deny", "jev_unavailable"];
+
+/// The fast-allow changes that the object map difference between `current` and `proposed`
+/// makes over `scope`, and whether the window was read in full.
+///
+/// # Errors
+/// Returns the database error when the decisions cannot be read.
+pub(crate) async fn changes(
+    pool: &PgPool,
+    scope: &Scope,
+    current: &SiteSpec,
+    proposed: &SiteSpec,
+) -> ApiResult<(Vec<ChangeBody>, bool)> {
+    let moved = moved_positions(current, proposed);
+    if moved.is_empty() {
+        return Ok((Vec::new(), true));
+    }
+    let slots: Vec<String> = moved.iter().cloned().collect();
+    let (rows, complete) = decision_stats::slot_rows(pool, scope, &slots).await?;
+    let shifted = moves_of(&rows, &moved, &Reading::of(proposed));
+    let changes = [
+        shifted.new_fast_allow.change(NEW_FAST_ALLOW),
+        shifted.back_to_jev.change(BACK_TO_JEV),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Ok((changes, complete))
+}
+
+/// The request positions the judge reads a different kind for under the two configurations:
+/// the positions a draft adds, removes or gives another kind. A paused entry gives no kind,
+/// so pausing one counts as a change too.
+fn moved_positions(current: &SiteSpec, proposed: &SiteSpec) -> BTreeSet<String> {
+    let keys: BTreeSet<&str> = current
+        .objects()
+        .slots()
+        .iter()
+        .chain(proposed.objects().slots())
+        .map(|slot| slot.key.as_str())
+        .collect();
+    keys.into_iter()
+        .filter(|key| current.objects().class_of(key) != proposed.objects().class_of(key))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A configuration as the judge reads it: its object map, and the kind rules of its
+/// advanced section.
+struct Reading<'a> {
+    spec: &'a SiteSpec,
+    rules: Rules,
+}
+
+impl<'a> Reading<'a> {
+    fn of(spec: &'a SiteSpec) -> Self {
+        Self {
+            spec,
+            rules: Rules::of(spec.advanced()),
+        }
+    }
+
+    /// Whether a request value is verified at position `slot`: one place that showed the
+    /// value to the session shows it as the kind the request needs, judged as the gateway
+    /// judges it. The rule reads the value's key, its location and its length, not its text.
+    fn verifies(&self, row: &SlotRow, value: &TraceValue, slot: &str) -> bool {
+        let objects = self.spec.objects();
+        let wanted = objects.class_of(slot);
+        let used = Used {
+            value: "",
+            path: &row.path,
+            key: value.key.as_deref(),
+            segment: path_segment(&value.at),
+        };
+        let long = value.len.unwrap_or_else(|| value.value.chars().count()) >= LONG_VALUE_CHARS;
+        value.sources.iter().any(|source| {
+            let shown = Shown {
+                field: &source.field,
+                request: &source.request,
+            };
+            let known = source.slot.as_deref().and_then(|at| objects.class_of(at));
+            shown_as(used, shown, wanted, known, &self.rules, long)
+        })
+    }
+}
+
+/// How one decision moves under the proposed configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shift {
+    /// A Jev call whose every value is verified under the proposed configuration.
+    NewFastAllow,
+    /// A fast allow with a value that the proposed configuration no longer verifies.
+    BackToJev,
+}
+
+/// The shift of one decision, if it has one. A value is judged again when its own position
+/// or a place that showed it has moved; every other value keeps the verdict the trace
+/// recorded. A value whose trace kept no place for it keeps its recorded verdict too.
+fn shift(
+    row: &SlotRow,
+    values: &[TraceValue],
+    moved: &BTreeSet<String>,
+    next: &Reading<'_>,
+) -> Option<Shift> {
+    let mut verified_now = true;
+    let mut verified_next = true;
+    for value in values.iter().filter(|value| !value.inert) {
+        let slot = request_slot(row, value);
+        let touched = moved.contains(&slot)
+            || value
+                .sources
+                .iter()
+                .any(|source| source.slot.as_deref().is_some_and(|at| moved.contains(at)));
+        verified_now &= value.verified;
+        verified_next &= if touched && !value.sources.is_empty() {
+            next.verifies(row, value, &slot)
+        } else {
+            value.verified
+        };
+    }
+    match row.decision_path.as_str() {
+        FAST_ALLOW if verified_now && !verified_next => Some(Shift::BackToJev),
+        decision if JEV_CALLS.contains(&decision) && !verified_now && verified_next => {
+            Some(Shift::NewFastAllow)
+        }
+        _ => None,
+    }
+}
+
+/// The position of a request value: the trace's own, or the one the gateway gives it.
+fn request_slot(row: &SlotRow, value: &TraceValue) -> String {
+    value
+        .slot
+        .clone()
+        .unwrap_or_else(|| format!("{} {} {}", row.method, route_of(&row.path), value.at))
+}
+
+/// The route template of a path, as positions name it.
+fn route_of(path: &str) -> String {
+    normalize(path).unwrap_or_else(|| path.to_owned())
+}
+
+/// The requests that each change kind moves.
+#[derive(Default)]
+struct Moves {
+    new_fast_allow: Groups,
+    back_to_jev: Groups,
+}
+
+/// Judges every row again and sorts the ones that move into their change kind.
+fn moves_of(rows: &[SlotRow], moved: &BTreeSet<String>, next: &Reading<'_>) -> Moves {
+    let mut found = Moves::default();
+    for row in rows {
+        // A trace the history wrote in an older form carries no values to judge.
+        let Ok(values) = serde_json::from_str::<Vec<TraceValue>>(&row.values) else {
+            continue;
+        };
+        match shift(row, &values, moved, next) {
+            Some(Shift::NewFastAllow) => found.new_fast_allow.add(row),
+            Some(Shift::BackToJev) => found.back_to_jev.add(row),
+            None => {}
+        }
+    }
+    found
+}
+
+/// The requests of one change kind, by method and route template.
+#[derive(Default)]
+struct Groups {
+    count: i64,
+    /// `(method, route)` to its requests, and the first request id among them.
+    routes: BTreeMap<(String, String), (i64, String)>,
+}
+
+impl Groups {
+    fn add(&mut self, row: &SlotRow) {
+        self.count += 1;
+        let (requests, _) = self
+            .routes
+            .entry((row.method.clone(), route_of(&row.path)))
+            .or_insert_with(|| (0, row.request_id.clone()));
+        *requests += 1;
+    }
+
+    /// The change for these requests, or `None` when there are none. The example request
+    /// comes from the largest group.
+    fn change(&self, kind: &str) -> Option<ChangeBody> {
+        if self.count == 0 {
+            return None;
+        }
+        let mut routes: Vec<(&(String, String), i64, &str)> = self
+            .routes
+            .iter()
+            .map(|(route, (requests, sample))| (route, *requests, sample.as_str()))
+            .collect();
+        routes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        let sample = routes.first().map(|(_, _, sample)| (*sample).to_owned());
+        let top: Vec<PathCount> = routes
+            .iter()
+            .take(TOP_PATHS)
+            .map(|(route, requests, _)| (route.0.clone(), route.1.clone(), *requests))
+            .collect();
+        Some(ChangeBody {
+            kind: kind.to_owned(),
+            count: self.count,
+            top: Some(top),
+            would_block: None,
+            sample,
+            detail: Some(ChangeDetailBody::Approximate { approximate: true }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use xshield_core::context::TraceSource;
+
+    use super::*;
+
+    /// A map with a document and a doctor: two response positions, and one request position
+    /// of a doctor. Written on one line, so that the tests can rewrite single entries.
+    const DOCS: &str = r#"{"classes":[{"id":"document","name":"文档"},{"id":"doctor","name":"医生"}],"slots":[{"key":"GET /api/docs [].id","class":"document","source":"admin"},{"key":"GET /api/doctors [].id","class":"doctor","source":"admin"},{"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"}]}"#;
+
+    const DOCTOR_SLOT: &str =
+        r#"{"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"}"#;
+
+    fn spec(objects: &str) -> SiteSpec {
+        let text = format!(
+            r#"{{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{{"cookie":"SID"}},"entries":["/login"],"objects":{objects}}}"#
+        );
+        SiteSpec::from_json(&text).expect("valid test site")
+    }
+
+    /// The map of `DOCS` with one piece rewritten. The piece must be in `DOCS`, or the test
+    /// would compare a configuration with itself.
+    fn edited(from: &str, to: &str) -> SiteSpec {
+        assert!(DOCS.contains(from), "not in the test map: {from}");
+        spec(&DOCS.replace(from, to))
+    }
+
+    fn origin(field: &str, request: &str, slot: &str) -> TraceSource {
+        TraceSource {
+            field: field.to_owned(),
+            request: request.to_owned(),
+            request_id: None,
+            at_millis: None,
+            slot: Some(slot.to_owned()),
+            object: None,
+            object_from: None,
+        }
+    }
+
+    fn value(at: &str, verified: bool, sources: Vec<TraceSource>) -> TraceValue {
+        TraceValue {
+            at: at.to_owned(),
+            key: None,
+            value: "7".to_owned(),
+            len: None,
+            clipped: false,
+            kind: "reference".to_owned(),
+            inert: false,
+            seen: !sources.is_empty(),
+            verified,
+            sources,
+            slot: None,
+            object: None,
+            object_from: None,
+        }
+    }
+
+    fn row(decision: &str, path: &str) -> SlotRow {
+        SlotRow {
+            request_id: "req_1".to_owned(),
+            method: "GET".to_owned(),
+            path: path.to_owned(),
+            decision_path: decision.to_owned(),
+            values: String::new(),
+        }
+    }
+
+    /// The shift of a decision when a draft moves the map from `current` to `proposed`.
+    fn shift_under(
+        current: &SiteSpec,
+        proposed: &SiteSpec,
+        row: &SlotRow,
+        values: &[TraceValue],
+    ) -> Option<Shift> {
+        let moved = moved_positions(current, proposed);
+        shift(row, values, &moved, &Reading::of(proposed))
+    }
+
+    #[test]
+    fn a_position_given_a_kind_turns_its_jev_calls_into_fast_allows() {
+        // `/doctors/7` names a doctor by its route word, so by name the value is not a
+        // document. The draft gives the position a document, which `GET /api/docs` showed:
+        // the value is verified under the draft and was not before.
+        let current = spec(DOCS);
+        let proposed = edited(
+            DOCTOR_SLOT,
+            &format!(
+                r#"{DOCTOR_SLOT},{{"key":"GET /doctors/{{id}} path[1]","class":"document","source":"admin"}}"#
+            ),
+        );
+        let call = row("jev_allow", "/doctors/7");
+        let docs = [value(
+            "path[1]",
+            false,
+            vec![origin("id", "GET /api/docs", "GET /api/docs [].id")],
+        )];
+        assert_eq!(
+            shift_under(&current, &proposed, &call, &docs),
+            Some(Shift::NewFastAllow)
+        );
+        // A value the response showed as a doctor is still not a document: it stays a call.
+        let doctors = [value(
+            "path[1]",
+            false,
+            vec![origin("id", "GET /api/doctors", "GET /api/doctors [].id")],
+        )];
+        assert_eq!(shift_under(&current, &proposed, &call, &doctors), None);
+    }
+
+    #[test]
+    fn a_fast_allow_whose_position_changes_kind_goes_back_to_jev() {
+        let current = spec(DOCS);
+        let proposed = edited(
+            DOCTOR_SLOT,
+            r#"{"key":"GET /doctor/{id} path[1]","class":"document","source":"admin"}"#,
+        );
+        let values = [value(
+            "path[1]",
+            true,
+            vec![origin("id", "GET /api/doctors", "GET /api/doctors [].id")],
+        )];
+        let allowed = row("fast_allow", "/doctor/7");
+        assert_eq!(
+            shift_under(&current, &proposed, &allowed, &values),
+            Some(Shift::BackToJev)
+        );
+        // Decisions that are neither fast allows nor Jev calls do not move.
+        let cached = row("cached_allow", "/doctor/7");
+        assert_eq!(shift_under(&current, &proposed, &cached, &values), None);
+    }
+
+    #[test]
+    fn a_removed_position_is_judged_by_its_name() {
+        // Without the entry, `/doctor/7` is judged by its route word, which names a doctor,
+        // and the response showed a doctor: still verified, so nothing moves.
+        let current = spec(DOCS);
+        let proposed = edited(&format!(",{DOCTOR_SLOT}"), "");
+        let values = [value(
+            "path[1]",
+            true,
+            vec![origin("id", "GET /api/doctors", "GET /api/doctors [].id")],
+        )];
+        let allowed = row("fast_allow", "/doctor/7");
+        assert_eq!(shift_under(&current, &proposed, &allowed, &values), None);
+    }
+
+    #[test]
+    fn decisions_that_touch_no_moved_position_keep_their_verdict() {
+        let current = spec(DOCS);
+        let proposed = edited(
+            DOCTOR_SLOT,
+            r#"{"key":"GET /doctor/{id} path[1]","class":"document","source":"admin"}"#,
+        );
+        // An unverified value at an unrelated route stays unverified under the draft.
+        let docs = [value(
+            "path[1]",
+            false,
+            vec![origin("id", "GET /api/docs", "GET /api/docs [].id")],
+        )];
+        let call = row("jev_deny", "/api/records/7");
+        assert_eq!(shift_under(&current, &proposed, &call, &docs), None);
+        let verified = [value(
+            "path[1]",
+            true,
+            vec![origin("id", "GET /api/docs", "GET /api/docs [].id")],
+        )];
+        let allowed = row("fast_allow", "/api/records/7");
+        assert_eq!(shift_under(&current, &proposed, &allowed, &verified), None);
+    }
+
+    #[test]
+    fn inert_route_words_never_hold_a_decision_back() {
+        let current = spec(DOCS);
+        let proposed = edited(
+            DOCTOR_SLOT,
+            r#"{"key":"GET /doctor/{id} path[1]","class":"document","source":"admin"}"#,
+        );
+        let mut route = value("path[0]", false, Vec::new());
+        route.inert = true;
+        let values = [
+            route,
+            value(
+                "path[1]",
+                true,
+                vec![origin("id", "GET /api/doctors", "GET /api/doctors [].id")],
+            ),
+        ];
+        let allowed = row("fast_allow", "/doctor/7");
+        assert_eq!(
+            shift_under(&current, &proposed, &allowed, &values),
+            Some(Shift::BackToJev)
+        );
+    }
+
+    #[test]
+    fn pausing_a_position_moves_it() {
+        let current = spec(DOCS);
+        let paused = edited(
+            DOCTOR_SLOT,
+            r#"{"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin","paused":true}"#,
+        );
+        assert_eq!(
+            moved_positions(&current, &paused)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["GET /doctor/{id} path[1]".to_owned()]
+        );
+        assert!(moved_positions(&current, &current).is_empty());
+    }
+
+    #[test]
+    fn the_largest_route_gives_the_example_and_the_ranking() {
+        let mut groups = Groups::default();
+        let mut first = row("fast_allow", "/doctor/7");
+        first.request_id = "req_small".to_owned();
+        groups.add(&first);
+        let mut big = row("fast_allow", "/api/records/3");
+        big.request_id = "req_big".to_owned();
+        for _ in 0..3 {
+            groups.add(&big);
+        }
+        let change = groups.change(BACK_TO_JEV).expect("requests are counted");
+        assert_eq!(change.kind, BACK_TO_JEV);
+        assert_eq!(change.count, 4);
+        assert_eq!(change.sample.as_deref(), Some("req_big"));
+        assert_eq!(
+            change.top,
+            Some(vec![
+                ("GET".to_owned(), "/api/records/{id}".to_owned(), 3),
+                ("GET".to_owned(), "/doctor/{id}".to_owned(), 1),
+            ])
+        );
+        assert_eq!(
+            change.detail,
+            Some(ChangeDetailBody::Approximate { approximate: true })
+        );
+        assert!(Groups::default().change(NEW_FAST_ALLOW).is_none());
+    }
+    /// The window of a draft run through the database: the decisions that name a moved
+    /// position are judged again, and the rest are left alone. Needs the migrations applied
+    /// to `XSHIELD_DATABASE_URL`.
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_draft_moves_the_window_decisions_that_name_its_positions() {
+        use crate::test_support::ensure_days;
+
+        const SITE: &str = "impact-live";
+        let url = std::env::var("XSHIELD_DATABASE_URL").expect("XSHIELD_DATABASE_URL");
+        let pool = PgPool::connect(&url).await.expect("connect");
+        // A day of its own, in 2100, that no other test writes to.
+        let day_start = 4_102_444_800_000_i64;
+        ensure_days(&pool, &[day_start]).await;
+        sqlx::query("DELETE FROM decision_log WHERE site = $1")
+            .bind(SITE)
+            .execute(&pool)
+            .await
+            .expect("clear the test site");
+        let rows = [
+            // The position is a doctor's by the current map; the response showed a doctor.
+            (
+                "req_back",
+                "fast_allow",
+                "/doctor/7",
+                r#"[{"at":"path[1]","value":"7","kind":"reference","inert":false,"seen":true,"verified":true,"sources":[{"field":"id","request":"GET /api/doctors","request_id":"req_o1","at_millis":1,"slot":"GET /api/doctors [].id"}],"slot":"GET /doctor/{id} path[1]"}]"#,
+            ),
+            // The draft gives the position a document, which the response showed.
+            (
+                "req_new",
+                "jev_allow",
+                "/doctors/7",
+                r#"[{"at":"path[1]","value":"7","kind":"reference","inert":false,"seen":true,"verified":false,"sources":[{"field":"id","request":"GET /api/docs","request_id":"req_o2","at_millis":2,"slot":"GET /api/docs [].id"}],"slot":"GET /doctors/{id} path[1]"}]"#,
+            ),
+            // A route the draft does not touch.
+            (
+                "req_plain",
+                "fast_allow",
+                "/api/records/3",
+                r#"[{"at":"path[1]","value":"3","kind":"reference","inert":false,"seen":true,"verified":true,"sources":[{"field":"id","request":"GET /api/docs","request_id":"req_o3","at_millis":3,"slot":"GET /api/docs [].id"}],"slot":"GET /api/records/{id} path[1]"}]"#,
+            ),
+            // Served from the allow cache: a draft cannot move that decision.
+            (
+                "req_cached",
+                "cached_allow",
+                "/doctor/8",
+                r#"[{"at":"path[1]","value":"8","kind":"reference","inert":false,"seen":true,"verified":true,"sources":[{"field":"id","request":"GET /api/doctors","request_id":"req_o4","at_millis":4,"slot":"GET /api/doctors [].id"}],"slot":"GET /doctor/{id} path[1]"}]"#,
+            ),
+        ];
+        for (index, (request_id, decision, path, trace)) in rows.into_iter().enumerate() {
+            let offset = i64::try_from(index).expect("four rows");
+            sqlx::query(
+                "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client,
+                    method, path, decision_path, outcome, trace)
+                 VALUES ($1, $2, $3, 'edge-test', 'host', 'client', 'GET', $4, $5, 'allowed', $6::jsonb)",
+            )
+            .bind(day_start + 1_000 + offset)
+            .bind(request_id)
+            .bind(SITE)
+            .bind(path)
+            .bind(decision)
+            .bind(format!(r#"{{"values":{trace}}}"#))
+            .execute(&pool)
+            .await
+            .expect("insert a decision");
+        }
+
+        let current = spec(DOCS);
+        let proposed = spec(
+            r#"{"classes":[{"id":"document","name":"文档"},{"id":"doctor","name":"医生"}],"slots":[{"key":"GET /api/docs [].id","class":"document","source":"admin"},{"key":"GET /api/doctors [].id","class":"doctor","source":"admin"},{"key":"GET /doctor/{id} path[1]","class":"document","source":"admin"},{"key":"GET /doctors/{id} path[1]","class":"document","source":"admin"}]}"#,
+        );
+        let scope = Scope {
+            site: Some(SITE.to_owned()),
+            since_millis: day_start,
+            until_millis: day_start + 86_400_000 - 1,
+        };
+        let (found, complete) = changes(&pool, &scope, &current, &proposed)
+            .await
+            .expect("the window reads");
+        assert!(complete);
+        let summary: Vec<(&str, i64, Option<&str>)> = found
+            .iter()
+            .map(|change| (change.kind.as_str(), change.count, change.sample.as_deref()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (NEW_FAST_ALLOW, 1, Some("req_new")),
+                (BACK_TO_JEV, 1, Some("req_back")),
+            ]
+        );
+        assert_eq!(
+            found[0].top,
+            Some(vec![("GET".to_owned(), "/doctors/{id}".to_owned(), 1)])
+        );
+        assert_eq!(
+            found[1].top,
+            Some(vec![("GET".to_owned(), "/doctor/{id}".to_owned(), 1)])
+        );
+    }
+}

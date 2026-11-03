@@ -768,8 +768,10 @@ CREATE TABLE jev_prompts (
 | `api_split` | 草稿给路径加上接口名后，按接口区分的请求数，`top` 列出这些路径 | 按 URL 路径匹配草稿路由；路由是新增的，或与现在的 `name_from` 不同即计入。历史记录没有接口名，只按路径计数 |
 | `entry_unreachable` | 入口仍登记在 URL 路径上，但请求的逻辑路径多了接口名，入口不再命中的请求数 | 草稿路由覆盖的路径按 `URL/~` 重新匹配入口（`~` 是占位名）：精确入口不再命中，前缀入口仍命中；子路径的接口名未知，不作入口 |
 | `cache_by_api` | 放行缓存的键加上接口名后，原来命中缓存放行的请求数 | 被草稿路由按接口区分的路径上，原为 `cached_allow` 的行数；缓存时长为 0 时不计 |
+| `new_fast_allow` | 草稿改了对象表里某个位置的类别（增加、删除、改类别或暂停）后，原先调用 Jev、改后每个请求值都被核验而快速放行的请求数，`top` 与 `sample` 同其他变化 | 窗口内 `fast_allow`、`jev_allow`、`jev_deny`、`jev_unavailable` 的记录里，凡请求值的位置或它的来源位置改了类别的，按新配置重新核验：核验用与网关相同的规则（`xshield_core::kind::shown_as`）。历史只记录每个值的前 3 个来源，结果是估算 |
+| `back_to_jev` | 原为快速放行，改后有请求值不再被核验、会改回调用 Jev 的请求数 | 同上，只看原为 `fast_allow` 的记录 |
 
-`api_split`、`entry_unreachable` 和 `cache_by_api` 三类总是估算，它们的 `detail` 为 `{ "approximate": true }`，控制台据此说明估算的原因。草稿路由覆盖了有请求的路径（即 `api_split` 有计数）时，`warnings` 还包含 `INTERFACE_UNVERIFIED`：这些请求的接口名历史记录里没有，前缀入口下的无会话请求可能漏报，路由影响都只是估计。
+`api_split`、`entry_unreachable`、`cache_by_api`、`new_fast_allow` 和 `back_to_jev` 五类总是估算，它们的 `detail` 为 `{ "approximate": true }`，控制台据此说明估算的原因。草稿路由覆盖了有请求的路径（即 `api_split` 有计数）时，`warnings` 还包含 `INTERFACE_UNVERIFIED`：这些请求的接口名历史记录里没有，前缀入口下的无会话请求可能漏报，路由影响都只是估计。
 
 会话凭证、Host 或同义词改变时只给警告（`SESSION_CHANGED`、`HOSTS_CHANGED`、`SYNONYMS_CHANGED`）：会话凭证换了以后现有会话上下文全部作废，Host 换了以后流量路由改变，同义词改变核验结果，都无法从历史记录可靠预估。
 
@@ -795,7 +797,7 @@ CREATE TABLE jev_prompts (
 - `name` 与路径参数不一致：400 `SITE_NAME_MISMATCH`。
 - `hosts` 中有其他站点已占用的主机名：409 `SITE_HOST_TAKEN`，`field` 指出哪一项。现状是网关按站点名顺序先到先得、落选站点只写 stderr，控制面在保存时就拒绝。
 - 请求体最大 64 KiB；`note` 最长 500 字符。
-- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。
+- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复）、`key_invalid`（位置格式不对或过长）、`too_many`（超过 64 个类别或 2,048 个位置）、`class_id_invalid`（类别 id 格式不对）；其余对象表错误只带 `field`。
 
 ### 7.9.13 状态灯与配置生效
 

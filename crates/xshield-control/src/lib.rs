@@ -22,6 +22,7 @@ mod maintenance;
 mod migrations;
 mod object_agent;
 mod object_agent_api;
+mod object_impact;
 mod object_learning;
 mod object_map;
 mod params;
