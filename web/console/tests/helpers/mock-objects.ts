@@ -90,8 +90,24 @@ export function objectsAnswer(site: string, params: URLSearchParams, owner: obje
   );
   return {
     status: 200,
-    body: { ...base, counts: storeOf(owner, site).counts, slots },
+    body: {
+      ...base,
+      counts: storeOf(owner, site).counts,
+      slots,
+      events: base.events.filter((event) => event.status === "open"),
+    },
   };
+}
+
+/** `GET .../objects/events`: the window's automatic changes, the open ones unless the status asks for all, and the kind it names. */
+export function objectEventsAnswer(site: string, params: URLSearchParams): ObjectAnswer {
+  const status = params.get("status") ?? "open";
+  const kind = params.get("kind");
+  const events = baseOf(site).events.filter(
+    (event) =>
+      (status === "all" || event.status === "open") && (kind === null || event.kind === kind),
+  );
+  return { status: 200, body: { events } };
 }
 
 /** `GET .../objects/slots/{id}`: the drawer of one position. The samples carry evidence for s2 only. */
