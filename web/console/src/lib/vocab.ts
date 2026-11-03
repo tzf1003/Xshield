@@ -276,6 +276,20 @@ export const ERROR_TEXT: Record<string, string> = {
   MODEL_NOTE_INVALID: "备注最长 200 个字符",
   MODEL_TEST_RATE_LIMITED: "10 秒内只能测试一次",
   MODEL_STORE_UNAVAILABLE: "模型配置的存储暂时不可用，请稍后重试",
+  // The refusals of a value the control plane will not save (ConfigError::code), and of a test the
+  // gateway refuses before calling the model (JEV_CONFIG_*). The form checks most of these first.
+  MODEL_ROUTE_INVALID: "线路不在可选范围内",
+  MODEL_PROVIDER_INVALID: "提供方不在可选范围内",
+  MODEL_ENDPOINT_INVALID: "地址格式不正确，请检查后再保存",
+  MODEL_NAME_INVALID: "模型名格式不正确，请检查后再保存",
+  MODEL_TIMEOUT_INVALID: "超时不在允许的范围内",
+  MODEL_KEY_INVALID: "密钥格式不正确",
+  MODEL_KEY_SHARE_INVALID: "只有两边都是 Vercel AI Gateway 时才能共用密钥",
+  JEV_CONFIG_ROUTE_INVALID: "线路不在可选范围内",
+  JEV_CONFIG_ENDPOINT_INVALID: "地址格式不正确，请检查后再测试",
+  JEV_CONFIG_MODEL_INVALID: "模型名格式不正确，请检查后再测试",
+  JEV_CONFIG_TIMEOUT_INVALID: "超时不在允许的范围内",
+  JEV_CONFIG_KEY_INVALID: "密钥格式不正确",
   INTERNAL: "控制面出错，请稍后重试；问题持续时查看控制面日志",
 };
 
@@ -329,7 +343,9 @@ export const MODEL_FAILURE_TEXT: Record<string, string> = {
 /** Error codes a gateway reports for a console version it could not load (design 2.1). Unknown codes show as they are. */
 export const MODEL_LOAD_ERROR_TEXT: Record<string, string> = {
   MODEL_KEY_UNREADABLE: "密钥无法解密",
-  MODEL_CONFIG_INVALID: "配置不符合要求",
+  MODEL_STORE_UNAVAILABLE: "存储暂时不可用",
+  JEV_CONFIG_ROUTE_INVALID: "线路不在可选范围内",
+  JEV_CONFIG_ENDPOINT_INVALID: "地址格式不正确",
 };
 
 export const MODEL_TEXT = {
