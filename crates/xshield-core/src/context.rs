@@ -3,6 +3,7 @@
 //! The judging logic lives in the `xshield-judge` crate.
 
 pub mod advanced;
+pub mod agent;
 pub mod config;
 pub mod learning;
 pub mod log;

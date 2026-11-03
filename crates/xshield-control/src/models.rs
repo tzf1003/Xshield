@@ -15,10 +15,11 @@ use std::{
 };
 
 use axum::{
-    Json,
+    Json, Router,
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    routing::{get, post, put},
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -328,6 +329,15 @@ fn client_refused(error: JevConfigError) -> ApiError {
         JevConfigError::Model => "JEV_CONFIG_MODEL_INVALID",
     };
     ApiError::new(StatusCode::BAD_REQUEST, code)
+}
+
+/// The model settings routes, mounted behind the session gate with the rest of `/api`.
+pub fn routes() -> Router<Arc<ControlState>> {
+    Router::new()
+        .route("/api/system/models", get(list))
+        .route("/api/system/models/{group}", put(save).delete(revert))
+        .route("/api/system/models/{group}/test", post(test))
+        .route("/api/system/models/{group}/history", get(history))
 }
 
 /// `GET /api/system/models`.

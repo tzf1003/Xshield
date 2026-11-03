@@ -372,6 +372,14 @@ impl SiteSpec {
         &self.objects
     }
 
+    /// The same site with its object map replaced. The learning task writes its automatic
+    /// pauses with it, and the result is stored as a new configuration version.
+    #[must_use]
+    pub fn with_objects(mut self, objects: ObjectMap) -> Self {
+        self.objects = objects;
+        self
+    }
+
     /// The entry pattern that covers `path`, as configured.
     #[must_use]
     pub fn matching_entry(&self, path: &str) -> Option<&str> {

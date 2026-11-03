@@ -7,8 +7,15 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
 chrono = { workspace = true, features = ["serde"] }
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
 openssl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,6 +30,7 @@ tokio-stream.workspace = true
 xshield-core = { path = "../xshield-core" }
 xshield-judge = { path = "../xshield-judge" }
 xshield-postgres = { path = "../xshield-postgres" }
+zeroize.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
