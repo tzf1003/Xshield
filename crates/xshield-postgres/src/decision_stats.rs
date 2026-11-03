@@ -832,7 +832,8 @@ pub struct SlotRow {
     pub request_id: String,
     /// HTTP method.
     pub method: String,
-    /// Path without the query.
+    /// The logical path the judge matched the request by, or the physical path for a row that
+    /// kept none. A declaration's scope is read against this path.
     pub path: String,
     /// The deciding step.
     pub decision_path: String,
@@ -842,10 +843,11 @@ pub struct SlotRow {
 
 /// The decisions of `scope` that were fast-allowed or called Jev, and whose trace names one of
 /// `slots` as a request position or as the position a value was seen at, or mentions one of
-/// `fields` as a name. A name matches in any case and with `_` or `-` between its letters, so
-/// `doc_id` also finds `docId`: the match is a superset, and the caller checks each value
-/// exactly. Newest first, at most [`SLOT_SCAN_LIMIT`]. Returns the rows and whether they are all
-/// of the window. A trace written before positions were recorded has no `slot` and is not found.
+/// `fields` as a name. A name matches in any case and with any number of `_` or `-` between its
+/// letters, so `doc_id` also finds `docId` and `doc__id`: the match is a superset, and the caller
+/// checks each value exactly. Newest first, at most [`SLOT_SCAN_LIMIT`]. Returns the rows and
+/// whether they are all of the window. A trace written before positions were recorded has no
+/// `slot` and is not found.
 ///
 /// # Errors
 /// Returns [`sqlx::Error`] when the query fails.
@@ -856,7 +858,8 @@ pub async fn window_rows(
     fields: &[String],
 ) -> Result<(Vec<SlotRow>, bool), sqlx::Error> {
     let mut query = QueryBuilder::<Postgres>::new(
-        "SELECT request_id, method, path, decision_path, (trace -> 'values')::text AS values
+        "SELECT request_id, method, COALESCE(logical_path, path) AS path, decision_path,
+            (trace -> 'values')::text AS values
          FROM decision_log",
     );
     push_scope(&mut query, scope);
@@ -899,8 +902,8 @@ pub async fn window_rows(
 }
 
 /// The case-insensitive pattern of the spellings of `names`: each name's letters in order, with
-/// `_` or `-` allowed between them, as the judge reads a field name (`doc_id`, `docId` and
-/// `doc-id` are one name). `None` when there is no name to look for.
+/// any number of `_` or `-` allowed between them, as the judge reads a field name (`doc_id`,
+/// `docId`, `doc-id` and `doc__id` are one name). `None` when there is no name to look for.
 fn name_pattern(names: &[String]) -> Option<String> {
     let alternatives: Vec<String> = names
         .iter()
@@ -909,9 +912,9 @@ fn name_pattern(names: &[String]) -> Option<String> {
                 .filter(|c| !matches!(c, '_' | '-'))
                 .map(|c| {
                     if c.is_alphanumeric() {
-                        format!("{c}[_-]?")
+                        format!("{c}[_-]*")
                     } else {
-                        format!("\\{c}[_-]?")
+                        format!("\\{c}[_-]*")
                     }
                 })
                 .collect::<String>()
@@ -1164,7 +1167,12 @@ mod tests {
     fn a_name_matches_its_spellings_in_any_case_and_with_separators() {
         assert_eq!(
             name_pattern(&["doc_id".to_owned()]).as_deref(),
-            Some("(d[_-]?o[_-]?c[_-]?i[_-]?d[_-]?)")
+            Some("(d[_-]*o[_-]*c[_-]*i[_-]*d[_-]*)")
+        );
+        // A name's own separators do not count: `doc__id` is the same name as `doc_id`.
+        assert_eq!(
+            name_pattern(&["doc__id".to_owned()]).as_deref(),
+            Some("(d[_-]*o[_-]*c[_-]*i[_-]*d[_-]*)")
         );
         assert_eq!(name_pattern(&["_".to_owned()]), None);
         assert_eq!(name_pattern(&[]), None);
