@@ -161,6 +161,8 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
   const [conflict, setConflict] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [backError, setBackError] = useState<string | null>(null);
+  // The version the form was read at: a save sends it, not the version the card has refreshed to since.
+  const [readVersion, setReadVersion] = useState<number>(jev.version);
   const { modal } = App.useApp();
 
   const saved = jevForm(jev);
@@ -196,6 +198,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
 
   const openEdit = (next?: Form) => {
     setForm(next ?? jevForm(jev));
+    setReadVersion(jev.version);
     setRestored(null);
     setConflict(null);
     setSaveError(null);
@@ -216,7 +219,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
       {
         ...jevValues(form),
         ...(key === "" ? {} : { key }),
-        expected_version: jev.version,
+        expected_version: readVersion,
         note,
         tested,
       },
@@ -248,11 +251,15 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
     setSaveOpen(false);
     setConflict(null);
     setSaveError(null);
-    if (latest !== undefined) setForm(jevForm(latest));
+    if (latest !== undefined) {
+      setForm(jevForm(latest));
+      setReadVersion(latest.version);
+    }
   };
 
   const restore = (version: number, config: ModelValues) => {
     setForm(formFromValues("jev", config));
+    setReadVersion(jev.version);
     setRestored(version);
     setEditing(true);
     setConflict(null);
@@ -438,6 +445,8 @@ export function AgentModelCard({
   const save = useSaveAgentModel();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Form>(() => agentForm(agent));
+  // The version the form was read at, as on the Jev card above.
+  const [readVersion, setReadVersion] = useState<number>(agent.version);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [saveOpen, setSaveOpen] = useState(false);
   const [restored, setRestored] = useState<number | null>(null);
@@ -465,6 +474,7 @@ export function AgentModelCard({
 
   const openEdit = (next?: Form) => {
     setForm(next ?? agentForm(agent));
+    setReadVersion(agent.version);
     setRestored(null);
     setConflict(null);
     setSaveError(null);
@@ -484,7 +494,7 @@ export function AgentModelCard({
       {
         ...agentValues(form),
         ...(key === "" || form.shareKey ? {} : { key }),
-        expected_version: agent.version,
+        expected_version: readVersion,
         note,
         tested,
       },
@@ -516,11 +526,15 @@ export function AgentModelCard({
     setSaveOpen(false);
     setConflict(null);
     setSaveError(null);
-    if (latest !== undefined) setForm(agentForm(latest));
+    if (latest !== undefined) {
+      setForm(agentForm(latest));
+      setReadVersion(latest.version);
+    }
   };
 
   const restore = (version: number, config: ModelValues) => {
     setForm(formFromValues("agent", config));
+    setReadVersion(agent.version);
     setRestored(version);
     setEditing(true);
     setConflict(null);

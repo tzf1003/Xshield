@@ -9,6 +9,8 @@ import { MODEL_LOAD_ERROR_TEXT, MODEL_TEXT } from "./vocab.ts";
 export const LOAD_GRACE_MS = 60_000;
 /** How often a card re-reads the configuration while a version is on its way to the gateways. */
 export const LOAD_POLL_MS = 5_000;
+/** How often a card re-reads while a gateway is still behind after the grace period, so a late load shows without a reload. */
+export const LOAD_RECHECK_MS = 30_000;
 
 export type StatusLine = {
   tone: "ok" | "warn" | "neutral";
@@ -64,6 +66,12 @@ export function jevWaitingForLoad(jev: JevModelsState | undefined, now: number):
   if (jev === undefined || jev.source !== "console" || jev.version < 1) return false;
   if (!recent(jev.updated_at, now)) return false;
   return behindOf(jev, jev.version).some((load) => load.error === null);
+}
+
+/** Whether an online gateway still runs an older version, grace period or not: the card re-reads at LOAD_RECHECK_MS. */
+export function jevBehind(jev: JevModelsState | undefined): boolean {
+  if (jev === undefined || jev.source !== "console" || jev.version < 1) return false;
+  return behindOf(jev, jev.version).length > 0;
 }
 
 /** The gateways the overview lists: online, behind the console version, for more than the grace period. */
