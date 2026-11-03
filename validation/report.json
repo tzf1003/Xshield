@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, JSON Schema and synthetic sample checks only. Not Rust behaviour (cargo test runs crates/xshield-core/tests/v4_samples.rs over the same samples), not WAF effectiveness and not model accuracy.",
   "passed": true,
-  "checks_total": 301,
-  "passed_count": 301,
+  "checks_total": 303,
+  "passed_count": 303,
   "checks": [
     {
       "name": "json:examples/sites-dev.json",
@@ -646,6 +646,16 @@
     },
     {
       "name": "negative:bad_request_id_rejected",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "tiered:record_schema",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "negative:unknown_tier_rejected",
       "passed": true,
       "detail": ""
     },

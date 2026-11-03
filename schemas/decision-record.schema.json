@@ -96,7 +96,18 @@
         "sources": {"type": "array", "items": {"$ref": "#/$defs/trace_source"}, "description": "会话在何处见过该值，最有用的在前。"},
         "slot": {"type": ["string", "null"], "description": "请求中的位置，例如 GET /doctor/{id} path[1]。"},
         "object": {"type": ["string", "null"], "description": "对象表给出的对象类别，例如 doctor。"},
-        "object_from": {"type": ["string", "null"], "enum": ["map", null]}
+        "object_from": {"type": ["string", "null"], "enum": ["map", null]},
+        "public_access": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["accepts", "reliability"],
+          "properties": {
+            "accepts": {"type": "boolean", "description": "false 表示该请求位置不接受公共来源的值。"},
+            "reliability": {"type": "string", "enum": ["low", "medium", "high"], "description": "对象表对 accepts 的把握程度；只有 high 会收紧判定。"}
+          },
+          "description": "请求位置在对象表里的公共来源设定（docs/07 7.9.16）；位置没有 accepts_public 时不写。"
+        },
+        "attempt": {"type": "string", "enum": ["over_privilege"], "description": "尝试越权：值只由公共响应展示过，请求位置不接受公共来源。没有时不写。"}
       }
     },
     "trace_source": {
@@ -110,7 +121,9 @@
         "at_millis": {"type": ["integer", "null"], "minimum": 0},
         "slot": {"type": ["string", "null"]},
         "object": {"type": ["string", "null"]},
-        "object_from": {"type": ["string", "null"], "enum": ["map", null]}
+        "object_from": {"type": ["string", "null"], "enum": ["map", null]},
+        "tier": {"type": "string", "enum": ["self", "org", "admin", "public"], "description": "来源响应位置的档位；位置没有标档位时不写。"},
+        "reliability": {"type": "string", "enum": ["low", "medium", "high"], "description": "对象表对档位的把握程度；没有时不写。"}
       }
     },
     "trace_session": {
