@@ -265,41 +265,6 @@ write_dev_env() {
     export XSHIELD_EDGE_LISTEN_PORTS="${XSHIELD_EDGE_LISTEN_PORTS:-127.0.0.1:6188,127.0.0.1:56188,127.0.0.1:56189}"
     export XSHIELD_EDGE_BOOTSTRAP_ONLY=1
     export XSHIELD_ALLOW_LOOPBACK_UPSTREAM=1
-    local bootstrap_config="$dev_root/gateway-bootstrap.json"
-    if [[ ! -f "$bootstrap_config" ]]; then
-        sed -e "s#target/xshield-dev#${dev_root}#g" "$repo_root/examples/gateway-bootstrap-config.json" >"$bootstrap_config"
-        chmod 600 "$bootstrap_config"
-    else
-        # Gateway audit recovery is event-contract strict. Keep development
-        # journals versioned so an older local event schema cannot prevent a
-        # newly checked-out gateway from booting. The old directory remains
-        # intact for manual inspection and is never used as current state.
-        # Gateway audit events are contract-versioned. A development checkout
-        # must never reuse an older journal after the event schema changes;
-        # retain the old directory for inspection and start from a fresh one.
-        local versioned_audit_dir="${dev_root}/gateway-audit-v4-$(date +%s)"
-        install -d -m 0700 "$versioned_audit_dir"
-        BOOTSTRAP_CONFIG="$bootstrap_config" VERSIONED_AUDIT_DIR="$versioned_audit_dir" \
-            python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-path = Path(os.environ["BOOTSTRAP_CONFIG"])
-document = json.loads(path.read_text())
-document["audit"]["directory"] = os.environ["VERSIONED_AUDIT_DIR"]
-# A bootstrap file written before the edge could serve protected sites delivered
-# by apply has no identity store and a public placeholder route; bring it up to
-# the example's shape (the placeholder is never served: no business route exists
-# until a signed snapshot arrives).
-document.setdefault("identity_store", {"max_connections": 4, "acquire_timeout_ms": 2000})
-for operation in document.get("operations", []):
-    if operation.get("operation_id") == "bootstrap.reject":
-        operation["admission"] = "AUTHENTICATED_ROOT"
-path.write_text(json.dumps(document, indent=2) + "\n")
-PY
-    fi
-    export XSHIELD_CONFIG="${XSHIELD_CONFIG:-$bootstrap_config}"
     chmod 600 "$env_file"
     export XSHIELD_CONTROL_OIDC_ISSUER='http://127.0.0.1:58080/realms/xshield-dev'
     export XSHIELD_CONTROL_OIDC_CLIENT_ID='xshield-console-dev'

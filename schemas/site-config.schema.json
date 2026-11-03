@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:xshield:schema:site-config:v4",
+  "title": "Xshield v4 站点配置",
+  "description": "一个站点的完整配置，见 docs/03 第 3.2 节。管理员在控制台用 YAML 编辑，保存后以本文件描述的 JSON 形式写入 PostgreSQL；网关读取的也是这个形式。未知字段拒绝，与网关的解析一致。本文件只表达可以用 JSON Schema 写出的约束（例如路径的形状、数值范围）；网关还会检查路径里的点段、编码的斜杠等，以网关代码为准。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "hosts", "origin", "session", "entries"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]{1,64}$",
+      "description": "站点名，全部部署内唯一；只用小写字母、数字、- 和 _。"
+    },
+    "hosts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/host"},
+      "description": "网关按 Host 头把请求分配到站点（不区分大小写，忽略端口）。"
+    },
+    "origin": {
+      "type": "string",
+      "pattern": "^https?://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?$",
+      "description": "源站地址，只能是 http:// 或 https://，不带用户信息和路径。"
+    },
+    "session": {
+      "$ref": "#/$defs/session",
+      "description": "源站会话凭证所在的位置：Cookie 名或请求头名，二选一。"
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/path_pattern"},
+      "description": "入口：访问时不要求会话里已有上下文，但仍做攻击判定。登录、首页、起始列表、分享兑换接口都写在这里。以 * 结尾的为前缀匹配。"
+    },
+    "bypass": {
+      "type": "array",
+      "maxItems": 64,
+      "default": [],
+      "items": {"$ref": "#/$defs/path_pattern"},
+      "description": "绕过：不判定，只记一条简记录。静态资源等路径写在这里。"
+    },
+    "routes": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"$ref": "#/$defs/route"},
+      "description": "接口名路由：由路径和请求头里的若干来源拼出接口名（逻辑路径）。省略时为空，判定按原始路径进行。"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["observe", "enforce"],
+      "default": "observe",
+      "description": "observe：照常判定和记录，本应拦截的也转发；enforce：拦截。新站点默认 observe。"
+    },
+    "on_jev_unavailable": {
+      "type": "string",
+      "enum": ["deny", "allow"],
+      "default": "deny",
+      "description": "Jev 超时、出错、超出调用限额或答不上来时的处理。deny 拦截（默认）；allow 放行，并在判定日志里标注为未经判定。"
+    },
+    "advanced": {
+      "$ref": "#/$defs/advanced",
+      "description": "可选：站点级判定参数。省略的项取代码默认值。"
+    },
+    "objects": {
+      "$ref": "#/$defs/objects",
+      "description": "可选：对象表（对象类别和已确认的位置）。省略时为空，判定与之前相同。"
+    }
+  },
+  "$defs": {
+    "host": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$",
+      "not": {"pattern": "\\.\\."}
+    },
+    "credential_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9!#$%&'*+.^_`|~-]+$"
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        {"required": ["cookie"]},
+        {"required": ["header"]}
+      ],
+      "properties": {
+        "cookie": {"$ref": "#/$defs/credential_name", "description": "Cookie 名，例如 SESSIONID。"},
+        "header": {"$ref": "#/$defs/credential_name", "description": "请求头名，例如 Authorization。"}
+      }
+    },
+    "path_pattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^/[^*?#\\\\ \\x00-\\x1f\\x7f]*\\*?$",
+      "not": {"pattern": "//|(^|/)\\.\\.?(/|$)"},
+      "description": "精确路径，或以 * 结尾的前缀。不带查询串，* 只能出现在末尾。"
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "name_from"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path_pattern"},
+        "name_from": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "advanced": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jev_timeout_ms": {"type": "integer", "minimum": 100, "maximum": 30000},
+        "session_calls_per_minute": {"type": "integer", "minimum": 1, "maximum": 600},
+        "address_calls_per_minute": {"type": "integer", "minimum": 1, "maximum": 600},
+        "allow_cache_minutes": {"type": "integer", "minimum": 0, "maximum": 60},
+        "secret_fields": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"type": "string", "minLength": 3, "maxLength": 32}
+        },
+        "synonyms": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "items": {"type": "string", "minLength": 3, "maxLength": 24}
+          }
+        },
+        "field_kinds": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {"type": "object"}
+        }
+      }
+    },
+    "objects": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "classes": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "name"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "description": {"type": "string"}
+            }
+          }
+        },
+        "slots": {
+          "type": "array",
+          "maxItems": 2048,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "class", "source"],
+            "properties": {
+              "key": {"type": "string", "minLength": 1, "description": "位置，形如 GET /doctor/{id} path[1]。"},
+              "class": {"type": "string", "minLength": 1},
+              "source": {"type": "string", "enum": ["admin", "rule", "agent"]}
+            }
+          }
+        },
+        "learning": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "auto_learn": {"type": "boolean"},
+            "auto_tighten": {"type": "boolean"},
+            "auto_pause": {"type": "boolean"},
+            "thresholds": {"type": "object"},
+            "agent": {"type": "object"}
+          }
+        }
+      }
+    }
+  }
+}

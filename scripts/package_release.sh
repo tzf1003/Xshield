@@ -83,7 +83,7 @@ printf '==> console bundle\n'
 printf '==> assemble\n'
 cp -R -- "$repo_root/migrations" "$stage/migrations"
 mkdir -p -- "$stage/examples"
-cp -- "$repo_root"/examples/gateway-bootstrap-config.json "$stage/examples/"
+cp -- "$repo_root"/examples/site-emr.yaml "$stage/examples/"
 cp -- "$repo_root/README.md" "$repo_root/CHANGELOG.md" "$stage/"
 cp -- "$repo_root"/docs/*.md "$stage/docs/"
 printf '%s\n' "$version" >"$stage/VERSION"

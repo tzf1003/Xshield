@@ -1,0 +1,21 @@
+# 站点配置样例（docs/03 第 3.2 节）。管理员在控制台 YAML 编辑器里看到的就是这种格式；
+# 保存时转换为 JSON 写入 PostgreSQL，网关读取的是 JSON 形式（见 schemas/site-config.schema.json）。
+# 未写的可选项取代码默认值：mode 为 observe，on_jev_unavailable 为 deny。
+name: emr
+hosts: [emr.example.com]
+origin: http://10.0.0.5:8080
+session:
+  cookie: SESSIONID            # 或者 header: Authorization
+entries:                       # 不需要事先有上下文即可访问，仍做攻击判定
+  - /login
+  - /api/home
+  - /api/patients
+  - /share/*
+bypass:                        # 不判定，只记一条简记录
+  - /static/*
+  - /favicon.ico
+mode: observe                  # observe（默认）或 enforce
+on_jev_unavailable: deny       # deny（默认）或 allow
+advanced:                      # 可选：站点级判定参数，省略的项取代码默认值
+  jev_timeout_ms: 3000
+  secret_fields: [ssn, idcard]

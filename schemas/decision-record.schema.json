@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:xshield:schema:decision-record:v4",
+  "title": "Xshield v4 判定日志一行",
+  "description": "网关处理的每个请求写一行判定日志，见 docs/03 第 3.4 节和 crates/xshield-core/src/context/log.rs。日志只用于排查和调优，不是授权依据。这里的字段全部由网关写出，所以列出的必填字段都应存在（无值时为 null）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "at_millis", "request_id", "site", "site_version", "edge", "host", "client", "session",
+    "context", "method", "path", "logical_path", "api", "request_headers", "query", "status",
+    "decision_path", "outcome", "trace", "jev"
+  ],
+  "properties": {
+    "at_millis": {"type": "integer", "minimum": 0, "description": "请求到达网关的时间，Unix 毫秒。"},
+    "request_id": {"type": "string", "pattern": "^req_[0-9a-f]{32}$", "description": "网关分配的请求 ID，同时作为 X-Xshield-Request-Id 转发给源站。"},
+    "site": {"type": ["string", "null"], "pattern": "^[a-z0-9_-]{1,64}$", "description": "站点名；Host 不属于任何站点时为 null。"},
+    "site_version": {"type": ["integer", "null"], "minimum": 1, "description": "判定时生效的站点配置版本。"},
+    "edge": {"type": "string", "maxLength": 128, "description": "网关实例名。"},
+    "host": {"type": "string", "maxLength": 253, "description": "Host 头，小写。"},
+    "client": {"type": "string", "maxLength": 64, "description": "客户端地址。"},
+    "session": {"type": "string", "pattern": "^([0-9a-f]{16})?$", "description": "会话标签：会话键哈希的前 16 个十六进制字符；没有会话上下文时为空串。不是凭证。"},
+    "context": {"type": ["string", "null"], "enum": ["session", "address", null], "description": "上下文来源：会话凭证，或无凭证入口请求的客户端地址。"},
+    "method": {"type": "string", "pattern": "^[A-Z]{3,10}$"},
+    "path": {"type": "string", "pattern": "^/", "maxLength": 2048, "description": "不带查询串的请求路径，原样记录。"},
+    "logical_path": {"type": "string", "maxLength": 2048, "description": "用于判定的路径：path，有路由时加上接口名。"},
+    "api": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/api_named"}, {"$ref": "#/$defs/api_unknown"}], "description": "接口名或未识别原因；没有路由覆盖该请求时为 null。"},
+    "request_headers": {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^[a-z0-9-]+$"}, "description": "请求头名（小写），不含值。"},
+    "query": {"type": ["string", "null"], "maxLength": 2048, "description": "脱敏后的查询串。"},
+    "status": {"type": ["integer", "null"], "minimum": 100, "maximum": 599, "description": "返回给客户端的状态码。"},
+    "decision_path": {"type": "string", "enum": ["bypass", "body_not_inspectable", "unknown_site", "fast_allow", "cached_allow", "jev_allow", "jev_deny", "jev_unavailable", "no_session"], "description": "决定结论的步骤。"},
+    "outcome": {"type": "string", "enum": ["allowed", "blocked", "would_block", "unjudged"], "description": "网关的实际动作：allowed 转发；blocked 拦截；would_block 观察模式下本应拦截，已转发；unjudged 未经判定放行。"},
+    "trace": {"$ref": "#/$defs/trace"},
+    "jev": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/jev"}], "description": "调用了 Jev，或因限额跳过调用时才有。"}
+  },
+  "$defs": {
+    "api_named": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "from"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "from": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "api_unknown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unknown"],
+      "properties": {
+        "unknown": {"type": "string", "enum": ["missing", "repeated", "conflict", "invalid_name", "body_unsupported", "body_not_json", "body_too_large", "route_subpath"]},
+        "source": {"type": "string"}
+      }
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "timing"],
+      "properties": {
+        "v": {"type": "integer", "minimum": 0, "maximum": 1, "description": "1 为网关写入的行；0 为旧格式导入的行，没有 trace。"},
+        "entry": {"type": ["string", "null"], "description": "覆盖该路径的入口模式，原样记录。"},
+        "bypass": {"type": ["string", "null"], "description": "覆盖该路径的绕过模式，原样记录。"},
+        "refused": {"type": ["string", "null"], "enum": ["unauthenticated", "forbidden", "body_not_inspectable", "unknown_site", null], "description": "网关自己给出的拒绝原因。"},
+        "values_truncated": {"type": "boolean", "description": "请求没有被完整拆成请求值（请求体不是结构化数据，或超过上限）。"},
+        "values": {"type": "array", "items": {"$ref": "#/$defs/trace_value"}, "description": "请求拆出的全部请求值，按提取顺序，包括惰性值。"},
+        "session": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/trace_session"}]},
+        "cache_source": {"type": ["string", "null"], "description": "放行缓存命中时，复用的那次 Jev 放行所对应的请求 ID。"},
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["judge_ms"],
+          "properties": {
+            "total_ms": {"type": ["integer", "null"], "minimum": 0},
+            "judge_ms": {"type": "integer", "minimum": 0},
+            "origin_ms": {"type": ["integer", "null"], "minimum": 0}
+          }
+        },
+        "response": {"type": ["object", "null"], "description": "源站响应教给会话的内容（只有字段名和计数，没有值）。"},
+        "upstream_error": {"type": ["string", "null"], "description": "源站无法应答时的失败类别。"},
+        "trimmed": {"type": "boolean", "description": "为了控制在大小上限内，去掉了部分细节。"}
+      }
+    },
+    "trace_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "value", "kind", "inert", "seen", "verified", "sources"],
+      "properties": {
+        "at": {"type": "string", "description": "位置，例如 path[2] 或 query.doctor。"},
+        "key": {"type": ["string", "null"]},
+        "value": {"type": "string", "maxLength": 256, "description": "值本身；秘密为 <redacted>。"},
+        "len": {"type": ["integer", "null"], "minimum": 0, "description": "值被脱敏或截断时的原始字符数。"},
+        "clipped": {"type": "boolean"},
+        "kind": {"type": "string", "enum": ["reference", "route", "input"], "description": "reference 像对象引用；route 是路径里的词；input 是其他输入。"},
+        "inert": {"type": "boolean", "description": "路由词之类，从不选择对象。"},
+        "seen": {"type": "boolean", "description": "会话此前见过该值。"},
+        "verified": {"type": "boolean", "description": "网关用响应核验过：响应里以同类对象展示过同一个值。"},
+        "sources": {"type": "array", "items": {"$ref": "#/$defs/trace_source"}, "description": "会话在何处见过该值，最有用的在前。"},
+        "slot": {"type": ["string", "null"], "description": "请求中的位置，例如 GET /doctor/{id} path[1]。"},
+        "object": {"type": ["string", "null"], "description": "对象表给出的对象类别，例如 doctor。"},
+        "object_from": {"type": ["string", "null"], "enum": ["map", null]}
+      }
+    },
+    "trace_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "request", "request_id", "at_millis"],
+      "properties": {
+        "field": {"type": "string", "description": "出现在哪个字段下。"},
+        "request": {"type": "string", "description": "返回它的请求，例如 GET /api/patients。"},
+        "request_id": {"type": ["string", "null"], "description": "网关请求 ID；重启前学到的值为 null。"},
+        "at_millis": {"type": ["integer", "null"], "minimum": 0},
+        "slot": {"type": ["string", "null"]},
+        "object": {"type": ["string", "null"]},
+        "object_from": {"type": ["string", "null"], "enum": ["map", null]}
+      }
+    },
+    "trace_session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["age_seconds", "known_values"],
+      "properties": {
+        "age_seconds": {"type": "integer", "minimum": 0},
+        "known_values": {"type": "integer", "minimum": 0},
+        "entries_passed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": {"type": "string"},
+              "at_millis": {"type": ["integer", "null"], "minimum": 0},
+              "request_id": {"type": ["string", "null"]}
+            }
+          },
+          "description": "只在 Jev 记录里出现：与发给 Jev 的 state 一致。"
+        },
+        "recent": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["method", "path", "status"],
+            "properties": {
+              "method": {"type": "string"},
+              "path": {"type": "string"},
+              "status": {"type": "integer", "minimum": 100, "maximum": 599},
+              "request_id": {"type": ["string", "null"]},
+              "at_millis": {"type": ["integer", "null"], "minimum": 0}
+            }
+          },
+          "description": "只在 Jev 记录里出现：最近的请求，旧的在前；裁剪级别见 jev.trim。"
+        }
+      }
+    },
+    "jev": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "prompt", "model", "route", "timeout_ms", "trim", "request_bytes", "http_status", "response", "usage", "access", "attack", "conclusion", "millis", "failure"],
+      "properties": {
+        "state": {"type": ["string", "null"], "description": "发送给 Jev 的 state（JSON 文本，已脱敏）；没有构造或没有发送时为 null。"},
+        "prompt": {"type": "string", "pattern": "^(jq_[0-9a-f]{16})?$", "description": "指令版本。"},
+        "model": {"type": "string", "description": "线上模型名。"},
+        "route": {"type": "string", "enum": ["gateway", "direct", "custom"], "description": "经 AI Gateway、直连，或私有端点。"},
+        "timeout_ms": {"type": "integer", "minimum": 0},
+        "trim": {"type": ["integer", "null"], "minimum": 0, "maximum": 4, "description": "state 的裁剪级别，0 到 4；没有构造 state 时为 null。"},
+        "request_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "http_status": {"type": ["integer", "null"], "minimum": 100, "maximum": 599, "description": "供应商的 HTTP 状态码；超时和传输失败时为 null。"},
+        "response": {"type": ["string", "null"], "maxLength": 8192, "description": "供应商的回答，最多 8 KiB。"},
+        "usage": {"type": ["object", "null"], "description": "回答里的 usage 对象，原样记录。"},
+        "access": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}, "description": "access 问题各选项的概率。"},
+        "attack": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}, "description": "attack 问题各选项的概率。"},
+        "conclusion": {"type": ["string", "null"], "enum": ["allow", "deny", "unknown", null]},
+        "millis": {"type": "integer", "minimum": 0, "description": "往返耗时，毫秒。"},
+        "failure": {"type": ["string", "null"], "description": "没有可用回答时的稳定失败码，例如 JEV_TIMEOUT、JEV_UNKNOWN、JEV_CALL_LIMIT。"}
+      }
+    }
+  }
+}

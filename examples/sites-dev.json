@@ -1,0 +1,22 @@
+[
+  {
+    "name": "emr",
+    "hosts": ["emr.example.com"],
+    "origin": "http://10.0.0.5:8080",
+    "session": {"cookie": "SESSIONID"},
+    "entries": ["/login", "/api/home", "/api/patients", "/share/*"],
+    "bypass": ["/static/*", "/favicon.ico"],
+    "mode": "observe",
+    "on_jev_unavailable": "deny",
+    "advanced": {"jev_timeout_ms": 3000, "secret_fields": ["ssn", "idcard"]}
+  },
+  {
+    "name": "juice",
+    "hosts": ["juice.example.com"],
+    "origin": "http://10.0.0.9:3000",
+    "session": {"header": "Authorization"},
+    "entries": ["/rest/user/login", "/rest/products/search"],
+    "bypass": ["/assets/*"],
+    "mode": "enforce"
+  }
+]
