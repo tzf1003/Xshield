@@ -31,7 +31,7 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 
 `kind` 是 `reference`（像对象引用）、`route`（路径里的词）或 `input`（其他输入）；网关已用响应核验过同类对象的值多一个 `"verified": true`；`truncated` 表示请求体被摘要或截断。`seen_as` 为空表示这个值从未出现过。上例中 `8` 只以"年龄"出现过，从未作为患者 ID 出现，Jev 据此判断这是越权引用。
 
-站点配置了档位（[07.4.7](07-console-architecture.md#747-档位字段)）时，`seen_as` 的每一项在括号里附上来源响应的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`；请求值的位置配置了 `accepts_public` 时，值上带 `"public_access": {"accepts": false, "reliability": "high"}`。值被判为尝试越权时带 `"attempt": "over_privilege"`：这个值只由公共档响应展示过，而请求位置不接受公共来源。指令要求 Jev 对带 `attempt` 的值答 DENY，不论它在 `seen_as` 里出现过几次，因为公共搜索只证明源站展示过它，不证明本会话有权操作它。没有标档位的站点，`state` 的内容与之前相同。
+站点配置了档位（[07.4.7](07-console-architecture.md#747-档位在判定中的使用)）时，`seen_as` 的每一项在括号里附上来源响应的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`；请求值的位置配置了 `accepts_public` 时，值上带 `"public_access": {"accepts": false, "reliability": "high"}`。值被判为尝试越权时带 `"attempt": "over_privilege"`：这个值只由公共档响应展示过，而请求位置不接受公共来源。指令要求 Jev 对带 `attempt` 的值答 DENY，不论它在 `seen_as` 里出现过几次，因为公共搜索只证明源站展示过它，不证明本会话有权操作它。没有标档位的站点，`state` 的内容与之前相同。
 
 两个问题：
 

@@ -215,7 +215,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values[].kind` | `reference` / `route` / `input`，与 `state` 里的 `kind` 同一函数（`values::value_kind`） |
 | `values[].seen` / `verified` | 会话里见过这个值 / 网关已按同类对象核验（快速放行的依据） |
 | `values[].sources[]` | 最多 3 个来源，顺序与 `state` 里的 `seen_as` 相同（最相关的在前，[7.5.2](#752-state-与追溯信息的对齐)）；`request_id`、`at_millis` 正常情况下都有（上下文随网关重启清空，[7.3.2](#732-追溯链路)），只有导入的旧格式记录和测试数据可能为 null；同一 `(field, request)` 再次出现时保留最早的那次（[7.7.1](#771-会话上下文增加请求-id)） |
-| `values[].public_access` | 请求位置在对象表里的公共来源设定（[7.4.7](#747-档位字段)），形如 `{ "accepts": false, "reliability": "high" }`；位置没有 `accepts_public` 时不写 |
+| `values[].public_access` | 请求位置在对象表里的公共来源设定（[7.9.16](#7916-对象表的档位与可靠性w3)），形如 `{ "accepts": false, "reliability": "high" }`；位置没有 `accepts_public` 时不写 |
 | `values[].attempt` | `over_privilege`：尝试越权。值只由公共档响应展示过，请求位置不接受公共来源，所以不快速放行、不查缓存，交 Jev 并要求 DENY（[01 1.4](01-request-flow.md#14-判定步骤) 第 4 步）。没有时不写 |
 | `values[].sources[].tier` / `reliability` | 来源响应位置的档位和可靠性，与 `state` 里 `seen_as` 括号中的文字对应；位置没有标档位时不写 |
 | `values_truncated` | 请求体未结构化、超过 64 KiB 解析上限或值数到上限（即 `ExtractedRequest::truncated`） |
@@ -257,27 +257,36 @@ GET /api/patients ──响应里出现 id=7──┐
 
 这不是控制台能修的问题，记录在这里交给判定线程决定（例如本应拦截的响应不学习）。控制台的做法：用 `trace.response.after_would_block` 标出这种学习，模式切换前的就绪检查里单列“由本应拦截请求学到的值被后续请求引用 N 次”。
 
-### 7.4.7 档位字段
+### 7.4.7 档位在判定中的使用
 
-站点的对象表（配置键 `objects`，[03](03-admin-config-audit.md)）的 `slots` 可以给位置标注档位。下面三个字段名是 W3（配置）和 W4（判定）共用的，改名需要两边同时改。
+对象表的位置可以标注档位，字段与校验见 [7.9.16](#7916-对象表的档位与可靠性w3)。本节写判定怎样读这些字段（W4）。字段名 `tier`、`accepts_public`、`reliability` 由 W3（配置）与本节（判定）共用，改名需要两边同时改。没有标档位的位置，判定与之前相同。
 
-| 字段 | 标在哪个位置 | 取值 | 含义 |
-|---|---|---|---|
-| `tier` | 响应位置，如 `GET /api/search results[].id` | `self`、`org`、`admin`、`public` | 这个响应的数据给谁：`self` 是会话本人的记录，`org` 是本机构的记录，`admin` 只有管理员会收到，`public` 是任何登录会话都会收到的搜索或列表 |
-| `accepts_public` | 请求位置，如 `DELETE /api/patients/{id} path[2]` | `true`、`false` | 这个位置是否接受公共来源的值。删除、私密读取一般为 `false`；备注这类子路径一般为 `true` |
-| `reliability` | 同一个位置，与 `tier` 或 `accepts_public` 一起写 | `high`、`medium`、`low`，省略为 `low` | 对这个标注的把握。只有 `high` 参与收紧 |
+判定只读可靠性为 `high` 的判断。`reliability` 省略时按 `low` 处理，所以省略可靠性的标注不参与收紧，它的 `public` 响应也照旧核验。缺少 `tier` 或 `accepts_public`、条目被暂停时，该位置不收紧。
 
-规则：
+收紧条件（[01 §1.4](01-request-flow.md#14-判定步骤) 第 4 步）：请求位置 `accepts_public: false` 且 `reliability: high`，并且值的每个来源都是 `tier: public` 且 `reliability: high` 的响应位置。只要有一个来源是 `self`、`org`、`admin`、没有标档位，或可靠性不是 `high`，就不收紧。
 
-- `tier` 和 `accepts_public` 至少写一个，`reliability` 只能与它们一起写；两者都没有的位置配置无效（`tier_invalid`）。暂停的条目不参与判定。
-- 收紧条件（[01 §1.4](01-request-flow.md#14-判定步骤) 第 4 步）：请求位置 `accepts_public: false` 且 `reliability: high`，并且值的每个来源都是 `tier: public` 且 `reliability: high` 的响应位置。满足时值记为尝试越权。只要有一个来源是 `self`、`org`、`admin`、没有标档位，或可靠性不是 `high`，就不收紧。
-- 核验（“已见”的判定）：收紧条件成立时，`public` 响应不证明会话有权操作对象；`self` 只用来排除收紧，从不单独核验，因此不快速放行；`org` 与没有标档位的响应照旧核验；`admin` 见下。
-- 管理员：管理档响应对管理员会话算正证，按正常逻辑判；管理员没见过的对象照常拦。角色只是辅助，不是放行理由。会话是否为管理员由身份位置决定（W1），只认对象表声明的身份位置，不从请求里取。在 W1 合入之前，所有会话都按非管理员处理，管理档来源不算正证，值照常交给 Jev。
+满足收紧条件的值是**尝试越权**（`attempt: over_privilege`）：这个值只由公共响应展示过，而请求位置不接受公共来源。尝试越权的值不快速放行，不进入缓存，交给 Jev；`state` 里带上 `"attempt": "over_privilege"`，指令要求 Jev 对它答 DENY。
+
+核验（一个响应是否证明会话见过该对象）按来源响应的档位与可靠性：
+
+| 来源响应 | 收紧条件成立时 | 收紧条件不成立时 |
+|---|---|---|
+| `public`，可靠性 `high` | 不证明 | 证明 |
+| `public`，可靠性 `medium` 或 `low` | 证明 | 证明 |
+| `org` | 证明 | 证明 |
+| 没有标档位 | 证明 | 证明 |
+| `self` | 不证明，因此不快速放行 | 不证明，因此不快速放行 |
+| `admin` | 不证明（见下） | 不证明（见下） |
+
+只要有一个展示过该值的响应证明了它，值就被核验（`verified: true`）。`self` 从不单独证明，它只用来排除收紧：同一个值的来源里有 `self`，就不是尝试越权。没有任何响应展示过的值既不证明，也不是尝试越权，照常交给 Jev。
+
+管理员：管理档响应只对管理员会话算正证，按正常逻辑判。会话是否为管理员由身份位置决定（W1，尚未合入），只认对象表声明的身份位置，不从请求里取。角色只是辅助，不是放行理由：管理员没见过的对象照常拦。在 W1 合入之前，所有会话都按非管理员处理，管理档来源不证明，值照常交给 Jev。
 
 `state` 与 `trace` 里的对应字段：
 
-- `state`：`seen_as` 每一项在括号里附上来源位置的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`；请求值带 `public_access`；尝试越权的值带 `"attempt": "over_privilege"`（[02 §2.2](02-jev.md#22-调用内容)）。没有标档位的站点，`state` 的内容与之前相同。
+- `state`：`seen_as` 每一项在括号里附上来源位置的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`，没有标档位的来源不带括号。请求值带 `public_access`，形如 `{"accepts": false, "reliability": "high"}`，位置没有 `accepts_public` 时不带。尝试越权的值带 `"attempt": "over_privilege"`（[02 §2.2](02-jev.md#22-调用内容)）。
 - `trace`：`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability`，见 [7.4.3](#743-trace-结构)。
+- 没有标档位的站点：`state` 的数据、`trace` 的新字段与判定都与之前相同。指令文字（`ACCESS_INSTRUCTIONS`）新增了对档位的说明，所以指令版本号 `prompt`（见 [7.5.1](#751-jevrecord-v2)）对所有站点都变了，现在是 `jq_e290fa8a62172221`。
 
 ## 7.5 Jev 调用上下文的保存
 
@@ -307,7 +316,7 @@ GET /api/patients ──响应里出现 id=7──┐
 
 - `state.request.values` 由非惰性值按提取顺序构成，所以 `state.request.values[i]` 对应 `trace.values` 中第 i 个 `inert == false` 的元素。不用 `at` 对齐，因为数组元素会共享同一个 `at`（`body.ids[]`）。
 - `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`：`seen_as` 是 `sources` 的前缀，裁剪级别 3、4 只发 1 个来源，所以可以更短，不要求等长。
-- `seen_as[j]` 括号中的档位和可靠性对应 `sources[j].tier` 和 `sources[j].reliability`（[7.4.7](#747-档位字段)）。
+- `seen_as[j]` 括号中的档位和可靠性对应 `sources[j].tier` 和 `sources[j].reliability`（[7.4.7](#747-档位在判定中的使用)）。
 - `state.recent` 是最近访问的最后 N 条（N 由裁剪级别决定），对应 `trace.session.recent` 的最后 N 条。
 - `state.session.entries_passed[k]` 对应 `trace.session.entries_passed[k]`。
 - `state.entry` 只有 `matched`（布尔值），没有规则原文：命中的是哪条入口规则只在 `trace.entry`，结构化视图的“入口”一行以 `trace.entry` 为准。`state` 里的值也没有 `key` 字段，字段名取 `trace.values[].key`。
@@ -927,9 +936,9 @@ CREATE TABLE jev_prompts (
 - 可靠性：单位数不少于阈值的两倍且一致程度不低于 980‰（`admin` 为被拒绝单位数不少于阈值的两倍）为 `high`；满足阈值但未达到这些条件为 `medium`；`low` 不提议。
 - `accepts_public`：只看会话的投票（一个会话在一天内计一票）。管理员会话的票不计，被拦截的会话的票不计，档位未知的位置不计。一票只要它的已知档位全部是 `public`，就算公共票。公共票占已判定票的 10‰ 以下为 `false`，200‰ 以上为 `true`，之间不提议。`high` 的条件是票数与会话数都达到阈值的两倍，且公共票占比在 `false` 时不超过 5‰、在 `true` 时不低于 400‰。
 
-判定侧的约定（由 W4 实现，这里只写契约）：只有 `reliability` 为 `high` 的 `tier` 与 `accepts_public` 参与收紧。收紧条件是：目标值的全部来源位置都是 `public` 且为 `high`，并且请求位置的 `accepts_public` 为 `false` 且为 `high`。缺少任一判断、可靠性不是 `high`、或条目被暂停时，判定维持现状。
+判定侧的约定（W4，已实现，规则与核验见 [7.4.7](#747-档位在判定中的使用)）：只有 `reliability` 为 `high` 的 `tier` 与 `accepts_public` 参与收紧。收紧条件是：目标值的全部来源位置都是 `public` 且为 `high`，并且请求位置的 `accepts_public` 为 `false` 且为 `high`。缺少任一判断、可靠性不是 `high`、或条目被暂停时，该位置不收紧。
 
-实现状态：字段、校验、纯函数与其测试已实现。证据的写入、提议、管理员确认写配置，依赖 W1 的身份位置和 W2 的响应指纹，后续实现。
+实现状态：字段、校验、纯函数与其测试已实现（W3）；判定侧的收紧与核验已实现（W4，见 [7.4.7](#747-档位在判定中的使用)）。证据的写入、提议、管理员确认写配置，依赖 W1 的身份位置和 W2 的响应指纹，后续实现。
 
 ## 7.10 控制台前端架构
 
