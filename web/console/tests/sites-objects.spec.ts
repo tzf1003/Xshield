@@ -156,31 +156,33 @@ test("the declaration dialog takes the field and the interface from the URL, and
   await expect(page.getByText("未保存的改动 1 处")).toBeVisible();
 });
 
-test("a site with no object map offers its candidate classes, and skipping them keeps learning going", async ({
+test("a site with no object map lists its candidate positions, picks the clear ones, and skipping keeps learning going", async ({
   page,
 }) => {
   await openMap(page, "/sites/juice?tab=objects");
   await expect(page.getByText("还没有对象表")).toBeVisible();
 
-  await expect(page.getByRole("checkbox", { name: /医生/ })).toBeChecked();
-  await expect(page.getByRole("checkbox", { name: /患者/ })).toBeChecked();
-  await expect(page.getByRole("checkbox", { name: /文档/ })).not.toBeChecked();
-  await expect(page.getByRole("checkbox", { name: /记录/ })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "确认 2 个类别…" })).toBeEnabled();
+  await expect(page.getByRole("checkbox", { name: "响应 GET /api/doctors [].id" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "请求 GET /doctor/{id} path[1]" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "响应 GET /api/docs [].id" })).not.toBeChecked();
+  await expect(page.getByRole("button", { name: "确认 5 个位置…" })).toBeEnabled();
 
   await page.getByRole("button", { name: "稍后再说" }).click();
   await expect(page.getByText("还没有对象表")).toHaveCount(0);
   await expect(page.getByText("对象表还是空的，学习照常进行。")).toBeVisible();
 });
 
-test("confirming the candidates puts their declarations in the save dialog", async ({ page }) => {
+test("confirming the candidates puts their declarations and slots in the save dialog", async ({
+  page,
+}) => {
   await openMap(page, "/sites/juice?tab=objects");
-  await page.getByRole("button", { name: "确认 2 个类别…" }).click();
+  await page.getByRole("button", { name: "确认 5 个位置…" }).click();
 
   const save = page.getByRole("dialog", { name: "保存 juice 的配置" });
   const changes = save.getByRole("list", { name: "改动摘要" });
   await expect(changes).toContainText("对象表 ＋ 字段 id 归为医生（仅 /api/doctors*）");
   await expect(changes).toContainText("对象表 ＋ 字段 id 归为患者（仅 /api/patients*）");
+  await expect(changes).toContainText("对象表 ＋ 请求 GET /doctor/{id} 第 1 个路径参数 = 医生");
 });
 
 test("the learning settings save through the save dialog, and the agent stays off", async ({
@@ -236,7 +238,9 @@ test("the synonym migration turns a group into declarations, and the save remove
   await expect(changes).toContainText("对象表 ＋ 字段 doc_id 归为医生（仅 /api/appointments*）");
 });
 
-test("the wizard can open the new site on its object map", async ({ page }) => {
+test("the wizard's last step opens the new site on its object map, and confirming there saves the candidates", async ({
+  page,
+}) => {
   await freezeClock(page);
   await mockApi(page);
   await page.goto("/sites/new?from=yaml");
@@ -244,9 +248,33 @@ test("the wizard can open the new site on its object map", async ({ page }) => {
   await page.getByRole("textbox", { name: EDITOR }).fill(YAML_SITE);
   await expect(page).toHaveURL(/\/sites\/new\?step=4$/);
   await expect(page.getByText("✓ 服务端校验通过")).toBeVisible();
-  await page.getByRole("checkbox", { name: "创建后打开对象表" }).check();
+  await expect(
+    page.getByRole("checkbox", { name: "创建后确认对象表起点（可跳过）" }),
+  ).toBeChecked();
   await page.getByRole("button", { name: "创建站点" }).click();
 
+  await expect(page).toHaveURL(/\/sites\/new\?step=5&site=yaml-shop$/);
+  await page.getByRole("button", { name: "确认 5 个位置…" }).click();
+
   await expect(page).toHaveURL(/\/sites\/yaml-shop\?tab=objects$/);
-  await expect(page.getByRole("tab", { name: "对象表" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("dialog", { name: "保存 yaml-shop 的配置" })).toBeVisible();
+});
+
+test("a paused position is named in the banner, and its drawer re-confirms it through the save dialog", async ({
+  page,
+}) => {
+  await openMap(page, "/sites/emr?tab=objects&view=slot");
+  const banner = page.getByRole("status").filter({ hasText: "个位置已自动暂停" });
+  await expect(banner).toContainText("GET /doctor/{id} path[1]");
+
+  await banner.getByRole("button", { name: "查看" }).click();
+  await expect(page).toHaveURL(/slot=s3/);
+  const drawer = page.getByRole("dialog");
+  await expect(drawer).toContainText("判定退回名字推断");
+  await drawer.getByRole("button", { name: "重新确认为医生…" }).click();
+
+  const save = page.getByRole("dialog", { name: "保存 emr 的配置" });
+  await expect(save.getByRole("list", { name: "改动摘要" })).toContainText(
+    "对象表 ＋ 请求 GET /doctor/{id} 第 1 个路径参数 = 医生",
+  );
 });

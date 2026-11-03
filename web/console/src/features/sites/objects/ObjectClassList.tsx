@@ -29,6 +29,14 @@ export function ObjectClassList({ classes, selected, onSelect }: Props) {
                 <span className="obj-class-name">
                   <SafeText text={item.name} />
                 </span>
+                {(item.suspended_count ?? 0) > 0 ? (
+                  <span
+                    className="field-warn small"
+                    title={OBJECT_TEXT.classCard.paused(item.suspended_count ?? 0)}
+                  >
+                    {` ▲ ${fmtInt(item.suspended_count ?? 0)}`}
+                  </span>
+                ) : null}
                 <span className="obj-class-id mono small">
                   <SafeText text={item.id} />
                 </span>

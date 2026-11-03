@@ -14,44 +14,68 @@
       "name": "医生",
       "description": "出诊的医生。值在预约、排班、医生详情之间流动。",
       "origin": "rule",
-      "fields": ["name", "title", "department"],
+      "fields": [
+        "name",
+        "title",
+        "department"
+      ],
       "slot_count": 14,
       "uses_24h": 382,
-      "routes": ["/doctor/{id}", "/api/doctors/{id}/files/{id}"]
+      "routes": [
+        "/doctor/{id}",
+        "/api/doctors/{id}/files/{id}"
+      ]
     },
     {
       "id": "document",
       "name": "文档",
       "description": "病历和附件所属的文档。",
       "origin": "admin",
-      "fields": ["title", "doc_name"],
+      "fields": [
+        "title",
+        "doc_name"
+      ],
       "slot_count": 9,
       "uses_24h": 214,
-      "routes": ["/docs/{id}"]
+      "routes": [
+        "/docs/{id}"
+      ]
     },
     {
       "id": "patient",
       "name": "患者",
       "description": "就诊的患者，可按手机号或姓名查找。",
       "origin": "rule",
-      "fields": ["name", "phone"],
+      "fields": [
+        "name",
+        "phone"
+      ],
       "slot_count": 21,
       "uses_24h": 956,
-      "routes": ["/api/patients/{id}"]
+      "routes": [
+        "/api/patients/{id}"
+      ]
     },
     {
       "id": "appointment",
       "name": "预约",
       "description": "一次挂号。",
       "origin": "admin",
-      "fields": ["slot", "date"],
+      "fields": [
+        "slot",
+        "date"
+      ],
       "slot_count": 8,
       "uses_24h": 143,
-      "routes": ["/api/appointments/{id}"]
+      "routes": [
+        "/api/appointments/{id}"
+      ]
     }
   ],
   "slots": [
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s1",
       "side": "response",
       "key": "GET /api/doctors [].id",
@@ -63,6 +87,8 @@
       "dismissed": false
     },
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s2",
       "side": "response",
       "key": "GET /api/appointments [].doc_id",
@@ -74,17 +100,57 @@
       "dismissed": false
     },
     {
+      "in_effect": false,
+      "suspension": {
+        "at": "2026-11-03T05:00:00Z",
+        "auto": true,
+        "version": 17,
+        "event_id": "ev1",
+        "reason": {
+          "code": "origin_4xx_rise",
+          "days": 7,
+          "before": 0.01,
+          "after": 0.18,
+          "status": 404,
+          "total": 312,
+          "hits": 56
+        },
+        "previous": {
+          "class": "doctor",
+          "source": "admin",
+          "confirmed_at": "2026-10-28T10:00:00Z",
+          "confirmed_by": "alice"
+        },
+        "fallback": {
+          "kind": "doctor",
+          "basis": "route_word",
+          "word": "doctor"
+        },
+        "evidence_now": [
+          {
+            "class": "document",
+            "share": 0.64
+          },
+          {
+            "class": "doctor",
+            "share": 0.3
+          }
+        ],
+        "acknowledged": false
+      },
       "id": "s3",
       "side": "request",
       "key": "GET /doctor/{id} path[1]",
-      "class": "doctor",
+      "class": null,
       "state": "suspended",
       "source": "admin",
-      "basis": "快速放行后源站 404 比例 18%",
+      "basis": "404 比例 1% → 18%",
       "last_seen": "2026-11-01T13:10:00Z",
       "dismissed": false
     },
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s4",
       "side": "response",
       "key": "GET /api/patients [].id",
@@ -96,6 +162,8 @@
       "dismissed": false
     },
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s5",
       "side": "request",
       "key": "GET /api/patients/{id} path[2]",
@@ -107,6 +175,8 @@
       "dismissed": false
     },
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s6",
       "side": "request",
       "key": "POST /api/schedule query.doc",
@@ -118,6 +188,8 @@
       "dismissed": false
     },
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s7",
       "side": "response",
       "key": "GET /api/docs [].id",
@@ -129,6 +201,8 @@
       "dismissed": false
     },
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s8",
       "side": "response",
       "key": "GET /api/appointments [].patient_id",
@@ -140,6 +214,8 @@
       "dismissed": false
     },
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s9",
       "side": "request",
       "key": "GET /api/records/{id} query.doc_id",
@@ -151,6 +227,8 @@
       "dismissed": false
     },
     {
+      "in_effect": true,
+      "suspension": null,
       "id": "s10",
       "side": "response",
       "key": "GET /api/records/{id} attachments[].doc_id",
@@ -164,16 +242,54 @@
   ],
   "events": [
     {
+      "id": "ev1",
       "kind": "auto_pause",
-      "at": "2026-11-01T13:10:00Z",
-      "text": "GET /doctor/{id} path[1]，快速放行后源站 404 比例从 1% 升到 18%",
-      "version": null
-    },
-    {
-      "kind": "auto_tighten",
-      "at": "2026-11-01T06:00:00Z",
-      "text": "自动收紧了 2 个位置",
-      "version": 12
+      "at": "2026-11-03T05:00:00Z",
+      "version": 17,
+      "slot_id": "s3",
+      "key": "GET /doctor/{id} path[1]",
+      "side": "request",
+      "before": {
+        "class": "doctor",
+        "entry": {
+          "key": "GET /doctor/{id} path[1]",
+          "class": "doctor",
+          "source": "admin"
+        }
+      },
+      "after": {
+        "class": "doctor",
+        "entry": {
+          "key": "GET /doctor/{id} path[1]",
+          "class": "doctor",
+          "source": "admin",
+          "paused": true
+        }
+      },
+      "reason": {
+        "code": "origin_4xx_rise",
+        "days": 7,
+        "before": 0.01,
+        "after": 0.18,
+        "status": 404,
+        "total": 312,
+        "hits": 56
+      },
+      "impact": [],
+      "examples": [],
+      "status": "open",
+      "handled": null,
+      "note": "学习任务"
     }
-  ]
+  ],
+  "features": {
+    "auto_tighten": true,
+    "auto_pause": true,
+    "path_confirm": true
+  },
+  "learning_status": {
+    "last_pass_at": "2026-11-03T05:00:00Z",
+    "auto_tighten_7d": 0,
+    "auto_pause_7d": 0
+  }
 }

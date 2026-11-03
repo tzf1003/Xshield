@@ -20,6 +20,7 @@ import { HistoryTab } from "./HistoryTab.tsx";
 import { InsightsTab } from "./InsightsTab.tsx";
 import { ModeSwitchDialog } from "./ModeSwitchDialog.tsx";
 import { OverviewTab } from "./OverviewTab.tsx";
+import type { ApplyOptions } from "./objects/objects-model.ts";
 import { LazyObjectsTab } from "./objects/objects-lazy.ts";
 import { RollbackDialog } from "./RollbackDialog.tsx";
 import { type RolloutTone, rolloutView } from "./rollout.ts";
@@ -110,7 +111,16 @@ function SiteDetailBody({ name }: { name: string }) {
   const [modeOpen, setModeOpen] = useState(false);
   const [rollbackTo, setRollbackTo] = useState<SiteVersion | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [saveHint, setSaveHint] = useState<ApplyOptions>({});
   const [created, setCreated] = useState(() => readCreated(name));
+  // The wizard's hand-off (console design 1.4): the draft it wrote opens the save dialog once, and the count of the
+  // positions it confirmed is said after the save.
+  const handoff = useRef({
+    save: search.save === "1",
+    count: search.bootstrap as number | undefined,
+  });
+  const handedOff = useRef(false);
   const leaving = useRef(false);
   const dirtyRef = useRef(false);
   const following = pending !== null && now - pending.savedAt < FOLLOW_MS;
@@ -131,6 +141,15 @@ function SiteDetailBody({ name }: { name: string }) {
   useEffect(() => {
     clearCreated();
   }, []);
+
+  // The wizard's hand-off opens the save dialog of its draft once the site has loaded, and drops its parameters.
+  useEffect(() => {
+    if (handedOff.current || !handoff.current.save || !dirty) return;
+    handedOff.current = true;
+    setSaveHint({ note: OBJECT_TEXT.events.noteWizard });
+    setSaveOpen(true);
+    setSearch({ save: undefined, bootstrap: undefined }, true);
+  }, [dirty, setSearch]);
 
   useEffect(() => {
     dirtyRef.current = dirty;
@@ -225,6 +244,10 @@ function SiteDetailBody({ name }: { name: string }) {
     clearDraft(name);
     setDraft(null);
     setSaveOpen(false);
+    setSaveHint({});
+    const count = handoff.current.count;
+    handoff.current.count = undefined;
+    if (count !== undefined) setNotice(OBJECT_TEXT.wizard.saved(count, version));
     startFollowing(version);
   };
 
@@ -303,8 +326,9 @@ function SiteDetailBody({ name }: { name: string }) {
           now={now}
           dialogOpen={saveOpen || modeOpen || rollbackTo !== null}
           onAdd={changeDraft}
-          onApply={(spec) => {
+          onApply={(spec, options) => {
             changeDraft(spec);
+            setSaveHint(options ?? {});
             setSaveOpen(true);
           }}
         />
@@ -381,6 +405,7 @@ function SiteDetailBody({ name }: { name: string }) {
       ) : null}
 
       {flash ? <Notice tone="bad">{flash}</Notice> : null}
+      {notice ? <Notice tone="info">{notice}</Notice> : null}
 
       <div className="tabs-wrap">
         <Tabs activeKey={tab} onChange={(key) => setSearch({ tab: key })} items={tabItems} />
@@ -402,6 +427,8 @@ function SiteDetailBody({ name }: { name: string }) {
           site={data}
           draft={working}
           baseVersion={draft?.base ?? data.version}
+          initialNote={saveHint.note}
+          objectEvent={saveHint.objectEvent}
           onClose={() => setSaveOpen(false)}
           onSaved={(_spec, version) => savedDraft(version)}
           onDiscard={() => {

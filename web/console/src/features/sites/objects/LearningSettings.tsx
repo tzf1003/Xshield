@@ -4,6 +4,8 @@
 // model is configured.
 
 import { Drawer, Switch } from "antd";
+import type { LearningStatus, ObjectEventKind, ObjectFeatures } from "../../../api/types.ts";
+import { hm } from "../../../features/system/clock.ts";
 import { useState } from "react";
 import type { LearningSettings as Learning, SiteSpec } from "../../../api/types.ts";
 import { effectiveLearning } from "../../../lib/objects-validate.ts";
@@ -13,6 +15,11 @@ import { withLearning } from "./objects-model.ts";
 type Props = {
   working: SiteSpec;
   agentConfigured: boolean;
+  /** What the gateway runs now: a part it does not run yet still saves, and its line says so. */
+  features: ObjectFeatures;
+  status: LearningStatus;
+  /** Opens the list of automatic changes filtered to one kind (the counts in the status lines link to it). */
+  onOpenEvents: (kind: ObjectEventKind) => void;
   onClose: () => void;
   onApply: (spec: SiteSpec) => void;
 };
@@ -73,7 +80,17 @@ function NumberField({
   );
 }
 
-export function LearningSettings({ working, agentConfigured, onClose, onApply }: Props) {
+export function LearningSettings({
+  working,
+  agentConfigured,
+  features,
+  status,
+  onOpenEvents,
+  onClose,
+  onApply,
+}: Props) {
+  const passAt = status.last_pass_at === null ? NaN : Date.parse(status.last_pass_at);
+  const lastPass = Number.isNaN(passAt) ? text.status.never : text.status.schedule(hm(passAt));
   const saved = effectiveLearning(working.objects?.learning);
   const [value, setValue] = useState<Learning>(saved);
   const editable = LEARNING_SAVE_READY;
@@ -123,6 +140,15 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
             onChange={(checked) => setValue({ ...value, auto_tighten: checked })}
           />
           <span className="obj-learning-help">{text.autoTighten.help}</span>
+          <span className="small muted">
+            {lastPass} ·{" "}
+            <button type="button" className="linkbtn" onClick={() => onOpenEvents("auto_tighten")}>
+              {text.status.tightened(status.auto_tighten_7d)}
+            </button>
+            {features.auto_tighten ? null : (
+              <span className="field-warn"> · {text.status.notApplied}</span>
+            )}
+          </span>
         </div>
 
         <div className="obj-learning-row">
@@ -195,6 +221,14 @@ export function LearningSettings({ working, agentConfigured, onClose, onApply }:
             onChange={(checked) => setValue({ ...value, auto_pause: checked })}
           />
           <span className="obj-learning-help">{text.autoPause.help}</span>
+          <span className="small muted">
+            <button type="button" className="linkbtn" onClick={() => onOpenEvents("auto_pause")}>
+              {text.status.paused(status.auto_pause_7d)}
+            </button>
+            {features.auto_pause ? null : (
+              <span className="field-warn"> · {text.status.notApplied}</span>
+            )}
+          </span>
         </div>
 
         <div className="obj-foot">

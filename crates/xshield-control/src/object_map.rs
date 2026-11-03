@@ -21,9 +21,12 @@ use axum::{
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use xshield_core::context::{
-    ObjectSlot, SiteSpec, SlotSource,
-    learning::{RETIRE_DAYS, WINDOW_DAYS, day_of},
+use xshield_core::{
+    context::{
+        ObjectSlot, SiteSpec, SlotSource,
+        learning::{RETIRE_DAYS, WINDOW_DAYS, day_of, observe},
+    },
+    kind::{NameReason, NameSource, Rules, request_name, response_name},
 };
 use xshield_postgres::{
     object_learning_store::{self as store, Flow, JevFlow, PositionRow},
@@ -33,6 +36,7 @@ use xshield_postgres::{
 use crate::{
     ControlState,
     error::{ApiError, ApiResult},
+    object_agent_api::{self as agent_api, AgentBody, AgentPhase, AgentView, LearningRunBody},
     params::{DAY_MILLIS, Params, now_millis, rfc3339},
 };
 
@@ -46,6 +50,18 @@ const DIGEST_BYTES: usize = 8;
 const FLOWS_MAX: usize = 20;
 /// Most sample requests a drawer lists for one position.
 const EXAMPLES_MAX: i64 = 3;
+/// Days of automatic changes the object map lists.
+const EVENTS_DAYS: i64 = 30;
+/// Most automatic versions one object map response reads.
+const EVENTS_MAX: i64 = 20;
+/// Milliseconds in an hour.
+const HOUR_MILLIS: i64 = 3_600_000;
+/// Most decision rows the bootstrap candidates read, the newest first.
+const BOOTSTRAP_ROWS_MAX: i64 = 5_000;
+/// Most candidates the bootstrap list returns.
+const CANDIDATES_MAX: usize = 50;
+/// A kind word this short may be an abbreviation, and its candidate asks for a look.
+const SHORT_WORD: usize = 3;
 
 /// The learning state of a position, as the console names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -137,6 +153,11 @@ struct SlotRow {
     basis: String,
     last_seen: Option<String>,
     dismissed: bool,
+    /// Whether the saved configuration uses the position's kind: a declared entry that is
+    /// not paused. A learned position is never in effect, since the judge does not use it.
+    in_effect: bool,
+    /// The learning agent's status of a learned request position, when it has one.
+    agent_status: Option<AgentPhase>,
 }
 
 /// The counts of the whole map: `ObjectCounts`. Retired positions are not counted.
@@ -170,11 +191,32 @@ struct ClassBody {
 pub(crate) struct ObjectsBody {
     counts: Counts,
     agent_configured: bool,
+    /// Whether the model's last call gave an answer: `ok`, `failing`, or `unknown`.
+    agent_health: &'static str,
+    learning_run: LearningRunBody,
     classes: Vec<ClassBody>,
     slots: Vec<SlotRow>,
-    /// The automatic changes the banner shows. None are recorded yet, so empty.
+    /// Which automatic behaviours this build runs, so the console can say which are off.
+    features: Features,
+    /// The automatic changes of the last 30 days, newest first: one event per entry changed.
     events: Vec<Value>,
 }
+
+/// The automatic behaviours this build runs: `features` of the object map's response.
+#[derive(Debug, Serialize)]
+pub(crate) struct Features {
+    auto_tighten: bool,
+    auto_pause: bool,
+    path_confirm: bool,
+}
+
+/// What this build runs. Tightening is not applied on its own yet, and path positions cannot be
+/// confirmed from the console yet.
+const FEATURES: Features = Features {
+    auto_tighten: false,
+    auto_pause: true,
+    path_confirm: false,
+};
 
 /// One other end of a position's flows: `ObjectFlow`.
 #[derive(Debug, Serialize)]
@@ -199,6 +241,8 @@ pub(crate) struct SlotBody {
     #[serde(flatten)]
     row: SlotRow,
     flows_in: Vec<FlowBody>,
+    /// The learning agent's share of the position, when it has one.
+    agent: Option<AgentBody>,
     /// Request ids of the newest uses of the position, at most three.
     examples: Vec<String>,
     shape: Vec<Value>,
@@ -206,23 +250,37 @@ pub(crate) struct SlotBody {
     impact: Vec<Value>,
 }
 
-/// `GET /objects/bootstrap`: `BootstrapResponse`. The candidates are not read yet, so empty.
+/// `GET /objects/bootstrap`: `BootstrapResponse`.
 #[derive(Debug, Serialize)]
 pub(crate) struct BootstrapBody {
     window_hours: i64,
+    /// The decision records the site logged in the window, so an empty list can be told
+    /// apart from a site with no traffic.
+    records: i64,
     candidates: Vec<Value>,
 }
 
-/// The filters of the list: a state, a kind, and text the key or the kind's id contains.
+/// The agent filter of the list: the positions the agent is to answer, or whose answer failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentFilter {
+    Waiting,
+    Failed,
+}
+
+/// The filters of the list: a state, a kind, a source, an agent status, and text the key or
+/// the kind's id contains.
 struct Filter {
     state: Option<PositionState>,
     class: Option<String>,
+    source: Option<Origin>,
+    agent: Option<AgentFilter>,
     text: Option<String>,
 }
 
 impl Filter {
     /// # Errors
-    /// `INVALID_FILTER` naming `state` when the value is not a position state.
+    /// `INVALID_FILTER` naming the field whose value is not one the list takes: `state`,
+    /// `source` (`admin`, `rule` or `agent`) or `agent` (`waiting` or `failed`).
     fn of(params: &Params) -> ApiResult<Self> {
         let state = params
             .text("state")
@@ -230,9 +288,28 @@ impl Filter {
                 PositionState::parse(value).ok_or_else(|| ApiError::invalid_filter("state"))
             })
             .transpose()?;
+        let source = params
+            .text("source")
+            .map(|value| match value {
+                "admin" => Ok(Origin::Admin),
+                "rule" => Ok(Origin::Rule),
+                "agent" => Ok(Origin::Agent),
+                _ => Err(ApiError::invalid_filter("source")),
+            })
+            .transpose()?;
+        let agent = params
+            .text("agent")
+            .map(|value| match value {
+                "waiting" => Ok(AgentFilter::Waiting),
+                "failed" => Ok(AgentFilter::Failed),
+                _ => Err(ApiError::invalid_filter("agent")),
+            })
+            .transpose()?;
         Ok(Self {
             state,
             class: params.text("class").map(str::to_owned),
+            source,
+            agent,
             text: params.text("q").map(str::to_ascii_lowercase),
         })
     }
@@ -254,7 +331,16 @@ impl Filter {
                     .as_deref()
                     .is_some_and(|class| class.contains(text))
         });
-        state && class && text
+        let source = self.source.is_none_or(|source| row.source == source);
+        let agent = match self.agent {
+            None => true,
+            Some(AgentFilter::Waiting) => matches!(
+                row.agent_status,
+                Some(AgentPhase::Queued | AgentPhase::SkippedBudget)
+            ),
+            Some(AgentFilter::Failed) => row.agent_status == Some(AgentPhase::Failed),
+        };
+        state && class && source && agent && text
     }
 }
 
@@ -271,15 +357,35 @@ pub async fn list(
 ) -> ApiResult<Json<ObjectsBody>> {
     let filter = Filter::of(&Params::from(query))?;
     let record = site_of(&state, &name).await?;
+    let now = now_millis();
     let learned = store::positions(&state.pool, &name).await?;
-    let rows = merged(&record.spec, &learned)?;
+    let view = AgentView::load(&state, &record, now).await?;
+    let rows = merged(&record.spec, &learned, &view)?;
+    let waiting = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.agent_status,
+                Some(AgentPhase::Queued | AgentPhase::SkippedBudget)
+            )
+        })
+        .count();
+    let failed = rows
+        .iter()
+        .filter(|row| row.agent_status == Some(AgentPhase::Failed))
+        .count();
+    let learning_run =
+        agent_api::learning_run(&state.pool, &name, now, &view, waiting, failed).await?;
     let classes = record.spec.objects().classes().len();
     Ok(Json(ObjectsBody {
         counts: counts_of(classes, &rows),
-        agent_configured: false,
+        agent_configured: view.model_configured(),
+        agent_health: agent_api::health(&state.pool).await?,
+        learning_run,
         classes: classes_of(&record.spec, &rows),
         slots: rows.into_iter().filter(|row| filter.matches(row)).collect(),
-        events: Vec::new(),
+        features: FEATURES,
+        events: automatic_events(&state, &name).await?,
     }))
 }
 
@@ -294,13 +400,21 @@ pub async fn slot(
     Path((name, id)): Path<(String, String)>,
 ) -> ApiResult<Json<SlotBody>> {
     let record = site_of(&state, &name).await?;
+    let now = now_millis();
     let learned = store::positions(&state.pool, &name).await?;
-    let row = merged(&record.spec, &learned)?
+    let view = AgentView::load(&state, &record, now).await?;
+    let row = merged(&record.spec, &learned, &view)?
         .into_iter()
         .find(|row| row.id == id)
         .ok_or_else(slot_not_found)?;
+    let agent = match learned
+        .iter()
+        .find(|learned| learned_id(learned.id) == row.id)
+    {
+        Some(learned) => agent_api::agent_body(&state.pool, &name, &view, learned).await?,
+        None => None,
+    };
     let side = row.side;
-    let now = now_millis();
     let oldest = oldest_day(now);
     let since = drawer_since(now, record.created_at.timestamp_millis());
     let total = store::uses(&state.pool, &name, &row.key, side.as_str(), oldest).await?;
@@ -318,6 +432,7 @@ pub async fn slot(
     Ok(Json(SlotBody {
         row,
         flows_in: flow_bodies(side.opposite(), total, flows, &decisions),
+        agent,
         examples,
         shape: Vec::new(),
         history: Vec::new(),
@@ -369,33 +484,229 @@ pub async fn ambiguous(
     changed_or_conflict(changed)
 }
 
-/// `GET /api/sites/{name}/objects/bootstrap`: the kinds the cold start can propose. The
-/// candidates are not read yet, so the list is empty.
+/// `GET /api/sites/{name}/objects/bootstrap`: the kinds the cold start can propose. The candidates
+/// are the positions the site's own decision records used in the window, whose names give a kind and
+/// which the configuration does not declare.
 ///
 /// # Errors
-/// `SITE_NOT_FOUND` for an unknown site.
+/// `SITE_NOT_FOUND` for an unknown site, and a 500 when a read of the decision log fails.
 pub async fn bootstrap(
     State(state): State<Arc<ControlState>>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<BootstrapBody>> {
-    site_of(&state, &name).await?;
+    let record = site_of(&state, &name).await?;
+    let since = now_millis().saturating_sub(BOOTSTRAP_WINDOW_HOURS.saturating_mul(HOUR_MILLIS));
+    let records = store::records_since(&state.pool, &name, since).await?;
+    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    for fact in store::recent_facts(&state.pool, &name, since, BOOTSTRAP_ROWS_MAX).await? {
+        for vote in observe(&fact).votes {
+            let session = vote.session;
+            for key in std::iter::once(vote.slot).chain(vote.from) {
+                tallies.entry(key).or_default().add(&session);
+            }
+        }
+    }
     Ok(Json(BootstrapBody {
         window_hours: BOOTSTRAP_WINDOW_HOURS,
-        candidates: Vec::new(),
+        records,
+        candidates: candidates_of(&record.spec, &tallies),
     }))
+}
+
+/// The uses a position has in the window: the votes that name it, and the sessions among them.
+#[derive(Debug, Default)]
+struct Tally {
+    uses: u32,
+    sessions: BTreeSet<String>,
+}
+
+impl Tally {
+    fn add(&mut self, session: &str) {
+        self.uses += 1;
+        self.sessions.insert(session.to_owned());
+    }
+}
+
+/// The candidates of the tallies: each position the configuration does not declare and whose name
+/// gives a kind, the most used first, at most [`CANDIDATES_MAX`].
+fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>) -> Vec<Value> {
+    let map = spec.objects();
+    let rules = Rules::of(spec.advanced());
+    let mut found: Vec<(u32, &str, Value)> = tallies
+        .iter()
+        .filter(|(key, _)| map.declared_class_of(key).is_none())
+        .filter_map(|(key, tally)| {
+            let (reason, side) = name_of(key, &rules)?;
+            let class = map
+                .classes()
+                .iter()
+                .find(|class| rules.relates(&reason.word, &class.id));
+            let short = class.is_none() && reason.word.len() <= SHORT_WORD;
+            let value = serde_json::json!({
+                "id": digest_id('c', key),
+                "key": key,
+                "side": side,
+                "kind": class.map_or(reason.word.as_str(), |class| class.id.as_str()),
+                "name": class.map(|class| class.name.as_str()),
+                "reason": {
+                    "code": reason_code(reason.source),
+                    "word": reason.word,
+                    "field": reason.field,
+                },
+                "uses": tally.uses,
+                "sessions": tally.sessions.len(),
+                "note": short.then_some("名字较短，可能是缩写，请确认类别"),
+                "conflict": null,
+            });
+            Some((tally.uses, key.as_str(), value))
+        })
+        .collect();
+    found.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+    found
+        .into_iter()
+        .take(CANDIDATES_MAX)
+        .map(|(_, _, value)| value)
+        .collect()
+}
+
+/// The name a position's kind comes from, and the side of the position. `None` when the name gives
+/// no kind, or the key is not a position this map reads.
+fn name_of(key: &str, rules: &Rules) -> Option<(NameReason, &'static str)> {
+    let mut parts = key.splitn(3, ' ');
+    let (method, route, location) = (parts.next()?, parts.next()?, parts.next()?);
+    match side_of_key(key) {
+        Side::Request => {
+            let reason = if let Some(index) = location
+                .strip_prefix("path[")
+                .and_then(|rest| rest.strip_suffix(']'))
+            {
+                request_name(route, None, index.parse().ok(), rules)?
+            } else {
+                let name = location
+                    .strip_prefix("query.")
+                    .or_else(|| location.strip_prefix("body."))?;
+                request_name(route, Some(name), None, rules)?
+            };
+            Some((reason, Side::Request.as_str()))
+        }
+        Side::Response => {
+            // A response field of an array is named by the field inside the array.
+            let field = location.rsplit("[].").next().unwrap_or(location);
+            let reason = response_name(field, &format!("{method} {route}"), rules)?;
+            Some((reason, Side::Response.as_str()))
+        }
+    }
+}
+
+/// The reason code the console shows for a name's source.
+fn reason_code(source: NameSource) -> &'static str {
+    match source {
+        NameSource::Field => "field_name",
+        NameSource::Parent => "parent_name",
+        NameSource::Endpoint => "endpoint_name",
+        NameSource::Route => "route_word",
+    }
+}
+
+/// The automatic changes of the last [`EVENTS_DAYS`] days, newest first: one event for each entry a
+/// version changed, with the entry it replaced and the entry it became. Every event is `open`: the
+/// console's acknowledgements are not recorded yet.
+///
+/// # Errors
+/// A 500 when a read of the configuration history fails.
+async fn automatic_events(state: &ControlState, name: &str) -> ApiResult<Vec<Value>> {
+    let since = now_millis().saturating_sub(EVENTS_DAYS.saturating_mul(DAY_MILLIS));
+    let versions = site_spec_store::automatic_history(&state.pool, name, EVENTS_MAX).await?;
+    let mut events = Vec::new();
+    for version in versions {
+        if version.changed_at.timestamp_millis() < since {
+            break;
+        }
+        let Some(spec) = version.spec.as_ref() else {
+            continue;
+        };
+        let before = match version.version.checked_sub(1) {
+            Some(earlier) if earlier > 0 => site_spec_store::version(&state.pool, name, earlier)
+                .await?
+                .and_then(|entry| entry.spec),
+            _ => None,
+        };
+        for (index, (previous, slot)) in
+            changed_slots(before.as_ref(), spec).into_iter().enumerate()
+        {
+            events.push(automatic_event(&version, index, previous, slot));
+        }
+    }
+    Ok(events)
+}
+
+/// One automatic change in the shape the console reads: the entry it replaced and the entry it
+/// became, the side of the position, and the reason. A pause is for evidence that points at other
+/// kinds. The status is `open` until the console acknowledges or undoes the event, which is not
+/// recorded yet.
+fn automatic_event(
+    version: &site_spec_store::HistoryEntry,
+    index: usize,
+    previous: Option<&ObjectSlot>,
+    slot: &ObjectSlot,
+) -> Value {
+    let reason = (version.change == site_spec_store::Change::AutoPause)
+        .then(|| serde_json::json!({ "code": "evidence_drift" }));
+    serde_json::json!({
+        "id": format!("v{}-{index}", version.version),
+        "kind": version.change.as_str(),
+        "at": version.changed_at.to_rfc3339(),
+        "version": version.version,
+        "key": slot.key,
+        "side": side_of_key(&slot.key).as_str(),
+        "before": { "class": previous.map(|entry| entry.class.as_str()), "entry": previous },
+        "after": { "class": slot.class, "entry": slot },
+        "reason": reason,
+        "impact": [],
+        "examples": [],
+        "status": "open",
+        "handled": null,
+        "note": version.note,
+    })
+}
+
+/// The entries of `after` that `before` does not hold as they are, each with the entry it replaced.
+/// With no earlier configuration, every paused entry counts as changed.
+fn changed_slots<'a>(
+    before: Option<&'a SiteSpec>,
+    after: &'a SiteSpec,
+) -> Vec<(Option<&'a ObjectSlot>, &'a ObjectSlot)> {
+    after
+        .objects()
+        .slots()
+        .iter()
+        .filter_map(|slot| {
+            let previous = before.and_then(|spec| {
+                spec.objects()
+                    .slots()
+                    .iter()
+                    .find(|earlier| earlier.key == slot.key)
+            });
+            match (before, previous) {
+                (Some(_), Some(earlier)) if earlier == slot => None,
+                (Some(_), previous) => Some((previous, slot)),
+                (None, _) => slot.paused.then_some((None, slot)),
+            }
+        })
+        .collect()
 }
 
 /// The site's record: its configuration, and the generation the writes are checked against.
 ///
 /// # Errors
 /// `SITE_NOT_FOUND` when no such site exists.
-async fn site_of(state: &ControlState, name: &str) -> ApiResult<SiteRecord> {
+pub(crate) async fn site_of(state: &ControlState, name: &str) -> ApiResult<SiteRecord> {
     site_spec_store::get(&state.pool, name)
         .await?
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "SITE_NOT_FOUND"))
 }
 
-fn slot_not_found() -> ApiError {
+pub(crate) fn slot_not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "SLOT_NOT_FOUND")
 }
 
@@ -406,7 +717,7 @@ fn slot_not_found() -> ApiError {
 /// `SLOT_NOT_FOUND` (404) for an id that names no position of the site, `SLOT_IS_DECLARED`
 /// and `SLOT_NOT_REQUEST` (409) for a position the action does not apply to, and a 500 when
 /// a query fails.
-async fn learned_request(
+pub(crate) async fn learned_request(
     state: &ControlState,
     name: &str,
     spec: &SiteSpec,
@@ -419,7 +730,7 @@ async fn learned_request(
     let row = store::position(&state.pool, name, row_id)
         .await?
         .ok_or_else(slot_not_found)?;
-    if spec.objects().class_of(&row.slot).is_some() {
+    if spec.objects().declared_class_of(&row.slot).is_some() {
         return Err(ApiError::new(StatusCode::CONFLICT, "SLOT_IS_DECLARED"));
     }
     if Side::parse(&row.side) != Some(Side::Request) {
@@ -442,7 +753,7 @@ fn changed_or_conflict(changed: bool) -> ApiResult<StatusCode> {
 ///
 /// # Errors
 /// `INTERNAL` when a stored state or side is not one this build reads.
-fn merged(spec: &SiteSpec, learned: &[PositionRow]) -> ApiResult<Vec<SlotRow>> {
+fn merged(spec: &SiteSpec, learned: &[PositionRow], view: &AgentView) -> ApiResult<Vec<SlotRow>> {
     let objects = spec.objects();
     let by_key: BTreeMap<&str, &PositionRow> =
         learned.iter().map(|row| (row.slot.as_str(), row)).collect();
@@ -452,8 +763,8 @@ fn merged(spec: &SiteSpec, learned: &[PositionRow]) -> ApiResult<Vec<SlotRow>> {
         .map(|slot| declared_row(slot, by_key.get(slot.key.as_str()).copied()))
         .collect();
     for row in learned {
-        if objects.class_of(&row.slot).is_none() {
-            rows.push(learned_row(row)?);
+        if objects.declared_class_of(&row.slot).is_none() {
+            rows.push(learned_row(row, view)?);
         }
     }
     Ok(rows)
@@ -462,9 +773,11 @@ fn merged(spec: &SiteSpec, learned: &[PositionRow]) -> ApiResult<Vec<SlotRow>> {
 /// A declared position: confirmed, or suspended when the learned row says its evidence now
 /// points at other kinds. Its side comes from the learned row when there is one.
 fn declared_row(slot: &ObjectSlot, learned: Option<&PositionRow>) -> SlotRow {
-    let state = match learned {
-        Some(row) if row.state == "suspended" => PositionState::Suspended,
-        _ => PositionState::Confirmed,
+    let suspended = slot.paused || learned.is_some_and(|row| row.state == "suspended");
+    let state = if suspended {
+        PositionState::Suspended
+    } else {
+        PositionState::Confirmed
     };
     let side = learned
         .and_then(|row| Side::parse(&row.side))
@@ -483,22 +796,41 @@ fn declared_row(slot: &ObjectSlot, learned: Option<&PositionRow>) -> SlotRow {
         basis,
         last_seen: learned.and_then(|row| last_seen(row.last_day)),
         dismissed: false,
+        in_effect: !slot.paused,
+        agent_status: None,
     }
 }
 
-/// A learned position the configuration does not declare.
+/// A learned position the configuration does not declare. Its basis names the agent's
+/// confidence when the agent gave its kind, and says so when the agent and the rules
+/// disagree.
 ///
 /// # Errors
-/// `INTERNAL` when the stored state or side is not one this build reads.
-fn learned_row(row: &PositionRow) -> ApiResult<SlotRow> {
+/// `INTERNAL` when the stored state, side or source is not one this build reads.
+fn learned_row(row: &PositionRow, view: &AgentView) -> ApiResult<SlotRow> {
     let state = PositionState::parse(&row.state)
         .ok_or_else(|| ApiError::internal("object position state", &row.state))?;
     let side = Side::parse(&row.side)
         .ok_or_else(|| ApiError::internal("object position side", &row.side))?;
+    let source = match row.source.as_str() {
+        "agent" => Origin::Agent,
+        "rule" => Origin::Rule,
+        other => return Err(ApiError::internal("object position source", other)),
+    };
+    let answer = view.latest(&row.slot).filter(|call| call.choice.is_some());
     let basis = match state {
         PositionState::Retired => format!("超过 {RETIRE_DAYS} 天没有使用"),
+        PositionState::Ambiguous if answer.is_some_and(|call| call.rule_choice.is_some()) => {
+            "与规则不一致".to_owned()
+        }
         PositionState::Ambiguous => "已标为不确定，不再提议".to_owned(),
         _ if row.dismissed && row.class.is_none() => "已忽略，证据明显变化后再提议".to_owned(),
+        _ if source == Origin::Agent && row.class.is_some() => {
+            match answer.and_then(|call| call.confidence) {
+                Some(percent) => format!("学习代理 {percent}%"),
+                None => "学习代理".to_owned(),
+            }
+        }
         _ if row.class.is_some() && row.votes > 0 => evidence_basis(row),
         _ => "学习中，尚无提议".to_owned(),
     };
@@ -508,10 +840,12 @@ fn learned_row(row: &PositionRow) -> ApiResult<SlotRow> {
         key: row.slot.clone(),
         class: row.class.clone(),
         state,
-        source: Origin::Rule,
+        source,
         basis,
         last_seen: last_seen(row.last_day),
         dismissed: row.dismissed,
+        in_effect: false,
+        agent_status: view.phase_of(row),
     })
 }
 
@@ -652,20 +986,26 @@ fn share_of(uses: i64, total: i64) -> f64 {
 }
 
 /// The id of a learned position: `s` and its row's identity.
-fn learned_id(id: i64) -> String {
+pub(crate) fn learned_id(id: i64) -> String {
     format!("s{id}")
 }
 
 /// The learned row an id names, when the id has the learned form.
-fn learned_row_id(id: &str) -> Option<i64> {
+pub(crate) fn learned_row_id(id: &str) -> Option<i64> {
     id.strip_prefix('s')?.parse().ok()
 }
 
 /// The id of a declared position: `a` and the leading bytes of the digest of its key.
 fn declared_id(key: &str) -> String {
+    digest_id('a', key)
+}
+
+/// An id made of `prefix` and the leading bytes of the digest of a position key, so that it stays
+/// the same while the key does.
+fn digest_id(prefix: char, key: &str) -> String {
     let digest = Sha256::digest(key.as_bytes());
     let mut id = String::with_capacity(1 + 2 * DIGEST_BYTES);
-    id.push('a');
+    id.push(prefix);
     for byte in &digest[..DIGEST_BYTES] {
         id.push(char::from(HEX[usize::from(*byte >> 4)]));
         id.push(char::from(HEX[usize::from(*byte & 0x0f)]));
@@ -712,7 +1052,7 @@ fn last_seen(last_day: i64) -> Option<String> {
 }
 
 /// The first UTC day of the learning window at `now`, counted as the learning pass counts it.
-fn oldest_day(now: i64) -> u64 {
+pub(crate) fn oldest_day(now: i64) -> u64 {
     day_of(u64::try_from(now).unwrap_or(0)).saturating_sub(WINDOW_DAYS - 1)
 }
 
@@ -763,6 +1103,7 @@ mod tests {
             state: state.to_owned(),
             class: class.map(str::to_owned),
             dismissed: false,
+            source: "rule".to_owned(),
             votes: 0,
             sessions: 0,
             share_per_mille: 0,
@@ -842,7 +1183,7 @@ mod tests {
                 Some("doctor"),
             ),
         ];
-        let rows = merged(&spec(), &learned).unwrap();
+        let rows = merged(&spec(), &learned, &AgentView::idle()).unwrap();
         assert_eq!(rows.len(), 3);
         let appointments = &rows[0];
         assert_eq!(appointments.key, "GET /api/appointments [].doc_id");
@@ -862,7 +1203,11 @@ mod tests {
 
     #[test]
     fn a_learned_row_in_an_unknown_state_is_an_internal_error() {
-        let error = learned_row(&row(1, "GET /x path[1]", "request", "bogus", None)).unwrap_err();
+        let error = learned_row(
+            &row(1, "GET /x path[1]", "request", "bogus", None),
+            &AgentView::idle(),
+        )
+        .unwrap_err();
         assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -872,7 +1217,7 @@ mod tests {
             row(1, "GET /other/{id} path[1]", "request", "pending", None),
             row(2, "GET /old/{id} path[1]", "request", "retired", None),
         ];
-        let rows = merged(&spec(), &learned).unwrap();
+        let rows = merged(&spec(), &learned, &AgentView::idle()).unwrap();
         let counts = counts_of(1, &rows);
         assert_eq!(
             (
@@ -1022,6 +1367,112 @@ mod tests {
         let window = i64::try_from(WINDOW_DAYS).expect("a small window");
         assert_eq!(window_start_millis(now), (10 - (window - 1)) * DAY_MILLIS);
     }
+
+    /// A site declaring the given entries, for the entries an automatic change touched.
+    fn site_with_slots(slots: &str) -> SiteSpec {
+        let text = format!(
+            r#"{{"name": "clinic", "hosts": ["clinic.example.com"], "origin": "http://10.0.0.5:8080",
+                "session": {{"cookie": "SESSIONID"}}, "entries": ["/login"],
+                "objects": {{"classes": [{{"id": "doctor", "name": "医生"}}], "slots": [{slots}]}}}}"#
+        );
+        SiteSpec::from_json(&text).expect("test spec")
+    }
+
+    #[test]
+    fn bootstrap_candidates_name_the_positions_the_site_uses_and_does_not_declare() {
+        let spec = site_with_slots(
+            r#"{"key": "GET /api/notes [].author_id", "class": "doctor", "source": "admin"}"#,
+        );
+        let tally = |sessions: &[&str]| {
+            let mut tally = Tally::default();
+            for session in sessions {
+                tally.add(session);
+            }
+            tally
+        };
+        let tallies = BTreeMap::from([
+            ("GET /doctor/{id} path[1]".to_owned(), tally(&["a", "b"])),
+            ("GET /api/doctors [].id".to_owned(), tally(&["a", "b", "c"])),
+            ("GET /api/docs [].id".to_owned(), tally(&["a"])),
+            ("GET /api/notes [].author_id".to_owned(), tally(&["a"])),
+            ("GET /api/me [].name".to_owned(), tally(&["a"])),
+        ]);
+        let candidates = candidates_of(&spec, &tallies);
+        // The declared position and the field that names no kind are left out. The most used
+        // comes first.
+        assert_eq!(candidates.len(), 3);
+        let first = &candidates[0];
+        assert_eq!(first["key"], "GET /api/doctors [].id");
+        assert_eq!(first["side"], "response");
+        assert_eq!(first["kind"], "doctor");
+        assert_eq!(first["name"], "医生");
+        assert_eq!(first["reason"]["code"], "endpoint_name");
+        assert_eq!(first["reason"]["word"], "doctor");
+        assert_eq!(
+            (first["uses"].as_u64(), first["sessions"].as_u64()),
+            (Some(3), Some(3))
+        );
+        assert!(first["note"].is_null());
+        assert!(first["id"].as_str().is_some_and(|id| id.starts_with('c')));
+        let second = &candidates[1];
+        assert_eq!(second["key"], "GET /doctor/{id} path[1]");
+        assert_eq!(second["side"], "request");
+        assert_eq!(second["reason"]["code"], "route_word");
+        assert_eq!(second["kind"], "doctor");
+        // An abbreviation has no class of the site yet, so its candidate asks for a look.
+        let third = &candidates[2];
+        assert_eq!(
+            (third["kind"].as_str(), third["name"].is_null()),
+            (Some("doc"), true)
+        );
+        assert!(third["note"].is_string());
+    }
+
+    #[test]
+    fn an_automatic_pause_event_names_its_entries_its_side_and_its_reason() {
+        let entry = r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule"}"#;
+        let before = site_with_slots(entry);
+        let paused = site_with_slots(&entry.replace("\"rule\"", "\"rule\", \"paused\": true"));
+        let version = site_spec_store::HistoryEntry {
+            version: 3,
+            change: site_spec_store::Change::AutoPause,
+            rollback_of: None,
+            note: Some("学习任务自动暂停了 1 个位置".to_owned()),
+            changed_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("the epoch"),
+            spec: Some(paused.clone()),
+        };
+        let event = automatic_event(
+            &version,
+            0,
+            Some(&before.objects().slots()[0]),
+            &paused.objects().slots()[0],
+        );
+        assert_eq!(event["id"], "v3-0");
+        assert_eq!(event["kind"], "auto_pause");
+        assert_eq!(event["status"], "open");
+        assert_eq!(event["side"], "request");
+        assert_eq!(event["before"]["class"], "doctor");
+        // An unpaused entry has no `paused` key, and the paused one says so.
+        assert_eq!(event["before"]["entry"]["paused"], Value::Null);
+        assert_eq!(event["after"]["entry"]["paused"], true);
+        assert_eq!(event["reason"]["code"], "evidence_drift");
+    }
+
+    #[test]
+    fn an_automatic_pause_shows_the_entry_it_paused_and_the_entry_before_it() {
+        let entry = r#"{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "rule"}"#;
+        let before = site_with_slots(entry);
+        let paused = site_with_slots(&entry.replace("\"rule\"", "\"rule\", \"paused\": true"));
+        let changed = changed_slots(Some(&before), &paused);
+        assert_eq!(changed.len(), 1);
+        let (previous, slot) = changed[0];
+        assert_eq!(previous.map(|entry| entry.paused), Some(false));
+        assert!(slot.paused);
+        // The same configuration changes nothing, and a version with no earlier one shows its pauses.
+        assert!(changed_slots(Some(&paused), &paused).is_empty());
+        assert_eq!(changed_slots(None, &paused).len(), 1);
+        assert!(changed_slots(None, &before).is_empty());
+    }
 }
 
 /// Passes against a migrated PostgreSQL database, which they need `XSHIELD_DATABASE_URL` for.
@@ -1034,7 +1485,7 @@ mod live_tests {
     use sqlx::{PgPool, postgres::PgPoolOptions};
     use xshield_core::context::learning::{Vote, day_of};
     use xshield_postgres::{
-        object_learning_store::{Judgement, LearnedState},
+        object_learning_store::{Judgement, LearnedState, Source},
         site_spec_store,
     };
 
@@ -1117,6 +1568,7 @@ mod live_tests {
             sessions: 5,
             share_per_mille: 950,
             last_day: today,
+            source: Source::Rule,
         };
         store::put_judgement(&state.pool, &name, generation, &proposal, now)
             .await
@@ -1227,6 +1679,83 @@ mod live_tests {
             .0;
         assert_eq!(candidates.window_hours, BOOTSTRAP_WINDOW_HOURS);
         assert!(candidates.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn bootstrap_counts_the_last_day_of_decisions_and_skips_declared_positions() {
+        let (state, name) = seeded_site("bootstrap").await;
+        let now = now_millis();
+        crate::test_support::ensure_days(&state.pool, &[now, now - 2 * DAY_MILLIS]).await;
+        let minutes_ago = |minutes: i64| now - minutes * 60_000;
+        // Three uses of the doctor position in the window, by two sessions, and one use a day
+        // older than the window, which counts for nothing.
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(5),
+            "req_boot_1",
+            "a",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_boot_r1")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(4),
+            "req_boot_2",
+            "b",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_boot_r2")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            minutes_ago(3),
+            "req_boot_3",
+            "b",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_boot_r3")]),
+        )
+        .await;
+        decide(
+            &state.pool,
+            &name,
+            now - 2 * DAY_MILLIS,
+            "req_boot_4",
+            "c",
+            "fast_allow",
+            json!([value(SLOT, APPOINTMENTS, "req_boot_r4")]),
+        )
+        .await;
+        let body = bootstrap(State(Arc::clone(&state)), Path(name.clone()))
+            .await
+            .expect("bootstrap")
+            .0;
+        assert_eq!(body.records, 3);
+        // The response position the site declares is not a candidate; the doctor position is.
+        let keys: Vec<&str> = body
+            .candidates
+            .iter()
+            .filter_map(|candidate| candidate["key"].as_str())
+            .collect();
+        assert_eq!(keys, [SLOT]);
+        let candidate = &body.candidates[0];
+        assert_eq!(
+            (candidate["uses"].as_u64(), candidate["sessions"].as_u64()),
+            (Some(3), Some(2))
+        );
+        assert_eq!(
+            (
+                candidate["kind"].as_str(),
+                candidate["name"].as_str(),
+                candidate["reason"]["code"].as_str(),
+            ),
+            (Some("doctor"), Some("医生"), Some("route_word"))
+        );
+        assert!(candidate["note"].is_null());
     }
 
     #[tokio::test]

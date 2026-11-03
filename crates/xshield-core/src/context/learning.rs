@@ -232,11 +232,50 @@ impl Evidence {
         kinds
     }
 
+    /// The response positions the votes were shown at, most votes first, ties by key.
+    #[must_use]
+    pub fn flows(&self) -> Vec<FlowShare> {
+        let mut counts: BTreeMap<&str, (u32, BTreeSet<&str>)> = BTreeMap::new();
+        for ((session, _), positions) in &self.votes {
+            for position in positions.iter().collect::<BTreeSet<&String>>() {
+                let entry = counts.entry(position.as_str()).or_default();
+                entry.0 = entry.0.saturating_add(1);
+                entry.1.insert(session.as_str());
+            }
+        }
+        let mut flows: Vec<FlowShare> = counts
+            .into_iter()
+            .map(|(from, (votes, sessions))| FlowShare {
+                from: from.to_owned(),
+                votes,
+                sessions: saturating_count(sessions.len()),
+            })
+            .collect();
+        flows.sort_by(|left, right| {
+            right
+                .votes
+                .cmp(&left.votes)
+                .then_with(|| left.from.cmp(&right.from))
+        });
+        flows
+    }
+
     /// The most recent day with a vote, when there is one.
     #[must_use]
     pub fn last_day(&self) -> Option<u64> {
         self.votes.keys().map(|(_, day)| *day).max()
     }
+}
+
+/// One response position a vote was shown at, with the votes and sessions it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowShare {
+    /// The response position, `METHOD route location`.
+    pub from: String,
+    /// The votes whose value was shown at it.
+    pub votes: u32,
+    /// The distinct sessions among them.
+    pub sessions: u32,
 }
 
 /// A kind the rules propose for a request position.

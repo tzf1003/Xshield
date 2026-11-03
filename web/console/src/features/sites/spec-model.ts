@@ -409,26 +409,27 @@ export function rebaseSpec(
     declarationKey,
   );
   if (declarations.length > 0) advanced.field_kinds = declarations;
-  // The gateway's sections: a draft never edits them, so they come from the newer version unless it changed them.
-  const classes = pick<unknown>(
-    "objects.classes",
-    base.objects?.classes,
-    mine.objects?.classes,
-    latest.objects?.classes,
+  // The object map's classes and confirmed positions are lists the draft adds to and removes from (console design
+  // 4.3), so they merge like the other lists; the learning settings are one value.
+  const classes = mergeList(
+    base.objects?.classes ?? [],
+    mine.objects?.classes ?? [],
+    latest.objects?.classes ?? [],
+    (item) => item.id,
   );
-  const slots = pick<unknown>(
-    "objects.slots",
-    base.objects?.slots,
-    mine.objects?.slots,
-    latest.objects?.slots,
+  const slots = mergeList(
+    base.objects?.slots ?? [],
+    mine.objects?.slots ?? [],
+    latest.objects?.slots ?? [],
+    (item) => item.key,
   );
   const objects: ObjectsSpec | undefined =
-    learning === undefined && classes === undefined && slots === undefined
+    learning === undefined && classes.length === 0 && slots.length === 0
       ? undefined
       : {
           ...(learning === undefined ? {} : { learning }),
-          ...(classes === undefined ? {} : { classes }),
-          ...(slots === undefined ? {} : { slots }),
+          ...(classes.length === 0 ? {} : { classes }),
+          ...(slots.length === 0 ? {} : { slots }),
         };
   const spec: SiteSpec = {
     name: latest.name,

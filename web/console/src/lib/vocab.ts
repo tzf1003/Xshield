@@ -12,6 +12,9 @@ import type {
   JevHealth,
   JevRoute,
   ModelSource,
+  NameReasonCode,
+  ObjectEventKind,
+  ObjectReason,
   ObjectSide,
   ObjectSource,
   ObjectState,
@@ -657,7 +660,9 @@ export const OBJECT_SOURCE_LABEL: Record<ObjectSource, string> = {
   agent: "agent",
 };
 
-/** Words of the drawer's source line and the counters, keyed by the state each one filters on. */
+/** Words of the object map tab: the banner, the cold start and the wizard's object step, the drawer and its suspension
+ *  section, the path positions, the automatic changes and the learning settings. Record text is never written here: it
+ *  arrives as data and is shown as text nodes. */
 export const OBJECT_TEXT = {
   tab: "对象表",
   search: "搜索类别、字段、路径",
@@ -672,10 +677,12 @@ export const OBJECT_TEXT = {
   none: "没有符合条件的位置。",
   columns: { slot: "位置", state: "类别与状态", source: "来源", basis: "依据", seen: "最近出现" },
   banner: {
-    paused: "已自动暂停",
-    task: (time: string) => `学习任务 ${time}`,
     view: "查看",
-    undo: "撤销",
+    knowIt: "知道了",
+    more: "等",
+    pausedLine: (count: number) => `${count} 个位置已自动暂停，判定已退回名字推断：`,
+    anomalyLine: (count: number) => `${count} 个已确认的位置出现异常，自动暂停已关闭，仍在生效：`,
+    taskLine: (time: string, count: number) => `学习任务 ${time} 自动收紧了 ${count} 个位置：`,
   },
   noClasses: "还没有类别。学习中的位置在“按位置”里可以看到。",
   classCard: {
@@ -688,6 +695,7 @@ export const OBJECT_TEXT = {
     routes: "相关路由",
     pick: "选一个类别，查看它的位置。",
     positions: "位置",
+    paused: (count: number) => `已暂停 ${count}`,
   },
   drawer: {
     flowsOut: "这个位置的值之后用在：",
@@ -709,7 +717,7 @@ export const OBJECT_TEXT = {
     confirmPreview: "确认后：",
     confirmLine: (side: string, key: string, cls: string, scope: string) =>
       `对象表 ＋ ${side} ${key} 归为${cls}（仅 ${scope}）`,
-    noField: "路径参数没有字段名，不能用字段归类确认。",
+    noField: "这个位置没有字段名，不能用字段归类确认。",
     noClass: "还没有提议的类别，先用“改为其他类别…”选一个。",
     confirm: "确认…",
     reclass: "改为其他类别…",
@@ -717,6 +725,59 @@ export const OBJECT_TEXT = {
     ignore: "忽略",
     dismissed: "已忽略这个位置的提议，学习任务不再提议同一结论。",
     markedAmbiguous: "已标为有歧义，之后交给 Jev 判定。",
+  },
+  suspension: {
+    title: "暂停",
+    paused: "已暂停",
+    pausedBy: (at: string, version: number | null) =>
+      version === null ? `${at} · 学习任务` : `${at} · 学习任务 · v${version}`,
+    pausedByAdmin: (at: string) => `${at} · 管理员`,
+    reason: "原因",
+    examples: "示例",
+    previous: "暂停前",
+    previousLine: (cls: string, date: string, who: string) => `${cls}（${date} 由 ${who} 确认）`,
+    previousNone: "没有已确认的类别",
+    now: "现在",
+    nowSame: (basis: string, kind: string) =>
+      `判定退回名字推断：${basis} 得到 ${kind}。名字推断与暂停前相同，快速放行多半不变。想让它更严，可以标为有歧义。`,
+    nowDiff: (basis: string, kind: string) =>
+      `判定退回名字推断：${basis} 得到 ${kind}。与暂停前不同，按 ${kind} 核验。`,
+    nowNone: "判定退回名字推断：没有可用的名字，这个位置的值都交给 Jev。",
+    inEffect: (cls: string) => `仍在生效：判定照常按 ${cls} 核验，暂停没有停用它。`,
+    effectOff: "自动暂停已关闭，检测到异常后只提示，不停用。",
+    notApplied: "暂停尚未影响判定，网关升级后才会停用它。",
+    evidence: "证据现在",
+    warn: "暂停属于收紧，已经生效。重新确认会恢复快速放行，需要保存。",
+    keepPaused: "保持暂停",
+    keepEffect: "保持生效",
+    keptPaused: "已保持暂停。这个位置继续按名字推断判定，之后可以在这里重新确认。",
+    keptEffect: "已保持生效。这次异常只做提示，位置仍按原来的类别核验。",
+    reconfirm: (cls: string) => `重新确认为${cls}…`,
+    reject: "驳回",
+    nameOnly: "名字推断",
+    inEffectShort: "仍在生效",
+    stopUse: "暂停使用…",
+    stopNote: "保存后这个位置不再按对象表核验，判定退回名字推断。",
+    stopMissing: "这个位置不在配置里，没有要停用的条目。",
+    ambiguousAfterStop: "先暂停使用并保存，再驳回或标为有歧义。",
+  },
+  pathParam: {
+    label: (method: string, route: string, ordinal: number, segment: number) =>
+      `路由 ${method} ${route} 的第 ${ordinal} 个路径参数（path[${segment}]）`,
+    literal: (method: string, route: string, segment: number) =>
+      `路由 ${method} ${route} 的第 ${segment} 段（从 0 数，不是路径参数）`,
+    template: "被指到的段",
+    routeOnly: "只对这个方法和路由，精确匹配；路由改版后是新的位置。",
+    after: (label: string, cls: string) => `对象表 ＋ ${label} = ${cls}`,
+    confirmHint: "确认后：",
+    noProposal: "还没有提议的类别，先用“改为其他类别…”选一个。",
+    pickNote: "选好类别后再确认。",
+    inDraft: "已在草稿里",
+    inDraftReason: (cls: string) => `草稿里这个位置已归为${cls}，保存或撤销草稿后再改。`,
+    full: "对象表最多 2,048 个位置，类别最多 64 个。先清理已过期的位置。",
+    unsupported: "路径参数的确认需要网关升级，暂不可用。现在可以驳回或标为有歧义。",
+    confirmLabel: "确认…",
+    pickClass: "改为其他类别…",
   },
   declare: {
     title: "声明字段归类",
@@ -763,8 +824,12 @@ export const OBJECT_TEXT = {
     pending: "网关接受对象表的学习设置之后，这里的开关才能保存。现在只能查看当前的值。",
     autoLearn: { name: "自动学习", help: "关闭后只用手工声明，已确认的位置照常生效" },
     autoTighten: {
-      name: "自动收紧",
-      help: "只会让快速放行变少的改动是否自动生效；关闭后也进入待确认",
+      name: "自动收紧（推荐）",
+      help: "只会让快速放行变少的改动自动生效，例如把同时指医生和文档的 doc 拆成两个类别。每次都写成新版本，作者为“学习任务”，可以撤销。关闭后这类改动进入待确认。",
+    },
+    autoPause: {
+      name: "自动暂停（推荐）",
+      help: "已确认的位置出现异常时自动停用，判定退回名字推断。异常包括：证据转向别的类别、按它快速放行后源站 403/404 比例升高、同一位置 Jev 拒绝增多。恢复属于放宽，需要你确认。关闭后只提示，不停用。",
     },
     agent: {
       name: "agent",
@@ -782,7 +847,13 @@ export const OBJECT_TEXT = {
       uses: "次使用",
       sessions: "个会话",
     },
-    autoPause: { name: "自动暂停", help: "已确认位置出现异常时自动暂停" },
+    status: {
+      schedule: (time: string) => `学习任务每小时执行一次，上次 ${time}`,
+      never: "学习任务还没有执行过",
+      tightened: (count: number) => `近 7 天自动收紧 ${count} 次`,
+      paused: (count: number) => `近 7 天自动暂停 ${count} 次`,
+      notApplied: "开关会保存，执行要等网关升级后生效",
+    },
     on: "开",
     off: "关",
     unchanged: "没有改动",
@@ -791,19 +862,135 @@ export const OBJECT_TEXT = {
   coldStart: {
     title: "还没有对象表",
     intro: (hours: number, count: number) =>
-      `从最近 ${hours} 小时的请求里识别出 ${count} 个名字明确的类别。确认后它们作为学习的起点，其余位置照常判定。`,
-    none: "最近的请求里没有名字明确的位置。有请求后再来看，或在下面的声明里手工归类。",
+      `从最近 ${hours} 小时的请求里识别出 ${count} 个名字明确的位置。确认后它们作为学习的起点，其余位置照常判定。`,
+    windowLine: (hours: number, records: number) =>
+      `最近 ${hours} 小时 · ${records.toLocaleString("en-US")} 条判定记录`,
+    explain:
+      "下面是名字明确的位置。确认后同一类别的值可以直接核验，作为学习的起点；其余位置照常判定。",
+    explainSave: "确认走保存对话框，会产生新版本，不改变站点模式。",
+    selectAll: (picked: number, total: number) => `全选（已选 ${picked} / ${total}）`,
+    filter: "筛选位置",
+    noTraffic: "还没有判定记录",
+    noTrafficText:
+      "站点刚创建，还没有经过网关的请求。开始接流量后，名字明确的位置会出现在对象表顶部，到时再确认。",
+    none: "最近的请求里没有名字明确的位置。有请求后再来看，或在对象表里手工声明。",
+    noneChosen: "没有选中的位置",
     pathOnly: "只在路径参数里，没有字段名，不能确认；学习会处理。",
     later: "稍后再说",
+    skip: "跳过，进入站点",
+    enter: "进入站点",
     skipped: "对象表还是空的，学习照常进行。",
-    confirm: (count: number) => `确认 ${count} 个类别…`,
+    errorHint: "跳过不影响站点，之后可以在对象表里确认同一份列表。",
+    confirm: (count: number) => `确认 ${count} 个位置…`,
+    summary: (fields: number, slots: number, classes: number, names: string) =>
+      `确认后：字段归类 ＋${fields} 条 · 对象表位置 ＋${slots} 条 · 新类别 ${classes} 个${names === "" ? "" : `（${names}）`}`,
+    changed: "已改",
+    changedFrom: (proposal: string) => `系统提议：${proposal}`,
+    note: "名字推断的规则，与判定时相同",
+    newClass: "＋ 新类别…",
+    newClassId: "新类别的 id",
+    newClassName: "名字",
+    conflict: (cls: string) => `草稿里这个位置已归为${cls}，保存或撤销草稿后再改。`,
+    inDraft: "已在草稿里",
   },
   wizard: {
     title: "对象表（可选）",
     text: "创建后，最近的请求里名字明确的位置会列为候选类别，可以在对象表里一次确认。现在可以跳过。",
-    open: "创建后打开对象表",
+    open: "创建后确认对象表起点（可跳过）",
+    step: "对象表起点（可选）",
+    saved: (count: number, version: number) =>
+      `已确认 ${count} 个位置，版本 v${version}。其余位置继续学习。`,
+    missing: "这个站点不存在，已回到站点列表。",
+  },
+  events: {
+    title: "自动变更",
+    meta: (days: number, open: number) => `近 ${days} 天 · 未处理 ${open}`,
+    open: "未处理",
+    all: "全部",
+    kind: "类型",
+    kindAll: "全部",
+    empty: "没有符合条件的变更。",
+    kinds: { auto_tighten: "自动收紧", auto_pause: "自动暂停", anomaly: "检测到异常" },
+    task: "学习任务",
+    version: (version: number) => `v${version}`,
+    scope: (from: string, to: string) => `范围 ${from} → ${to}`,
+    reason: "原因",
+    impact: "影响",
+    sample: "示例",
+    anomalyNote: "自动暂停已关闭，只提示，不停用。",
+    statusOpen: "未处理",
+    acknowledged: (by: string, at: string) => `已知悉 · ${by} ${at}`,
+    undone: (version: number | null) => (version === null ? "已撤销" : `已撤销 · v${version}`),
+    superseded: "已被后续改动取代（之后又改了这个位置，不可撤销）",
+    actions: {
+      knowIt: "知道了",
+      viewVersion: "查看版本",
+      undo: "撤销…",
+      open: "打开位置",
+      keepPaused: "保持暂停",
+      keepEffect: "保持生效",
+      reconfirm: "重新确认…",
+    },
+    blockedAfter: "这个位置之后又改过，请在位置抽屉里处理。",
+    blockedDraft: "草稿里有未保存的改动涉及这个位置。",
+    noteUndo: (version: number) => `撤销自动收紧 v${version}`,
+    noteReconfirm: (key: string, version: number | null) =>
+      version === null ? `重新确认 ${key}（自动暂停）` : `重新确认 ${key}（自动暂停 v${version}）`,
+    noteWizard: "接入时确认对象表起点",
+    failed: "这次操作没有完成，请重试。",
+    nothingToUndo: "这次变更没有可以放回的条目。",
   },
   dismissInvalid: "这个位置已经不在对象表里，刷新后再试。",
+};
+
+/** The name rule that named a class, in words (console design 1.5). */
+export function nameReasonText(
+  code: NameReasonCode,
+  word: string | null,
+  field: string | null,
+): string {
+  switch (code) {
+    case "field_name":
+      return `字段名 ${field ?? "—"}`;
+    case "parent_name":
+      return `裸 id，取父对象 ${word ?? "—"}`;
+    case "endpoint_name":
+      return `裸 id，取接口名 ${word ?? "—"}`;
+    case "route_word":
+      return `路由词 ${word ?? "—"} 紧挨在前`;
+  }
+}
+
+/** A share from 0 to 1 in whole percent; a missing share is a dash. */
+export function percentOf(share: number | null | undefined): string {
+  return share === null || share === undefined ? "—" : `${Math.round(share * 100)}%`;
+}
+
+/** The evidence of an automatic change or a pause, in words (console design 2.3, the table of its reasons). */
+export function reasonText(reason: ObjectReason, side: ObjectSide, cls: string | null): string {
+  const response = side === "response";
+  switch (reason.code) {
+    case "evidence_drift": {
+      const now = response ? "之后用在" : "来自";
+      const before = response ? "用在" : "来自";
+      return `证据转向：${percentOf(reason.after)} 的值${now} ${reason.key ?? "—"}（之前 ${percentOf(reason.before)} ${before} ${reason.key_before ?? "—"}）`;
+    }
+    case "origin_4xx_rise":
+      return `快速放行后源站 ${reason.status ?? "403/404"} 比例从 ${percentOf(reason.before)} 升到 ${percentOf(reason.after)}（${reason.days ?? "—"} 天 ${reason.total ?? "—"} 次中 ${reason.hits ?? "—"} 次）`;
+    case "jev_deny_rise":
+      return `Jev 拒绝增多：${reason.days ?? "—"} 天 ${reason.after ?? "—"} 次，之前 ${reason.before ?? "—"} 次`;
+    case "split": {
+      const [first = "—", second = "—"] = reason.classes ?? [];
+      return `${cls ?? "—"} 同时指两类对象，拆成 ${first} 与 ${second}`;
+    }
+  }
+}
+
+/** The kinds of automatic change, with their icon. */
+export const OBJECT_EVENT_INFO: Record<ObjectEventKind, { name: string; icon: string }> = {
+  auto_tighten: { name: "自动收紧", icon: "●" },
+  auto_pause: { name: "自动暂停", icon: "▲" },
+  anomaly: { name: "检测到异常", icon: "▲" },
 };
 
 /** The messages of field declarations (lib/objects-validate.ts). */
@@ -820,6 +1007,19 @@ export const DECLARE_TEXT = {
     `字段 ${field} 在重叠的范围里已归为 ${kind}，不能同时归为别的类别`,
   shape: (where: string) => `字段归类 ${where} 的格式不对`,
   learningShape: "学习设置的格式不对",
+  classesShape: "对象表的类别格式不对",
+  slotsShape: "对象表的位置格式不对",
+  classShape: (index: number) => `对象表第 ${index} 个类别的格式不对`,
+  slotShape: (index: number) => `对象表第 ${index} 个位置的格式不对`,
+  classCountMax: "对象表最多 64 个类别",
+  slotCountMax: "对象表最多 2,048 个位置",
+  classDuplicate: (id: string) => `类别 ${id} 重复了`,
+  classNameEmpty: "类别名不能为空",
+  classNameLong: "类别名最多 32 个字符",
+  slotDuplicate: (key: string) => `位置 ${key} 在对象表里已经有一条`,
+  slotClassUnknown: (key: string, cls: string) => `位置 ${key} 的类别 ${cls} 还没有声明`,
+  slotKeyFormat: "位置的格式不对：应为“方法 /路径 位置”",
+  slotKeyLong: "位置键最多 256 个字节",
   unknownKey: (key: string) => `未知字段 ${key}`,
   label: (field: string, kind: string, scope: string | null) =>
     `字段 ${field} 归为${kind}（${scope === null ? "全站" : `仅 ${scope}`}）`,

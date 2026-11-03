@@ -5,9 +5,6 @@ import type {
   BootstrapResponse,
   Evidence,
   ImpactPreview,
-  ObjectsFilter,
-  ObjectsResponse,
-  ObjectSlotDetail,
   ImportResult,
   Insights,
   JevPrompt,
@@ -24,6 +21,11 @@ import type {
   ModelTestResult,
   ModelVersion,
   ModelWrite,
+  ObjectEventsFilter,
+  ObjectEventsResponse,
+  ObjectsFilter,
+  ObjectSlotDetail,
+  ObjectsResponse,
   RequestCounts,
   RequestDetail,
   RequestListResponse,
@@ -169,6 +171,12 @@ export const api = {
   ambiguousSlot: (site: string, id: string) =>
     post<void>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/ambiguous`),
   bootstrap: (site: string) => get<BootstrapResponse>(`/sites/${name(site)}/objects/bootstrap`),
+  /** The learning task's changes and anomalies (console design 6 C2). */
+  objectEvents: (site: string, filter: ObjectEventsFilter) =>
+    get<ObjectEventsResponse>(`/sites/${name(site)}/objects/events${qs({ ...filter })}`),
+  /** Marks an event handled: known, kept paused or kept in effect. Learning state only, no version (C3). */
+  ackEvent: (site: string, id: string) =>
+    post<void>(`/sites/${name(site)}/objects/events/${encodeURIComponent(id)}/ack`),
 
   status: () => get<StatusResponse>("/status"),
   system: () => get<SystemInfo>("/system"),

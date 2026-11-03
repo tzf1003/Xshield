@@ -1,29 +1,102 @@
 {
   "window_hours": 24,
+  "records": 412,
   "candidates": [
     {
+      "id": "c1",
+      "key": "GET /api/doctors [].id",
+      "side": "response",
       "kind": "doctor",
       "name": "医生",
-      "slots": ["GET /api/doctors [].id", "GET /doctor/{id} path[1]"],
-      "note": null
+      "reason": {
+        "code": "field_name",
+        "word": null,
+        "field": "id"
+      },
+      "uses": 140,
+      "sessions": 23,
+      "note": null,
+      "conflict": null
     },
     {
+      "id": "c2",
+      "key": "GET /doctor/{id} path[1]",
+      "side": "request",
+      "kind": "doctor",
+      "name": "医生",
+      "reason": {
+        "code": "route_word",
+        "word": "doctor",
+        "field": null
+      },
+      "uses": 140,
+      "sessions": 23,
+      "note": null,
+      "conflict": null
+    },
+    {
+      "id": "c3",
+      "key": "GET /api/patients [].id",
+      "side": "response",
       "kind": "patient",
       "name": "患者",
-      "slots": ["GET /api/patients [].id", "GET /api/patients/{id} path[2]"],
-      "note": null
+      "reason": {
+        "code": "field_name",
+        "word": null,
+        "field": "id"
+      },
+      "uses": 96,
+      "sessions": 14,
+      "note": null,
+      "conflict": null
     },
     {
+      "id": "c4",
+      "key": "GET /api/patients/{id} path[2]",
+      "side": "request",
+      "kind": "patient",
+      "name": "患者",
+      "reason": {
+        "code": "route_word",
+        "word": "patients",
+        "field": null
+      },
+      "uses": 96,
+      "sessions": 14,
+      "note": null,
+      "conflict": null
+    },
+    {
+      "id": "c5",
+      "key": "GET /api/docs [].id",
+      "side": "response",
       "kind": "doc",
       "name": "文档",
-      "slots": ["GET /api/docs [].id"],
-      "note": "名字是缩写，建议改名为“文档 document”"
+      "reason": {
+        "code": "field_name",
+        "word": null,
+        "field": "id"
+      },
+      "uses": 31,
+      "sessions": 6,
+      "note": "名字是缩写，建议改名为“文档 document”",
+      "conflict": null
     },
     {
+      "id": "c6",
+      "key": "GET /api/records/{id} path[1]",
+      "side": "request",
       "kind": "record",
       "name": "记录",
-      "slots": ["GET /api/records/{id} path[1]"],
-      "note": null
+      "reason": {
+        "code": "route_word",
+        "word": "records",
+        "field": null
+      },
+      "uses": 58,
+      "sessions": 9,
+      "note": null,
+      "conflict": null
     }
   ]
 }

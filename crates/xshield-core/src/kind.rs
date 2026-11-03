@@ -124,6 +124,13 @@ impl Rules {
             fields: advanced.field_kinds().to_vec(),
         }
     }
+
+    /// Whether two words name the same kind under these rules, by the built-in and the site's
+    /// synonym pairs.
+    #[must_use]
+    pub fn relates(&self, left: &str, right: &str) -> bool {
+        related(left, right, &self.synonyms)
+    }
 }
 
 /// Where an origin showed a value.
@@ -314,9 +321,194 @@ fn folded_name(text: &str) -> impl Iterator<Item = u8> + '_ {
         .map(|byte| byte.to_ascii_lowercase())
 }
 
+/// Where a position's name gave it its kind: the reason the console shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameSource {
+    /// The field's own name, or a request key's, is an identifier of the kind.
+    Field,
+    /// A bare `id` takes the kind of the object it belongs to.
+    Parent,
+    /// A bare `id` takes the kind of the endpoint's name.
+    Endpoint,
+    /// A path segment takes the route word before it, or a bare key the route word nearest the
+    /// end of the path.
+    Route,
+}
+
+/// The kind a position's name gives it, and the name it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameReason {
+    /// Where the name was read.
+    pub source: NameSource,
+    /// The kind word the name gives, in the form the rules compare.
+    pub word: String,
+    /// The field name, when the name is a field's own.
+    pub field: Option<String>,
+}
+
+/// The kind a request position's name gives it. `route` is the request's route, `key` the query,
+/// form or body key of the position (`None` for a path position), and `segment` the index of a path
+/// position among the route's segments. A declared key gives no name, since its declaration decides,
+/// and a key that names no identifier gives none either: `name` is a word, not an object.
+#[must_use]
+pub fn request_name(
+    route: &str,
+    key: Option<&str>,
+    segment: Option<usize>,
+    rules: &Rules,
+) -> Option<NameReason> {
+    let Some(key) = key else {
+        let word = first_kind(route_kinds(route, segment))?;
+        return Some(NameReason {
+            source: NameSource::Route,
+            word,
+            field: None,
+        });
+    };
+    if declared_for(&rules.fields, key, route).is_some() {
+        return None;
+    }
+    let (parent, last) = split_field(key);
+    if names_identifier(last) {
+        return Some(NameReason {
+            source: NameSource::Field,
+            word: first_kind(kind_words(last))?,
+            field: Some(key.to_owned()),
+        });
+    }
+    if !kind_words(last).is_empty() {
+        return None;
+    }
+    if let Some(word) = first_kind(kind_words(nearest(parent))) {
+        return Some(NameReason {
+            source: NameSource::Parent,
+            word,
+            field: None,
+        });
+    }
+    let word = first_kind(route_kinds(route, None))?;
+    Some(NameReason {
+        source: NameSource::Route,
+        word,
+        field: None,
+    })
+}
+
+/// The kind a response position's name gives it. `field` is the field as the state keeps it, and
+/// `request` the `METHOD /path` that returned it. A declared field gives no name, and a field whose
+/// name is not an identifier gives none either. A bare `id` takes its parent's kind, else the
+/// endpoint's.
+#[must_use]
+pub fn response_name(field: &str, request: &str, rules: &Rules) -> Option<NameReason> {
+    if declares(Shown { field, request }, rules) {
+        return None;
+    }
+    let (parent, last) = split_field(field);
+    if names_identifier(last) {
+        return Some(NameReason {
+            source: NameSource::Field,
+            word: first_kind(kind_words(last))?,
+            field: Some(field.to_owned()),
+        });
+    }
+    if !kind_words(last).is_empty() {
+        return None;
+    }
+    if let Some(word) = first_kind(kind_words(nearest(parent))) {
+        return Some(NameReason {
+            source: NameSource::Parent,
+            word,
+            field: None,
+        });
+    }
+    let word = first_kind(object_kinds(request_path(request)))?;
+    Some(NameReason {
+        source: NameSource::Endpoint,
+        word,
+        field: None,
+    })
+}
+
+/// Whether a field or key's last segment names an identifier: its name without `_` or `-`
+/// ends in an identifier ending (`docId`, `doc_id`, `doctorno`), where a word that merely ends
+/// in the same letters (`paid`) does not.
+fn names_identifier(last: &str) -> bool {
+    let folded: String = last
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    kind_of(&folded) != folded.as_str()
+}
+
+/// The first kind word of a name, with its identifier ending taken off.
+fn first_kind(words: Vec<String>) -> Option<String> {
+    words
+        .into_iter()
+        .next()
+        .map(|word| kind_of(&word).to_owned())
+}
+
+/// The last dotted segment of a name's parent: the object a bare key sits in (`doctor` for
+/// `patient.doctor.id`), with the whole name when it has no parent.
+fn nearest(parent: &str) -> &str {
+    parent.rsplit('.').next().unwrap_or(parent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_gives_a_kind_only_when_it_names_an_identifier() {
+        let rules = Rules::default();
+        let route = request_name("/doctor/{id}", None, Some(1), &rules).expect("a route word");
+        assert_eq!(
+            (route.source, route.word.as_str()),
+            (NameSource::Route, "doctor")
+        );
+        let query = request_name("/api/search", Some("doctor_id"), None, &rules).expect("a key");
+        assert_eq!(
+            (query.source, query.word.as_str(), query.field.as_deref()),
+            (NameSource::Field, "doctor", Some("doctor_id"))
+        );
+        let nested = request_name("/api/notes", Some("doctor.id"), None, &rules).expect("a parent");
+        assert_eq!(
+            (nested.source, nested.word.as_str()),
+            (NameSource::Parent, "doctor")
+        );
+        let bare = request_name("/api/doctors/7", Some("id"), None, &rules).expect("a route word");
+        assert_eq!(
+            (bare.source, bare.word.as_str()),
+            (NameSource::Route, "doctor")
+        );
+        assert!(request_name("/api/search", Some("name"), None, &rules).is_none());
+        assert!(request_name("/rest/save", None, None, &rules).is_none());
+        let field =
+            response_name("doc_id", "GET /api/records", &rules).expect("an identifier field");
+        assert_eq!(
+            (field.source, field.word.as_str()),
+            (NameSource::Field, "doc")
+        );
+        assert_eq!(
+            response_name("docid", "GET /api/records", &rules)
+                .expect("a compound identifier")
+                .word,
+            "doc"
+        );
+        let parent = response_name("doctor.id", "GET /api/notes", &rules).expect("a parent");
+        assert_eq!(
+            (parent.source, parent.word.as_str()),
+            (NameSource::Parent, "doctor")
+        );
+        let endpoint = response_name("id", "GET /api/doctors", &rules).expect("an endpoint");
+        assert_eq!(
+            (endpoint.source, endpoint.word.as_str()),
+            (NameSource::Endpoint, "doctor")
+        );
+        assert!(response_name("name", "GET /api/me", &rules).is_none());
+        assert!(response_name("paid", "GET /api/me", &rules).is_none());
+    }
 
     #[test]
     fn words_come_from_names_without_route_prefixes_or_plurals() {

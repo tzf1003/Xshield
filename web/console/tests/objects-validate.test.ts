@@ -3,19 +3,24 @@ import { test } from "node:test";
 import type {
   BootstrapCandidate,
   FieldKindDeclaration,
+  ObjectEvent,
   ObjectSlotRow,
   SiteSpec,
 } from "../src/api/types.ts";
 import {
-  candidateDeclarations,
+  type BootstrapChoice,
+  bannerGroups,
   declarationFor,
   fieldOfKey,
   flowSearch,
   migrateSynonyms,
   pathWordWarnings,
+  planBootstrap,
+  revertEvent,
   routeFilter,
   scopeOfKey,
   withDeclarations,
+  withPlan,
 } from "../src/features/sites/objects/objects-model.ts";
 import {
   checkDeclarations,
@@ -220,6 +225,8 @@ test("a confirmed position becomes one declaration, and a path position cannot",
     basis: "流向 87%",
     last_seen: null,
     dismissed: false,
+    in_effect: true,
+    suspension: null,
   };
   assert.deepEqual(declarationFor(slot), {
     field: "doc_id",
@@ -230,18 +237,124 @@ test("a confirmed position becomes one declaration, and a path position cannot",
   assert.equal(declarationFor({ ...slot, key: "GET /doctor/{id} path[1]" }), null);
 });
 
-test("cold start candidates become declarations for their named positions only", () => {
-  const candidate: BootstrapCandidate = {
-    kind: "doctor",
-    name: "医生",
-    slots: ["GET /api/doctors [].id", "GET /doctor/{id} path[1]", "GET /api/doctors [].id"],
+const base: SiteSpec = {
+  name: "emr",
+  hosts: ["emr.example.com"],
+  origin: "http://10.0.0.5:8080",
+  session: { header: "Authorization" },
+  entries: ["/login", "/api/docs"],
+};
+
+const candidate = (key: string, kind: string, name: string): BootstrapCandidate => ({
+  id: key,
+  key,
+  side: "response",
+  kind,
+  name,
+  reason: { code: "field_name", word: null, field: null },
+  uses: 10,
+  sessions: 3,
+  note: null,
+  conflict: null,
+});
+
+/** An automatic change for the tests: a pause of a path position unless `over` says otherwise. */
+function eventOf(
+  id: string,
+  kind: ObjectEvent["kind"],
+  at: string,
+  over: Partial<ObjectEvent>,
+): ObjectEvent {
+  return {
+    id,
+    kind,
+    at,
+    version: 17,
+    slot_id: "s1",
+    key: "GET /doctor/{id} path[1]",
+    side: "request",
+    before: {
+      class: "doctor",
+      entry: { key: "GET /doctor/{id} path[1]", class: "doctor", source: "admin" },
+    },
+    after: null,
+    reason: null,
+    impact: [],
+    examples: [],
+    status: "open",
+    handled: null,
     note: null,
+    ...over,
   };
-  assert.deepEqual(candidateDeclarations(candidate), [
+}
+
+test("a cold start writes named fields as declarations, path positions as slots, and the classes it needs", () => {
+  const choices: BootstrapChoice[] = [
+    {
+      candidate: candidate("GET /api/doctors [].id", "doctor", "医生"),
+      kind: "doctor",
+      name: "医生",
+      changed: false,
+    },
+    {
+      candidate: candidate("GET /doctor/{id} path[1]", "doctor", "医生"),
+      kind: "doctor",
+      name: "医生",
+      changed: true,
+    },
+    {
+      candidate: candidate("GET /api/doctors [].id", "doctor", "医生"),
+      kind: "doctor",
+      name: "医生",
+      changed: false,
+    },
+  ];
+  const plan = planBootstrap(choices, [], undefined);
+  assert.deepEqual(plan.declarations, [{ field: "id", kind: "doctor", in: ["/api/doctors*"] }]);
+  assert.deepEqual(plan.slots, [
+    { key: "GET /doctor/{id} path[1]", class: "doctor", source: "admin" },
+  ]);
+  assert.deepEqual(plan.classes, [{ id: "doctor", name: "医生" }]);
+  const written = withPlan(base, plan);
+  assert.deepEqual(written.advanced?.field_kinds, [
     { field: "id", kind: "doctor", in: ["/api/doctors*"] },
   ]);
-  const pathOnly: BootstrapCandidate = { ...candidate, slots: ["GET /doctor/{id} path[1]"] };
-  assert.deepEqual(candidateDeclarations(pathOnly), []);
+  assert.deepEqual(written.objects?.slots, [
+    { key: "GET /doctor/{id} path[1]", class: "doctor", source: "admin" },
+  ]);
+  assert.deepEqual(written.objects?.classes, [{ id: "doctor", name: "医生" }]);
+});
+
+test("an automatic pause is undone by putting back the entry from before it, without the pause", () => {
+  const before = { key: "GET /doctor/{id} path[1]", class: "doctor", source: "admin" as const };
+  const paused: SiteSpec = {
+    ...base,
+    objects: { classes: [{ id: "doctor", name: "医生" }], slots: [{ ...before, paused: true }] },
+  };
+  const undone = revertEvent(paused, eventOf("e1", "auto_pause", "2026-11-03T05:00:00Z", {}));
+  assert.deepEqual(undone?.objects?.slots, [before]);
+  assert.equal(revertEvent(paused, eventOf("e2", "anomaly", "2026-11-03T05:00:00Z", {})), null);
+});
+
+test("the banner groups open events: pauses and anomalies apart, and the tightenings of one pass together", () => {
+  const groups = bannerGroups([
+    eventOf("a", "auto_pause", "2026-11-03T05:00:00Z", {}),
+    eventOf("b", "auto_tighten", "2026-11-03T06:00:00Z", {}),
+    eventOf("c", "auto_tighten", "2026-11-03T06:00:00Z", {}),
+    eventOf("d", "auto_tighten", "2026-11-03T03:00:00Z", {}),
+  ]);
+  assert.deepEqual(
+    groups.paused.map((item) => item.id),
+    ["a"],
+  );
+  assert.deepEqual(groups.anomaly, []);
+  assert.deepEqual(
+    groups.tightened.map((group) => [group.at, group.events.map((item) => item.id)]),
+    [
+      ["2026-11-03T06:00:00Z", ["b", "c"]],
+      ["2026-11-03T03:00:00Z", ["d"]],
+    ],
+  );
 });
 
 test("declarations are added once, and a migrated synonym group leaves the synonyms", () => {

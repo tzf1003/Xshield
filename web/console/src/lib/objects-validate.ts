@@ -3,7 +3,14 @@
 // how a change reads in the save dialog, and what a configuration's `objects` section may hold. Pure functions:
 // the declare dialog, the synonym migration, the cold start, the spec helpers and diff.ts all use them.
 
-import type { FieldKindDeclaration, LearningSettings, ObjectsSpec } from "../api/types.ts";
+import type {
+  FieldKindDeclaration,
+  LearningSettings,
+  ObjectClassEntry,
+  ObjectSlotEntry,
+  ObjectSource,
+  ObjectsSpec,
+} from "../api/types.ts";
 import { parsePattern } from "./patterns.ts";
 import { DECLARE_TEXT, LEARNING_TEXT, OBJECT_KIND_LABEL } from "./vocab.ts";
 
@@ -12,6 +19,11 @@ export const KIND_MIN = 3;
 export const KIND_MAX = 24;
 export const DECLARATIONS_MAX = 32;
 export const SCOPE_MAX = 8;
+/** The gateway's limits of the object map (console design 6 A1). */
+export const CLASSES_MAX = 64;
+export const SLOTS_MAX = 2048;
+export const CLASS_NAME_MAX = 32;
+export const KEY_MAX = 256;
 
 /** The defaults of the learning settings (console design 3.5). Absent settings mean these values. */
 export const DEFAULT_LEARNING: LearningSettings = {
@@ -230,7 +242,13 @@ export function objectChanges(
   flag(LEARNING_TEXT.autoLearn, was.auto_learn, now.auto_learn);
   flag(LEARNING_TEXT.autoTighten, was.auto_tighten, now.auto_tighten);
   flag(LEARNING_TEXT.agent, was.agent.enabled, now.agent.enabled);
-  flag(LEARNING_TEXT.autoPause, was.auto_pause, now.auto_pause);
+  if (was.auto_pause !== now.auto_pause) {
+    changes.push(
+      now.auto_pause
+        ? `${LEARNING_TEXT.autoPause} 关 → 开：之后出现异常的位置会自动暂停`
+        : `${LEARNING_TEXT.autoPause} 开 → 关：已暂停的位置保持暂停，之后的异常只提示`,
+    );
+  }
   if (was.agent.daily_limit !== now.agent.daily_limit) {
     changes.push(
       `学习设置 ${LEARNING_TEXT.agentDaily} ${was.agent.daily_limit} 次 → ${now.agent.daily_limit} 次`,
@@ -244,7 +262,62 @@ export function objectChanges(
       `学习设置 学习门槛 ${was.thresholds.uses} 次、${was.thresholds.sessions} 个会话 → ${now.thresholds.uses} 次、${now.thresholds.sessions} 个会话`,
     );
   }
+  changes.push(...classChanges(before?.classes, after?.classes));
+  changes.push(...slotChanges(before?.slots, after?.slots));
   return changes;
+}
+
+/** The classes of the object map that were added or removed. */
+function classChanges(
+  before: readonly ObjectClassEntry[] | undefined,
+  after: readonly ObjectClassEntry[] | undefined,
+): string[] {
+  const old = new Set((before ?? []).map((item) => item.id));
+  const next = new Set((after ?? []).map((item) => item.id));
+  const changes: string[] = [];
+  for (const item of after ?? []) {
+    if (!old.has(item.id)) changes.push(`对象表 ＋ 类别 ${item.name}（${item.id}）`);
+  }
+  for (const item of before ?? []) {
+    if (!next.has(item.id)) changes.push(`对象表 －1 类别 ${item.name}（${item.id}）`);
+  }
+  return changes;
+}
+
+/** The positions of the object map that were added, removed, moved to another class, or paused (console design 4.1). */
+function slotChanges(
+  before: readonly ObjectSlotEntry[] | undefined,
+  after: readonly ObjectSlotEntry[] | undefined,
+): string[] {
+  const old = new Map((before ?? []).map((item): [string, ObjectSlotEntry] => [item.key, item]));
+  const next = new Map((after ?? []).map((item): [string, ObjectSlotEntry] => [item.key, item]));
+  const changes: string[] = [];
+  for (const item of after ?? []) {
+    const previous = old.get(item.key);
+    if (previous === undefined) {
+      changes.push(`对象表 ＋ ${positionWords(item.key)} = ${classWord(item.class)}`);
+      continue;
+    }
+    if (kindKey(previous.class) !== kindKey(item.class)) {
+      changes.push(
+        `${positionWords(item.key)} 从${classWord(previous.class)}改为${classWord(item.class)}`,
+      );
+    }
+    if ((previous.paused ?? false) !== (item.paused ?? false)) {
+      changes.push(`${positionWords(item.key)} ${item.paused ? "暂停" : "恢复使用"}`);
+    }
+  }
+  for (const item of before ?? []) {
+    if (!next.has(item.key)) changes.push(`对象表 －1：${positionWords(item.key)}`);
+  }
+  return changes;
+}
+
+/** A position in words for the change lists: a path parameter reads as its route and number (console design 4.1). */
+export function positionWords(key: string): string {
+  const slot = pathSlotOf(key);
+  if (slot === null || slot.ordinal === null) return key;
+  return `请求 ${slot.method} ${slot.route} 第 ${slot.ordinal} 个路径参数`;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -326,10 +399,57 @@ export function declarationsOf(
   return { ok: true, value: list };
 }
 
+const SOURCES: readonly ObjectSource[] = ["admin", "rule", "agent"];
+
+const isSource = (value: unknown): value is ObjectSource =>
+  typeof value === "string" && (SOURCES as readonly string[]).includes(value);
+
+/** One class of `objects.classes`, read strictly: an id, a name and an optional description. */
+function classOf(
+  value: unknown,
+  index: number,
+): { ok: true; value: ObjectClassEntry } | { ok: false; message: string } {
+  const where = DECLARE_TEXT.classShape(index + 1);
+  if (!isRecord(value)) return { ok: false, message: where };
+  for (const key of Object.keys(value)) {
+    if (!["id", "name", "description"].includes(key))
+      return { ok: false, message: DECLARE_TEXT.unknownKey(key) };
+  }
+  const { id, name, description } = value;
+  if (typeof id !== "string" || typeof name !== "string") return { ok: false, message: where };
+  if (description !== undefined && typeof description !== "string")
+    return { ok: false, message: where };
+  return {
+    ok: true,
+    value: description === undefined ? { id, name } : { id, name, description },
+  };
+}
+
+/** One position of `objects.slots`, read strictly: the key, the class, the source and the paused flag. */
+function slotOf(
+  value: unknown,
+  index: number,
+): { ok: true; value: ObjectSlotEntry } | { ok: false; message: string } {
+  const where = DECLARE_TEXT.slotShape(index + 1);
+  if (!isRecord(value)) return { ok: false, message: where };
+  for (const key of Object.keys(value)) {
+    if (!["key", "class", "source", "paused"].includes(key))
+      return { ok: false, message: DECLARE_TEXT.unknownKey(key) };
+  }
+  const { key, class: cls, source, paused } = value;
+  if (typeof key !== "string" || typeof cls !== "string" || !isSource(source)) {
+    return { ok: false, message: where };
+  }
+  if (paused !== undefined && typeof paused !== "boolean") return { ok: false, message: where };
+  const entry: ObjectSlotEntry = { key, class: cls, source };
+  if (paused !== undefined) entry.paused = paused;
+  return { ok: true, value: entry };
+}
+
 /**
  * Reads the `objects` section of a configuration (YAML or JSON) into the typed value. Missing means no section. The
- * learning settings are read strictly; the gateway's `classes` and `slots` are kept exactly as they are. A wrong shape
- * is refused with the message to show, and the form is never given a value it cannot use.
+ * learning settings, the classes and the confirmed positions are read strictly; a wrong shape is refused with the
+ * message to show, and the form is never given a value it cannot use.
  */
 export function parseObjects(
   value: unknown,
@@ -346,7 +466,104 @@ export function parseObjects(
     if (!learning.ok) return learning;
     out.learning = learning.value;
   }
-  if (value.classes !== undefined) out.classes = value.classes;
-  if (value.slots !== undefined) out.slots = value.slots;
+  if (value.classes !== undefined && value.classes !== null) {
+    if (!Array.isArray(value.classes)) return { ok: false, message: DECLARE_TEXT.classesShape };
+    const classes: ObjectClassEntry[] = [];
+    for (const [index, item] of value.classes.entries()) {
+      const parsed = classOf(item, index);
+      if (!parsed.ok) return parsed;
+      classes.push(parsed.value);
+    }
+    out.classes = classes;
+  }
+  if (value.slots !== undefined && value.slots !== null) {
+    if (!Array.isArray(value.slots)) return { ok: false, message: DECLARE_TEXT.slotsShape };
+    const slots: ObjectSlotEntry[] = [];
+    for (const [index, item] of value.slots.entries()) {
+      const parsed = slotOf(item, index);
+      if (!parsed.ok) return parsed;
+      slots.push(parsed.value);
+    }
+    out.slots = slots;
+  }
   return { ok: true, value: out };
+}
+
+/** The gateway's limits of one position key: `METHOD /template location`, 256 bytes at most (console design 6 A1). */
+export function keyProblem(key: string): string | null {
+  const parts = key.split(" ");
+  if (parts.length !== 3) return DECLARE_TEXT.slotKeyFormat;
+  const [method = "", template = "", location = ""] = parts;
+  const shaped =
+    /^[A-Z]{3,7}$/.test(method) &&
+    template.startsWith("/") &&
+    !/[?#]/.test(template) &&
+    location.length > 0 &&
+    ![...key].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f);
+  if (!shaped) return DECLARE_TEXT.slotKeyFormat;
+  if (new TextEncoder().encode(key).length > KEY_MAX) return DECLARE_TEXT.slotKeyLong;
+  return null;
+}
+
+/** A class of `objects.classes`: a lower-case id, and a name of 1 to 32 characters. */
+export function classProblem(item: ObjectClassEntry): string | null {
+  const id = checkKind(item.id);
+  if (id !== null) return id;
+  if (item.name.length === 0) return DECLARE_TEXT.classNameEmpty;
+  if ([...item.name].length > CLASS_NAME_MAX) return DECLARE_TEXT.classNameLong;
+  return null;
+}
+
+/**
+ * The messages for the object map's classes and positions as the gateway checks them: the counts, each class and
+ * position's own shape, no repeated id or key, and every position's class declared in the map.
+ */
+export function checkObjects(objects: ObjectsSpec | undefined): string[] {
+  const messages: string[] = [];
+  const classes = objects?.classes ?? [];
+  const slots = objects?.slots ?? [];
+  if (classes.length > CLASSES_MAX) messages.push(DECLARE_TEXT.classCountMax);
+  if (slots.length > SLOTS_MAX) messages.push(DECLARE_TEXT.slotCountMax);
+  const ids = new Set<string>();
+  classes.forEach((item, index) => {
+    const problem = classProblem(item);
+    if (problem !== null) messages.push(DECLARE_TEXT.classShape(index + 1));
+    if (ids.has(item.id)) messages.push(DECLARE_TEXT.classDuplicate(item.id));
+    ids.add(item.id);
+  });
+  const keys = new Set<string>();
+  slots.forEach((item, index) => {
+    if (keyProblem(item.key) !== null) messages.push(DECLARE_TEXT.slotShape(index + 1));
+    if (keys.has(item.key)) messages.push(DECLARE_TEXT.slotDuplicate(item.key));
+    keys.add(item.key);
+    if (!ids.has(item.class)) messages.push(DECLARE_TEXT.slotClassUnknown(item.key, item.class));
+  });
+  return messages;
+}
+
+/** A path position read apart (console design 4.1): the route template, the segment the judge reads (`path[n]`,
+ *  counted from 0 over the template's segments) and, when that segment is a `{…}` parameter, its number among the
+ *  parameters of the template (`第 2 个路径参数`). Null for a key that is not a path position. */
+export type PathSlot = {
+  method: string;
+  route: string;
+  segment: number;
+  ordinal: number | null;
+};
+
+const isParamSegment = (text: string | undefined): boolean =>
+  text !== undefined && /^\{[^{}]*\}$/.test(text);
+
+export function pathSlotOf(key: string): PathSlot | null {
+  const parts = key.split(" ");
+  if (parts.length !== 3) return null;
+  const [method = "", route = "", location = ""] = parts;
+  const match = /^path\[(\d+)\]$/.exec(location);
+  if (match === null) return null;
+  const segment = Number(match[1]);
+  const segments = route.replace(/^\//, "").split("/");
+  const ordinal = isParamSegment(segments[segment])
+    ? segments.slice(0, segment + 1).filter(isParamSegment).length
+    : null;
+  return { method, route, segment, ordinal };
 }

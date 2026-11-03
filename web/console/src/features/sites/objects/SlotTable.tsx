@@ -8,6 +8,7 @@ import {
   OBJECT_SOURCE_LABEL,
   OBJECT_STATE_INFO,
   OBJECT_TEXT,
+  percentOf,
 } from "../../../lib/vocab.ts";
 import { SafeText } from "../../../ui/SafeText.tsx";
 import { classNameOf, seenText } from "./objects-model.ts";
@@ -22,6 +23,41 @@ export function StateTag({ state }: { state: ObjectState }) {
       </span>
       {info.name}
     </span>
+  );
+}
+
+/** The short cause of a pause, for the 依据 column (console design 3.1); a row without a pause reason keeps its basis. */
+function causeOf(row: ObjectSlotRow): string {
+  const reason = row.suspension?.reason ?? null;
+  if (reason === null) return row.basis;
+  switch (reason.code) {
+    case "origin_4xx_rise":
+      return `${reason.status ?? 404} 比例 ${percentOf(reason.before)} → ${percentOf(reason.after)}`;
+    case "jev_deny_rise":
+      return `Jev 拒绝 ${reason.before ?? "—"} → ${reason.after ?? "—"}`;
+    case "evidence_drift":
+      return `证据转向 ${percentOf(reason.after)}`;
+    case "split":
+      return `拆分 ${(reason.classes ?? []).join(" / ")}`;
+  }
+}
+
+/** A paused row's class and state: the class it fell back from when it is stopped, its class with a warning when in effect. */
+function PausedCell({ row, classes }: { row: ObjectSlotRow; classes: readonly ObjectClass[] }) {
+  const previous = row.suspension?.previous?.class ?? null;
+  return (
+    <>
+      <StateTag state={row.state} />{" "}
+      {row.in_effect ? (
+        <span className="field-warn">
+          <SafeText
+            text={`${classNameOf(classes, row.class)} · ${OBJECT_TEXT.suspension.inEffectShort}`}
+          />
+        </span>
+      ) : (
+        <SafeText text={`${classNameOf(classes, previous)} → ${OBJECT_TEXT.suspension.nameOnly}`} />
+      )}
+    </>
   );
 }
 
@@ -69,11 +105,18 @@ export function SlotTable({ rows, classes, selected, now, onOpen }: Props) {
                   </span>
                 </td>
                 <td className="wrap">
-                  <SafeText text={classNameOf(classes, row.class)} /> <StateTag state={row.state} />
+                  {row.suspension === null ? (
+                    <>
+                      <SafeText text={classNameOf(classes, row.class)} />{" "}
+                      <StateTag state={row.state} />
+                    </>
+                  ) : (
+                    <PausedCell row={row} classes={classes} />
+                  )}
                 </td>
                 <td className="keep">{OBJECT_SOURCE_LABEL[row.source]}</td>
                 <td className="wrap">
-                  <SafeText text={row.basis} />
+                  <SafeText text={row.suspension === null ? row.basis : causeOf(row)} />
                 </td>
                 <td className="num">{seenText(row.last_seen, now)}</td>
               </tr>
