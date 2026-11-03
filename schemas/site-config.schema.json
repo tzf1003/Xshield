@@ -179,8 +179,15 @@
               "key": {"type": "string", "minLength": 1, "description": "位置，形如 GET /doctor/{id} path[1]。"},
               "class": {"type": "string", "minLength": 1},
               "source": {"type": "string", "enum": ["admin", "rule", "agent"]},
-              "identity": {"type": "string", "enum": ["user", "org", "role"], "description": "响应位置声明的本会话身份，见 docs/07 7.9.15。"}
-            }
+              "identity": {"type": "string", "enum": ["user", "org", "role"], "description": "响应位置声明的本会话身份，见 docs/07 7.9.15。"},
+              "paused": {"type": "boolean", "description": "暂停的条目保留判断但不被使用，见 docs/07 7.9.16。"},
+              "tier": {"type": "string", "enum": ["self", "org", "admin", "public"], "description": "响应位置的档位，见 docs/07 7.9.16。"},
+              "accepts_public": {"type": "boolean", "description": "请求位置是否接受公共来源，见 docs/07 7.9.16。"},
+              "reliability": {"type": "string", "enum": ["low", "medium", "high"], "description": "档位或 accepts_public 的可靠性，见 docs/07 7.9.16。"}
+            },
+            "not": {"required": ["tier", "accepts_public"], "description": "一个条目最多带一个判断。"},
+            "if": {"required": ["reliability"]},
+            "then": {"anyOf": [{"required": ["tier"]}, {"required": ["accepts_public"]}]}
           }
         },
         "learning": {
