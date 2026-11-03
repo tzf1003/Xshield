@@ -346,6 +346,11 @@ pub struct ObservationSummary {
     /// site and apart in another. The values themselves are not kept.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fingerprints: BTreeMap<String, Vec<String>>,
+    /// A suspected attribute-level over-exposure ([`Exposure`], W6): the response showed a
+    /// user-class object the session does not own, next to sensitive attributes. Observe only:
+    /// the response is forwarded as it is. Absent when the response showed none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<Exposure>,
 }
 
 impl ObservationSummary {
@@ -365,8 +370,64 @@ impl ObservationSummary {
             after_would_block: false,
             shape: None,
             fingerprints: BTreeMap::new(),
+            exposure: None,
         }
     }
+}
+
+/// Most user-class positions one [`Exposure`] lists.
+pub const EXPOSURE_USERS_MAX: usize = 4;
+/// Most sensitive attributes one [`Exposure`] lists.
+pub const EXPOSURE_ATTRIBUTES_MAX: usize = 8;
+
+/// A suspected attribute-level over-exposure (W6, docs/07 section 7.9.17): the response showed a
+/// user-class object that is not the session's own, and sensitive attributes such as phone
+/// numbers, emails or ID numbers. Only positions and kinds are kept, never values. This is an
+/// alert: the request is judged and forwarded as before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exposure {
+    /// Positions of the user-class objects the session does not own, sorted, at most
+    /// [`EXPOSURE_USERS_MAX`].
+    pub users: Vec<String>,
+    /// The sensitive attributes the response showed, sorted, at most
+    /// [`EXPOSURE_ATTRIBUTES_MAX`].
+    pub attributes: Vec<ExposedAttribute>,
+    /// Whether either list was cut at its limit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+/// One sensitive attribute a response showed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ExposedAttribute {
+    /// The position, `GET /api/comments comments[].author.phone`.
+    pub slot: String,
+    /// What the attribute is.
+    pub kind: ExposureKind,
+    /// How the gateway recognised it.
+    pub by: ExposureBasis,
+}
+
+/// The kinds of sensitive attribute the alert recognises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExposureKind {
+    /// A mobile phone number.
+    Phone,
+    /// An email address.
+    Email,
+    /// A resident ID number.
+    IdCard,
+}
+
+/// How a sensitive attribute was recognised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExposureBasis {
+    /// By the field's name.
+    Name,
+    /// By the shape of the value.
+    Format,
 }
 
 /// How the response body was treated.
