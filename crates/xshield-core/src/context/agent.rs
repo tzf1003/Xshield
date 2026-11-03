@@ -200,8 +200,7 @@ impl Verdict {
 /// # Errors
 /// Returns the [`Refusal`] that names what the answer got wrong.
 pub fn verdict(answer: &str, question: &Question, map: &ObjectMap) -> Result<Verdict, Refusal> {
-    let value: Value = serde_json::from_str(answer).map_err(|_| Refusal::NotJson)?;
-    let object = value.as_object().ok_or(Refusal::NotJson)?;
+    let object = &answer_object(answer).ok_or(Refusal::NotJson)?;
     let confidence = object
         .get("confidence")
         .and_then(Value::as_u64)
@@ -233,6 +232,47 @@ pub fn verdict(answer: &str, question: &Question, map: &ObjectMap) -> Result<Ver
         cites,
         reason: plain(text_of(object, "reason"), REASON_CHARS_MAX),
     })
+}
+
+/// The JSON object an answer carries. A model may put a reasoning block (`<think>` and
+/// `</think>`), a Markdown code fence or a sentence around the object, and the object is what
+/// the question asks for, so the wrapping is set aside. `None` when no object can be read.
+fn answer_object(answer: &str) -> Option<Map<String, Value>> {
+    let visible = without_reasoning(answer)?;
+    let text = without_fence(visible.trim());
+    if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(text) {
+        return Some(object);
+    }
+    let object = text.get(text.find('{')?..=text.rfind('}')?)?;
+    match serde_json::from_str::<Value>(object) {
+        Ok(Value::Object(object)) => Some(object),
+        _ => None,
+    }
+}
+
+/// The answer without its reasoning blocks. A block that is never closed is an answer cut off
+/// inside its reasoning, so there is no answer to read and `None` comes back.
+fn without_reasoning(answer: &str) -> Option<String> {
+    let mut rest = answer;
+    let mut visible = String::with_capacity(answer.len());
+    while let Some(start) = rest.find("<think>") {
+        visible.push_str(&rest[..start]);
+        let inside = &rest[start + "<think>".len()..];
+        let end = inside.find("</think>")?;
+        rest = &inside[end + "</think>".len()..];
+    }
+    visible.push_str(rest);
+    Some(visible)
+}
+
+/// The text inside a Markdown code fence, when the answer is one. Text without a closing fence
+/// is returned as it is.
+fn without_fence(text: &str) -> &str {
+    let Some(fenced) = text.strip_prefix("```") else {
+        return text;
+    };
+    let body = fenced.split_once('\n').map_or(fenced, |(_, body)| body);
+    body.trim_end().strip_suffix("```").map_or(text, str::trim)
 }
 
 fn existing_class(object: &Map<String, Value>, question: &Question) -> Result<String, Refusal> {
@@ -646,6 +686,31 @@ mod tests {
         ] {
             assert_eq!(verdict(answer, &question, &map()), Err(refusal), "{answer}");
         }
+    }
+
+    #[test]
+    fn an_answer_wrapped_in_a_reasoning_block_or_a_fence_is_read() {
+        let question = question_for_tests();
+        let object = r#"{"choice":"ambiguous","confidence":80,"reason":"两个都像"}"#;
+        for answer in [
+            format!("```json\n{object}\n```"),
+            format!("```\n{object}\n```"),
+            format!("<think>the values look like ids: {{ maybe }}</think>\n{object}"),
+            format!("Here is the answer:\n{object}\nThanks."),
+            format!("<think>reasoning</think>```json\n{object}\n```"),
+        ] {
+            let verdict = verdict(&answer, &question, &map()).expect(&answer);
+            assert_eq!(verdict.choice, Choice::Ambiguous, "{answer}");
+            assert_eq!(verdict.confidence, 80, "{answer}");
+        }
+    }
+
+    #[test]
+    fn a_reasoning_block_that_never_closes_leaves_no_answer() {
+        let question = question_for_tests();
+        let cut_off = r#"<think>{"choice":"ambiguous","confidence":90}"#;
+        assert_eq!(verdict(cut_off, &question, &map()), Err(Refusal::NotJson));
+        assert_eq!(verdict("", &question, &map()), Err(Refusal::NotJson));
     }
 
     #[test]
