@@ -265,12 +265,31 @@ export interface TraceResponse {
    * structure is first seen or changes; the object map learns from it (object-map design 3).
    */
   shape?: ResponseShapeField[];
+  /**
+   * A suspected attribute-level over-exposure (W6, 7.9.17): the response showed a user-class object
+   * the session does not own, next to sensitive attributes. Positions and kinds only, never values.
+   * Absent when the response showed none, and always absent on a site without identity positions.
+   */
+  exposure?: ResponseExposure | null;
 }
 
 export interface ResponseShapeField {
   /** e.g. `[].doc_id`. */
   path: string;
   type: "string" | "number" | "boolean" | "null";
+}
+
+export interface ResponseExposure {
+  /** Positions of the user-class objects the session does not own (at most four). */
+  users: string[];
+  /** The sensitive attributes shown, by position (at most eight). */
+  attributes: Array<{
+    slot: string;
+    kind: "phone" | "email" | "id_card";
+    by: "name" | "format";
+  }>;
+  /** Whether either list was cut at its limit. */
+  truncated?: boolean;
 }
 
 /**

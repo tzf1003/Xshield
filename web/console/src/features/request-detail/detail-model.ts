@@ -13,7 +13,9 @@ import type {
   Outcome,
   RecentAccess,
   RequestRow,
+  ResponseExposure,
   Trace,
+  TraceResponse,
   TraceSession,
   TraceSource,
   TraceTiming,
@@ -520,6 +522,32 @@ function executionStep(summary: RequestRow, trace: Trace): PipelineStep {
   };
 }
 
+const EXPOSURE_KIND_LABEL: Record<ResponseExposure["attributes"][number]["kind"], string> = {
+  phone: "手机号",
+  email: "邮箱",
+  id_card: "身份证号",
+};
+
+/**
+ * The note for a suspected attribute-level over-exposure (W6, 7.9.17): which kinds of contact detail
+ * another user's object carried. It names kinds, never values, and says the request was not stopped.
+ */
+export function exposureNote(exposure: ResponseExposure | null | undefined): string | null {
+  if (!exposure) return null;
+  const kinds = [...new Set(exposure.attributes.map((item) => EXPOSURE_KIND_LABEL[item.kind]))];
+  if (kinds.length === 0) return null;
+  return `疑似属性越权，仅告警未拦截：响应里有不属于本会话的用户的${kinds.join("、")}`;
+}
+
+/** The attention line of the learning step: what the response did beyond teaching the session. */
+function learningAttention(response: TraceResponse): string | null {
+  const notes = [
+    response.after_would_block ? "本应拦截请求的响应也进入了上下文" : null,
+    exposureNote(response.exposure),
+  ].filter((note): note is string => note !== null);
+  return notes.length > 0 ? notes.join("；") : null;
+}
+
 function learningStep(summary: RequestRow, trace: Trace): PipelineStep | null {
   const response = trace.response;
   if (!response) return null;
@@ -552,7 +580,7 @@ function learningStep(summary: RequestRow, trace: Trace): PipelineStep | null {
     decisive: false,
     links,
     notes,
-    attention: response.after_would_block ? "本应拦截请求的响应也进入了上下文" : null,
+    attention: learningAttention(response),
     warn: false,
   };
 }

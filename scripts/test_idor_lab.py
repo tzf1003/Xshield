@@ -49,7 +49,10 @@ ENTRIES = ["/login", "/api/home", "/api/patients", "/share/*"]
 # The other sites declare nothing, so their decision records carry no identity.
 IDENTITY_OBJECTS = {
     "classes": [{"id": "doctor", "name": "医生"}],
-    "slots": [{"key": "GET /api/home doctor.id", "class": "doctor", "source": "admin", "identity": "user"}],
+    "slots": [
+        {"key": "GET /api/home doctor.id", "class": "doctor", "source": "admin", "identity": "user"},
+        {"key": "GET /api/comments comments[].author.id", "class": "doctor", "source": "admin"},
+    ],
 }
 
 
@@ -540,6 +543,50 @@ def w1(lab: Lab) -> None:
         "emr.lab", "GET", "/api/patients", cookie=plain), Expect(200, "fast_allow", "allowed", True))
     lab.check("a site without identity positions writes no identity", not identity_of(unset),
               f"identity {identity_of(unset)}")
+
+
+@scenario("W6", "评论作者是另一位医生且资料带手机号、邮箱：记一条属性越权告警，请求照常放行；自己的资料和未声明身份的站点不告警")
+def w6(lab: Lab) -> None:
+    def response_of(sent: Sent) -> dict:
+        return ((sent.record or {}).get("trace") or {}).get("response") or {}
+
+    def exposure_of(sent: Sent) -> dict | None:
+        return response_of(sent).get("exposure")
+
+    cookie = lab.login("identity.lab", "doctor_a", "W6 doctor A logs in on the identity site")
+    lab.expect("W6 doctor A opens the home page", lab.send(
+        "identity.lab", "GET", "/api/home", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    lab.expect("W6 doctor A lists her patients", lab.send(
+        "identity.lab", "GET", "/api/patients", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    shown = lab.expect("W6 doctor A reads the comments on her patient PT-7001", lab.send(
+        "identity.lab", "GET", "/api/comments?patient=PT-7001", cookie=cookie),
+        Expect(200, "fast_allow", "allowed", True))
+    exposure = exposure_of(shown) or {}
+    lab.check("the alert names the author position of the other doctor",
+              exposure.get("users") == ["GET /api/comments comments[].author.id"], f"exposure {exposure}")
+    lab.check("the alert names the phone and the email by their field names",
+              sorted((item["kind"], item["by"], item["slot"]) for item in exposure.get("attributes", [])) == [
+                  ("email", "name", "GET /api/comments comments[].author.email"),
+                  ("phone", "name", "GET /api/comments comments[].author.phone")],
+              f"exposure {exposure}")
+    lab.check("the decision record keeps no contact detail",
+              not any(value in json.dumps(shown.record, ensure_ascii=False)
+                      for value in ("13800000002", "dr-b@emr.example")), "a contact detail is in the record")
+
+    own = lab.expect("W6 doctor A reads the comments on her patient PT-7002", lab.send(
+        "identity.lab", "GET", "/api/comments?patient=PT-7002", cookie=cookie),
+        Expect(200, "fast_allow", "allowed", True))
+    lab.check("her own contact details in a comment raise no alert", "exposure" not in response_of(own),
+              f"exposure {exposure_of(own)}")
+
+    plain = lab.login("emr.lab", "doctor_a", "W6 doctor A logs in on a site without identity")
+    lab.expect("W6 the same patients on a site without identity", lab.send(
+        "emr.lab", "GET", "/api/patients", cookie=plain), Expect(200, "fast_allow", "allowed", True))
+    unset = lab.expect("W6 the same comments on a site without identity", lab.send(
+        "emr.lab", "GET", "/api/comments?patient=PT-7001", cookie=plain),
+        Expect(200, "fast_allow", "allowed", True))
+    lab.check("a site without identity positions writes no exposure key", "exposure" not in response_of(unset),
+              f"exposure {exposure_of(unset)}")
 
 
 def main() -> int:
