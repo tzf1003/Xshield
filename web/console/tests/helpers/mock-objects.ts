@@ -119,7 +119,17 @@ export function objectSlotAnswer(site: string, id: string, owner: object): Objec
       ? { ...objectSlotS2, state: row.state, dismissed: row.dismissed }
       : id === objectSlotS8.id
         ? { ...objectSlotS8, state: row.state, dismissed: row.dismissed }
-        : { ...row, flows_in: [], examples: [], shape: [], history: [], impact: [], agent: null };
+        : {
+            ...row,
+            flows_in: [],
+            examples: [],
+            shape: [],
+            history: [],
+            impact: [],
+            impact_complete: true,
+            impact_estimated: true,
+            agent: null,
+          };
   return { status: 200, body: detail };
 }
 

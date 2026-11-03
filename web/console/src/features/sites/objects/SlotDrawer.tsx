@@ -579,6 +579,12 @@ export function SlotDrawer({
               ))}
             </ul>
           )}
+          {data.impact_estimated ? null : (
+            <div className="small muted">{OBJECT_TEXT.drawer.impactNotEstimated}</div>
+          )}
+          {data.impact_estimated && !data.impact_complete ? (
+            <div className="small muted">{OBJECT_TEXT.drawer.impactIncomplete}</div>
+          ) : null}
           {data.state === "proposed" && proposalEntry !== null && proposalBlock === null ? (
             <div className="small muted">
               {field === null

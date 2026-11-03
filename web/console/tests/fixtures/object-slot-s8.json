@@ -16,6 +16,8 @@
   "shape": [],
   "history": [],
   "impact": [],
+  "impact_complete": true,
+  "impact_estimated": true,
   "agent": {
     "status": "answered",
     "asked_at": "2026-11-03T04:00:00Z",

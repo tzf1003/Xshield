@@ -394,8 +394,11 @@ pub(crate) struct SlotBody {
     /// The fast allows the position's main action moves over the last day: confirming a
     /// proposal, restoring a suspended entry, or pausing an entry in effect.
     impact: Vec<ChangeBody>,
-    /// False when the impact was not read in full, or when the action's impact is not estimated.
+    /// False when the impact was not read in full: the window held more decisions than it reads.
     impact_complete: bool,
+    /// False when the action's impact is not estimated yet, which is a field position's: the impact
+    /// does not read the field kinds. A position with no action has nothing to estimate.
+    impact_estimated: bool,
 }
 
 /// `GET /objects/bootstrap`: `BootstrapResponse`.
@@ -589,6 +592,7 @@ pub async fn slot(
     )
     .await?;
     let (impact, impact_complete) = slot_impact(&state, &record, &row, now).await?;
+    let impact_estimated = action_is_estimated(&row);
     Ok(Json(SlotBody {
         row,
         flows_in: flow_bodies(side.opposite(), total, flows, &decisions),
@@ -598,6 +602,7 @@ pub async fn slot(
         history: Vec::new(),
         impact,
         impact_complete,
+        impact_estimated,
     }))
 }
 
@@ -623,12 +628,21 @@ async fn slot_impact(
     let current = &record.spec;
     let objects = objects_after(current.objects(), &row.key, &action);
     let proposed = current.clone().with_objects(objects);
+    // The decision log outlives a site, so the rows from before this site was created belong to
+    // a deleted site of the same name.
     let scope = Scope {
         site: Some(current.name().to_owned()),
-        since_millis: now - DAY_MILLIS,
+        since_millis: (now - DAY_MILLIS).max(record.created_at.timestamp_millis()),
         until_millis: now,
     };
     object_impact::changes(&state.pool, &scope, current, &proposed).await
+}
+
+/// Whether the impact of a position's action is estimated. A field position's kind is not read by
+/// the impact yet, so its action is not estimated. A position with no action has nothing to
+/// estimate.
+fn action_is_estimated(row: &SlotRow) -> bool {
+    main_action(row).is_none() || is_path_key(&row.key)
 }
 
 /// What a position's main button does to the configuration, with the entry it writes.
@@ -2382,6 +2396,35 @@ mod tests {
     }
 
     #[test]
+    fn a_field_position_with_an_action_is_not_estimated() {
+        let path = slot_row(
+            "GET /doctor/{id} path[1]",
+            PositionState::Proposed,
+            Origin::Rule,
+            Some("doctor"),
+            false,
+        );
+        let field = slot_row(
+            "GET /api/appointments [].doc_id",
+            PositionState::Proposed,
+            Origin::Rule,
+            Some("doctor"),
+            false,
+        );
+        let confirmed = slot_row(
+            "GET /api/appointments [].doc_id",
+            PositionState::Confirmed,
+            Origin::Admin,
+            Some("doctor"),
+            true,
+        );
+        assert!(action_is_estimated(&path));
+        assert!(!action_is_estimated(&field));
+        // A confirmed position has no main action, so there is nothing to estimate.
+        assert!(action_is_estimated(&confirmed));
+    }
+
+    #[test]
     fn a_path_key_is_one_that_ends_in_its_segment() {
         assert!(is_path_key("GET /doctor/{id} path[1]"));
         assert!(!is_path_key("GET /api/appointments [].doc_id"));
@@ -3044,6 +3087,51 @@ mod live_tests {
         assert_eq!(body["impact"][0]["kind"], "new_fast_allow");
         assert_eq!(body["impact"][0]["count"], 1);
         assert_eq!(body["impact"][0]["sample"], "req_call");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_path_impact_leaves_out_the_decisions_from_before_the_site_was_created() {
+        let (state, name) = seeded_site("path-impact-recreated").await;
+        // The site was created two hours ago. A decision from five hours ago belongs to a deleted
+        // site of the same name, and a decision from an hour ago belongs to this one.
+        let created = now_millis() - 2 * 60 * 60_000;
+        sqlx::query("UPDATE site_configs SET created_at = $2 WHERE name = $1")
+            .bind(&name)
+            .bind(chrono::DateTime::from_timestamp_millis(created).expect("a time"))
+            .execute(&state.pool)
+            .await
+            .expect("set the creation time");
+        let id = id_of(&listed(&state, &name, &[]).await, OTHER);
+        let before = now_millis() - 5 * 60 * 60_000;
+        let after = now_millis() - 60 * 60_000;
+        crate::test_support::ensure_days(&state.pool, &[before, after]).await;
+        for (at, request) in [(before, "req_deleted_site"), (after, "req_new_site")] {
+            sqlx::query(
+                "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                    method, path, status, decision_path, outcome, trace, jev)
+                 VALUES ($1, $2, $3, 'edge-1', 'clinic.example.com', '10.0.0.1', 'a',
+                    'GET', '/other/7', 200, 'jev_allow', 'allowed', $4, $5)",
+            )
+            .bind(at)
+            .bind(request)
+            .bind(&name)
+            .bind(json!({"v": 1, "values": [seen_value(OTHER, APPOINTMENTS, "req_shown", Some(at))]}))
+            .bind(json!({"v": 1}))
+            .execute(&state.pool)
+            .await
+            .expect("insert a decision row");
+        }
+        let body = slot(State(Arc::clone(&state)), Path((name, id)))
+            .await
+            .expect("the drawer reads")
+            .0;
+        let body = serde_json::to_value(body).expect("the drawer as JSON");
+        assert_eq!(body["impact_estimated"], json!(true));
+        assert_eq!(body["impact_complete"], json!(true));
+        assert_eq!(body["impact"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["impact"][0]["count"], 1);
+        assert_eq!(body["impact"][0]["sample"], "req_new_site");
     }
 
     #[tokio::test]
