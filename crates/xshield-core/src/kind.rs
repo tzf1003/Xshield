@@ -246,6 +246,34 @@ pub fn shown_as(
     }
 }
 
+/// Whether a declaration of the field `declared` is one that `name` is read under: the name's
+/// last segment, or for a bare `id` its parent, as `declared_for` looks it up. A change to such
+/// a declaration can change how the name is read.
+#[must_use]
+pub fn declaration_reads(name: &str, declared: &str) -> bool {
+    let (parent, last) = split_field(name);
+    same_field(declared, last)
+        || (last.eq_ignore_ascii_case("id")
+            && !parent.is_empty()
+            && same_field(declared, parent.rsplit('.').next().unwrap_or(parent)))
+}
+
+/// The kind a request value names under `rules`: the declared kind of its key in the request's
+/// scope, else the kind its key's words name, else the route word. The first kind of
+/// [`wanted_kinds`], which is what the judge compares an origin with.
+#[must_use]
+pub fn name_kind_of(used: Used<'_>, rules: &Rules) -> Option<String> {
+    wanted_kinds(used, rules).into_iter().next()
+}
+
+/// The kind `rules` declares for a request value's key in the request's scope, if a declaration
+/// names it.
+#[must_use]
+pub fn declared_kind_of<'r>(used: Used<'_>, rules: &'r Rules) -> Option<&'r str> {
+    used.key
+        .and_then(|key| declared_for(&rules.fields, key, used.path))
+}
+
 /// The kinds an origin shows a value as: the declared kind of its field when a
 /// declaration names it, else the field's own name. A bare `id` takes the kind
 /// of its parent (`Products.id`). With no parent it takes the route word nearest
@@ -589,6 +617,16 @@ mod tests {
         assert!(same_field("doc_id", "DocID"));
         assert!(same_field("doc-id", "doc_id"));
         assert!(!same_field("doc_id", "doc"));
+    }
+
+    #[test]
+    fn a_declaration_is_read_under_the_names_it_declares() {
+        // `doc_id` and `doc.id` are read under `doc_id`, and `doc.id` also under its parent.
+        assert!(declaration_reads("doc_id", "docId"));
+        assert!(declaration_reads("x.doc_id", "doc_id"));
+        assert!(declaration_reads("doc.id", "doc"));
+        assert!(!declaration_reads("doc.id", "visit"));
+        assert!(!declaration_reads("doc_id", "doc"));
     }
 
     #[test]

@@ -76,7 +76,10 @@
           158
         ]
       ],
-      "sample": "req_01a1973ed5c0732b8f29804d7fc746d3"
+      "sample": "req_01a1973ed5c0732b8f29804d7fc746d3",
+      "detail": {
+        "approximate": true
+      }
     },
     {
       "kind": "back_to_jev",
@@ -88,7 +91,12 @@
           14
         ]
       ],
-      "sample": "req_01a1973940107ebea1af2c54ce635f38"
+      "sample": "req_01a1973940107ebea1af2c54ce635f38",
+      "detail": {
+        "approximate": true,
+        "name_kind": "document",
+        "object_kind": "doctor"
+      }
     },
     {
       "kind": "cache_by_api",
