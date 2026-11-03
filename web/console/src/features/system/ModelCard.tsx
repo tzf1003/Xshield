@@ -24,6 +24,8 @@ import {
   type ChangeRow,
   type FormProblems,
   type ModelForm as Form,
+  agentCanShare,
+  agentEffective,
   agentForm,
   agentKeyRequired,
   agentProblems,
@@ -260,13 +262,15 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
   };
 
   const restore = (version: number, config: ModelValues) => {
-    setForm(formFromValues("jev", config));
+    const next = formFromValues("jev", config);
+    setForm(next);
     setReadVersion(jev.version);
     setRestored(version);
     setEditing(true);
     setConflict(null);
     setSaveError(null);
-    setSaveOpen(true);
+    // The dialog opens only when the version saves as it is; otherwise the form asks for the key it needs first.
+    setSaveOpen(Object.keys(jevProblems(next, keyRequired)).length === 0);
   };
 
   const backToEnv = () => {
@@ -438,16 +442,21 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
 export function AgentModelCard({
   agent,
   jevRoute,
+  jevConsole,
 }: {
   agent: AgentModelsState;
   jevRoute: JevRoute | null;
+  /** Jev's configuration is saved in the console, which holds the key that a share uses. */
+  jevConsole: boolean;
 }) {
   const client = useQueryClient();
   const clock = useNowBucket(1_000);
   const test = useModelTest("agent", clock);
   const save = useSaveAgentModel();
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState<Form>(() => agentForm(agent));
+  const [draftForm, setForm] = useState<Form>(() => agentForm(agent));
+  // The form as it is saved: a share that cannot apply is off, so the form asks for the key it needs instead.
+  const form = agentEffective(draftForm, jevRoute, jevConsole);
   // The version the form was read at, as on the Jev card above.
   const [readVersion, setReadVersion] = useState<number>(agent.version);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -457,8 +466,8 @@ export function AgentModelCard({
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const saved = agentForm(agent);
-  // The key is shared only when both sides run on the Vercel AI Gateway (design 2.2).
-  const shareAllowed = jevRoute === "gateway" && form.choice === "gateway";
+  // The key is shared only when both sides run on the Vercel AI Gateway and the console holds Jev's key (design 2.2).
+  const shareAllowed = agentCanShare(form, jevRoute, jevConsole);
   const keyRequired = agentKeyRequired(form.shareKey, agent.key);
   const problems: FormProblems = agentProblems(form, keyRequired);
   const valid = Object.keys(problems).length === 0;
@@ -536,13 +545,17 @@ export function AgentModelCard({
   };
 
   const restore = (version: number, config: ModelValues) => {
-    setForm(formFromValues("agent", config));
+    const next = formFromValues("agent", config);
+    const effective = agentEffective(next, jevRoute, jevConsole);
+    const keyNeeded = agentKeyRequired(effective.shareKey, agent.key);
+    setForm(next);
     setReadVersion(agent.version);
     setRestored(version);
     setEditing(true);
     setConflict(null);
     setSaveError(null);
-    setSaveOpen(true);
+    // The dialog opens only when the version saves as it is; otherwise the form asks for the key it needs first.
+    setSaveOpen(Object.keys(agentProblems(effective, keyNeeded)).length === 0);
   };
 
   const changes = formChanges("agent", saved, form, agent.key.last4, restored !== null);

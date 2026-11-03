@@ -6,6 +6,8 @@ import { test } from "node:test";
 import type { AgentModelValues, JevModelValues, ModelTestResult } from "../src/api/types.ts";
 import {
   AGENT_TIMEOUT,
+  agentCanShare,
+  agentEffective,
   agentKeyRequired,
   agentProblems,
   agentTestable,
@@ -141,6 +143,20 @@ test("agentTestable holds a test back while the sharing changed and no key is ty
   assert.equal(agentTestable({ ...form, shareKey: false, key: "sk-live-7d20" }, true), true);
 });
 
+test("agentCanShare needs the gateway on both sides and a Jev key the console holds", () => {
+  const form = formFromValues("agent", AGENT_SAVED);
+  assert.equal(agentCanShare(form, "gateway", true), true);
+  // Jev from the environment: the console holds no key to share.
+  assert.equal(agentCanShare(form, "gateway", false), false);
+  assert.equal(agentCanShare(form, "direct", true), false);
+  assert.equal(agentCanShare({ ...form, choice: "custom" }, "gateway", true), false);
+  // A share that cannot apply is off, so the form asks for its own key.
+  const shared = { ...form, shareKey: true };
+  assert.equal(agentEffective(shared, "gateway", true).shareKey, true);
+  assert.equal(agentEffective(shared, "direct", true).shareKey, false);
+  assert.equal(agentEffective(shared, "gateway", false).shareKey, false);
+});
+
 test("sameForm compares what a test tried, key included, ignoring blanks at the ends", () => {
   const form = formFromValues("jev", SAVED);
   assert.equal(sameForm(form, { ...form, endpoint: ` ${form.endpoint} ` }), true);
@@ -169,7 +185,7 @@ test("a preset line without a saved address or model takes the route's own", () 
     timeout_ms: 3000,
   });
   assert.equal(form.endpoint, "https://api.typesafe.ai/v1/systemone");
-  assert.equal(form.model, "typesafe-ai/jev");
+  assert.equal(form.model, "jev-1.13.0");
   assert.equal(form.timeout, "3000");
 });
 
@@ -184,7 +200,7 @@ test("withChoice puts a preset line's own address and model in, and keeps what a
   const form = formFromValues("jev", SAVED);
   const direct = withChoice("jev", form, "direct");
   assert.equal(direct.endpoint, "https://api.typesafe.ai/v1/systemone");
-  assert.equal(direct.model, "typesafe-ai/jev");
+  assert.equal(direct.model, "jev-1.13.0");
   const custom = withChoice(
     "jev",
     { ...form, endpoint: "https://llm.example.com/v1", model: "jev-x" },
@@ -192,7 +208,7 @@ test("withChoice puts a preset line's own address and model in, and keeps what a
   );
   assert.equal(custom.endpoint, "https://llm.example.com/v1");
   assert.equal(custom.model, "jev-x");
-  assert.equal(presetModel("direct"), "typesafe-ai/jev");
+  assert.equal(presetModel("direct"), "jev-1.13.0");
   assert.equal(presetModel("custom"), null);
 });
 

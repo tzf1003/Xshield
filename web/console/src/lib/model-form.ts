@@ -26,6 +26,8 @@ import {
 
 /** The model of every Jev line that has a preset (design 2.2). */
 export const JEV_MODEL = "typesafe-ai/jev";
+/** The direct route's model, as the backend defines it (xshield-core's DIRECT_JEV_MODEL). */
+export const DIRECT_JEV_MODEL = "jev-1.13.0";
 export const JEV_TIMEOUT = { min: 100, max: 30_000, fallback: 2_000 } as const;
 /** Seconds in the form, milliseconds on the wire. */
 export const AGENT_TIMEOUT = { min: 5, max: 120, fallback: 30 } as const;
@@ -36,7 +38,7 @@ export const AGENT_GATEWAY_ENDPOINT = "https://ai-gateway.vercel.sh/v1";
 
 const JEV_PRESETS: Record<JevRoute, { endpoint: string | null; model: string | null }> = {
   gateway: { endpoint: "https://ai-gateway.vercel.sh/typesafe/v1/systemone", model: JEV_MODEL },
-  direct: { endpoint: "https://api.typesafe.ai/v1/systemone", model: JEV_MODEL },
+  direct: { endpoint: "https://api.typesafe.ai/v1/systemone", model: DIRECT_JEV_MODEL },
   custom: { endpoint: null, model: null },
 };
 
@@ -279,6 +281,28 @@ export function agentKeyRequired(
 ): boolean {
   if (shareKey) return false;
   return !key.set || key.shared_with_jev;
+}
+
+/**
+ * Whether the agent form may share Jev's key: both sides on the Vercel AI Gateway (design 2.2), and a Jev key the
+ * console holds. A gateway's environment key cannot be shared, since the console never reads it, and a shared key
+ * that the console does not hold leaves the learning agent without a key.
+ */
+export function agentCanShare(
+  form: ModelForm,
+  jevRoute: JevRoute | null,
+  jevConsole: boolean,
+): boolean {
+  return jevRoute === "gateway" && form.choice === "gateway" && jevConsole;
+}
+
+/** The agent form as it is saved: a share that cannot apply is off. */
+export function agentEffective(
+  form: ModelForm,
+  jevRoute: JevRoute | null,
+  jevConsole: boolean,
+): ModelForm {
+  return agentCanShare(form, jevRoute, jevConsole) ? form : { ...form, shareKey: false };
 }
 
 /**

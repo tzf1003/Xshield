@@ -410,7 +410,7 @@ export const MODEL_TEXT = {
   timeoutHintAgent: "学习代理按位置调用、不在请求路径上，可以比 Jev 宽松。",
   shareKeyLabel: "与 Jev 共用密钥",
   shareKeyHelp:
-    "只在两边都是 Vercel AI Gateway 时可选。选中后不单独保存密钥，Jev 换密钥时学习代理跟着换。",
+    "只在两边都是 Vercel AI Gateway，且 Jev 的密钥保存在控制台时可选。选中后不单独保存密钥，Jev 换密钥时学习代理跟着换。",
   keyHelp: "密钥只写不读，保存后只显示末 4 位；保存后旧密钥立即作废。",
   keyEnvHelp: "控制台读不到环境变量里的密钥，请重新填写。",
   keyAgentHelp: "学习代理不与 Jev 共用时需要自己的密钥，请填写。",

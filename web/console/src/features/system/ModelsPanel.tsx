@@ -28,7 +28,7 @@ export function ModelsPanel() {
   return (
     <div className="sys-models">
       <JevModelCard jev={jev} now={now} />
-      <AgentModelCard agent={agent} jevRoute={jev.route} />
+      <AgentModelCard agent={agent} jevRoute={jev.route} jevConsole={jev.source === "console"} />
     </div>
   );
 }
