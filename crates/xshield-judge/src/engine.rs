@@ -290,6 +290,8 @@ impl<J: JevPort> Judge<J> {
 
     /// Decides one request (docs/01 section 1.4 steps 1 to 7) and returns the
     /// row that describes the decision.
+    // The steps for one request stay in one function, in the order they happen, as observe() does.
+    #[allow(clippy::too_many_lines)]
     pub async fn judge(&self, site: &SiteSpec, request: &RequestFacts<'_>) -> Judgement {
         let started = Instant::now();
         let routed = resolved_of(request);
@@ -325,7 +327,8 @@ impl<J: JevPort> Judge<J> {
         );
         settle_values(&mut extracted, resolved);
         let tuning = Tuning::new(site, self.jev.default_timeout());
-        let cache_key = self.cache_key(request, resolved, &extracted.values, tuning.objects);
+        let admin = self.is_administrator(session_id, request.now_ms);
+        let cache_key = self.cache_key(request, resolved, &extracted.values, tuning.objects, admin);
         record.session = session_id.map(|id| label(&id)).unwrap_or_default();
         record.context = match (session_id, entry) {
             (Some(_), _) => Some(ContextKind::Session),
@@ -705,17 +708,27 @@ impl<J: JevPort> Judge<J> {
         })
     }
 
+    /// Whether the session is an administrator's: its declared role is the administrator's
+    /// (docs/07 section 7.4.7). A request without a session is not.
+    fn is_administrator(&self, session_id: Option<Digest16>, now_ms: u64) -> bool {
+        session_id.is_some_and(|id| self.lock().store.session(id, now_ms).identity().is_admin())
+    }
+
     /// The allow cache key: the method, the logical path and the request values.
     /// The interface name is part of the logical path, so two methods that take
     /// the same values never share an allow. The key also names the site's object
     /// map: a map change can turn the same request into a different judgement, so
-    /// an allow made under the old map must not be reused under the new one.
+    /// an allow made under the old map must not be reused under the new one. And it
+    /// names whether the session is an administrator's: an administrator's admin-tier
+    /// proofs stop proving once the role changes, so an allow made under one flag is
+    /// not reused under the other.
     fn cache_key(
         &self,
         request: &RequestFacts<'_>,
         resolved: &Resolved,
         values: &[crate::values::RequestValue],
         objects: &ObjectMap,
+        admin: bool,
     ) -> Digest16 {
         let mut parts: Vec<String> = values
             .iter()
@@ -723,9 +736,10 @@ impl<J: JevPort> Judge<J> {
             .collect();
         parts.sort_unstable();
         let text = format!(
-            "{}\0{}\0{}",
+            "{}\0{}\0{}\0{}",
             request.method,
             resolved.logical_path(),
+            u8::from(admin),
             parts.join("\0")
         );
         let map = serde_json::to_string(objects).unwrap_or_default();
@@ -1509,8 +1523,8 @@ mod tests {
         let request = get("/api/rpc", Some("id=7"), Some("alice"), 1_000);
         // Two interfaces at one URL path, taking the same values, never share an allow.
         assert_ne!(
-            judge.cache_key(&request, &login, &[], site.objects()),
-            judge.cache_key(&request, &other, &[], site.objects())
+            judge.cache_key(&request, &login, &[], site.objects(), false),
+            judge.cache_key(&request, &other, &[], site.objects(), false)
         );
     }
 
@@ -3612,6 +3626,54 @@ mod tests {
         assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
         let second = judge
             .judge(&site, &call("DELETE", "/api/patients/7005", 2_000))
+            .await;
+        assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_administrators_allow_is_not_reused_once_the_role_changes() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = admin_site();
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        judge.observe(
+            &site,
+            &Observation {
+                path: "/api/admin/patients",
+                body: br#"{"patients":[{"id":"7005"}]}"#,
+                ..list_response("root", 1_000)
+            },
+        );
+        // The patient is proven by the administrator listing, but the query names a patient the
+        // session has never seen, so Jev judges the request and allows it, and the allow is cached.
+        let first = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    query: Some("ref=PT-7009"),
+                    ..call_as("DELETE", "/api/patients/7005", "root", 2_000)
+                },
+            )
+            .await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        // The home page now declares another role. The patient is no longer proven for this
+        // session, so the same request goes to Jev again rather than reusing the admin's allow.
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"staff"}"#),
+        );
+        let second = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    query: Some("ref=PT-7009"),
+                    ..call_as("DELETE", "/api/patients/7005", "root", 3_000)
+                },
+            )
             .await;
         assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
         assert_eq!(fake.calls(), 2);
