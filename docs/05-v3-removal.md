@@ -34,7 +34,7 @@
 | `crates/xshield-worker` | 已删除整个 crate（离线 CLI、`model_eval`、outbox 发布器、校准、证据迁移/清理、ClickHouse 索引与检索）；它只剩控制面已删除的调用方，没有需要迁移到网关的能力，因为 `crates/xshield-judge` 已自带 Jev 客户端 |
 | `crates/xshield-audit`、`crates/xshield-evidence` | 已删除（封存 journal 与加密证据库，含 S3 适配器与 MinIO 集成作业） |
 | `crates/xshield-postgres` | 只留站点配置、配置历史、判定日志三张表，另加网关心跳和 Jev 指令版本两张小表（[07.8](07-console-architecture.md#78-数据库)）；模块为 `site_spec_store`、`decision_log_store`、`decision_stats`、`edge_status_store`、`jev_prompt_store`、`partitions`。原 `lib.rs` 的 `PostgresIdentityStore`／`StoreError`（v3 身份绑定、凭证、匿名会话、outbox）以及其余 v3 模块（案件、证据访问、保全、导出、校准、资格账本、provenance、管理 API Key/Session、旧版 `site_config`）与对应集成测试一并删除；不再依赖 `xshield-evidence`、`openssl`、`uuid`、`zeroize` |
-| `migrations/`、`sql/` | 产品尚未上线，用一份新的基线迁移取代现有迁移；ClickHouse schema（`sql/clickhouse.sql`）已删除；`sql/postgres.sql` 待与 `migrations/` 核对后删除 |
+| `migrations/`、`sql/` | 产品尚未上线，用一份新的基线迁移取代现有迁移；ClickHouse schema（`sql/clickhouse.sql`）已删除；`sql/postgres.sql`（v3 数据模型草案）已与 `migrations/` 核对后删除，它的表都属于上面删除的 v3 能力，v4 的表以 `migrations/` 为准 |
 | `web/console` | 按 [06](06-console-ui.md) 重写：总览、请求追溯、会话、Jev 调用、站点、系统（[03.5](03-admin-config-audit.md#35-控制台范围)） |
 | `sensor/` | 已删除（浏览器探针，连同其 CI 作业与验收脚本） |
 | `deploy/` | 已删除（含 `compose`）；v4 尚无参考部署，这是已知且接受的缺口（[04](04-deployment-testing.md)），不在本次改造中补上 |
