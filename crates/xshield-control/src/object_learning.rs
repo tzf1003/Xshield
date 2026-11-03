@@ -5,11 +5,13 @@
 //! the map does not know, or a confirmed position whose evidence now points at
 //! other kinds (suspended). Where the rules cannot name a kind, the learning agent
 //! answers (`object_agent`). An administrator confirms a proposal. The pass changes a
-//! site configuration in one way only: with `auto_pause` on, a suspended position
-//! that the map declares is paused, as one new configuration version. The judge reads
-//! the paused entries from that configuration. A site turns the pass off, or sets how
-//! much evidence a proposal needs and how many questions the agent may ask, with its
-//! `objects.learning` settings.
+//! site configuration in two ways only, each as one new configuration version: with
+//! `auto_pause` on, a suspended position that the map declares is paused; with
+//! `auto_tighten` on, a class whose window votes show groups of positions that never
+//! share a value is split, so each group has a class of its own. The judge reads both
+//! from that configuration. A site turns the pass off, or sets how much evidence a
+//! proposal needs and how many questions the agent may ask, with its `objects.learning`
+//! settings.
 
 use std::collections::BTreeSet;
 
@@ -20,15 +22,18 @@ use xshield_core::context::learning::{
     kind_share, observe, propose,
 };
 use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec};
+use xshield_core::kind::Rules;
 use xshield_postgres::object_agent_store::{self as runs, CALLS_KEEP_DAYS, Trigger};
 use xshield_postgres::object_learning_store::{
     self as store, Cursor, Judgement, LearnedState, Source,
 };
-use xshield_postgres::site_spec_store::{self, Change, SiteRecord};
+use xshield_postgres::site_spec_store::{self, Change, SiteRecord, WriteOutcome};
 
 use crate::agent_model::AgentModel;
 use crate::object_agent::{self, Place, Run};
+use crate::object_map::name_word;
 use crate::params::DAY_MILLIS;
+use crate::tightening::{adds_fast_allow, apply, plan_splits};
 
 /// Decision rows this old are read. Newer rows may still be on their way from a gateway.
 const LAG_MILLIS: i64 = 10 * 60 * 1_000;
@@ -36,6 +41,9 @@ const LAG_MILLIS: i64 = 10 * 60 * 1_000;
 const BATCH_ROWS: i64 = 5_000;
 /// Batches read per site in one pass. A site still behind resumes at its cursor next time.
 const BATCHES_PER_PASS: usize = 20;
+/// Distinct votes of the window a tightening reads at most. A window with more is left for a later
+/// pass, since a split decided on part of the votes could add a fast allow the rest would show.
+const TIGHTEN_VOTES_MAX: usize = 20_000;
 
 /// Runs one learning pass over every site at `now_millis`, the hourly one. The agent
 /// asks the configured model, when there is one. A site that fails is logged, and the
@@ -239,7 +247,8 @@ async fn learn_site(
             settle_and_judge(run, pool, &place).await?;
         }
     }
-    pause_drifted(pool, site, generation).await?;
+    pause_drifted(run, pool, site, generation).await?;
+    tighten_split(run, pool, site, generation, oldest_day).await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
     store::prune_retired(pool, site, today.saturating_sub(KEEP_RETIRED_DAYS)).await?;
     Ok(())
@@ -347,6 +356,7 @@ async fn rejudge_proposals(
 /// no write; so does a write that finds a newer version. The positions stay suspended until they
 /// are paused, so the next pass tries again.
 async fn pause_drifted(
+    run: &mut Run<'_>,
     pool: &PgPool,
     site: &str,
     generation: DateTime<Utc>,
@@ -392,10 +402,88 @@ async fn pause_drifted(
         Some(&note),
     )
     .await;
-    if let Err(error) = outcome {
-        eprintln!("xshield-control: automatic pause skipped for site {site}, {error}");
+    match outcome {
+        Ok(WriteOutcome::Applied(_)) => {
+            run.counts.paused = run.counts.paused.saturating_add(count_of(keys.len()));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("xshield-control: automatic pause skipped for site {site}, {error}");
+        }
     }
     Ok(())
+}
+
+/// Splits the classes whose window votes show groups of positions that never share a value, when the
+/// site has `auto_tighten` on. The split is one new configuration version, recorded as an automatic
+/// change, and the moved positions take their new class. A split only removes fast allows, and it is
+/// written only when no window vote gains one. Like the pause, it writes nothing when the site has
+/// moved on since the pass began, or when the write finds a newer version; the next pass tries again.
+/// The run counts the positions it moved.
+async fn tighten_split(
+    run: &mut Run<'_>,
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    oldest_day: u64,
+) -> Result<(), store::LearningStoreError> {
+    let record = match site_spec_store::get(pool, site).await {
+        Ok(Some(record)) if record.created_at == generation => record,
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            eprintln!("xshield-control: automatic tightening skipped for site {site}, {error}");
+            return Ok(());
+        }
+    };
+    let map = record.spec.objects();
+    if !map.learning().auto_tighten || map.classes().is_empty() {
+        return Ok(());
+    }
+    let Some(votes) = store::window_votes(pool, site, oldest_day, TIGHTEN_VOTES_MAX).await? else {
+        eprintln!(
+            "xshield-control: automatic tightening skipped for site {site}, more than {TIGHTEN_VOTES_MAX} votes in the window"
+        );
+        return Ok(());
+    };
+    let rules = Rules::of(record.spec.advanced());
+    let word_of = |key: &str| name_word(key, &rules);
+    let splits = plan_splits(map, &votes, &word_of);
+    let moved: usize = splits.iter().map(|split| split.moves.len()).sum();
+    let Some((first, _)) = splits.first().and_then(|split| split.moves.first()) else {
+        return Ok(());
+    };
+    let Some(after) = apply(map, &splits).filter(|after| !adds_fast_allow(map, after, &votes))
+    else {
+        return Ok(());
+    };
+    let note = format!("学习任务自动收紧了 {moved} 个位置：{first} 等，按证据拆分了类别");
+    let tightened = record.spec.clone().with_objects(after);
+    // A write refused by a newer version, or to a site that is gone, writes nothing; the next
+    // pass tries again.
+    let outcome = site_spec_store::write(
+        pool,
+        site,
+        &tightened,
+        record.version,
+        Change::AutoTighten,
+        Some(&note),
+    )
+    .await;
+    match outcome {
+        Ok(WriteOutcome::Applied(_)) => {
+            run.counts.tightened = run.counts.tightened.saturating_add(count_of(moved));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("xshield-control: automatic tightening skipped for site {site}, {error}");
+        }
+    }
+    Ok(())
+}
+
+/// A count of positions as the run record keeps it. A count too large for it is held at the largest.
+fn count_of(positions: usize) -> u32 {
+    u32::try_from(positions).unwrap_or(u32::MAX)
 }
 
 /// The state the rules give a position: a confirmed position is confirmed or
@@ -988,6 +1076,190 @@ pub(crate) mod pass_tests {
         .execute(pool)
         .await
         .expect("insert a decision row");
+    }
+
+    /// A clinic site whose one class `entity` holds two flows that never cross: a doctor position
+    /// with the response that shows its id, and a document position with the response that shows
+    /// its id. `learning` is the learning settings (null for the defaults).
+    fn clinic_with_two_flows(learning: serde_json::Value) -> SiteSpec {
+        let mut objects = serde_json::json!({
+            "classes": [{"id": "entity", "name": "对象"}],
+            "slots": [
+                {"key": "GET /doctor/{id} path[1]", "class": "entity", "source": "rule"},
+                {"key": "GET /api/appointments [].doc_id", "class": "entity", "source": "rule"},
+                {"key": "GET /document/{id} path[1]", "class": "entity", "source": "rule"},
+                {"key": "GET /api/documents [].id", "class": "entity", "source": "rule"}
+            ]
+        });
+        if !learning.is_null() {
+            objects["learning"] = learning;
+        }
+        let spec = serde_json::json!({
+            "name": "clinic",
+            "hosts": ["clinic.example.com"],
+            "origin": "http://10.0.0.5:8080",
+            "session": {"cookie": "SESSIONID"},
+            "entries": ["/login"],
+            "objects": objects
+        });
+        SiteSpec::from_json(&spec.to_string()).expect("test spec")
+    }
+
+    /// One allowed decision row of `path`, whose value names `value_slot` and was shown by `source`,
+    /// the request and the response position that showed it, made in `session` at `at_millis`.
+    async fn record_flow(
+        pool: &PgPool,
+        id: &str,
+        at_millis: i64,
+        session: &str,
+        path: &str,
+        value_slot: &str,
+        source: (&str, &str),
+    ) {
+        let trace = serde_json::json!({
+            "v": 1,
+            "values_truncated": false,
+            "values": [{
+                "at": "path[1]",
+                "value": "7",
+                "kind": "reference",
+                "inert": false,
+                "seen": true,
+                "verified": true,
+                "slot": value_slot,
+                "sources": [{
+                    "field": "id",
+                    "request": source.0,
+                    "slot": source.1
+                }]
+            }],
+            "timing": {"judge_ms": 1}
+        });
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace)
+             VALUES ($1, $2, 'clinic', 'edge-1', 'clinic.example.com', '10.0.0.1', $3,
+                'GET', $4, 200, 'fast_allow', 'allowed', $5)",
+        )
+        .bind(at_millis)
+        .bind(id)
+        .bind(session)
+        .bind(path)
+        .bind(trace)
+        .execute(pool)
+        .await
+        .expect("insert a decision row");
+    }
+
+    /// Twenty uses of each flow from five sessions over the last four days, so the window holds
+    /// the votes that join each doctor to its source and each document to its source.
+    async fn record_two_flows(pool: &PgPool, now: i64) {
+        for index in 0..20 {
+            let at_millis = now - (1 + index / 5) * DAY_MILLIS;
+            let session = format!("s{}", index % 5);
+            record_flow(
+                pool,
+                &format!("req_doctor_{index:032x}"),
+                at_millis,
+                &session,
+                "/doctor/7",
+                "GET /doctor/{id} path[1]",
+                ("GET /api/appointments", "GET /api/appointments [].doc_id"),
+            )
+            .await;
+            record_flow(
+                pool,
+                &format!("req_document_{index:032x}"),
+                at_millis,
+                &session,
+                "/document/9",
+                "GET /document/{id} path[1]",
+                ("GET /api/documents", "GET /api/documents [].id"),
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_class_whose_votes_show_two_flows_is_split_by_one_new_version() {
+        let Some((admin, pool, name)) = scratch("auto_tighten").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic_with_two_flows(serde_json::Value::Null), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        record_two_flows(&pool, now).await;
+        learn_once(&pool, now).await;
+        let record = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        assert_eq!(record.version, 2);
+        let map = record.spec.objects();
+        // The doctor flow keeps the class; the document flow moves to a class of its own.
+        assert_eq!(map.class_of("GET /doctor/{id} path[1]"), Some("entity"));
+        assert_eq!(
+            map.class_of("GET /api/appointments [].doc_id"),
+            Some("entity")
+        );
+        assert_eq!(
+            map.class_of("GET /document/{id} path[1]"),
+            Some("documents")
+        );
+        assert_eq!(map.class_of("GET /api/documents [].id"), Some("documents"));
+        assert!(
+            map.classes()
+                .iter()
+                .any(|class| class.id == "documents" && class.name == "document")
+        );
+        let history = site_spec_store::history(&pool, "clinic", None, 10)
+            .await
+            .expect("read the history");
+        assert_eq!(history[0].change, Change::AutoTighten);
+        assert!(
+            history[0]
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("自动收紧"))
+        );
+        // A later pass finds the split already in place and writes no further version.
+        learn_once(&pool, now).await;
+        let again = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        assert_eq!(again.version, 2);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn with_auto_tighten_off_a_split_is_not_written() {
+        let Some((admin, pool, name)) = scratch("auto_tighten_off").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic_with_two_flows(serde_json::json!({"auto_tighten": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        record_two_flows(&pool, now).await;
+        learn_once(&pool, now).await;
+        let record = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        assert_eq!(record.version, 1);
+        assert_eq!(
+            record.spec.objects().class_of("GET /document/{id} path[1]"),
+            Some("entity")
+        );
+        drop_scratch(admin, pool, name).await;
     }
 
     #[tokio::test]
