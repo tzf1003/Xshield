@@ -18,6 +18,9 @@ from urllib.parse import parse_qs, urlsplit
 PASSWORD = "LAB-PASSWORD-7f3e9d"
 # Login name -> doctor ID. doctor_c is the share recipient and owns no patients.
 DOCTORS = {"doctor_a": "DR-A", "doctor_b": "DR-B", "doctor_c": "DR-C"}
+# Administrator logins. Their sessions hold the role "admin", which the home page names; only they
+# get the administrator's search (docs/07 section 7.4.7).
+ADMINS = {"admin_root": "DR-ROOT"}
 PATIENTS = {
     "PT-7001": {"id": "PT-7001", "name": "患者 A", "doctor": "DR-A"},
     "PT-7002": {"id": "PT-7002", "name": "患者 B", "doctor": "DR-A"},
@@ -42,6 +45,7 @@ class EmrOrigin:
         self.lock = Lock()
         self.patients = {key: dict(value) for key, value in PATIENTS.items()}
         self.sessions: dict[str, str] = {}  # SID cookie value -> doctor ID
+        self.roles: dict[str, str] = {}  # SID cookie value -> role, for administrators only
         self.shares: dict[str, str] = {}  # share code -> patient ID
         self.next_patient = 7005
         # (method, request target, X-Xshield-Request-Id as received or None)
@@ -86,13 +90,23 @@ class _Handler(BaseHTTPRequestHandler):
             status, payload, extra = self._route(method, body)
         self._send(status, payload, extra)
 
-    def _caller(self) -> str | None:
-        """The doctor behind the SID cookie, or None when the session is unknown."""
+    def _sid(self) -> str | None:
+        """The SID cookie's value, when the request carries one."""
         for part in (self.headers.get("Cookie") or "").split(";"):
             name, _, value = part.strip().partition("=")
             if name == "SID":
-                return self.origin.sessions.get(value)
+                return value
         return None
+
+    def _caller(self) -> str | None:
+        """The doctor behind the SID cookie, or None when the session is unknown."""
+        token = self._sid()
+        return None if token is None else self.origin.sessions.get(token)
+
+    def _role(self) -> str | None:
+        """The role behind the SID cookie, when it is an administrator's."""
+        token = self._sid()
+        return None if token is None else self.origin.roles.get(token)
 
     def _route(self, method: str, body: bytes) -> tuple[int, object, dict[str, str]]:
         origin = self.origin
@@ -102,22 +116,31 @@ class _Handler(BaseHTTPRequestHandler):
         if method == "POST" and url.path == "/login":
             credentials = _json(body)
             user = credentials.get("username")
-            if user not in DOCTORS or credentials.get("password") != PASSWORD:
+            accounts = {**DOCTORS, **ADMINS}
+            if user not in accounts or credentials.get("password") != PASSWORD:
                 return 401, {"error": "invalid_credentials"}, {}
             token = secrets.token_urlsafe(18)
-            origin.sessions[token] = DOCTORS[user]
+            origin.sessions[token] = accounts[user]
+            if user in ADMINS:
+                origin.roles[token] = "admin"
             return 302, None, {"Location": "/api/home", "Set-Cookie": f"SID={token}; Path=/; HttpOnly"}
         doctor = self._caller()
         if doctor is None:
             return 401, {"error": "login_required"}, {}
         if method == "GET" and url.path == "/api/home":
-            return 200, {"doctor": {"id": doctor}}, {}
+            # An administrator's home page names the role; a doctor's home page does not.
+            home: dict[str, object] = {"doctor": {"id": doctor}}
+            if self._role() == "admin":
+                home["role"] = "admin"
+            return 200, home, {}
         if method == "GET" and url.path == "/api/patients":
             # Deliberately trusts the doctor parameter: "my patients" is whoever is named.
             owner = query.get("doctor", [doctor])[0]
             return 200, {"patients": [p for p in origin.patients.values() if p["doctor"] == owner]}, {}
         if method == "POST" and url.path == "/api/patients":
-            patient = {"id": f"PT-{origin.next_patient}", "name": _json(body).get("name", ""), "doctor": doctor}
+            # Numeric ids: the object map's path templates replace numeric and UUID segments
+            # only (docs/07), so a patient created in the lab has positions in the map.
+            patient = {"id": str(origin.next_patient), "name": _json(body).get("name", ""), "doctor": doctor}
             origin.next_patient += 1
             origin.patients[patient["id"]] = patient
             return 201, patient, {}
@@ -136,11 +159,22 @@ class _Handler(BaseHTTPRequestHandler):
             code = "SHR-" + secrets.token_hex(4).upper()
             origin.shares[code] = parts[2]
             return 201, {"code": code}, {}
+        if len(parts) == 4 and parts[:2] == ["api", "patients"] and parts[3] == "notes" and method == "POST":
+            # Deliberately vulnerable as well: a note is written on any patient named in the path.
+            if parts[2] not in origin.patients:
+                return 404, {"error": "not_found"}, {}
+            return 201, {"saved": True, "patient": parts[2]}, {}
         if len(parts) == 2 and parts[0] == "share" and method == "POST":
             patient_id = origin.shares.get(parts[1])
             if patient_id is None:
                 return 404, {"error": "unknown_share_code"}, {}
             return 200, {"patient": origin.patients[patient_id]}, {}
+        if method == "GET" and url.path == "/api/admin/search":
+            # The administrator's search: every patient, to administrator sessions only.
+            if self._role() != "admin":
+                return 403, {"error": "forbidden"}, {}
+            text = query.get("q", [""])[0]
+            return 200, {"results": [p for p in origin.patients.values() if text in p["name"]]}, {}
         if method == "GET" and url.path == "/api/search":
             text = query.get("q", [""])[0]
             return 200, {"results": [p for p in origin.patients.values() if text in p["name"]]}, {}

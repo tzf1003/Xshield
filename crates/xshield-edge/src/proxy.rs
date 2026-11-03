@@ -77,6 +77,9 @@ pub struct RequestContext {
     /// Digests of the request values the judge found unseen, handed to the
     /// judge with the response (see `Judgement::sent`).
     sent: Vec<Digest16>,
+    /// Digests of the request values the tiers turned down, handed to the judge
+    /// with this request's response only (see `Judgement::echo`).
+    echo: Vec<Digest16>,
     /// The request's logical path and interface name, once the request is routed.
     resolved: Option<Resolved>,
     /// The request was bypassed: forwarded as it arrived, never judged.
@@ -322,6 +325,7 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
                 would_block,
                 now_ms: now_ms(),
                 sent: &ctx.sent,
+                echo: &ctx.echo,
             },
         ))
     }
@@ -349,6 +353,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
             status: 0,
             observed: false,
             sent: Vec::new(),
+            echo: Vec::new(),
             resolved: None,
             bypass: false,
         }
@@ -442,6 +447,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
             .await;
         ctx.credential = credential;
         ctx.sent = judgement.sent;
+        ctx.echo = judgement.echo;
         ctx.bypass = bypass;
         ctx.resolved = Some(resolved);
         let mut record = judgement.record;

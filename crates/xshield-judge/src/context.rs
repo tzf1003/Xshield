@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
-use xshield_core::context::{IdentityRole, TraceIdentity, role_label};
+use xshield_core::context::{ADMIN_ROLE, IdentityRole, TraceIdentity, role_label};
 use xshield_core::kind::{Rules, Shown, Used, affinity, declares, shown_as};
 
 use crate::values::{ResponseValue, is_id_like};
@@ -251,6 +251,33 @@ impl Seen {
         })
     }
 
+    /// The origins that show the value as the kind of object the request names for it: the
+    /// ones [`Seen::is_shown_as`] counts, one by one. The tiers judge these, since a public
+    /// sighting may count for some requests and not for others.
+    #[must_use]
+    pub fn shown_origins<'a>(
+        &self,
+        used: Used<'_>,
+        rules: &Rules,
+        request_object: Option<&str>,
+        origin_object: impl Fn(&Origin) -> Option<&'a str>,
+    ) -> Vec<&Origin> {
+        let long = used.value.chars().count() >= LONG_VALUE_CHARS;
+        self.origins
+            .iter()
+            .filter(|origin| {
+                shown_as(
+                    used,
+                    as_shown(origin),
+                    request_object,
+                    origin_object(origin),
+                    rules,
+                    long,
+                )
+            })
+            .collect()
+    }
+
     /// The origins ordered for the model, most useful last: ones of the same
     /// kind of object as the request, then id fields, then the rest. The
     /// model sees only the last few, so a recent unrelated match (a stock
@@ -364,6 +391,13 @@ impl SessionIdentity {
         if let Some(role) = &declared.role {
             self.role = Some(role.clone());
         }
+    }
+
+    /// Whether the session's declared role is an administrator's ([`ADMIN_ROLE`], docs/07 section
+    /// 7.4.7). Only a declared role counts: a session that has shown none is not an administrator.
+    #[must_use]
+    pub fn is_admin(&self) -> bool {
+        self.role.as_deref() == Some(ADMIN_ROLE)
     }
 
     /// The identity as a decision record carries it, or `None` while the session has shown none.

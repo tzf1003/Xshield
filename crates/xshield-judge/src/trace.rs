@@ -3,7 +3,10 @@
 //! showed them, and the query string with secrets removed.
 
 use xshield_core::context::trace::{TRACE_NAME_BYTES_MAX, TRACE_PATH_BYTES_MAX, VALUE_CHARS_MAX};
-use xshield_core::context::{ObjectFrom, TraceEntry, TraceRecent, TraceSource, TraceValue};
+use xshield_core::context::{
+    Attempt, ObjectFrom, PublicAccess, Reliability, Tier, TraceEntry, TraceRecent, TraceSource,
+    TraceValue,
+};
 
 use crate::context::{EntryPass, Origin, Recent, request_text};
 use crate::slots::origin_slot;
@@ -25,6 +28,13 @@ pub struct Place {
     /// The kind of object the map gives each origin's position, in the order of
     /// the ranked origins.
     pub origin_objects: Vec<Option<String>>,
+    /// The tier the map gives each origin's position, with how sure it is, in the
+    /// same order.
+    pub origin_tiers: Vec<Option<(Tier, Reliability)>>,
+    /// What the map says of the request position about public sources.
+    pub public_access: Option<PublicAccess>,
+    /// The attempt the tiers found for the value.
+    pub attempt: Option<Attempt>,
 }
 
 /// One request value as the trace shows it. `ranked` is the session's origins
@@ -41,6 +51,8 @@ pub fn value_entry(
 ) -> TraceValue {
     let key = value.key.as_deref();
     let (text, len, clipped) = shown(&value.at, key, &value.value, credential, secret_words);
+    let public_access = place.public_access;
+    let attempt = place.attempt;
     TraceValue {
         at_len: (value.at.len() > TRACE_NAME_BYTES_MAX).then_some(value.at.len()),
         at: cut(value.at.clone(), TRACE_NAME_BYTES_MAX),
@@ -61,6 +73,7 @@ pub fn value_entry(
             .take(SOURCES_SHOWN)
             .map(|(index, origin)| {
                 let object = place.origin_objects.get(index).cloned().flatten();
+                let tier = place.origin_tiers.get(index).copied().flatten();
                 TraceSource {
                     field: origin.field.clone(),
                     request: origin.request.clone(),
@@ -69,12 +82,16 @@ pub fn value_entry(
                     slot: origin_slot(origin).map(|slot| cut(slot, TRACE_NAME_BYTES_MAX)),
                     object_from: object.as_ref().map(|_| ObjectFrom::Map),
                     object,
+                    tier: tier.map(|(tier, _)| tier),
+                    reliability: tier.map(|(_, reliability)| reliability),
                 }
             })
             .collect(),
         slot: Some(cut(place.slot, TRACE_NAME_BYTES_MAX)),
         object_from: place.object.as_ref().map(|_| ObjectFrom::Map),
         object: place.object,
+        public_access,
+        attempt,
     }
 }
 

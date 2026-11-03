@@ -1,11 +1,13 @@
 //! A bounded, deterministic normalization from a request path to a display
-//! template, used only to group unmatched requests for route discovery.
+//! template. The console groups unmatched requests by it for route discovery,
+//! and the judge keys its object-map positions by it ([`position_template`]).
 //!
 //! The heuristic is deliberately narrow: it replaces a segment only when the
 //! whole segment is all-ASCII-digits or a canonical UUID, and leaves every
-//! other segment untouched. A template is never fed back into route matching
-//! or route configuration as a literal path; it is a grouping key for the
-//! console's "import routes from observed traffic" discovery list.
+//! other segment untouched. Positions first take the spelling the origin routes
+//! a path by ([`canonical_path`]), so that `/orders/7/` and `/orders/%37` find
+//! the position of `/orders/7`. A template is never fed back into route matching
+//! or route configuration as a literal path.
 
 /// Maximum accepted input length. Longer paths are rejected rather than
 /// normalized, keeping the audit field bounded without truncating a value
@@ -24,12 +26,7 @@ const PLACEHOLDER: &str = "{id}";
 /// [`MAX_PATH_BYTES`] returns `None`.
 #[must_use]
 pub fn normalize(path: &str) -> Option<String> {
-    if path.is_empty()
-        || path.len() > MAX_PATH_BYTES
-        || !path.starts_with('/')
-        || path.contains(['?', '#'])
-        || path.bytes().any(|byte| byte.is_ascii_control())
-    {
+    if !is_plain(path) || path.len() > MAX_PATH_BYTES {
         return None;
     }
     let mut template = String::with_capacity(path.len());
@@ -44,6 +41,79 @@ pub fn normalize(path: &str) -> Option<String> {
         }
     }
     Some(template)
+}
+
+/// Whether `path` is a plain absolute path the heuristics can describe: the refusals
+/// [`normalize`] makes, apart from its length bound. The bound applies to the template, so a
+/// long spelling is folded to its canonical path before it is bounded.
+fn is_plain(path: &str) -> bool {
+    !path.is_empty()
+        && path.starts_with('/')
+        && !path.contains(['?', '#'])
+        && !path.bytes().any(|byte| byte.is_ascii_control())
+}
+
+/// The spelling of `path` that the usual HTTP stacks route it by: the equivalences of RFC 3986
+/// section 6.2.2. Empty segments go, so a trailing slash and a doubled slash too; `.` segments go,
+/// and a `..` segment takes its parent away (at the root it goes); a percent-escape of an
+/// unreserved character is decoded, and the other escapes keep their escape with upper-case hex
+/// digits. Every other character is kept, so a spelling that may route differently (an encoded
+/// slash, another case) is not folded into another one.
+///
+/// Returns `None` for a path that is not absolute, or carries a query or a control byte, and for
+/// a malformed escape.
+#[must_use]
+pub fn canonical_path(path: &str) -> Option<String> {
+    if !is_plain(path) {
+        return None;
+    }
+    let mut segments: Vec<String> = Vec::new();
+    for raw in path.split('/').skip(1) {
+        let decoded = decode_unreserved(raw)?;
+        match decoded.as_str() {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(decoded),
+        }
+    }
+    Some(format!("/{}", segments.join("/")))
+}
+
+/// `segment` with each escape of an unreserved character decoded, and each other escape kept
+/// with upper-case hex digits. `None` when an escape is not followed by two hex digits.
+fn decode_unreserved(segment: &str) -> Option<String> {
+    let mut out = String::with_capacity(segment.len());
+    let mut rest = segment;
+    while let Some(index) = rest.find('%') {
+        out.push_str(&rest[..index]);
+        let hex = rest.get(index + 1..index + 3)?;
+        if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = u8::from_str_radix(hex, 16).ok()?;
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push('%');
+            out.push_str(&hex.to_ascii_uppercase());
+        }
+        rest = &rest[index + 3..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// The template a route position is keyed by: the canonical spelling of `path`, with its
+/// numeric and UUID segments replaced as [`normalize`] does. A path without a canonical
+/// spelling is kept as it is.
+#[must_use]
+pub fn position_template(path: &str) -> String {
+    match canonical_path(path) {
+        Some(canonical) => normalize(&canonical).unwrap_or(canonical),
+        None => path.to_owned(),
+    }
 }
 
 /// A segment counts as variable only when it is entirely digits or a
@@ -70,6 +140,87 @@ fn is_canonical_uuid(segment: &str) -> bool {
             byte.is_ascii_hexdigit()
         }
     })
+}
+
+#[cfg(test)]
+mod canonical_tests {
+    use super::{MAX_PATH_BYTES, canonical_path, position_template};
+
+    #[test]
+    fn a_long_spelling_of_a_short_path_names_its_position() {
+        // Extra slashes take the spelling past the length bound, but they fold away first.
+        let long = format!("/api/patients/7005{}", "/".repeat(240));
+        assert!(long.len() > MAX_PATH_BYTES);
+        assert_eq!(canonical_path(&long).as_deref(), Some("/api/patients/7005"));
+        assert_eq!(position_template(&long), "/api/patients/{id}");
+    }
+
+    #[test]
+    fn equivalent_spellings_share_one_canonical_path() {
+        assert_eq!(
+            canonical_path("/api/patients/7005/").as_deref(),
+            Some("/api/patients/7005")
+        );
+        assert_eq!(
+            canonical_path("/api//patients/7005").as_deref(),
+            Some("/api/patients/7005")
+        );
+        assert_eq!(
+            canonical_path("/api/./patients/7005").as_deref(),
+            Some("/api/patients/7005")
+        );
+        assert_eq!(
+            canonical_path("/api/x/../patients/7005").as_deref(),
+            Some("/api/patients/7005")
+        );
+        assert_eq!(
+            canonical_path("/../api/patients").as_deref(),
+            Some("/api/patients")
+        );
+        assert_eq!(canonical_path("/api/%37005").as_deref(), Some("/api/7005"));
+        assert_eq!(
+            canonical_path("/api/%2e%2E/patients").as_deref(),
+            Some("/patients")
+        );
+        assert_eq!(canonical_path("/").as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn spellings_that_may_route_differently_are_kept_apart() {
+        assert_eq!(canonical_path("/api/a%2fb").as_deref(), Some("/api/a%2Fb"));
+        assert_eq!(canonical_path("/api/a%2Fb").as_deref(), Some("/api/a%2Fb"));
+        assert_eq!(
+            canonical_path("/api/Patients").as_deref(),
+            Some("/api/Patients")
+        );
+    }
+
+    #[test]
+    fn refuses_what_it_cannot_place() {
+        assert_eq!(canonical_path("orders/1"), None);
+        assert_eq!(canonical_path("/orders?x=1"), None);
+        assert_eq!(canonical_path("/api/%zz"), None);
+        assert_eq!(canonical_path("/api/%4"), None);
+        assert_eq!(canonical_path("/api/%+1"), None);
+    }
+
+    #[test]
+    fn positions_key_equivalent_spellings_alike() {
+        assert_eq!(
+            position_template("/api/patients/7005/"),
+            "/api/patients/{id}"
+        );
+        assert_eq!(
+            position_template("/api/patients/%37005"),
+            "/api/patients/{id}"
+        );
+        assert_eq!(
+            position_template("/api/patients/7005"),
+            "/api/patients/{id}"
+        );
+        assert_eq!(position_template("/orders/a%2Fb/"), "/orders/a%2Fb");
+        assert_eq!(position_template("orders/1"), "orders/1");
+    }
 }
 
 #[cfg(test)]

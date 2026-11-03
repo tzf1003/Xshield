@@ -8,7 +8,9 @@ Script:
 - a request value containing JEVDOWN gets HTTP 503 (provider unavailable);
 - a value containing JEVSLOW gets its answer after one second, which a site
   with a 100 ms timeout turns into JEV_TIMEOUT;
-- access is DENY when the request carries an object reference (kind
+- access is DENY when a value is an attempt (attempt over_privilege: the
+  session saw it only in public responses, and its position takes none of
+  them), and DENY when the request carries an object reference (kind
   "reference") that the session was never shown, except for the input the
   entry itself needs (the share code under /share/, the login form). Otherwise
   ALLOW;
@@ -63,12 +65,15 @@ def judge(document: dict) -> dict:
     entry_input = state["entry"]["matched"] and (
         path in ENTRY_INPUT_PATHS or path.startswith(ENTRY_INPUT_PREFIXES)
     )
-    access_deny = any(
+    # An attempt is refused whatever else the request says: the origin showed the
+    # value only to the public, and the position takes no public sighting.
+    attempt = any(value.get("attempt") == "over_privilege" for value in values)
+    unseen = any(
         selects_object(value) and not value.get("verified") and not value.get("seen_as")
         for value in values
     ) and not entry_input
     text = " ".join([path, *(str(value.get("value", "")) for value in values)]).lower()
-    access = "DENY" if access_deny else "ALLOW"
+    access = "DENY" if attempt or unseen else "ALLOW"
     attack = "ATTACK" if any(marker in text for marker in ATTACK_MARKERS) else "BENIGN"
     return {
         "model": "fake-jev",
