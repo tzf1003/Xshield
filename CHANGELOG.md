@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 安全靶场改为 [docs/04](docs/04-deployment-testing.md) 4.3 的验收场景 A1–C5：`scripts/test_idor_lab.py` 启动真实 `xshield-edge`（站点来自 `XSHIELD_EDGE_SITES_FILE`），对一个无对象鉴权的 EMR 源站和脚本化的 Jev 假服务逐条发请求，核对状态码、源站是否收到请求和判定日志。不需要 Docker、数据库或模型；CI 的 validate 作业运行它。删除 v3 靶场的 Compose 源站、界面种子、独立标签和指标脚本，以及只服务于已删网关的 `test_security_lab.py`。
 - 修复路径参数绕过 Jev：路径里的数字现在按紧挨它前面的路由词判定类别，不再取整条路径的所有词。此前医生列表里出现过的 `9`，在 `/api/doctors/7/files/9` 里会被当成医生快速放行，而那里的 `9` 是文件 id。没有路由词的路径段仍退回整条路径。
 - 站点可以用 `advanced.field_kinds` 声明字段名或参数名装的对象类别，覆盖按名字的推断，例如 `doc_id` 装的是医生、`in` 限定在预约接口里。判定与 `synonyms` 共用 `xshield-core` 中新的 `kind` 模块，控制台以后的预览与网关使用同一份规则（[07.6](docs/07-console-architecture.md#76-站点级判定参数advanced)）。
 - 修复查询、表单和请求体里没有名字的键（裸 `id`、`ids`，以及顶层数组里的值）绕过 Jev：这类值现在取路径末尾最近的路由词，不再取整条路径的所有词，所以 `?id=9` 在 `/api/doctors/7/files` 上不会因为医生 9 而放行。嵌套在具名对象里的裸 `id` 改按对象名判定：`{"doc":{"id":5}}` 的 `doc.id` 与 `?doc=5` 一样装的是文档。此前它取记录接口的词而交给 Jev，现在文档 5 若曾在文档列表里出现过，会快速放行。
