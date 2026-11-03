@@ -61,7 +61,42 @@ pub enum SlotSource {
     Agent,
 }
 
+/// Whose objects a response position shows (the tier of the object-map learning, docs/07
+/// section 7.9.16). `self` holds the current user's own objects, `org` the objects of the
+/// user's organisation, `admin` the objects only admin sessions get back, and `public`
+/// objects many users see alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    /// The current user's own objects, written `self`.
+    #[serde(rename = "self")]
+    Own,
+    /// The objects of the current user's organisation.
+    Org,
+    /// Objects that only admin sessions get back.
+    Admin,
+    /// Objects many users see alike.
+    Public,
+}
+
+/// How sure the learning is of a tier or of an acceptance. The judge tightens only on
+/// `high`; `medium` is proposed to an administrator and changes no decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reliability {
+    /// Too little evidence or too little agreement. Never proposed.
+    Low,
+    /// Enough evidence to propose; not enough for the judge to tighten.
+    Medium,
+    /// Enough evidence, and nearly every unit agrees.
+    High,
+}
+
 /// One confirmed position and the kind of object it carries.
+///
+/// The learning may add a judgement to an entry: a response position may carry a `tier`,
+/// and a request position may carry `accepts_public`. `reliability` qualifies the one that
+/// is there. An absent judgement is unknown, and the judge then behaves as it did before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObjectSlot {
@@ -74,9 +109,19 @@ pub struct ObjectSlot {
     /// Paused: the entry stays, so the position keeps its kind and the learning task
     /// knows it, but the judge does not use the kind. The position is judged by its name
     /// until an administrator writes the entry back without the flag. Absent means not
-    /// paused.
+    /// paused. A paused entry keeps its judgement too, and the judge does not use that either.
     #[serde(default, skip_serializing_if = "is_false")]
     pub paused: bool,
+    /// For a response position: whose objects it shows. Absent means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    /// For a request position: whether normal traffic sends values from public positions
+    /// here. `false` means it rarely does. Absent means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts_public: Option<bool>,
+    /// How sure the learning is of `tier` or `accepts_public`. Absent counts as low.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliability: Option<Reliability>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -253,25 +298,56 @@ impl ObjectMap {
     }
 
     /// The map with `key` set to `class` from `source`, and not paused. The entry the map has
-    /// for the key is replaced, paused or not. A key the map does not declare is appended, so
-    /// the index stays valid.
+    /// for the key is replaced, paused or not, but its judgement (`tier`, `accepts_public`,
+    /// `reliability`) is kept: confirming a kind does not discard what the learning judged.
+    /// A key the map does not declare is appended, so the index stays valid.
     #[must_use]
     pub fn with_entry(mut self, key: &str, class: &str, source: SlotSource) -> Self {
-        let entry = ObjectSlot {
-            key: key.to_owned(),
-            class: class.to_owned(),
-            source,
-            paused: false,
-        };
         if let Some(&place) = self.index.get(key) {
             if let Some(slot) = self.slots.get_mut(place) {
-                *slot = entry;
+                class.clone_into(&mut slot.class);
+                slot.source = source;
+                slot.paused = false;
             }
         } else {
             self.index.insert(key.to_owned(), self.slots.len());
-            self.slots.push(entry);
+            self.slots.push(ObjectSlot {
+                key: key.to_owned(),
+                class: class.to_owned(),
+                source,
+                paused: false,
+                tier: None,
+                accepts_public: None,
+                reliability: None,
+            });
         }
         self
+    }
+
+    /// The tier a response position is confirmed with, when the map confirms one and does
+    /// not pause the entry. The judge and the acceptance learning read tiers through this.
+    #[must_use]
+    pub fn tier_of(&self, key: &str) -> Option<Tier> {
+        self.live(key).and_then(|slot| slot.tier)
+    }
+
+    /// Whether a request position is confirmed to accept public sources: `Some(false)` when
+    /// normal traffic rarely sends them. Only confirmed, unpaused entries answer.
+    #[must_use]
+    pub fn accepts_public_of(&self, key: &str) -> Option<bool> {
+        self.live(key).and_then(|slot| slot.accepts_public)
+    }
+
+    /// How sure the learning is of the judgement of a position, when the map confirms one and
+    /// does not pause the entry.
+    #[must_use]
+    pub fn reliability_of(&self, key: &str) -> Option<Reliability> {
+        self.live(key).and_then(|slot| slot.reliability)
+    }
+
+    /// The entry of a position when it is not paused.
+    fn live(&self, key: &str) -> Option<&ObjectSlot> {
+        self.slot(key).filter(|slot| !slot.paused)
     }
 
     /// The entry of a position, paused or not.
@@ -336,6 +412,11 @@ pub enum ObjectsReason {
     TooMany,
     /// A kind id is not lower-case ASCII letters, or not 3 to 24 of them.
     ClassIdInvalid,
+    /// A position carries both a `tier` (a response judgement) and `accepts_public` (a request
+    /// judgement). A position is one or the other.
+    JudgementConflict,
+    /// A `reliability` with neither a `tier` nor `accepts_public` to qualify.
+    ReliabilityWithoutJudgement,
 }
 
 impl ObjectsReason {
@@ -348,6 +429,8 @@ impl ObjectsReason {
             Self::KeyInvalid => "key_invalid",
             Self::TooMany => "too_many",
             Self::ClassIdInvalid => "class_id_invalid",
+            Self::JudgementConflict => "judgement_conflict",
+            Self::ReliabilityWithoutJudgement => "reliability_without_judgement",
         }
     }
 }
@@ -393,6 +476,15 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
             }
             if !ids.contains_key(slot.class.as_str()) {
                 return Err(refused(place, Some(ObjectsReason::ClassUnknown)));
+            }
+            if slot.tier.is_some() && slot.accepts_public.is_some() {
+                return Err(refused(place, Some(ObjectsReason::JudgementConflict)));
+            }
+            if slot.reliability.is_some() && slot.tier.is_none() && slot.accepts_public.is_none() {
+                return Err(refused(
+                    place,
+                    Some(ObjectsReason::ReliabilityWithoutJudgement),
+                ));
             }
             if index.insert(slot.key.clone(), at).is_some() {
                 return Err(refused(place, Some(ObjectsReason::DuplicateKey)));
@@ -453,6 +545,127 @@ fn valid_key(key: &str) -> bool {
         && !location.is_empty()
         && location.len() <= 128
         && location.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+#[cfg(test)]
+mod judgement_tests {
+    use super::*;
+
+    const JUDGED: &str = r#"{
+        "classes": [{"id": "patient", "name": "患者"}],
+        "slots": [
+            {"key": "GET /api/search [].id", "class": "patient", "source": "rule",
+             "tier": "public", "reliability": "high"},
+            {"key": "DELETE /api/patients/{id} path[1]", "class": "patient", "source": "admin",
+             "accepts_public": false, "reliability": "medium"},
+            {"key": "GET /api/patients [].id", "class": "patient", "source": "admin", "tier": "self"}
+        ]
+    }"#;
+
+    fn map(json: &str) -> ObjectMap {
+        let dto: ObjectMapDto = serde_json::from_str(json).expect("the section parses");
+        ObjectMap::try_from(dto).expect("the map is valid")
+    }
+
+    /// The reason a section is refused, when the rules name one.
+    fn refusal(json: &str) -> Option<ObjectsReason> {
+        let dto: ObjectMapDto = serde_json::from_str(json).expect("the section parses");
+        match ObjectMap::try_from(dto) {
+            Err(ConfigError::Objects(issue)) => issue.reason,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn judgements_are_read_and_written_and_absent_when_unknown() {
+        let judged = map(JUDGED);
+        assert_eq!(judged.tier_of("GET /api/search [].id"), Some(Tier::Public));
+        assert_eq!(
+            judged.reliability_of("GET /api/search [].id"),
+            Some(Reliability::High)
+        );
+        assert_eq!(
+            judged.accepts_public_of("DELETE /api/patients/{id} path[1]"),
+            Some(false)
+        );
+        assert_eq!(
+            judged.reliability_of("DELETE /api/patients/{id} path[1]"),
+            Some(Reliability::Medium)
+        );
+        assert_eq!(judged.tier_of("GET /api/patients [].id"), Some(Tier::Own));
+        assert_eq!(judged.reliability_of("GET /api/patients [].id"), None);
+        assert_eq!(judged.tier_of("GET /api/unknown [].id"), None);
+
+        let written = serde_json::to_value(&judged).expect("the map writes");
+        let slots = written["slots"].as_array().expect("the slots are an array");
+        assert_eq!(slots[0]["tier"], "public");
+        assert_eq!(slots[0]["reliability"], "high");
+        assert_eq!(slots[1]["accepts_public"], false);
+        assert_eq!(slots[1]["reliability"], "medium");
+        assert_eq!(slots[2]["tier"], "self");
+        assert!(slots[2].get("reliability").is_none());
+        assert!(slots[2].get("accepts_public").is_none());
+        assert!(slots[2].get("paused").is_none());
+    }
+
+    #[test]
+    fn a_position_names_one_judgement_and_a_reliability_needs_one() {
+        let both = r#"{"classes": [{"id": "patient", "name": "患者"}], "slots": [
+            {"key": "GET /api/search [].id", "class": "patient", "source": "rule",
+             "tier": "public", "accepts_public": true}]}"#;
+        assert_eq!(refusal(both), Some(ObjectsReason::JudgementConflict));
+        assert_eq!(
+            ObjectsReason::JudgementConflict.code(),
+            "judgement_conflict"
+        );
+
+        let alone = r#"{"classes": [{"id": "patient", "name": "患者"}], "slots": [
+            {"key": "GET /api/search [].id", "class": "patient", "source": "rule",
+             "reliability": "high"}]}"#;
+        assert_eq!(
+            refusal(alone),
+            Some(ObjectsReason::ReliabilityWithoutJudgement)
+        );
+        assert_eq!(
+            ObjectsReason::ReliabilityWithoutJudgement.code(),
+            "reliability_without_judgement"
+        );
+    }
+
+    #[test]
+    fn an_unknown_tier_or_reliability_is_not_read() {
+        let everyone = JUDGED.replace(r#""tier": "public""#, r#""tier": "everyone""#);
+        assert!(serde_json::from_str::<ObjectMapDto>(&everyone).is_err());
+        let sure = JUDGED.replace(r#""reliability": "high""#, r#""reliability": "certain""#);
+        assert!(serde_json::from_str::<ObjectMapDto>(&sure).is_err());
+    }
+
+    #[test]
+    fn confirming_a_kind_keeps_what_the_learning_judged() {
+        let confirmed =
+            map(JUDGED).with_entry("GET /api/search [].id", "patient", SlotSource::Admin);
+        let entry = confirmed
+            .slots()
+            .iter()
+            .find(|slot| slot.key == "GET /api/search [].id")
+            .expect("the entry stays");
+        assert_eq!(entry.source, SlotSource::Admin);
+        assert_eq!(entry.tier, Some(Tier::Public));
+        assert_eq!(entry.reliability, Some(Reliability::High));
+    }
+
+    #[test]
+    fn a_paused_entry_keeps_its_judgement_and_the_judge_gets_none() {
+        let paused = map(JUDGED).with_paused(&["GET /api/search [].id".to_owned()]);
+        assert_eq!(paused.tier_of("GET /api/search [].id"), None);
+        assert_eq!(paused.reliability_of("GET /api/search [].id"), None);
+        let entry = paused
+            .slots()
+            .iter()
+            .find(|slot| slot.key == "GET /api/search [].id")
+            .expect("the entry stays");
+        assert_eq!(entry.tier, Some(Tier::Public));
+    }
 }
 
 #[cfg(test)]

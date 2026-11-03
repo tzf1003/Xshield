@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::log::{DecisionPath, Outcome};
-use super::objects::ObjectMap;
+use super::objects::{ObjectMap, Reliability, Tier};
 use super::trace::Trace;
 
 /// Days of evidence a position is judged on.
@@ -265,6 +265,22 @@ impl Evidence {
     pub fn last_day(&self) -> Option<u64> {
         self.votes.keys().map(|(_, day)| *day).max()
     }
+
+    /// One (session, response positions) pair per vote in the window, in session order.
+    pub fn uses(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.votes
+            .iter()
+            .map(|((session, _), positions)| (session.as_str(), positions.as_slice()))
+    }
+
+    /// The sessions refused at this position in the window.
+    #[must_use]
+    pub fn refused_sessions(&self) -> BTreeSet<&str> {
+        self.denials
+            .iter()
+            .map(|(session, _)| session.as_str())
+            .collect()
+    }
 }
 
 /// One response position a vote was shown at, with the votes and sessions it holds.
@@ -375,6 +391,432 @@ fn share_of(count: u32, votes: u32) -> u32 {
 
 fn saturating_count(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+/// A response position is `self` when at most this share of its values, in thousandths,
+/// is seen by two units or more: its units see nearly disjoint objects.
+pub const SELF_SHARE_MAX_PER_MILLE: u32 = 10;
+/// A request position rarely sends public values when at most this share of its judged
+/// votes, in thousandths, came from public positions only.
+pub const RARE_PUBLIC_PER_MILLE: u32 = 10;
+/// A request position commonly sends public values when at least this share of its
+/// judged votes, in thousandths, came from public positions only.
+pub const COMMON_PUBLIC_PER_MILLE: u32 = 200;
+/// Agreement, in thousandths, a `high` tier needs from nearly every value.
+const HIGH_AGREEMENT_PER_MILLE: u32 = 980;
+
+/// What the control plane counted at one response position. The units are the user
+/// identities the site declares, or the sessions when it declares none.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResponseStats {
+    /// Whether the units are user identities rather than sessions.
+    pub identified: bool,
+    /// Non-admin units that got a 2xx carrying values at the position.
+    pub units: u32,
+    /// Distinct values those units saw at the position.
+    pub values: u32,
+    /// Of `values`, the ones two or more units saw.
+    pub shared: u32,
+    /// Admin units that got a 2xx at the position.
+    pub admin_units: u32,
+    /// Non-admin units refused at the position (no 2xx).
+    pub refused_units: u32,
+}
+
+/// The tier the rules give a response position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TierJudgement {
+    /// Whose objects the position shows.
+    pub tier: Tier,
+    /// How sure the rules are.
+    pub reliability: Reliability,
+    /// The share of values, in thousandths, that agree with the tier: the shared ones for
+    /// `public`, the unshared ones for `self`. Zero for `admin`, which the refusals decide.
+    pub agreement_per_mille: u32,
+}
+
+/// The tier the rules give a response position, when they can tell it and the answer is
+/// reliable enough to propose.
+///
+/// `admin`: only admin units get values back, and the non-admin units that tried were
+/// refused. `public`: the non-admin units share nearly all their values. `self`: they share
+/// nearly none. Anything between is left to the learning agent, and so is `org`, which
+/// needs the organisation of each unit. Too little evidence gives no judgement.
+///
+/// Without identities the units are sessions, and one user's sessions look like several
+/// users, so the reliability drops one step. A judgement that drops below `medium` is not
+/// returned.
+#[must_use]
+pub fn judge_tier(stats: &ResponseStats, thresholds: Thresholds) -> Option<TierJudgement> {
+    if stats.admin_units > 0 && stats.units == 0 && stats.refused_units >= thresholds.sessions {
+        let strong = stats.refused_units >= doubled(thresholds.sessions);
+        let reliability = grade(strong, stats.identified)?;
+        return Some(TierJudgement {
+            tier: Tier::Admin,
+            reliability,
+            agreement_per_mille: 0,
+        });
+    }
+    if stats.units < thresholds.sessions || stats.values < thresholds.votes {
+        return None;
+    }
+    let shared = share_of(stats.shared, stats.values);
+    let (tier, agreement) = if shared >= thresholds.share_per_mille {
+        (Tier::Public, shared)
+    } else if shared <= SELF_SHARE_MAX_PER_MILLE {
+        (Tier::Own, 1_000 - shared)
+    } else {
+        return None;
+    };
+    let strong =
+        stats.units >= doubled(thresholds.sessions) && agreement >= HIGH_AGREEMENT_PER_MILLE;
+    let reliability = grade(strong, stats.identified)?;
+    Some(TierJudgement {
+        tier,
+        reliability,
+        agreement_per_mille: agreement,
+    })
+}
+
+/// What the rules give a request position: whether normal traffic sends values from public
+/// positions to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptJudgement {
+    /// `false`: normal traffic rarely sends public values here. `true`: it commonly does.
+    pub accepts_public: bool,
+    /// How sure the rules are.
+    pub reliability: Reliability,
+    /// The votes judged: those with at least one response position of a known tier.
+    pub votes: u32,
+    /// The distinct sessions among them.
+    pub sessions: u32,
+    /// The share of judged votes, in thousandths, whose values came from public positions only.
+    pub public_per_mille: u32,
+}
+
+/// Whether a request position accepts public sources, from its votes and the confirmed tiers
+/// of the response positions the votes were shown at.
+///
+/// A vote is judged when at least one of its response positions has a tier, and it counts as
+/// public when every such position is `public`. Votes of admin sessions are left out: an
+/// admin's use of public objects says nothing about ordinary users. So are votes of sessions
+/// refused at the position, since a refused session is what the judge is there to stop.
+///
+/// Without identities the sessions count as users, so the reliability drops one step.
+#[must_use]
+pub fn judge_accepts_public(
+    evidence: &Evidence,
+    tier_of: impl Fn(&str) -> Option<Tier>,
+    admin_sessions: &BTreeSet<String>,
+    identified: bool,
+    thresholds: Thresholds,
+) -> Option<AcceptJudgement> {
+    let refused = evidence.refused_sessions();
+    let mut votes = 0_u32;
+    let mut public = 0_u32;
+    let mut sessions = BTreeSet::new();
+    for (session, positions) in evidence.uses() {
+        if admin_sessions.contains(session) || refused.contains(session) {
+            continue;
+        }
+        let mut tiers = positions
+            .iter()
+            .filter_map(|position| tier_of(position.as_str()))
+            .peekable();
+        if tiers.peek().is_none() {
+            continue;
+        }
+        votes = votes.saturating_add(1);
+        sessions.insert(session);
+        if tiers.all(|tier| tier == Tier::Public) {
+            public = public.saturating_add(1);
+        }
+    }
+    let sessions = saturating_count(sessions.len());
+    if votes < thresholds.votes || sessions < thresholds.sessions {
+        return None;
+    }
+    let public_per_mille = share_of(public, votes);
+    let accepts_public = if public_per_mille <= RARE_PUBLIC_PER_MILLE {
+        false
+    } else if public_per_mille >= COMMON_PUBLIC_PER_MILLE {
+        true
+    } else {
+        return None;
+    };
+    let margin = if accepts_public {
+        public_per_mille >= doubled(COMMON_PUBLIC_PER_MILLE)
+    } else {
+        doubled(public_per_mille) <= RARE_PUBLIC_PER_MILLE
+    };
+    let strong =
+        margin && votes >= doubled(thresholds.votes) && sessions >= doubled(thresholds.sessions);
+    let reliability = grade(strong, identified)?;
+    Some(AcceptJudgement {
+        accepts_public,
+        reliability,
+        votes,
+        sessions,
+        public_per_mille,
+    })
+}
+
+/// The reliability of a judgement: `high` when the evidence is strong, `medium` when it only
+/// meets the thresholds. Without identities, one step lower. `None` for `low`, which is
+/// never proposed.
+fn grade(strong: bool, identified: bool) -> Option<Reliability> {
+    let base = if strong {
+        Reliability::High
+    } else {
+        Reliability::Medium
+    };
+    let reliability = match (base, identified) {
+        (Reliability::High, false) => Reliability::Medium,
+        (Reliability::Medium, false) | (Reliability::Low, _) => Reliability::Low,
+        (level, true) => level,
+    };
+    (reliability != Reliability::Low).then_some(reliability)
+}
+
+fn doubled(count: u32) -> u32 {
+    count.saturating_mul(2)
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    const PATIENTS: &str = "GET /api/patients [].id";
+    const SEARCH: &str = "GET /api/search [].id";
+    const DELETE: &str = "DELETE /api/patients/{id} path[1]";
+
+    fn thresholds() -> Thresholds {
+        Thresholds::default()
+    }
+
+    fn tiers(key: &str) -> Option<Tier> {
+        match key {
+            PATIENTS => Some(Tier::Own),
+            SEARCH => Some(Tier::Public),
+            _ => None,
+        }
+    }
+
+    /// Stats for `units` non-admin identities that saw `values` values, `shared` of them
+    /// by two units or more.
+    fn stats(units: u32, values: u32, shared: u32) -> ResponseStats {
+        ResponseStats {
+            identified: true,
+            units,
+            values,
+            shared,
+            ..ResponseStats::default()
+        }
+    }
+
+    #[test]
+    fn values_all_seen_by_many_identities_are_public_and_high() {
+        let judged = judge_tier(&stats(12, 40, 40), thresholds()).unwrap();
+        assert_eq!(judged.tier, Tier::Public);
+        assert_eq!(judged.reliability, Reliability::High);
+        assert_eq!(judged.agreement_per_mille, 1_000);
+    }
+
+    #[test]
+    fn sessions_instead_of_identities_drop_reliability_one_step() {
+        let mut unidentified = stats(12, 40, 40);
+        unidentified.identified = false;
+        let judged = judge_tier(&unidentified, thresholds()).unwrap();
+        assert_eq!(judged.tier, Tier::Public);
+        assert_eq!(judged.reliability, Reliability::Medium);
+    }
+
+    #[test]
+    fn disjoint_units_are_self_and_high_only_with_enough_units() {
+        let few = judge_tier(&stats(6, 30, 0), thresholds()).unwrap();
+        assert_eq!(few.tier, Tier::Own);
+        assert_eq!(few.reliability, Reliability::Medium);
+        let many = judge_tier(&stats(10, 30, 0), thresholds()).unwrap();
+        assert_eq!(many.reliability, Reliability::High);
+        assert_eq!(many.agreement_per_mille, 1_000);
+    }
+
+    #[test]
+    fn a_mixed_share_is_left_to_the_agent() {
+        // Half the values shared: neither public nor self, and org needs the organisation.
+        assert_eq!(judge_tier(&stats(8, 40, 20), thresholds()), None);
+    }
+
+    #[test]
+    fn too_little_evidence_gives_no_tier() {
+        assert_eq!(judge_tier(&stats(4, 40, 40), thresholds()), None);
+        assert_eq!(judge_tier(&stats(12, 10, 10), thresholds()), None);
+    }
+
+    #[test]
+    fn a_weak_judgement_without_identities_is_not_returned() {
+        let mut weak = stats(6, 30, 0);
+        weak.identified = false;
+        assert_eq!(judge_tier(&weak, thresholds()), None);
+    }
+
+    #[test]
+    fn only_admin_units_get_values_back_and_the_others_are_refused() {
+        let admin = ResponseStats {
+            identified: true,
+            admin_units: 1,
+            refused_units: 5,
+            ..ResponseStats::default()
+        };
+        let judged = judge_tier(&admin, thresholds()).unwrap();
+        assert_eq!(judged.tier, Tier::Admin);
+        assert_eq!(judged.reliability, Reliability::Medium);
+
+        let strong = ResponseStats {
+            refused_units: 10,
+            ..admin
+        };
+        assert_eq!(
+            judge_tier(&strong, thresholds()).map(|judged| judged.reliability),
+            Some(Reliability::High)
+        );
+    }
+
+    #[test]
+    fn admin_values_seen_by_ordinary_units_are_not_admin() {
+        let shared_with_admin = ResponseStats {
+            admin_units: 1,
+            refused_units: 10,
+            units: 1,
+            values: 1,
+            ..ResponseStats::default()
+        };
+        assert_eq!(judge_tier(&shared_with_admin, thresholds()), None);
+    }
+
+    /// Votes for `DELETE` from `sessions` sessions: each vote shows its value at `from`, and
+    /// the sessions, days and votes are spread so that none collapses into another.
+    fn uses(count: u64, sessions: u64, from: impl Fn(u64) -> Vec<&'static str>) -> Evidence {
+        let mut evidence = Evidence::default();
+        for index in 0..count {
+            evidence.add_vote(Vote {
+                slot: DELETE.to_owned(),
+                session: format!("s{}", index % sessions),
+                day: index / sessions,
+                from: from(index).into_iter().map(str::to_owned).collect(),
+            });
+        }
+        evidence
+    }
+
+    fn no_admins() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
+    #[test]
+    fn a_request_that_only_takes_own_values_rarely_takes_public_ones() {
+        let evidence = uses(40, 10, |_| vec![PATIENTS]);
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!(judged.reliability, Reliability::High);
+        assert_eq!(judged.public_per_mille, 0);
+    }
+
+    #[test]
+    fn a_request_that_mostly_takes_public_values_accepts_them() {
+        let evidence = uses(40, 10, |_| vec![SEARCH]);
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()).unwrap();
+        assert!(judged.accepts_public);
+        assert_eq!(judged.public_per_mille, 1_000);
+        assert_eq!(judged.reliability, Reliability::High);
+    }
+
+    #[test]
+    fn a_middle_share_gives_no_acceptance() {
+        // 4 of 40 judged votes (100 per mille) took public values: neither rare nor common.
+        let evidence = uses(40, 10, |index| {
+            if index < 4 {
+                vec![SEARCH]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        assert_eq!(
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_vote_mixing_own_and_public_values_is_not_public() {
+        let evidence = uses(40, 10, |_| vec![SEARCH, PATIENTS]);
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!(judged.public_per_mille, 0);
+    }
+
+    #[test]
+    fn an_admin_session_taking_public_values_does_not_count() {
+        // Sessions s0 and s1 are admins and take public values; the rest take their own.
+        let evidence = uses(40, 10, |index| {
+            if index % 10 < 2 {
+                vec![SEARCH]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        let admins: BTreeSet<String> = ["s0", "s1"].iter().map(|s| (*s).to_owned()).collect();
+        let judged = judge_accepts_public(&evidence, tiers, &admins, true, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!(judged.sessions, 8);
+        assert_eq!(judged.public_per_mille, 0);
+    }
+
+    #[test]
+    fn a_refused_session_taking_public_values_does_not_count() {
+        // Sessions s0 and s1 take public values, but Jev refused them at this position.
+        let mut evidence = uses(40, 10, |index| {
+            if index % 10 < 2 {
+                vec![SEARCH]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        for session in ["s0", "s1"] {
+            evidence.add_denial(Denial {
+                slot: DELETE.to_owned(),
+                session: session.to_owned(),
+                day: 0,
+            });
+        }
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!(judged.sessions, 8);
+        assert_eq!(judged.public_per_mille, 0);
+    }
+
+    #[test]
+    fn values_of_unknown_tier_are_not_judged() {
+        let evidence = uses(40, 10, |_| vec!["GET /unknown [].id"]);
+        assert_eq!(
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()),
+            None
+        );
+    }
+
+    #[test]
+    fn without_identities_the_acceptance_drops_one_step() {
+        let evidence = uses(40, 10, |_| vec![PATIENTS]);
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), false, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!(judged.reliability, Reliability::Medium);
+    }
 }
 
 #[cfg(test)]
