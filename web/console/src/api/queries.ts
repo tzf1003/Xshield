@@ -253,6 +253,9 @@ export function useSaveSite() {
       void client.invalidateQueries({ queryKey: keys.sites });
       void client.invalidateQueries({ queryKey: keys.versions(site.name) });
       void client.invalidateQueries({ queryKey: keys.insights(site.name) });
+      // A save can undo an automatic change or move a position, so the map and its events are read again.
+      void client.invalidateQueries({ queryKey: ["objects", site.name] });
+      void client.invalidateQueries({ queryKey: ["object-events", site.name] });
     },
   });
 }
@@ -426,7 +429,8 @@ export function useAckEvent() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (args: { name: string; id: string }) => api.ackEvent(args.name, args.id),
-    onSuccess: (_result, args) => {
+    // Settled, not only succeeded: a refused event (409) is read again too, so the list shows why it was refused.
+    onSettled: (_result, _error, args) => {
       void client.invalidateQueries({ queryKey: ["objects", args.name] });
       void client.invalidateQueries({ queryKey: ["object-events", args.name] });
       void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
