@@ -2248,6 +2248,10 @@ mod tests {
 mod live_tests {
     use std::collections::BTreeMap;
 
+    use axum::{
+        body::Bytes,
+        http::{HeaderMap, HeaderValue, header},
+    };
     use serde_json::json;
     use sqlx::{PgPool, postgres::PgPoolOptions};
     use xshield_core::context::learning::{Vote, day_of};
@@ -2832,5 +2836,189 @@ mod live_tests {
         assert_eq!(doctor["flows_in"][0]["key"], APPOINTMENTS);
         assert_eq!(doctor["flows_in"][0]["jev_allow"], 1);
         assert_eq!(doctor["flows_in"][0]["jev_deny"], 0);
+    }
+
+    /// The configuration of the test site, with its declared position paused or not, as the
+    /// learning pass and the console write it.
+    fn site_with_pause(name: &str, paused: bool) -> SiteSpec {
+        SiteSpec::from_json(
+            &json!({
+                "name": name,
+                "hosts": [format!("{name}.example.com")],
+                "origin": "http://10.0.0.5:8080",
+                "session": {"cookie": "SESSIONID"},
+                "entries": ["/login"],
+                "objects": {
+                    "classes": [{"id": "doctor", "name": "医生"}],
+                    "slots": [{"key": APPOINTMENTS, "class": "doctor", "source": "admin", "paused": paused}]
+                }
+            })
+            .to_string(),
+        )
+        .expect("the test spec")
+    }
+
+    fn json_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers
+    }
+
+    /// The events of the test site for `query`, as JSON.
+    async fn events_of(state: &Arc<ControlState>, name: &str, query: &[(&str, &str)]) -> Value {
+        let query: BTreeMap<String, String> = query
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let Json(body) = events(
+            State(Arc::clone(state)),
+            Path(name.to_owned()),
+            Query(query),
+        )
+        .await
+        .expect("the events");
+        serde_json::to_value(body).expect("the events as JSON")
+    }
+
+    async fn version_of(state: &Arc<ControlState>, name: &str) -> i64 {
+        site_spec_store::get(&state.pool, name)
+            .await
+            .expect("read the site")
+            .expect("the site exists")
+            .version
+    }
+
+    /// A site whose declared position the learning pass paused in version 2, with the position
+    /// suspended: the state a pause leaves. Returns the state and the name of the site.
+    async fn paused_site(tag: &str) -> (Arc<ControlState>, String) {
+        let (state, name) = seeded_site(tag).await;
+        site_spec_store::write(
+            &state.pool,
+            &name,
+            &site_with_pause(&name, true),
+            1,
+            site_spec_store::Change::AutoPause,
+            Some("学习任务自动暂停了 1 个位置"),
+        )
+        .await
+        .expect("the pause");
+        let record = site_of(&state, &name).await.expect("the site");
+        assert_eq!(record.version, 2);
+        store::put_judgement(
+            &state.pool,
+            &name,
+            record.created_at,
+            &Judgement {
+                slot: APPOINTMENTS,
+                state: LearnedState::Suspended,
+                class: "doctor",
+                votes: 20,
+                sessions: 5,
+                share_per_mille: 100,
+                last_day: day_of(u64::try_from(now_millis()).unwrap_or(0)),
+                source: Source::Rule,
+            },
+            now_millis(),
+        )
+        .await
+        .expect("the suspended position");
+        (state, name)
+    }
+
+    /// A save of the site's configuration, with the declared position paused or not, that names
+    /// `event` when given.
+    async fn save_with(
+        state: &Arc<ControlState>,
+        name: &str,
+        paused: bool,
+        expected: i64,
+        event: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let body = json!({
+            "spec": site_with_pause(name, paused),
+            "expected_version": expected,
+            "object_event": event,
+        });
+        crate::sites::update(
+            State(Arc::clone(state)),
+            Path(name.to_owned()),
+            json_headers(),
+            Bytes::from(body.to_string()),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_save_undoes_an_acknowledged_pause_and_confirms_its_position_again() {
+        let (state, name) = paused_site("undo-pause").await;
+        let today = day_of(u64::try_from(now_millis()).unwrap_or(0));
+        let open = events_of(&state, &name, &[]).await;
+        assert_eq!(open["events"][0]["id"], "v2-0");
+        assert_eq!(open["events"][0]["status"], "open");
+        // Acknowledging the pause writes no version, and a second acknowledgement changes nothing.
+        for _ in 0..2 {
+            let status = ack_event(
+                State(Arc::clone(&state)),
+                Path((name.clone(), "v2-0".to_owned())),
+            )
+            .await
+            .expect("the acknowledgement");
+            assert_eq!(status, StatusCode::NO_CONTENT);
+        }
+        assert_eq!(events_of(&state, &name, &[]).await["events"], json!([]));
+        let acknowledged = events_of(&state, &name, &[("status", "all")]).await;
+        assert_eq!(acknowledged["events"][0]["status"], "acknowledged");
+        assert_eq!(version_of(&state, &name).await, 2);
+
+        // The save that restores the entry names the event, and the event reads undone at version 3.
+        save_with(&state, &name, false, 2, Some("v2-0"))
+            .await
+            .expect("the undo saves");
+        let undone = events_of(&state, &name, &[("status", "all")]).await;
+        assert_eq!(undone["events"][0]["status"], "undone");
+        assert_eq!(undone["events"][0]["handled"]["version"], 3);
+        // The position is confirmed again, and the evidence before tomorrow stops counting for it.
+        let (position_state, baseline): (String, Option<i64>) = sqlx::query_as(
+            "SELECT state, baseline_day FROM object_positions WHERE site = $1 AND slot = $2",
+        )
+        .bind(&name)
+        .bind(APPOINTMENTS)
+        .fetch_one(&state.pool)
+        .await
+        .expect("the position");
+        assert_eq!(position_state, "confirmed");
+        assert_eq!(baseline, Some(i64::try_from(today + 1).expect("a day")));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_save_refuses_an_event_it_cannot_undo_and_an_unknown_one() {
+        let (state, name) = paused_site("refuse-undo").await;
+        save_with(&state, &name, false, 2, Some("v2-0"))
+            .await
+            .expect("the undo saves");
+        // An undone event takes no further handling.
+        let Err(refused) = ack_event(
+            State(Arc::clone(&state)),
+            Path((name.clone(), "v2-0".to_owned())),
+        )
+        .await
+        else {
+            panic!("an undone event is acknowledged");
+        };
+        assert_eq!(refused.code(), "EVENT_UNDONE");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        // A save naming an event that does not exist writes nothing.
+        let Err(unknown) = save_with(&state, &name, true, 3, Some("v9-9")).await else {
+            panic!("a save names an unknown event");
+        };
+        assert_eq!(unknown.code(), "EVENT_NOT_FOUND");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(version_of(&state, &name).await, 3);
     }
 }
