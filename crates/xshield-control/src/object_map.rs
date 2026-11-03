@@ -2273,7 +2273,7 @@ mod live_tests {
             .await
             .expect("connect to XSHIELD_DATABASE_URL");
         let hash = crate::hash_password("object-map-test").expect("hash_password");
-        ControlState::new(pool, hash, None, false).expect("valid admin password hash")
+        ControlState::new(pool, hash, None, false, None).expect("valid admin password hash")
     }
 
     fn site_spec(name: &str) -> SiteSpec {

@@ -61,9 +61,12 @@ impl ChatModel {
     ///
     /// # Errors
     /// Returns a reason when the endpoint, the key, the name or the timeout is unusable.
-    #[expect(
-        dead_code,
-        reason = "built once the model configuration is read from the store"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "built once the model configuration is read from the store"
+        )
     )]
     pub fn new(
         base_url: &str,
@@ -86,12 +89,14 @@ impl ChatModel {
             Some("http") => loopback,
             _ => false,
         };
-        if !scheme_ok
-            || uri
-                .authority()
-                .is_some_and(|authority| authority.as_str().contains('@'))
+        if uri
+            .authority()
+            .is_some_and(|authority| authority.as_str().contains('@'))
         {
-            return Err("the endpoint must be https");
+            return Err("the endpoint carries user information");
+        }
+        if !scheme_ok {
+            return Err("the endpoint must be https, or http to a loopback host");
         }
         let connector = HttpsConnectorBuilder::new()
             .with_webpki_roots()
@@ -186,4 +191,228 @@ impl AgentModel for ChatModel {
 )]
 pub async fn configured(_pool: &PgPool) -> Option<ChatModel> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        sync::oneshot,
+    };
+
+    use super::*;
+
+    const ANSWER: &str = r#"{"choice":"existing","confidence":90}"#;
+
+    /// The offset of the blank line that ends a request or response head.
+    fn head_end(raw: &[u8]) -> Option<usize> {
+        raw.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    /// Reads one request: its head, then the body that the head's `Content-Length` names.
+    async fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut raw = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap_or(0);
+            if read == 0 {
+                return raw;
+            }
+            raw.extend_from_slice(&chunk[..read]);
+            if let Some(end) = head_end(&raw) {
+                let head = String::from_utf8_lossy(&raw[..end]).to_ascii_lowercase();
+                let body_len = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() >= end + 4 + body_len {
+                    return raw;
+                }
+            }
+        }
+    }
+
+    /// A fake endpoint on a loopback port. It answers the first request with `status` and
+    /// `body`, and sends back the raw request it read.
+    async fn serve(status: StatusCode, body: Vec<u8>) -> (String, oneshot::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (sent, received) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = sent.send(read_request(&mut stream).await);
+            let head = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                status.as_str(),
+                status.canonical_reason().unwrap_or(""),
+                body.len(),
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+            let _ = stream.shutdown().await;
+        });
+        (base, received)
+    }
+
+    /// A fake endpoint that reads the request and never answers.
+    async fn serve_silently() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut stream).await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        base
+    }
+
+    /// Splits a raw request into its head and its JSON body.
+    fn split(raw: &[u8]) -> (String, Value) {
+        let end = head_end(raw).unwrap();
+        let body = serde_json::from_slice(&raw[end + 4..]).unwrap();
+        (String::from_utf8_lossy(&raw[..end]).into_owned(), body)
+    }
+
+    fn model(base: &str, timeout: Duration) -> ChatModel {
+        ChatModel::new(base, "test-key", "test-model", timeout).unwrap()
+    }
+
+    fn failed(reason: &str) -> Result<String, CallError> {
+        Err(CallError::Failed(reason.to_owned()))
+    }
+
+    #[tokio::test]
+    async fn posts_the_question_and_returns_the_answer() {
+        let reply = json!({"choices": [{"message": {"role": "assistant", "content": ANSWER}}]});
+        let (base, request) = serve(StatusCode::OK, reply.to_string().into_bytes()).await;
+
+        let got = model(&base, Duration::from_secs(5))
+            .ask("the system words", "the user words")
+            .await;
+
+        assert_eq!(got, Ok(ANSWER.to_owned()));
+        let (head, body) = split(&request.await.unwrap());
+        assert_eq!(
+            head.lines().next(),
+            Some("POST /v1/chat/completions HTTP/1.1")
+        );
+        let authorization = head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("authorization")
+                .then(|| value.trim().to_owned())
+        });
+        assert_eq!(authorization.as_deref(), Some("Bearer test-key"));
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(
+            body["messages"][0],
+            json!({"role": "system", "content": "the system words"})
+        );
+        assert_eq!(
+            body["messages"][1],
+            json!({"role": "user", "content": "the user words"})
+        );
+        assert_eq!(body["response_format"], json!({"type": "json_object"}));
+        assert_eq!(body["temperature"], 0);
+        assert_eq!(body["max_tokens"], 400);
+        assert_eq!(body["stream"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn refuses_an_answer_with_another_status() {
+        let (base, _) = serve(StatusCode::UNAUTHORIZED, b"{}".to_vec()).await;
+
+        let got = model(&base, Duration::from_secs(5)).ask("s", "u").await;
+
+        assert_eq!(got, failed("HTTP 401"));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_reply_that_is_not_json() {
+        let (base, _) = serve(StatusCode::OK, b"<html>".to_vec()).await;
+
+        let got = model(&base, Duration::from_secs(5)).ask("s", "u").await;
+
+        assert_eq!(got, failed("the reply is not JSON"));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_reply_without_a_message() {
+        let (base, _) = serve(StatusCode::OK, br#"{"choices":[]}"#.to_vec()).await;
+
+        let got = model(&base, Duration::from_secs(5)).ask("s", "u").await;
+
+        assert_eq!(got, failed("the reply has no message"));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_reply_over_the_size_limit() {
+        let (base, _) = serve(StatusCode::OK, vec![b' '; REPLY_BYTES_MAX + 1]).await;
+
+        let got = model(&base, Duration::from_secs(5)).ask("s", "u").await;
+
+        assert_eq!(got, failed("the reply is too large"));
+    }
+
+    #[tokio::test]
+    async fn gives_up_when_the_answer_is_late() {
+        let base = serve_silently().await;
+
+        let got = model(&base, Duration::from_millis(200)).ask("s", "u").await;
+
+        assert_eq!(got, Err(CallError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn reports_no_connection_when_nothing_listens() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        drop(listener);
+
+        let got = model(&base, Duration::from_secs(5)).ask("s", "u").await;
+
+        assert_eq!(got, failed("no connection"));
+    }
+
+    #[test]
+    fn refuses_an_endpoint_key_or_name_that_is_not_usable() {
+        let one_second = Duration::from_secs(1);
+        let refusal = |base: &str, key: &str, name: &str, timeout: Duration| {
+            ChatModel::new(base, key, name, timeout).err()
+        };
+
+        assert!(ChatModel::new("https://example.com/v1", "key", "model", one_second).is_ok());
+        assert!(ChatModel::new("http://localhost:8080/v1", "key", "model", one_second).is_ok());
+        assert_eq!(
+            refusal("http://example.com/v1", "key", "model", one_second),
+            Some("the endpoint must be https, or http to a loopback host")
+        );
+        assert_eq!(
+            refusal(
+                "https://user:secret@example.com/v1",
+                "key",
+                "model",
+                one_second
+            ),
+            Some("the endpoint carries user information")
+        );
+        assert_eq!(
+            refusal("https://example.com/v1", "", "model", one_second),
+            Some("the key is not usable")
+        );
+        assert_eq!(
+            refusal("https://example.com/v1", "two words", "model", one_second),
+            Some("the key is not usable")
+        );
+        assert_eq!(
+            refusal("https://example.com/v1", "key", "", one_second),
+            Some("the model or the timeout is not usable")
+        );
+        assert_eq!(
+            refusal("https://example.com/v1", "key", "model", Duration::ZERO),
+            Some("the model or the timeout is not usable")
+        );
+    }
 }

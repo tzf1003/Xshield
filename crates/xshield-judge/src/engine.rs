@@ -17,7 +17,7 @@ use crate::context::{
     CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Recent, SENT_MAX, SentRecord,
     Source, label, request_number, request_text,
 };
-use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX};
+use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
 use crate::slots::{origin_object, request_slot, route_template};
 use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
@@ -491,8 +491,8 @@ impl<J: JevPort> Judge<J> {
         let tuning = turn.tuning;
         let mut row = JevRecord {
             prompt: self.prompt.id().to_owned(),
-            model: self.jev.model().to_owned(),
-            route: self.jev.route().to_owned(),
+            model: self.jev.model(),
+            route: self.jev.route(),
             timeout_ms: millis_u32(tuning.jev_timeout),
             ..JevRecord::default()
         };
@@ -525,7 +525,7 @@ impl<J: JevPort> Judge<J> {
             Ok(built) => built,
             Err(error) => return unjudged(row, &error.to_string()),
         };
-        let body = request_body(self.jev.model(), &state, &self.prompt);
+        let body = request_body(&self.jev.model(), &state, &self.prompt);
         row.trim = Some(trim);
         row.request_bytes = u32::try_from(body.len()).ok();
         row.state = Some(state);
@@ -962,16 +962,6 @@ fn unjudged(mut row: JevRecord, code: &str) -> (Verdict, JevRecord) {
     (Verdict::Unjudged(DecisionPath::JevUnavailable), row)
 }
 
-fn failure_code(failure: &JevFailure) -> &'static str {
-    match failure {
-        JevFailure::Timeout => "JEV_TIMEOUT",
-        JevFailure::RateLimited { .. } => "JEV_RATE_LIMITED",
-        JevFailure::Transport => "JEV_TRANSPORT",
-        JevFailure::Http { .. } => "JEV_HTTP_ERROR",
-        JevFailure::TooLarge => "JEV_RESPONSE_TOO_LARGE",
-    }
-}
-
 /// The status and the start of the reply a refused call got back, if any.
 fn failure_reply(failure: &JevFailure) -> Option<(u16, &[u8])> {
     match failure {
@@ -1151,14 +1141,17 @@ mod tests {
 
     #[async_trait]
     impl JevPort for FakeJev {
-        fn model(&self) -> &'static str {
-            "fake"
+        fn model(&self) -> String {
+            "fake".to_owned()
         }
-        fn route(&self) -> &'static str {
-            "fake"
+        fn route(&self) -> String {
+            "fake".to_owned()
         }
-        fn endpoint_host(&self) -> &'static str {
-            "fake.test"
+        fn endpoint(&self) -> String {
+            "https://fake.test/v1".to_owned()
+        }
+        fn endpoint_host(&self) -> String {
+            "fake.test".to_owned()
         }
         fn default_timeout(&self) -> Duration {
             crate::jev::TIMEOUT

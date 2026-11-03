@@ -13,14 +13,19 @@ use sqlx::{AssertSqlSafe, PgPool, Row};
 use xshield_core::context::{
     Api, Conclusion, ContextKind, DecisionPath, DecisionRecord, JevRecord, Outcome, Timing, Trace,
 };
+use xshield_core::model::{ApiKey, JEV_TIMEOUT_MS, JevRoute, JevSpec};
+use xshield_edge::jev_settings::JevLoader;
 use xshield_edge::sink::{Counters, DecisionSink, Gap, now_millis, write_postgres};
 use xshield_edge::sites::{ORIGIN_INVALID, SiteStatus, SiteTable};
 use xshield_edge::source::{SiteLoader, SiteSource};
 use xshield_edge::status::{self, Beat, Instance};
 use xshield_judge::context::ContextKey;
 use xshield_judge::engine::Judge;
-use xshield_judge::jev::{JevFailure, JevPort};
+use xshield_judge::jev::{JevFailure, JevPort, environment_settings_from};
+use xshield_judge::slot::{JevSlot, Source};
 use xshield_judge::state::Prompt;
+use xshield_postgres::key_seal::KeySealer;
+use xshield_postgres::model_config_store::{JevSave, revert_jev_to_env, save_jev};
 
 // The tables the control plane owns (docs/07 section 7.8.1); the columns the
 // edge reads and writes are the contract between the two processes. There is
@@ -202,14 +207,17 @@ struct Unreachable;
 
 #[async_trait]
 impl JevPort for Unreachable {
-    fn model(&self) -> &'static str {
-        "fake-model"
+    fn model(&self) -> String {
+        "fake-model".to_owned()
     }
-    fn route(&self) -> &'static str {
-        "fake"
+    fn route(&self) -> String {
+        "fake".to_owned()
     }
-    fn endpoint_host(&self) -> &'static str {
-        "jev.test"
+    fn endpoint(&self) -> String {
+        "https://jev.test/v1/systemone".to_owned()
+    }
+    fn endpoint_host(&self) -> String {
+        "jev.test".to_owned()
     }
     fn default_timeout(&self) -> Duration {
         Duration::from_millis(2000)
@@ -605,12 +613,19 @@ async fn a_site_change_is_reported_without_waiting_for_the_interval() {
         listen: "8080".to_owned(),
         tls: false,
     };
+    // No Jev settings are loaded here: the beat reports that, and nothing is called.
+    let jev = Arc::new(JevLoader::new(
+        Arc::new(JevSlot::new()),
+        environment_settings_from(|_| None),
+        KeySealer::from_context_secret(&[7; 32]).expect("a 32-byte secret"),
+    ));
     let heartbeat = tokio::spawn(status::run(
         pool.clone(),
         judge,
         Arc::clone(&table),
         sink.counters(),
         instance,
+        jev,
     ));
     // The first beat happens at once; it also registers the prompt before it.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -650,4 +665,88 @@ async fn a_site_change_is_reported_without_waiting_for_the_interval() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     heartbeat.abort();
+}
+
+/// The gateway's Jev settings follow the console. A saved key is picked up on the
+/// next refresh; a version it cannot open keeps the one in use and reports why; the
+/// next version that opens clears the failure; and giving the settings back to the
+/// environment empties the slot when the environment holds nothing.
+#[tokio::test]
+async fn the_gateway_follows_the_saved_jev_settings() {
+    let Some(pool) = database("jev_settings").await else {
+        eprintln!("skipped: XSHIELD_TEST_DATABASE_BASE_URL is not set");
+        return;
+    };
+    sqlx::raw_sql(include_str!("../../../migrations/0006_model_config.sql"))
+        .execute(&pool)
+        .await
+        .expect("the model settings schema");
+    let saver = KeySealer::from_context_secret(&[7_u8; 32]).expect("a 32-byte secret");
+    let gateway = KeySealer::from_context_secret(&[7_u8; 32]).expect("a 32-byte secret");
+    let slot = Arc::new(JevSlot::new());
+    let loader = JevLoader::new(
+        Arc::clone(&slot),
+        environment_settings_from(|_| None),
+        gateway,
+    );
+
+    // Nothing saved and no environment: nothing is loaded, and nothing fails.
+    loader.refresh(&pool).await;
+    assert_eq!(slot.status().source, None);
+    assert_eq!(slot.status().error, None);
+
+    // A key saved in the console is picked up on the next refresh.
+    let first = JevSave {
+        expected_version: 0,
+        spec: JevSpec::new(JevRoute::Gateway, None, None, JEV_TIMEOUT_MS).expect("a valid spec"),
+        key: Some(ApiKey::new("sk-console-9f3a").expect("a valid key")),
+        note: None,
+        tested: false,
+    };
+    assert_eq!(save_jev(&pool, Some(&saver), first).await.expect("save"), 1);
+    loader.refresh(&pool).await;
+    let status = slot.status();
+    assert_eq!(status.source, Some(Source::Console));
+    assert_eq!(status.version, Some(1));
+    assert_eq!(status.error, None);
+
+    // A version that cannot be opened keeps the one in use and says why.
+    let other = KeySealer::from_context_secret(&[8_u8; 32]).expect("a 32-byte secret");
+    let wrong_key = JevLoader::new(
+        Arc::clone(&slot),
+        environment_settings_from(|_| None),
+        other,
+    );
+    wrong_key.refresh(&pool).await;
+    let status = slot.status();
+    assert_eq!(status.source, Some(Source::Console));
+    assert_eq!(status.version, Some(1));
+    assert_eq!(status.error.as_deref(), Some("MODEL_KEY_UNREADABLE"));
+
+    // The next version that opens clears the failure.
+    let rotated = JevSave {
+        expected_version: 1,
+        spec: JevSpec::new(JevRoute::Gateway, None, None, JEV_TIMEOUT_MS).expect("a valid spec"),
+        key: Some(ApiKey::new("sk-console-abcd").expect("a valid key")),
+        note: None,
+        tested: false,
+    };
+    let saver = KeySealer::from_context_secret(&[7_u8; 32]).expect("a 32-byte secret");
+    assert_eq!(
+        save_jev(&pool, Some(&saver), rotated)
+            .await
+            .expect("rotate"),
+        2
+    );
+    loader.refresh(&pool).await;
+    let status = slot.status();
+    assert_eq!(status.version, Some(2));
+    assert_eq!(status.error, None);
+
+    // Giving the settings back to the environment empties the slot.
+    revert_jev_to_env(&pool, 2, Some("back to environment"))
+        .await
+        .expect("revert");
+    loader.refresh(&pool).await;
+    assert_eq!(slot.status().source, None);
 }

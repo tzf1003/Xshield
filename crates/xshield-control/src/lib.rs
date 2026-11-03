@@ -20,6 +20,7 @@ mod insights;
 mod jev;
 mod maintenance;
 mod migrations;
+mod models;
 mod object_agent;
 mod object_agent_api;
 mod object_learning;
@@ -45,6 +46,7 @@ mod tests;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use axum::{
@@ -56,6 +58,7 @@ use axum::{
     routing::{get, post},
 };
 use sqlx::PgPool;
+use xshield_postgres::key_seal::KeySealer;
 
 use crate::error::ApiError;
 
@@ -83,6 +86,10 @@ pub struct ControlState {
     pub(crate) login_limiter: auth::LoginLimiter,
     /// The last pending-suggestion count per site, with the time it was counted.
     pub(crate) suggestion_counts: Mutex<BTreeMap<String, (i64, i64)>>,
+    /// Seals and opens the model keys; `None` when the deployment sets no context secret.
+    pub(crate) key_sealer: Option<KeySealer>,
+    /// When each model group's last test call started, for the ten-second limit.
+    pub(crate) model_test_at: Mutex<BTreeMap<&'static str, Instant>>,
 }
 
 impl ControlState {
@@ -100,12 +107,14 @@ impl ControlState {
         admin_password_hash: String,
         console_origin: Option<String>,
         plain_http: bool,
+        key_sealer: Option<KeySealer>,
     ) -> Result<Arc<Self>, StartupError> {
         Self::with_console(
             pool,
             admin_password_hash,
             console_origin,
             plain_http,
+            key_sealer,
             static_files::EMBEDDED_CONSOLE,
         )
     }
@@ -117,6 +126,7 @@ impl ControlState {
         admin_password_hash: String,
         console_origin: Option<String>,
         plain_http: bool,
+        key_sealer: Option<KeySealer>,
         console: &'static [static_files::ConsoleFile],
     ) -> Result<Arc<Self>, StartupError> {
         if !auth::is_password_hash(&admin_password_hash) {
@@ -133,6 +143,8 @@ impl ControlState {
             console,
             login_limiter: auth::LoginLimiter::default(),
             suggestion_counts: Mutex::new(BTreeMap::new()),
+            key_sealer,
+            model_test_at: Mutex::new(BTreeMap::new()),
         }))
     }
 }
@@ -196,6 +208,7 @@ pub fn router(state: Arc<ControlState>) -> Router {
         .merge(object_routes())
         .route("/api/status", get(status::status))
         .route("/api/system", get(system::system))
+        .merge(models::routes())
         .layer(DefaultBodyLimit::max(BODY_LIMIT_BYTES))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),

@@ -39,7 +39,12 @@ KEY_ASSIGNMENT = re.compile(
 )
 
 # (path, rule) -> why a match there is not a credential.
-ALLOW: dict[tuple[str, str], str] = {}
+ALLOW: dict[tuple[str, str], str] = {
+    (
+        "crates/xshield-control/src/agent_model.rs",
+        "url-credentials",
+    ): "a test endpoint with a made-up user and password, which the endpoint check must refuse",
+}
 
 
 def tracked_files() -> list[Path]:

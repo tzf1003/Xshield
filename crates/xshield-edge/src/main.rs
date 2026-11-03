@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::postgres::PgPoolOptions;
+use xshield_edge::jev_settings::JevLoader;
 use xshield_edge::proxy::EdgeProxy;
 use xshield_edge::server::build_server;
 use xshield_edge::settings::Settings;
@@ -14,20 +15,38 @@ use xshield_edge::source::{SiteLoader, SiteSource};
 use xshield_edge::status::{self, Instance};
 use xshield_judge::context::ContextKey;
 use xshield_judge::engine::Judge;
-use xshield_judge::jev::JevClient;
+use xshield_judge::jev::environment_settings;
+use xshield_judge::slot::JevSlot;
+use xshield_postgres::key_seal::KeySealer;
 
 fn run() -> Result<(), Box<dyn Error>> {
     let settings = Settings::from_environment()?;
-    let jev = JevClient::from_environment()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
         .build()?;
 
+    // The judge calls through a slot that the settings saved in the console can
+    // replace while the gateway runs (docs/03 section 3.3). Nothing loaded is not a
+    // start-up error: judgements report JEV_NOT_CONFIGURED until a key is saved in
+    // the console or set in the environment.
+    let sealer = KeySealer::from_context_secret(&settings.context_key)
+        .map_err(|error| format!("XSHIELD_CONTEXT_KEY_HEX: {error:?}"))?;
+    let slot = Arc::new(JevSlot::new());
+    let jev = Arc::new(JevLoader::new(
+        Arc::clone(&slot),
+        environment_settings(),
+        sealer,
+    ));
+    jev.start();
+
     let table = Arc::new(SiteTable::new());
     let (sink, rx) = DecisionSink::channel(QUEUE_CAPACITY);
     let counters = sink.counters();
-    let judge = Arc::new(Judge::new(ContextKey::new(settings.context_key), jev));
+    let judge = Arc::new(Judge::new(
+        ContextKey::new(settings.context_key),
+        Arc::clone(&slot),
+    ));
     let edge = status::edge_name();
     let instance = Instance {
         edge: edge.clone(),
@@ -47,6 +66,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .acquire_timeout(Duration::from_secs(5))
                 .connect(url),
         )?;
+        // The saved settings apply before the first judgement when they can be read.
+        runtime.block_on(jev.refresh(&pool));
+        runtime.spawn(Arc::clone(&jev).run(pool.clone()));
         runtime.spawn(write_postgres(pool.clone(), rx, counters.clone()));
         runtime.spawn(status::run(
             pool.clone(),
@@ -54,6 +76,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             Arc::clone(&table),
             counters,
             instance,
+            Arc::clone(&jev),
         ));
         SiteSource::Postgres(pool)
     } else if let Some(path) = &settings.sites_file {
@@ -62,6 +85,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     } else {
         return Err("no site source".into());
     };
+    if jev.report().source.is_none() {
+        eprintln!(
+            "xshield-edge: no Jev key is loaded; judgements report JEV_NOT_CONFIGURED \
+             until one is saved in the console or set in the environment"
+        );
+    }
     let mut loader = SiteLoader::new(source, Arc::clone(&table));
     // Starting with an unreadable source would serve nothing; fail instead.
     runtime.block_on(loader.refresh())?;

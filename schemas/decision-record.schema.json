@@ -160,7 +160,7 @@
         "state": {"type": ["string", "null"], "description": "发送给 Jev 的 state（JSON 文本，已脱敏）；没有构造或没有发送时为 null。"},
         "prompt": {"type": "string", "pattern": "^(jq_[0-9a-f]{16})?$", "description": "指令版本。"},
         "model": {"type": "string", "description": "线上模型名。"},
-        "route": {"type": "string", "enum": ["gateway", "direct", "custom"], "description": "经 AI Gateway、直连，或私有端点。"},
+        "route": {"type": "string", "enum": ["gateway", "direct", "custom", "none"], "description": "经 AI Gateway、直连，或私有端点；none 表示没有加载任何 Jev 配置，没有发出调用。"},
         "timeout_ms": {"type": "integer", "minimum": 0},
         "trim": {"type": ["integer", "null"], "minimum": 0, "maximum": 4, "description": "state 的裁剪级别，0 到 4；没有构造 state 时为 null。"},
         "request_bytes": {"type": ["integer", "null"], "minimum": 0},

@@ -12,6 +12,8 @@ pub mod decision_log_store;
 pub mod decision_stats;
 pub mod edge_status_store;
 pub mod jev_prompt_store;
+pub mod key_seal;
+pub mod model_config_store;
 pub mod object_agent_store;
 pub mod object_learning_store;
 pub mod partitions;
