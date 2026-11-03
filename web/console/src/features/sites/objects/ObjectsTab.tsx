@@ -1,7 +1,7 @@
 // The object map of a site (console design 3.1 to 3.6): what the proxy has learned about the values that name objects,
 // by class or by position. The counters, the search, the view and the open position live in the URL. The drawer, the
 // declaration dialog, the synonym migration and the learning settings change the draft, which the save dialog saves as
-// a version; ignoring and marking ambiguous are learning state and are written at once.
+// a version; ignoring, marking ambiguous, dismissing and keeping a pause are learning state and are written at once.
 
 import { useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -17,8 +17,9 @@ import { LearningSettings } from "./LearningSettings.tsx";
 import { ObjectClassCard } from "./ObjectClassCard.tsx";
 import { ObjectClassList } from "./ObjectClassList.tsx";
 import { ObjectCounters } from "./ObjectCounters.tsx";
+import { ObjectEventsDrawer } from "./ObjectEventsDrawer.tsx";
 import { ObjectsBanner } from "./ObjectsBanner.tsx";
-import { classMatches, slotsOfClass } from "./objects-model.ts";
+import { type ApplyOptions, classMatches, slotsOfClass } from "./objects-model.ts";
 import { SlotDrawer } from "./SlotDrawer.tsx";
 import { SlotTable } from "./SlotTable.tsx";
 import { SynonymMigrateDialog } from "./SynonymMigrateDialog.tsx";
@@ -32,7 +33,8 @@ type Props = {
   /** A dialog of the page is open (save, mode, rollback): the keys of this tab wait. */
   dialogOpen: boolean;
   onAdd: (spec: SiteSpec) => void;
-  onApply: (spec: SiteSpec) => void;
+  /** Opens the save dialog with the draft; the options carry the note and the automatic change it undoes or confirms. */
+  onApply: (spec: SiteSpec, options?: ApplyOptions) => void;
 };
 
 export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: Props) {
@@ -60,7 +62,8 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
   const slot = search.slot;
   const slotIndex = rows.findIndex((row) => row.id === slot);
   const declaring = declareOpen || search.declare !== undefined;
-  const dialogsOpen = dialogOpen || declaring || synonymsOpen || learningOpen;
+  const eventsOpen = search.objevents !== undefined;
+  const dialogsOpen = dialogOpen || declaring || synonymsOpen || learningOpen || eventsOpen;
 
   const open = (id: string) => setSearch({ slot: id }, true);
   const close = () => setSearch({ slot: undefined }, true);
@@ -118,6 +121,8 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
       <ColdStartPanel
         site={site.name}
         working={working}
+        classes={data.classes}
+        pathConfirm={data.features.path_confirm}
         onApply={onApply}
         onLater={() => setSkipped(true)}
       />
@@ -163,7 +168,7 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
 
   return (
     <div className="obj-stack">
-      <ObjectsBanner events={data.events} />
+      <ObjectsBanner site={site.name} events={data.events} />
 
       <div className="obj-tools">
         <ObjectCounters
@@ -225,10 +230,32 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
           slotId={slot}
           classes={data.classes}
           working={working}
+          features={data.features}
           now={now}
           onClose={close}
           onApply={onApply}
           onReclass={(field, scope) => setSearch({ declare: field, in: scope }, true)}
+        />
+      )}
+
+      {search.objevents === undefined ? null : (
+        <ObjectEventsDrawer
+          site={site.name}
+          events={data.events}
+          classes={data.classes}
+          saved={site.spec}
+          working={working}
+          now={now}
+          status={search.objevents}
+          kind={search.objkind}
+          onClose={() => setSearch({ objevents: undefined, objkind: undefined }, true)}
+          onApply={onApply}
+          onChangeFilter={(next) =>
+            setSearch(
+              next.status === undefined ? { objkind: next.kind } : { objevents: next.status },
+              true,
+            )
+          }
         />
       )}
 
@@ -268,6 +295,12 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
         <LearningSettings
           working={working}
           agentConfigured={data.agent_configured}
+          features={data.features}
+          status={data.learning_status}
+          onOpenEvents={(kind) => {
+            setLearningOpen(false);
+            setSearch({ objevents: "open", objkind: kind }, true);
+          }}
           onClose={() => setLearningOpen(false)}
           onApply={(spec) => {
             onApply(spec);

@@ -218,3 +218,26 @@
   padding: 6px 0;
   border-bottom: 1px solid var(--border);
 }
+
+/* A path position's label and its route: the segment the judge reads is bracketed and shaded (console design 4.1). */
+.obj-path-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.obj-route {
+  word-break: break-all;
+}
+.obj-seg-hl {
+  border-radius: 3px;
+  background: var(--accent-weak);
+  padding: 0 2px;
+}
+
+/* The class choice of a path position and the new class's id and name (console design 1.3, 4.2). */
+.obj-new-class {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

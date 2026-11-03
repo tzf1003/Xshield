@@ -9,7 +9,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { api } from "./client.ts";
-import type { ObjectsFilter, SiteSpec, SiteWriteBody } from "./types.ts";
+import type { ObjectEventsFilter, ObjectsFilter, SiteSpec, SiteWriteBody } from "./types.ts";
 
 export const keys = {
   session: ["session"] as const,
@@ -245,6 +245,7 @@ export function useSaveSite() {
         spec: args.spec,
         expected_version: args.body?.expected_version,
         note: args.body?.note,
+        object_event: args.body?.object_event,
       });
     },
     onSuccess: (site) => {
@@ -344,6 +345,33 @@ export function useSlotLearning() {
         : api.ambiguousSlot(args.name, args.id),
     onSuccess: (_result, args) => {
       void client.invalidateQueries({ queryKey: ["objects", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
+    },
+  });
+}
+
+/** The learning task's changes and anomalies, newest first (console design 2.3). */
+export function useObjectEvents(
+  name: string | null,
+  filter: ObjectEventsFilter,
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: ["object-events", name ?? "", filter] as const,
+    queryFn: () => api.objectEvents(name ?? "", filter),
+    enabled: name !== null && (options.enabled ?? true),
+    staleTime: 30_000,
+  });
+}
+
+/** Marks an automatic change or anomaly handled: known, kept paused or kept in effect. No site version is written. */
+export function useAckEvent() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; id: string }) => api.ackEvent(args.name, args.id),
+    onSuccess: (_result, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-events", args.name] });
       void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
     },
   });

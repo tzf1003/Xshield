@@ -1,4 +1,6 @@
 {
+  "in_effect": true,
+  "suspension": null,
   "id": "s2",
   "side": "response",
   "key": "GET /api/appointments [].doc_id",
@@ -37,14 +39,32 @@
     "req_01a1973940107ebea1af2c54ce635f38"
   ],
   "shape": [
-    { "path": "[].id", "type": "number" },
-    { "path": "[].doc_id", "type": "number" },
-    { "path": "[].doc_name", "type": "string" },
-    { "path": "[].slot", "type": "string" }
+    {
+      "path": "[].id",
+      "type": "number"
+    },
+    {
+      "path": "[].doc_id",
+      "type": "number"
+    },
+    {
+      "path": "[].doc_name",
+      "type": "string"
+    },
+    {
+      "path": "[].slot",
+      "type": "string"
+    }
   ],
   "history": [
-    { "at": "2026-10-31T09:12:00Z", "text": "规则提议" },
-    { "at": "2026-11-01T13:15:00Z", "text": "证据更新" }
+    {
+      "at": "2026-10-31T09:12:00Z",
+      "text": "规则提议"
+    },
+    {
+      "at": "2026-11-01T13:15:00Z",
+      "text": "证据更新"
+    }
   ],
   "impact": [
     {
@@ -52,6 +72,9 @@
       "count": 158,
       "sample": "req_01a1973ed5c0732b8f29804d7fc746d3"
     },
-    { "kind": "back_to_jev", "count": 14 }
+    {
+      "kind": "back_to_jev",
+      "count": 14
+    }
   ]
 }
