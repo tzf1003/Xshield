@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use pingora::prelude::Opt;
 use serde_json::{Value, json};
-use xshield_core::context::trace::TRACE_BYTES_MAX;
+use xshield_core::context::trace::{TRACE_BYTES_MAX, TRACE_PATH_BYTES_MAX};
 use xshield_core::context::{DecisionPath, DecisionRecord, Outcome, SiteSpec, Skip};
 use xshield_edge::proxy::EdgeProxy;
 use xshield_edge::server::build_server;
@@ -621,6 +621,52 @@ fn d1_a_request_with_many_long_values_is_written_within_the_trace_limit() {
     );
     assert!(row.trace.timing.total_ms.is_some(), "timing is set by then");
     assert!(row.trace.response.is_some(), "the response was recorded");
+}
+
+#[test]
+fn d2_long_request_paths_stay_out_of_the_rows_that_follow() {
+    // Ten requests with 3 KB paths enter the session's recent list. The next
+    // judged request is still written within the limit, with each path cut.
+    let long = "p".repeat(3000);
+    for _ in 0..10 {
+        let listed = get(
+            "observe.test",
+            &format!("/api/patients/{long}"),
+            Some("s-d2"),
+        );
+        assert_eq!(listed.status, 200);
+    }
+    let values: Vec<String> = (0..60)
+        .map(|index| format!("d2{index:03}{}", "y".repeat(253)))
+        .collect();
+    let body = json!({ "items": values }).to_string();
+    let reply = call(
+        "observe.test",
+        "POST",
+        "/api/notes?who=d2",
+        Some("s-d2"),
+        body.as_bytes(),
+    );
+    let row = record(&reply);
+    let encoded = serde_json::to_vec(&row.trace).expect("the trace encodes");
+    assert!(
+        encoded.len() <= TRACE_BYTES_MAX,
+        "the written trace is {} bytes",
+        encoded.len()
+    );
+    let recent = row
+        .trace
+        .session
+        .as_ref()
+        .and_then(|session| session.recent.as_ref())
+        .expect("a judged row lists the recent requests");
+    assert!(!recent.is_empty(), "the session has recent requests");
+    assert!(
+        recent
+            .iter()
+            .all(|request| request.path.len() <= TRACE_PATH_BYTES_MAX),
+        "every recent path is cut"
+    );
 }
 
 #[test]
