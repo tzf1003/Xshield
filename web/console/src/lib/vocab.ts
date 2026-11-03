@@ -2,6 +2,7 @@
 // (docs/07 7.10.5, docs/06 6.6). Components read from this file; none of them spells these out.
 
 import type {
+  AgentProvider,
   DecisionPath,
   ImpactKind,
   JevAccess,
@@ -10,6 +11,7 @@ import type {
   JevFailure,
   JevHealth,
   JevRoute,
+  ModelSource,
   NameReasonCode,
   ObjectEventKind,
   ObjectReason,
@@ -268,6 +270,27 @@ export const ERROR_TEXT: Record<string, string> = {
   WINDOW_TOO_LARGE: "时间范围最长 7 天",
   TOO_MANY_IDS: "一次最多对照 1000 个请求 ID",
   BODY_TOO_LARGE: "内容过大（配置最大 64 KiB，导入文件最大 100 MiB）",
+  MODEL_ENV_KEY_MISSING: "环境变量里没有可用的密钥，不能改回",
+  MODEL_KEY_REQUIRED: "这组配置还没有密钥，请填写后再保存",
+  MODEL_KEY_UNAVAILABLE: "控制台没有配置密钥加密，暂时不能保存密钥",
+  MODEL_KEY_UNREADABLE: "已保存的密钥读不出来，请重新填写",
+  MODEL_NOTE_INVALID: "备注最长 200 个字符",
+  MODEL_TEST_RATE_LIMITED: "10 秒内只能测试一次",
+  MODEL_STORE_UNAVAILABLE: "模型配置的存储暂时不可用，请稍后重试",
+  // The refusals of a value the control plane will not save (ConfigError::code), and of a test the
+  // gateway refuses before calling the model (JEV_CONFIG_*). The form checks most of these first.
+  MODEL_ROUTE_INVALID: "线路不在可选范围内",
+  MODEL_PROVIDER_INVALID: "提供方不在可选范围内",
+  MODEL_ENDPOINT_INVALID: "地址格式不正确，请检查后再保存",
+  MODEL_NAME_INVALID: "模型名格式不正确，请检查后再保存",
+  MODEL_TIMEOUT_INVALID: "超时不在允许的范围内",
+  MODEL_KEY_INVALID: "密钥格式不正确",
+  MODEL_KEY_SHARE_INVALID: "只有两边都是 Vercel AI Gateway 时才能共用密钥",
+  JEV_CONFIG_ROUTE_INVALID: "线路不在可选范围内",
+  JEV_CONFIG_ENDPOINT_INVALID: "地址格式不正确，请检查后再测试",
+  JEV_CONFIG_MODEL_INVALID: "模型名格式不正确，请检查后再测试",
+  JEV_CONFIG_TIMEOUT_INVALID: "超时不在允许的范围内",
+  JEV_CONFIG_KEY_INVALID: "密钥格式不正确",
   INTERNAL: "控制面出错，请稍后重试；问题持续时查看控制面日志",
 };
 
@@ -276,6 +299,218 @@ export function errorText(code: string | undefined): string {
   if (!code) return "请求失败，请稍后重试";
   return ERROR_TEXT[code] ?? `请求失败（${code}）`;
 }
+
+// ------------------------------------------------------------------ models (系统 · 模型, design 2 and 7)
+
+export const MODEL_ROUTE_LABEL: Record<JevRoute, string> = {
+  gateway: "Vercel AI Gateway",
+  direct: "TypeSafe 直连",
+  custom: "自定义地址",
+};
+
+export const MODEL_PROVIDER_LABEL: Record<AgentProvider, string> = {
+  gateway: "Vercel AI Gateway（OpenAI 兼容）",
+  custom: "自定义 OpenAI 兼容地址",
+};
+
+export const MODEL_SOURCE_LABEL: Record<ModelSource, string> = {
+  console: "控制台",
+  env: "环境变量",
+};
+
+/** The words of a field in a change list or a history row. */
+export const MODEL_FIELD_LABEL: Record<string, string> = {
+  route: "线路",
+  provider: "提供方",
+  endpoint: "地址",
+  model: "模型",
+  timeout_ms: "超时",
+  key: "密钥",
+  share_key_with_jev: "与 Jev 共用密钥",
+};
+
+/** Failure codes of a call or a test in words: the 6.6.4 Jev codes, plus the ones only a test reports (design 2.4). */
+export const MODEL_FAILURE_TEXT: Record<string, string> = {
+  JEV_TIMEOUT: "超时",
+  JEV_RATE_LIMITED: "服务限流",
+  JEV_TRANSPORT: "连接失败",
+  JEV_HTTP_ERROR: "服务出错",
+  JEV_RESPONSE_INVALID: "响应无效",
+  dns: "域名解析失败",
+  tls: "TLS 错误",
+  answer_invalid: "回答不能解析",
+};
+
+/** Error codes a gateway reports for a console version it could not load (design 2.1). Unknown codes show as they are. */
+export const MODEL_LOAD_ERROR_TEXT: Record<string, string> = {
+  MODEL_KEY_UNREADABLE: "密钥无法解密",
+  MODEL_STORE_UNAVAILABLE: "存储暂时不可用",
+  JEV_CONFIG_ROUTE_INVALID: "线路不在可选范围内",
+  JEV_CONFIG_ENDPOINT_INVALID: "地址格式不正确",
+};
+
+export const MODEL_TEXT = {
+  tab: "模型",
+  jevTitle: "Jev 判定模型",
+  jevUnset: "还没有 Jev 的模型配置：控制台没有保存过，网关也读不到环境变量里的配置。",
+  agentTitle: "学习代理模型",
+  agentLead: "学习代理在规则判不了某个位置的类别时，用这个模型给出提议。",
+  agentOff: "没有配置时，各站点的学习代理开关保持关闭，学习照常按规则进行。",
+  unset: "未配置",
+  agentConfigured: (version: number) => `已配置 · 第 ${version} 版`,
+  onlineNone: "没有在线的网关",
+  loadedOf: (loaded: number, online: number, version: number) =>
+    `${loaded}/${online} 个网关已加载第 ${version} 版`,
+  loadWaiting: (version: number) => `等待网关加载第 ${version} 版…`,
+  loadBehind: (edge: string, version: number | null) =>
+    version === null ? `${edge} 还没有加载配置` : `${edge} 仍在用第 ${version} 版`,
+  loadEnv: (online: number) => `${online} 个网关读取环境变量的配置`,
+  rowProvider: "提供方",
+  rowRoute: "线路",
+  rowEndpoint: "地址",
+  rowModel: "模型",
+  rowKey: "密钥",
+  rowTimeout: "超时",
+  rowSource: "来源",
+  rowUsageWindow: (minutes: number) => `最近 ${minutes} 分钟`,
+  keySet: (last4: string, when: string) => `已设置 · 末 4 位 …${last4} · ${when} 更新`,
+  keyUnset: "未设置",
+  keyFromEnv: (name: string | null) => `来自环境变量 ${name ?? "（名字未知）"}`,
+  keyShared: "与 Jev 共用",
+  timeoutJev: (ms: string) => `${ms}（站点可在高级判定参数里覆盖）`,
+  timeoutAgent: (seconds: number) => `${seconds} 秒`,
+  sourceConsole: (version: number, when: string) => `控制台第 ${version} 版 · ${when}`,
+  sourceEnv: "环境变量（控制台里还没有配置，网关仍读环境变量）",
+  overridden: (names: string) => ` · 环境变量 ${names} 已被覆盖`,
+  usageJev: (calls: string, failRate: string, p95: string) =>
+    `调用 ${calls} · 失败 ${failRate} · p95 ${p95}`,
+  linkJevCalls: "查看 Jev 调用 →",
+  btnHistory: "变更记录",
+  btnTest: "测试连接",
+  btnTesting: "正在测试…",
+  btnCancelTest: "取消测试",
+  btnEdit: "编辑…",
+  btnTakeOver: "改由控制台管理…",
+  btnBackToEnv: "改回环境变量…",
+  btnConfigure: "配置…",
+  btnReplaceKey: "替换…",
+  btnCancelReplace: "取消替换",
+  btnRestoreDefault: "恢复默认",
+  btnSave: "保存…",
+  btnCancel: "取消",
+  btnReload: "重新载入",
+  btnSaveVersion: (version: number) => `保存第 ${version} 版`,
+  btnRestore: (version: number) => `恢复到第 ${version} 版…`,
+  revealKey: "按住显示密钥",
+  lineGateway: "线路",
+  directWarn: "部分地区直连会返回 451，一般保持默认。",
+  endpointFixed: "由线路决定",
+  modelPlaceholder: "例如 供应商/模型名",
+  timeoutHintJev: "站点的 advanced.jev_timeout_ms 优先",
+  timeoutHintAgent: "学习代理按位置调用、不在请求路径上，可以比 Jev 宽松。",
+  shareKeyLabel: "与 Jev 共用密钥",
+  shareKeyHelp:
+    "只在两边都是 Vercel AI Gateway，且 Jev 的密钥保存在控制台时可选。选中后不单独保存密钥，Jev 换密钥时学习代理跟着换。",
+  keyHelp: "密钥只写不读，保存后只显示末 4 位；保存后旧密钥立即作废。",
+  keyEnvHelp: "控制台读不到环境变量里的密钥，请重新填写。",
+  keyAgentHelp: "学习代理不与 Jev 共用时需要自己的密钥，请填写。",
+  keyRequired: "请填写密钥",
+  keyWhitespace: "密钥里不能有空白",
+  testFootJev: "测试从控制台发出。保存后以网关的加载状态为准。",
+  testFootAgent: "测试从控制台发出，学习任务也从控制台发出。",
+  testNeedsKey: "这套配置来自环境变量，控制台读不到它的密钥。改由控制台管理并填入密钥后即可测试。",
+  testNeedsSaveOrKey: "共用密钥的设置改了：请先保存，或填入一把密钥后再测试。",
+  testCooldown: (seconds: number) => `${seconds} 秒后可再测`,
+  testTooOften: "10 秒内只能测试一次",
+  noUsageYet: "还没有调用",
+  noChanges: "这次没有改动。",
+  savingNow: "正在保存…",
+  modelSwitchTitle: (model: string) => `模型名也换成 ${model} 吗？`,
+  modelSwitchYes: (model: string) => `换成 ${model}`,
+  modelSwitchKeep: "保留当前",
+  timeoutHelp: (min: number, max: number, fallback: number, hint: string) =>
+    `${min} 到 ${max}，默认 ${fallback}。${hint}`,
+  colAction: "操作",
+  testDetail: "模型返回的错误正文（不可信文本）",
+  testSucceeded: "成功",
+  testOkJev: "模型返回了合法的回答",
+  testAnswerInvalid: "能连上，但回答不能解析",
+  testWrongModelHint: "多半是模型名填错了，换成了一个不是 Jev 的模型。",
+  testWrongAgentHint: "输出不符合结构约束。",
+  testFailDns: "连不上：域名解析失败",
+  testFailTls: "连不上：TLS 错误",
+  testFailTransport: "连不上：连接失败",
+  testFailTimeout: (ms: string) => `失败：超时（${ms} ms）`,
+  testFailUnauthorized: "失败：401 未授权，密钥不对或已过期",
+  testFailRegion: "失败：451，这个地区不能直连",
+  testFailRate: "失败：429，服务限流",
+  testFailOther: (status: number | null, name: string) =>
+    status === null ? `失败：${name}` : `失败：${status}，${name}`,
+  testUnknown: "未知错误",
+  endpointRequired: "请填写地址",
+  endpointLong: "地址最长 2048 个字符",
+  endpointQuery: "地址里不能有查询串或片段",
+  endpointUrl: "地址格式不对，例如 https://主机名/路径",
+  endpointScheme: "地址必须以 https:// 开头（回环地址可以用 http://）",
+  endpointCredentials: "地址里不能带用户名和密码",
+  modelRequired: "请填写模型名",
+  modelLong: "模型名最长 200 个字符",
+  modelChars: "模型名只能用字母、数字和 . _ : / @ -",
+  timeoutRange: (min: number, max: number, unit: string) =>
+    `${min} 到 ${max} 之间的整数，单位${unit}`,
+  unitMs: "毫秒",
+  unitSeconds: "秒",
+  saveTitle: (name: string, version: number) => `保存${name}（第 ${version} 版）`,
+  sectionChanges: "改动",
+  sectionImpact: "影响",
+  sectionTest: "测试",
+  noteLabel: "备注",
+  notePlaceholder: "例如 换成新版 Jev",
+  impactJev: (sites: number, current: number | null) =>
+    current === null
+      ? `全部 ${sites} 个站点的 Jev 调用改用新配置。网关约 5 秒内加载。`
+      : `全部 ${sites} 个站点的 Jev 调用改用新配置。网关约 5 秒内加载；加载失败的网关继续用第 ${current} 版。`,
+  impactAgent: "学习代理下一次学习起改用新配置。学习代理只产生提议，放宽仍要人确认。",
+  impactFailClosed: (sites: string[]) =>
+    `▲ ${sites.length} 个站点处于拦截模式，Jev 失败时拒绝请求：${sites.join("、")}`,
+  testedOk: (time: string) => `✓ ${time} 用这份配置测试成功`,
+  testedMissing: "! 这份配置还没有测试成功",
+  ackUntested: "我知道没有测试成功，仍然保存",
+  failClosedSave: "保存后如果 Jev 调用失败，这些站点会拒绝请求。",
+  conflict: (version: number) =>
+    version === 0
+      ? "配置已被改动（控制台里现在没有这组配置），你的改动还没有保存。"
+      : `配置已被改为第 ${version} 版，你的改动还没有保存。`,
+  keyReplaced: (old: string | null, next: string) =>
+    old === null ? `已设置（…${next}）` : `已替换（…${old} → …${next}）`,
+  keyCleared: (old: string | null) => (old === null ? "已清除" : `已清除（原 …${old}）`),
+  keyKept: (last4: string | null) => (last4 === null ? "没有设置" : `保持当前的 …${last4}`),
+  changeYes: "是",
+  changeNo: "否",
+  restoreNote: (version: number) => `恢复到第 ${version} 版`,
+  backTitle: "改回环境变量？",
+  backBody: "控制台里的这组配置会被删除，网关改为读取环境变量。之前的版本仍可在变更记录里恢复。",
+  backOk: "改回环境变量",
+  historyTitle: "变更记录",
+  historyEmpty: "还没有变更记录。",
+  historyNoChange: "没有改动",
+  historyRevertToEnv: "改回环境变量",
+  historyTested: "成功",
+  historyUntested: "没有测试",
+  colVersion: "版本",
+  colTime: "时间",
+  colChanges: "改了什么",
+  colNote: "备注",
+  colTest: "测试",
+  edgeSourceConsole: (version: number) => `控制台第 ${version} 版`,
+  edgeSourceEnv: "环境变量",
+  edgeBehind: (version: number, reason: string) => `▲ 未加载第 ${version} 版：${reason}`,
+  edgeLinkModels: "查看模型配置",
+  edgeNoLoadReason: "还没有加载",
+  attentionNotLoaded: (version: number, edges: string, reason: string) =>
+    `▲ ${edges} 没有加载 Jev 模型配置第 ${version} 版：${reason}`,
+  attentionAction: "查看模型配置",
+} as const;
 
 export const RANGE_LABEL = {
   "15m": "15 分钟",

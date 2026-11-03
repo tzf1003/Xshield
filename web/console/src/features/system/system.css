@@ -115,3 +115,190 @@
 .sys-file::file-selector-button:hover {
   background: var(--sunken);
 }
+
+/* ------------------------------------------------------------------ models (design agent-model-ui 2) */
+
+.sys-models {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 880px;
+}
+
+.sys-model .card-h .aside {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+/* A link inside a line of text is told apart by its underline, not by colour alone (WCAG 1.4.1). */
+.sys-model a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.sys-status {
+  white-space: normal;
+}
+
+.sys-lead {
+  margin: 0 0 6px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.sys-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.sys-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.sys-form .field {
+  margin-bottom: 14px;
+}
+
+/* A fieldset that holds the radio group: no border, the legend reads like a field label. */
+.sys-choice {
+  border: 0;
+  margin: 0 0 14px;
+  padding: 0;
+  min-width: 0;
+}
+
+.sys-choice legend {
+  padding: 0;
+  margin-bottom: 4px;
+}
+
+.sys-inline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sys-keyrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.sys-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sys-secret-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sys-secret-row .native-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sys-eye {
+  flex: 0 0 auto;
+  min-width: var(--control-h);
+  padding: 0 10px;
+}
+
+.sys-form-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.sys-footnote {
+  margin: 10px 0 0;
+  line-height: 1.6;
+}
+
+.sys-test {
+  margin-top: 12px;
+}
+
+.sys-test-line {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sys-test-hint {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.sys-test-detail {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.sys-test-detail pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--sunken);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.sys-history {
+  margin-top: 12px;
+}
+
+.sys-dialog-section {
+  margin-bottom: 14px;
+}
+
+.sys-change {
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.sys-ack {
+  display: block;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.sys-dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+@media (max-width: 560px) {
+  .sys-actions,
+  .sys-form-foot,
+  .sys-dialog-foot {
+    justify-content: stretch;
+  }
+
+  .sys-actions .btn,
+  .sys-form-foot .btn,
+  .sys-dialog-foot .btn {
+    flex: 1 1 auto;
+  }
+}

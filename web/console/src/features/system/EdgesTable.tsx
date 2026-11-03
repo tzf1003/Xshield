@@ -2,10 +2,11 @@
 // "详情" sit the load result of each site, the Jev line the instance runs with (its endpoint and model,
 // never a key) and the instance's own loss windows (docs/07 7.7.4, 7.9.8).
 
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
-import type { EdgeStatus } from "../../api/types.ts";
+import type { EdgeStatus, JevConfig } from "../../api/types.ts";
 import { fmtAgo, fmtInt, fmtLocalDateTime, fmtMs, fmtUtc } from "../../lib/format.ts";
-import { errorText, ROUTE_LABEL } from "../../lib/vocab.ts";
+import { errorText, MODEL_LOAD_ERROR_TEXT, MODEL_TEXT, ROUTE_LABEL } from "../../lib/vocab.ts";
 import { Empty } from "../../ui/Page.tsx";
 import { hm, parseTime, shortDateTime } from "./clock.ts";
 
@@ -13,6 +14,42 @@ import { hm, parseTime, shortDateTime } from "./clock.ts";
 const COLUMNS = 14;
 
 type SiteState = { version?: number; error?: string; loaded_at_millis?: number };
+
+/** The configuration row of the Jev section: where the instance's configuration comes from (design 2.7). */
+function ConfigSource({
+  jev,
+  online,
+  consoleVersion,
+}: {
+  jev: JevConfig;
+  online: boolean;
+  consoleVersion: number | null;
+}) {
+  if (jev.config_source === undefined) return <>—</>;
+  const loaded = jev.config_source === "console" ? (jev.config_version ?? null) : null;
+  const text =
+    jev.config_source === "console" && loaded !== null
+      ? MODEL_TEXT.edgeSourceConsole(loaded)
+      : MODEL_TEXT.edgeSourceEnv;
+  // An online instance that runs another version than the console's one is behind (design 2.7).
+  const behind = online && consoleVersion !== null && loaded !== consoleVersion;
+  if (!behind) return <>{text}</>;
+  const reason =
+    jev.config_error === undefined || jev.config_error === null
+      ? MODEL_TEXT.edgeNoLoadReason
+      : (MODEL_LOAD_ERROR_TEXT[jev.config_error] ?? jev.config_error);
+  return (
+    <>
+      {text}
+      <div className="hint-warn">
+        {MODEL_TEXT.edgeBehind(consoleVersion, reason)}{" "}
+        <Link to="/system" search={{ tab: "models" }}>
+          {MODEL_TEXT.edgeLinkModels}
+        </Link>
+      </div>
+    </>
+  );
+}
 
 /** "已加载 v13", with when the instance loaded that version: local time, UTC on hover (docs/06 6.6.6). */
 function LoadedVersion({ version, loaded_at_millis }: SiteState) {
@@ -25,7 +62,16 @@ function LoadedVersion({ version, loaded_at_millis }: SiteState) {
   );
 }
 
-export function EdgesTable({ edges, now }: { edges: EdgeStatus[]; now: number }) {
+export function EdgesTable({
+  edges,
+  now,
+  consoleVersion,
+}: {
+  edges: EdgeStatus[];
+  now: number;
+  /** The console's Jev configuration version, null when the console has none. */
+  consoleVersion: number | null;
+}) {
   if (edges.length === 0) {
     return (
       <Empty title="还没有网关上报过心跳。">
@@ -70,14 +116,22 @@ export function EdgesTable({ edges, now }: { edges: EdgeStatus[]; now: number })
           </tr>
         </thead>
         {edges.map((edge) => (
-          <EdgeRows key={edge.edge} edge={edge} now={now} />
+          <EdgeRows key={edge.edge} edge={edge} now={now} consoleVersion={consoleVersion} />
         ))}
       </table>
     </div>
   );
 }
 
-function EdgeRows({ edge, now }: { edge: EdgeStatus; now: number }) {
+function EdgeRows({
+  edge,
+  now,
+  consoleVersion,
+}: {
+  edge: EdgeStatus;
+  now: number;
+  consoleVersion: number | null;
+}) {
   const [open, setOpen] = useState(false);
   const seen = parseTime(edge.seen_at);
   const started = parseTime(edge.started_at);
@@ -120,13 +174,23 @@ function EdgeRows({ edge, now }: { edge: EdgeStatus; now: number }) {
         </td>
       </tr>
       <tr id={detailId} hidden={!open} className="sys-detail">
-        <td colSpan={COLUMNS}>{open ? <EdgeDetail edge={edge} sites={sites} /> : null}</td>
+        <td colSpan={COLUMNS}>
+          {open ? <EdgeDetail edge={edge} sites={sites} consoleVersion={consoleVersion} /> : null}
+        </td>
       </tr>
     </tbody>
   );
 }
 
-function EdgeDetail({ edge, sites }: { edge: EdgeStatus; sites: Array<[string, SiteState]> }) {
+function EdgeDetail({
+  edge,
+  sites,
+  consoleVersion,
+}: {
+  edge: EdgeStatus;
+  sites: Array<[string, SiteState]>;
+  consoleVersion: number | null;
+}) {
   const gaps = [...edge.gaps].sort((a, b) => b.from_ms - a.from_ms);
   return (
     <div className="sys-detail-grid">
@@ -187,6 +251,10 @@ function EdgeDetail({ edge, sites }: { edge: EdgeStatus; sites: Array<[string, S
           <dd>{fmtMs(edge.jev.default_timeout_ms)}</dd>
           <dt>指令版本</dt>
           <dd className="mono">{edge.jev.prompt}</dd>
+          <dt>配置来源</dt>
+          <dd>
+            <ConfigSource jev={edge.jev} online={edge.online} consoleVersion={consoleVersion} />
+          </dd>
         </dl>
       </section>
       <section>

@@ -1,0 +1,45 @@
+{
+  "jev": {
+    "configured": true,
+    "source": "console",
+    "version": 14,
+    "updated_at": "2026-11-01T12:40:00.000Z",
+    "route": "gateway",
+    "endpoint": null,
+    "endpoint_host": null,
+    "model": "typesafe-ai/jev",
+    "timeout_ms": 2000,
+    "key": {
+      "set": true,
+      "last4": "9f3a",
+      "updated_at": "2026-11-01T12:40:00.000Z",
+      "shared_with_jev": false
+    },
+    "key_env": "AI_GATEWAY_API_KEY",
+    "env_available": true,
+    "env_overridden": [],
+    "loaded": [
+      { "edge": "edge-1", "online": true, "source": "console", "version": 14, "error": null },
+      { "edge": "edge-2", "online": true, "source": "console", "version": 14, "error": null }
+    ],
+    "impact": { "sites": 2, "fail_closed": ["emr"] },
+    "usage": { "window_minutes": 5, "calls": 1284, "failed": 17, "p95_ms": 812 }
+  },
+  "agent": {
+    "configured": true,
+    "source": "console",
+    "version": 3,
+    "updated_at": "2026-10-30T09:00:00.000Z",
+    "provider": "gateway",
+    "endpoint": "https://ai-gateway.vercel.sh/v1",
+    "model": "openai/gpt-4.1-mini",
+    "timeout_ms": 30000,
+    "share_key_with_jev": false,
+    "key": {
+      "set": true,
+      "last4": "c81d",
+      "updated_at": "2026-10-30T09:00:00.000Z",
+      "shared_with_jev": false
+    }
+  }
+}
