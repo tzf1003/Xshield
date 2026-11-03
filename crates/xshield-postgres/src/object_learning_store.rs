@@ -1340,6 +1340,7 @@ pub async fn forget_site(
         "DELETE FROM object_event_status WHERE site = $1",
         "DELETE FROM object_agent_calls WHERE site = $1",
         "DELETE FROM object_learning_runs WHERE site = $1",
+        "DELETE FROM object_judgements WHERE site = $1",
     ] {
         sqlx::query(statement)
             .bind(site)
