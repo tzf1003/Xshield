@@ -236,7 +236,8 @@ pub enum ChangeDetailBody {
     },
     /// A fast allow that calls Jev again, and the kinds that explain it: the kind the name of
     /// its request value gives (`name_kind`), and the kind the object map or a field
-    /// declaration gives it (`object_kind`). Estimated, like `Approximate`.
+    /// declaration gives it (`object_kind`). Estimated, like `Approximate`. A position the
+    /// current object map gives a class gets no pair: that class judged the value, not its name.
     Kinds {
         approximate: bool,
         name_kind: String,

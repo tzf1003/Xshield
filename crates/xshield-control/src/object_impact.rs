@@ -248,7 +248,9 @@ fn shift(
 
 /// The kinds that explain a value the draft stops verifying: the kind its name gives under the
 /// current configuration, and the kind the proposed configuration gives it, from the object map
-/// at its position or else from a declaration of its key. `None` when either is missing.
+/// at its position or else from a declaration of its key. `None` when either is missing, and
+/// when the current map gives the position a class: that class judged the value, not its name,
+/// so no name explains the change.
 fn kinds_of(
     row: &SlotRow,
     value: &TraceValue,
@@ -256,6 +258,9 @@ fn kinds_of(
     current: &Reading<'_>,
     next: &Reading<'_>,
 ) -> Option<(String, String)> {
+    if current.spec.objects().class_of(slot).is_some() {
+        return None;
+    }
     let used = used_of(row, value);
     let name = name_kind_of(used, &current.rules)?;
     let object = next
@@ -537,14 +542,36 @@ mod tests {
         let allowed = row("fast_allow", "/doctor/7");
         let verdict = verdict_under(&current, &proposed, &allowed, &values).expect("it moves");
         assert_eq!(verdict.shift, Shift::BackToJev);
-        // The name gave a doctor, and the map now gives a document.
+        // The map gave the position a doctor and now gives a document: that class judged the
+        // value, not the name, so no name explains the change.
+        assert_eq!(verdict.kinds, None);
+        // Decisions that are neither fast allows nor Jev calls do not move.
+        let cached = row("cached_allow", "/doctor/7");
+        assert_eq!(shift_under(&current, &proposed, &cached, &values), None);
+    }
+
+    #[test]
+    fn a_position_without_a_class_is_explained_by_its_name() {
+        // Without the entry, `/doctor/7` is judged by its route word, a doctor, and the response
+        // showed a doctor: the name verified it. The draft gives the position a document, so the
+        // name is what the old verdict relied on.
+        let current = edited(&format!(",{DOCTOR_SLOT}"), "");
+        let proposed = edited(
+            DOCTOR_SLOT,
+            r#"{"key":"GET /doctor/{id} path[1]","class":"document","source":"admin"}"#,
+        );
+        let values = [value(
+            "path[1]",
+            true,
+            vec![origin("id", "GET /api/doctors", "GET /api/doctors [].id")],
+        )];
+        let allowed = row("fast_allow", "/doctor/7");
+        let verdict = verdict_under(&current, &proposed, &allowed, &values).expect("it moves");
+        assert_eq!(verdict.shift, Shift::BackToJev);
         assert_eq!(
             verdict.kinds,
             Some(("doctor".to_owned(), "document".to_owned()))
         );
-        // Decisions that are neither fast allows nor Jev calls do not move.
-        let cached = row("cached_allow", "/doctor/7");
-        assert_eq!(shift_under(&current, &proposed, &cached, &values), None);
     }
 
     #[test]
@@ -840,14 +867,10 @@ mod tests {
             found[1].top,
             Some(vec![("GET".to_owned(), "/doctor/{id}".to_owned(), 1)])
         );
-        // The name gave a doctor; the map now gives the position a document.
+        // The map gave the position a doctor and now gives a document: no name explains it.
         assert_eq!(
             found[1].detail,
-            Some(ChangeDetailBody::Kinds {
-                approximate: true,
-                name_kind: "doctor".to_owned(),
-                object_kind: "document".to_owned(),
-            })
+            Some(ChangeDetailBody::Approximate { approximate: true })
         );
     }
 
@@ -942,6 +965,89 @@ mod tests {
         );
         assert_eq!(
             found[1].detail,
+            Some(ChangeDetailBody::Kinds {
+                approximate: true,
+                name_kind: "doctor".to_owned(),
+                object_kind: "document".to_owned(),
+            })
+        );
+    }
+
+    /// A draft that changes a field declaration, judged as the gateway judges it: the declaration
+    /// is scoped to the logical path of an interface-named request (its physical path is
+    /// `/api/rpc`), and one key spells the name with a doubled separator, which the judge reads
+    /// as the same name. Needs the migrations applied to `XSHIELD_DATABASE_URL`.
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_draft_reads_a_declaration_at_the_logical_path_and_every_spelling_of_its_name() {
+        use crate::test_support::ensure_days;
+
+        const SITE: &str = "impact-logical";
+        let url = std::env::var("XSHIELD_DATABASE_URL").expect("XSHIELD_DATABASE_URL");
+        let pool = PgPool::connect(&url).await.expect("connect");
+        // A day of its own, the day after the field test's, that no other test writes to.
+        let day_start = 4_102_617_600_000_i64;
+        ensure_days(&pool, &[day_start]).await;
+        sqlx::query("DELETE FROM decision_log WHERE site = $1")
+            .bind(SITE)
+            .execute(&pool)
+            .await
+            .expect("clear the test site");
+        let traces = [
+            (
+                "req_key",
+                r#"[{"at":"query","key":"doc_id","value":"5","kind":"reference","inert":false,"seen":true,"verified":true,"sources":[{"field":"id","request":"GET /api/doctors","request_id":"req_o1","at_millis":1,"slot":"GET /api/doctors [].id"}]}]"#,
+            ),
+            (
+                "req_spelled",
+                r#"[{"at":"query","key":"doc__id","value":"5","kind":"reference","inert":false,"seen":true,"verified":true,"sources":[{"field":"id","request":"GET /api/doctors","request_id":"req_o2","at_millis":2,"slot":"GET /api/doctors [].id"}]}]"#,
+            ),
+        ];
+        for (index, (request_id, trace)) in traces.into_iter().enumerate() {
+            let offset = i64::try_from(index).expect("two rows");
+            sqlx::query(
+                "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client,
+                    method, path, logical_path, decision_path, outcome, trace)
+                 VALUES ($1, $2, $3, 'edge-test', 'host', 'client', 'GET', '/api/rpc',
+                    '/api/rpc/getDoctor', 'fast_allow', 'allowed', $4::jsonb)",
+            )
+            .bind(day_start + 1_000 + offset)
+            .bind(request_id)
+            .bind(SITE)
+            .bind(format!(r#"{{"values":{trace}}}"#))
+            .execute(&pool)
+            .await
+            .expect("insert a decision");
+        }
+
+        let current = spec_declaring(
+            DOCS,
+            r#"[{"field":"doc_id","kind":"doctor","in":["/api/rpc/getDoctor*"]}]"#,
+        );
+        let proposed = spec_declaring(
+            DOCS,
+            r#"[{"field":"doc_id","kind":"document","in":["/api/rpc/getDoctor*"]}]"#,
+        );
+        let scope = Scope {
+            site: Some(SITE.to_owned()),
+            since_millis: day_start,
+            until_millis: day_start + 86_400_000 - 1,
+        };
+        let (found, complete) = changes(&pool, &scope, &current, &proposed)
+            .await
+            .expect("the window reads");
+        assert!(complete);
+        // Both values stop verifying under the document declaration. The declaration applies at
+        // the logical path only, so reading the physical path would miss its kinds.
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind.as_str(), BACK_TO_JEV);
+        assert_eq!(found[0].count, 2);
+        assert_eq!(
+            found[0].top,
+            Some(vec![("GET".to_owned(), "/api/rpc/getDoctor".to_owned(), 2)])
+        );
+        assert_eq!(
+            found[0].detail,
             Some(ChangeDetailBody::Kinds {
                 approximate: true,
                 name_kind: "doctor".to_owned(),

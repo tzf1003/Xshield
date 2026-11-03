@@ -773,7 +773,7 @@ CREATE TABLE jev_prompts (
 | `entry_unreachable` | 入口仍登记在 URL 路径上，但请求的逻辑路径多了接口名，入口不再命中的请求数 | 草稿路由覆盖的路径按 `URL/~` 重新匹配入口（`~` 是占位名）：精确入口不再命中，前缀入口仍命中；子路径的接口名未知，不作入口 |
 | `cache_by_api` | 放行缓存的键加上接口名后，原来命中缓存放行的请求数 | 被草稿路由按接口区分的路径上，原为 `cached_allow` 的行数；缓存时长为 0 时不计 |
 | `new_fast_allow` | 草稿改了对象表里某个位置的类别（增加、删除、改类别或暂停），或改了 `advanced.field_kinds` 里某个字段的声明后，原先调用 Jev、改后每个请求值都被核验而快速放行的请求数，`top` 与 `sample` 同其他变化 | 窗口内 `fast_allow`、`jev_allow`、`jev_deny`、`jev_unavailable` 的记录里，凡请求值的位置或它的来源位置改了类别、或请求值的键或来源字段的声明改了的，按新配置重新核验：核验用与网关相同的规则（`xshield_core::kind::shown_as`）。先按 trace 里的字段名（不分大小写，`_` 与 `-` 不计）筛选，再逐个值核验。历史只记录每个值的前 3 个来源，结果是估算 |
-| `back_to_jev` | 原为快速放行，改后有请求值不再被核验、会改回调用 Jev 的请求数 | 同上，只看原为 `fast_allow` 的记录。`detail` 另带 `name_kind`（名字给出的类别）和 `object_kind`（对象表或字段声明给出的类别），取最多请求共有的一对；给不出时不带 |
+| `back_to_jev` | 原为快速放行，改后有请求值不再被核验、会改回调用 Jev 的请求数 | 同上，只看原为 `fast_allow` 的记录。`detail` 另带 `name_kind`（名字给出的类别）和 `object_kind`（对象表或字段声明给出的类别），取最多请求共有的一对；给不出时不带。当前对象表已给该位置类别时也不带，那次判定靠的是类别而不是名字 |
 
 `api_split`、`entry_unreachable`、`cache_by_api`、`new_fast_allow` 和 `back_to_jev` 五类总是估算，它们的 `detail` 为 `{ "approximate": true }`，`back_to_jev` 能给出两个类别时为 `{ "approximate": true, "name_kind": …, "object_kind": … }`，控制台据此说明估算的原因。草稿路由覆盖了有请求的路径（即 `api_split` 有计数）时，`warnings` 还包含 `INTERFACE_UNVERIFIED`：这些请求的接口名历史记录里没有，前缀入口下的无会话请求可能漏报，路由影响都只是估计。
 
