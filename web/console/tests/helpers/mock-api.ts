@@ -24,6 +24,7 @@ import type {
   ModelTestResult,
   ModelValues,
   ModelVersionWire,
+  ModelWireConfig,
   Outcome,
   RequestDetail,
   RequestId,
@@ -1049,11 +1050,9 @@ function asText(value: string | number | boolean | null | undefined): string {
   return value === null || value === undefined ? "" : String(value);
 }
 
-/** A configuration as the history holds it: every value is text, and an empty one is "" (the core's values()). */
-function wireConfig(values: ModelValues): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(values).map(([field, value]) => [field, value === null ? "" : String(value)]),
-  );
+/** A configuration as the history holds it: the JSON the API stores (a timeout a number, a share flag a boolean). */
+function wireConfig(values: ModelValues): ModelWireConfig {
+  return { ...values };
 }
 
 /** The fields that differ between two configurations, as the history lists them (design 2.6). */

@@ -27,6 +27,7 @@ import {
   agentForm,
   agentKeyRequired,
   agentProblems,
+  agentTestable,
   agentValues,
   clockText,
   describeTest,
@@ -365,7 +366,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
             ]}
           />
           <div className="sys-actions">
-            {jev.source === "console" ? (
+            {jev.version > 0 ? (
               <button
                 type="button"
                 className="linkbtn"
@@ -570,6 +571,7 @@ export function AgentModelCard({
             timeoutMsOf("agent", form),
           ),
         onCancelTest: test.cancel,
+        blocked: agentTestable(form, saved.shareKey) ? null : MODEL_TEXT.testNeedsSaveOrKey,
       }}
       footnote={MODEL_TEXT.testFootAgent}
       canSave={valid}

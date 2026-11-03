@@ -419,6 +419,7 @@ export const MODEL_TEXT = {
   testFootJev: "测试从控制台发出。保存后以网关的加载状态为准。",
   testFootAgent: "测试从控制台发出，学习任务也从控制台发出。",
   testNeedsKey: "这套配置来自环境变量，控制台读不到它的密钥。改由控制台管理并填入密钥后即可测试。",
+  testNeedsSaveOrKey: "共用密钥的设置改了：请先保存，或填入一把密钥后再测试。",
   testCooldown: (seconds: number) => `${seconds} 秒后可再测`,
   testTooOften: "10 秒内只能测试一次",
   noUsageYet: "还没有调用",

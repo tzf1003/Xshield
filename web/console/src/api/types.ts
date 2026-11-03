@@ -1074,14 +1074,17 @@ export interface ModelChange {
   new: string;
 }
 
-/** One saved version as the API sends it, newest first. Every value of `config` is text (the core's values()). */
+/** A saved version's settings as the history stores them: the JSON of the core's config, without the key. */
+export type ModelWireConfig = Record<string, string | number | boolean | null>;
+
+/** One saved version as the API sends it, newest first. */
 export interface ModelVersionWire {
   version: number;
   at: string | null;
   /** `save`, or `revert_to_env` for the Jev group given back to the environment. */
   change: "save" | "revert_to_env";
-  /** The settings of that version, without the key. Values are text: "2000", "false". */
-  config: Record<string, string>;
+  /** The settings of that version, without the key, as JSON: a timeout is a number, a share flag a boolean. */
+  config: ModelWireConfig;
   changes: ModelChange[];
   /** Null when the note is empty. */
   note: string | null;

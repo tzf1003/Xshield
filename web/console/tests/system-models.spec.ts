@@ -307,6 +307,7 @@ test("a console configuration can go back to the environment, after a confirmati
   const confirm = page.getByRole("dialog", { name: MODEL_TEXT.backTitle });
   await confirm.getByRole("button", { name: MODEL_TEXT.backOk }).click();
   await expect(jev.getByText("2 个网关读取环境变量的配置")).toBeVisible();
+  await expect(jev.getByRole("button", { name: MODEL_TEXT.btnHistory })).toBeVisible();
   expect(callsTo(page, "DELETE", JEV_PATH).at(-1)?.query).toBe("expected_version=14");
 });
 
@@ -420,13 +421,18 @@ test("an agent that shares Jev's key asks for its own key once it stops sharing"
   await expect(agent.getByText(MODEL_TEXT.keyShared, { exact: true })).toBeVisible();
   await agent.getByRole("checkbox", { name: MODEL_TEXT.shareKeyLabel }).uncheck();
 
-  // Sharing cleared the agent's own key, so the form asks for one before it can save.
+  // Sharing cleared the agent's own key, so the form asks for one, and a test needs it typed in.
   const key = agent.locator('input[type="password"]');
   await expect(key).toBeVisible();
   const save = agent.getByRole("button", { name: MODEL_TEXT.btnSave });
+  const runTest = agent.getByRole("button", { name: MODEL_TEXT.btnTest });
   await expect(save).toBeDisabled();
+  await expect(runTest).toBeDisabled();
+  await expect(agent.getByText(MODEL_TEXT.testNeedsSaveOrKey)).toBeVisible();
   await key.fill("sk-agent-41c8");
   await expect(save).toBeEnabled();
+  await expect(runTest).toBeEnabled();
+  await expect(agent.getByText(MODEL_TEXT.testNeedsSaveOrKey)).toHaveCount(0);
 });
 
 for (const theme of ["light", "dark"] satisfies Theme[]) {

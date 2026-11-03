@@ -14,6 +14,7 @@ import type {
   ModelKind,
   ModelTestResult,
   ModelValues,
+  ModelWireConfig,
 } from "../api/types.ts";
 import {
   MODEL_FAILURE_TEXT,
@@ -160,12 +161,16 @@ export function withChoice(kind: ModelKind, form: ModelForm, choice: FormChoice)
 }
 
 /**
- * A saved version's settings as the API sends them: every value is text (xshield-core values()). This reads them
- * back into the form's types, so a restored version keeps its timeout, its share flag and its blanks as they were.
+ * A saved version's settings as the API sends them: the JSON the history stored, so a timeout is a number and a share
+ * flag a boolean. This reads them back into the form's types, so a restored version keeps its timeout, its share flag
+ * and its blanks as they were.
  */
-export function modelValuesFromWire(kind: ModelKind, config: Record<string, string>): ModelValues {
-  const text = (field: string): string | null => config[field] || null;
-  const timeout = Number(config.timeout_ms);
+export function modelValuesFromWire(kind: ModelKind, config: ModelWireConfig): ModelValues {
+  const text = (field: string): string | null => {
+    const value = config[field];
+    return typeof value === "string" && value !== "" ? value : null;
+  };
+  const timeout = typeof config.timeout_ms === "number" ? config.timeout_ms : Number.NaN;
   if (kind === "jev") {
     const routes: readonly JevRoute[] = ["gateway", "direct", "custom"];
     return {
@@ -177,10 +182,10 @@ export function modelValuesFromWire(kind: ModelKind, config: Record<string, stri
   }
   return {
     provider: config.provider === "custom" ? "custom" : "gateway",
-    endpoint: config.endpoint ?? "",
+    endpoint: text("endpoint") ?? "",
     model: text("model"),
     timeout_ms: Number.isFinite(timeout) ? timeout : AGENT_TIMEOUT.fallback * 1000,
-    share_key_with_jev: config.share_key_with_jev === "true",
+    share_key_with_jev: config.share_key_with_jev === true,
   };
 }
 
@@ -274,6 +279,16 @@ export function agentKeyRequired(
 ): boolean {
   if (shareKey) return false;
   return !key.set || key.shared_with_jev;
+}
+
+/**
+ * Whether the agent form can be tested as it stands. A test without a typed key uses the saved key, which is Jev's only
+ * while the saved agent shares it. So a form that changes the sharing is tested with a key typed in (when it stops
+ * sharing), or after a save (when it starts sharing).
+ */
+export function agentTestable(form: ModelForm, savedShare: boolean): boolean {
+  if (form.shareKey === savedShare) return true;
+  return !form.shareKey && form.key.trim() !== "";
 }
 
 export function agentProblems(form: ModelForm, keyRequired: boolean): FormProblems {

@@ -8,6 +8,7 @@ import {
   AGENT_TIMEOUT,
   agentKeyRequired,
   agentProblems,
+  agentTestable,
   agentValues,
   changeText,
   clockText,
@@ -128,6 +129,16 @@ test("agentKeyRequired asks for the agent's own key once a form stops sharing Je
   assert.equal(agentKeyRequired(false, { set: true, shared_with_jev: false }), false);
   assert.equal(agentKeyRequired(false, { set: false, shared_with_jev: false }), true);
   assert.equal(agentKeyRequired(false, { set: true, shared_with_jev: true }), true);
+});
+
+test("agentTestable holds a test back while the sharing changed and no key is typed for a stop", () => {
+  const form = formFromValues("agent", AGENT_SAVED);
+  assert.equal(agentTestable(form, false), true);
+  // Starting to share sends no key, so the test would use the saved one: save first.
+  assert.equal(agentTestable({ ...form, shareKey: true }, false), false);
+  // Stopping the share tests with a key typed in only.
+  assert.equal(agentTestable({ ...form, shareKey: false }, true), false);
+  assert.equal(agentTestable({ ...form, shareKey: false, key: "sk-live-7d20" }, true), true);
 });
 
 test("sameForm compares what a test tried, key included, ignoring blanks at the ends", () => {

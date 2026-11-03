@@ -37,6 +37,8 @@ export type ModelFormProps = {
     cooldown: number;
     onTest: () => void;
     onCancelTest: () => void;
+    /** Why the test cannot run as the form stands, or null. The button stays off and the reason shows. */
+    blocked?: string | null;
   };
   footnote: string;
   canSave: boolean;
@@ -296,6 +298,7 @@ export function ModelForm(props: ModelFormProps) {
 
       <ModelTestResult line={test.line} />
       <p className="muted small sys-footnote">{footnote}</p>
+      {test.blocked ? <p className="muted small">{test.blocked}</p> : null}
       <div className="sys-form-foot">
         <button type="button" className="btn" onClick={onCancel}>
           {MODEL_TEXT.btnCancel}
@@ -308,7 +311,7 @@ export function ModelForm(props: ModelFormProps) {
         <button
           type="button"
           className="btn"
-          disabled={test.testing || test.cooldown > 0}
+          disabled={test.testing || test.cooldown > 0 || Boolean(test.blocked)}
           onClick={test.onTest}
         >
           {test.testing
