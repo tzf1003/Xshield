@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 请求体里键名为 `name` 的值（新建患者时填的姓名）不再标为对象引用，改为 `input`：它是新输入，不选择对象（[docs/01](docs/01-request-flow.md#15-写操作和新建对象) 1.5）。此前它作为引用交给 Jev，新建患者的请求可能因此被误拦。查询和路径里的 `name` 仍是引用，因为 `?name=` 可以按名字查找对象。
 - 安全靶场改为 [docs/04](docs/04-deployment-testing.md) 4.3 的验收场景 A1–C5：`scripts/test_idor_lab.py` 启动真实 `xshield-edge`（站点来自 `XSHIELD_EDGE_SITES_FILE`），对一个无对象鉴权的 EMR 源站和脚本化的 Jev 假服务逐条发请求，核对状态码、源站是否收到请求和判定日志。不需要 Docker、数据库或模型；CI 的 validate 作业运行它。删除 v3 靶场的 Compose 源站、界面种子、独立标签和指标脚本，以及只服务于已删网关的 `test_security_lab.py`。
 - 修复路径参数绕过 Jev：路径里的数字现在按紧挨它前面的路由词判定类别，不再取整条路径的所有词。此前医生列表里出现过的 `9`，在 `/api/doctors/7/files/9` 里会被当成医生快速放行，而那里的 `9` 是文件 id。没有路由词的路径段仍退回整条路径。
 - 站点可以用 `advanced.field_kinds` 声明字段名或参数名装的对象类别，覆盖按名字的推断，例如 `doc_id` 装的是医生、`in` 限定在预约接口里。判定与 `synonyms` 共用 `xshield-core` 中新的 `kind` 模块，控制台以后的预览与网关使用同一份规则（[07.6](docs/07-console-architecture.md#76-站点级判定参数advanced)）。
