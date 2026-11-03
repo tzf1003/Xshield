@@ -45,8 +45,7 @@ def selects_object(value: dict) -> bool:
 
     A path segment or query value counts when the edge labels it a reference.
     A body field counts only when it is an identifier, so free text typed into
-    a body (the name of a new patient, a note) never selects anything, even
-    though the edge labels a field called "name" as a reference.
+    a body (the name of a new patient, a note) never selects anything.
     """
     at = str(value.get("at", ""))
     if at.startswith("body."):

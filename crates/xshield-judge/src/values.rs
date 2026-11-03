@@ -87,7 +87,8 @@ const AT_MAX: usize = 128;
 /// object reference would sit (an id-like path segment, or a field whose name
 /// reads like an id, an owner or a file), `route` for a plain-word path
 /// segment (a collection name such as `Addresss`, or occasionally a person's
-/// name), `input` for everything else.
+/// name), `input` for everything else. A `name` in a request body is `input` too:
+/// the name typed into a new record, not a pointer to an existing one.
 #[must_use]
 pub fn value_kind(at: &str, key: Option<&str>, value: &str) -> &'static str {
     if at.starts_with("path[") {
@@ -100,7 +101,7 @@ pub fn value_kind(at: &str, key: Option<&str>, value: &str) -> &'static str {
     let reference = key.is_some_and(|key| {
         let lower = key.to_ascii_lowercase();
         is_id_like(key)
-            || is_identity_key(key)
+            || (is_identity_key(key) && !is_body_name(at, key))
             || [
                 "file", "path", "doc", "record", "order", "share", "token", "basket", "item",
             ]
@@ -108,6 +109,13 @@ pub fn value_kind(at: &str, key: Option<&str>, value: &str) -> &'static str {
             .any(|word| lower.contains(word))
     });
     if reference { "reference" } else { "input" }
+}
+
+/// A `name` key in a request body (JSON or form) is free text: the name typed
+/// into a new record (docs/01 section 1.5). A query or a path can use the same
+/// key to look an object up by name (`?name=`), so it stays a reference there.
+fn is_body_name(at: &str, key: &str) -> bool {
+    (at.starts_with("body.") || at.starts_with("body[")) && key.eq_ignore_ascii_case("name")
 }
 
 fn is_identity_key(key: &str) -> bool {
@@ -733,6 +741,43 @@ mod tests {
         let request = extract_request("/", Some("username=bob&owner_id=bob"), None, b"");
         assert_eq!(request.values.len(), 2);
         assert!(request.values.iter().all(|value| !value.inert));
+    }
+
+    #[test]
+    fn a_name_in_a_body_is_input_but_a_name_in_a_query_still_selects() {
+        let body = br#"{"name":"Chen Yu","patient":{"name":"Wang Fang"},"items":[{"name":"Li"}],"username":"bob","patient_id":"P-7"}"#;
+        let request = extract_request(
+            "/api/patients",
+            Some("name=Zhang"),
+            Some("application/json"),
+            body,
+        );
+        let kind_of = |at: &str| {
+            let value = request.values.iter().find(|value| value.at == at).unwrap();
+            value_kind(&value.at, value.key.as_deref(), &value.value)
+        };
+        assert_eq!(kind_of("body.name"), "input");
+        assert_eq!(kind_of("body.patient.name"), "input");
+        assert_eq!(kind_of("body.items[].name"), "input");
+        assert_eq!(kind_of("body.username"), "reference");
+        assert_eq!(kind_of("body.patient_id"), "reference");
+        assert_eq!(kind_of("query.name"), "reference");
+        // A top-level array of records is body content too.
+        let list = extract_request(
+            "/api/patients",
+            None,
+            Some("application/json"),
+            br#"[{"name":"Li"}]"#,
+        );
+        let name = list
+            .values
+            .iter()
+            .find(|value| value.at == "body[].name")
+            .unwrap();
+        assert_eq!(
+            value_kind(&name.at, name.key.as_deref(), &name.value),
+            "input"
+        );
     }
 
     #[test]

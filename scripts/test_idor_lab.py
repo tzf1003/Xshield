@@ -361,6 +361,13 @@ def a8(lab: Lab) -> None:
     lab.expect("open the new patient", lab.send(
         "emr.lab", "GET", f"/api/patients/{new_id}", cookie=cookie),
         Expect(200, "fast_allow", "allowed", True))
+    # The name typed into the new record is input, not an object reference (docs/01 section 1.5).
+    with lab.jev.lock:
+        judged = [doc["state"]["request"] for doc in lab.jev.bodies]
+    create = [request for request in judged
+              if request["method"] == "POST" and request["path"] == "/api/patients"][-1]
+    kinds = [value["kind"] for value in create["values"] if value["at"] == "body.name"]
+    lab.check("Jev was shown the new patient's name as input", kinds == ["input"], f"kinds {kinds}")
 
 
 @scenario("B1", "搜索框、表单里输入正常中文和英文文本：放行")
