@@ -1,12 +1,15 @@
 //! Partition, retention and edge status maintenance of the control plane
 //! (docs/07-console-architecture.md section 7.8.2).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate};
 use sqlx::PgPool;
+use xshield_postgres::key_seal::KeySealer;
 use xshield_postgres::partitions;
 
+use crate::ControlState;
 use crate::params::DAY_MILLIS;
 
 /// The time between maintenance passes, after the first one at startup.
@@ -15,14 +18,20 @@ const PASS_INTERVAL: Duration = Duration::from_hours(1);
 const EDGE_STALE_MILLIS: i64 = DAY_MILLIS;
 
 /// Runs [`maintain_once`] at startup and then once an hour, for as long as the
-/// process runs. The binary spawns it once; it never returns.
-pub async fn run(pool: PgPool) {
+/// process runs. The pool and the key sealer come from the state. The binary spawns
+/// it once; it never returns.
+pub async fn run(state: Arc<ControlState>) {
     let mut ticker = tokio::time::interval(PASS_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         // The first tick completes at once, so the first pass runs at startup.
         ticker.tick().await;
-        maintain_once(&pool, crate::params::now_millis()).await;
+        maintain_once(
+            &state.pool,
+            state.key_sealer.as_ref(),
+            crate::params::now_millis(),
+        )
+        .await;
     }
 }
 
@@ -32,7 +41,7 @@ pub async fn run(pool: PgPool) {
 /// edge status rows that have not been refreshed for a day, and runs the object map
 /// learning over the decision log (`object_learning`). A step that fails is logged,
 /// and the next step still runs.
-pub async fn maintain_once(pool: &PgPool, now_millis: i64) {
+pub async fn maintain_once(pool: &PgPool, sealer: Option<&KeySealer>, now_millis: i64) {
     match utc_day(now_millis) {
         Some(today) => ensure_partitions(pool, today).await,
         None => eprintln!(
@@ -41,7 +50,7 @@ pub async fn maintain_once(pool: &PgPool, now_millis: i64) {
     }
     drop_expired_partitions(pool, now_millis).await;
     purge_stale_edges(pool, now_millis).await;
-    crate::object_learning::learn_once(pool, now_millis).await;
+    crate::object_learning::learn_once(pool, sealer, now_millis).await;
 }
 
 /// The UTC day of `now_millis`, or `None` when the time is outside the calendar.

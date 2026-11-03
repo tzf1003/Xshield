@@ -23,6 +23,7 @@ use xshield_core::context::learning::{
 };
 use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec};
 use xshield_core::kind::Rules;
+use xshield_postgres::key_seal::KeySealer;
 use xshield_postgres::object_agent_store::{self as runs, CALLS_KEEP_DAYS, Trigger};
 use xshield_postgres::object_learning_store::{
     self as store, Cursor, Judgement, LearnedState, Source,
@@ -48,8 +49,8 @@ const TIGHTEN_VOTES_MAX: usize = 20_000;
 /// Runs one learning pass over every site at `now_millis`, the hourly one. The agent
 /// asks the configured model, when there is one. A site that fails is logged, and the
 /// other sites still run.
-pub async fn learn_once(pool: &PgPool, now_millis: i64) {
-    let model = crate::agent_model::configured(pool).await;
+pub async fn learn_once(pool: &PgPool, sealer: Option<&KeySealer>, now_millis: i64) {
+    let model = crate::agent_model::configured(pool, sealer).await;
     learn_all(
         pool,
         now_millis,
@@ -97,9 +98,10 @@ pub(crate) async fn learn_all(
 /// Returns [`LearningStoreError`] on a database failure.
 pub(crate) async fn run_manual(
     pool: &PgPool,
+    sealer: Option<&KeySealer>,
     record: &SiteRecord,
 ) -> Result<(), store::LearningStoreError> {
-    let model = crate::agent_model::configured(pool).await;
+    let model = crate::agent_model::configured(pool, sealer).await;
     run_site(
         pool,
         &record.spec,
@@ -835,7 +837,7 @@ pub(crate) mod pass_tests {
         for index in 0..20 {
             record(&pool, index, now, "fast_allow", "allowed", 200).await;
         }
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         let (state, class): (String, String) = sqlx::query_as(
             "SELECT state, class FROM object_positions
              WHERE site = 'clinic' AND slot = 'GET /doctor/{id} path[1]'",
@@ -861,7 +863,7 @@ pub(crate) mod pass_tests {
             record(&pool, index, now, "fast_allow", "allowed", 200).await;
         }
         record(&pool, 20, now, "jev_deny", "blocked", 403).await;
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         // The position is listed as pending, and no judgement names it.
         let judged: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM object_positions WHERE site = 'clinic' AND state <> 'pending'",
@@ -887,7 +889,7 @@ pub(crate) mod pass_tests {
         for index in 0..10 {
             record(&pool, index, now, "fast_allow", "allowed", 200).await;
         }
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         let (state, class): (String, String) = sqlx::query_as(
             "SELECT state, class FROM object_positions
              WHERE site = 'clinic' AND slot = 'GET /doctor/{id} path[1]'",
@@ -913,7 +915,7 @@ pub(crate) mod pass_tests {
         for index in 0..20 {
             record(&pool, index, now, "fast_allow", "allowed", 200).await;
         }
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         let evidence: i64 =
             sqlx::query_scalar("SELECT count(*) FROM object_evidence WHERE site = 'clinic'")
                 .fetch_one(&pool)
@@ -954,12 +956,12 @@ pub(crate) mod pass_tests {
         for index in 0..20 {
             record(&pool, index, now, "fast_allow", "allowed", 200).await;
         }
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         assert_eq!(proposed(&pool).await, 1);
         // Jev refuses the position after the proposal was made. The pass an hour later
         // reads the refusal, which lies after the cursor the first pass left.
         record_at(&pool, 20, now - 5 * 60_000, "jev_deny", "blocked", 403).await;
-        learn_once(&pool, now + 60 * 60_000).await;
+        learn_once(&pool, None, now + 60 * 60_000).await;
         assert_eq!(proposed(&pool).await, 0);
         drop_scratch(admin, pool, name).await;
     }
@@ -977,10 +979,10 @@ pub(crate) mod pass_tests {
         for index in 0..20 {
             record(&pool, index, now, "fast_allow", "allowed", 200).await;
         }
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         assert_eq!(proposed(&pool).await, 1);
         // Eight days later no vote is in the window, and no new row has arrived.
-        learn_once(&pool, now + 8 * DAY_MILLIS).await;
+        learn_once(&pool, None, now + 8 * DAY_MILLIS).await;
         assert_eq!(proposed(&pool).await, 0);
         drop_scratch(admin, pool, name).await;
     }
@@ -998,7 +1000,7 @@ pub(crate) mod pass_tests {
         for index in 0..20 {
             record(&pool, index, now, "fast_allow", "allowed", 200).await;
         }
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         assert_eq!(proposed(&pool).await, 1);
         let deleted = site_spec_store::delete(&pool, "clinic", created.version, None)
             .await
@@ -1012,8 +1014,8 @@ pub(crate) mod pass_tests {
         site_spec_store::create(&pool, &clinic(), None)
             .await
             .expect("create the site again");
-        learn_once(&pool, now).await;
-        learn_once(&pool, now + 60 * 60_000).await;
+        learn_once(&pool, None, now).await;
+        learn_once(&pool, None, now + 60 * 60_000).await;
         let evidence: i64 =
             sqlx::query_scalar("SELECT count(*) FROM object_evidence WHERE site = 'clinic'")
                 .fetch_one(&pool)
@@ -1197,7 +1199,7 @@ pub(crate) mod pass_tests {
             .expect("create the site");
         partitions(&pool, now).await;
         record_two_flows(&pool, now).await;
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         let record = site_spec_store::get(&pool, "clinic")
             .await
             .expect("read the site")
@@ -1231,7 +1233,7 @@ pub(crate) mod pass_tests {
                 .is_some_and(|note| note.contains("自动收紧"))
         );
         // A later pass finds the split already in place and writes no further version.
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         let again = site_spec_store::get(&pool, "clinic")
             .await
             .expect("read the site")
@@ -1255,7 +1257,7 @@ pub(crate) mod pass_tests {
         .expect("create the site");
         partitions(&pool, now).await;
         record_two_flows(&pool, now).await;
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         let record = site_spec_store::get(&pool, "clinic")
             .await
             .expect("read the site")
@@ -1297,7 +1299,7 @@ pub(crate) mod pass_tests {
         )
         .await
         .expect("record the undo");
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         let record = site_spec_store::get(&pool, "clinic")
             .await
             .expect("read the site")
@@ -1323,7 +1325,7 @@ pub(crate) mod pass_tests {
         for index in 0..20 {
             record_document_source(&pool, index, now).await;
         }
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         let record = site_spec_store::get(&pool, "clinic")
             .await
             .expect("read the site")
@@ -1357,7 +1359,7 @@ pub(crate) mod pass_tests {
         .expect("the position is judged");
         assert_eq!(state, "suspended");
         // A later pass finds the position paused already, and writes no further version.
-        learn_once(&pool, now + 60 * 60_000).await;
+        learn_once(&pool, None, now + 60 * 60_000).await;
         let again = site_spec_store::get(&pool, "clinic")
             .await
             .expect("read the site")
@@ -1380,7 +1382,7 @@ pub(crate) mod pass_tests {
         for index in 0..20 {
             record_document_source(&pool, index, now).await;
         }
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         // The position is suspended for an administrator to decide, and the configuration is kept.
         let record = site_spec_store::get(&pool, "clinic")
             .await
@@ -1425,7 +1427,7 @@ pub(crate) mod pass_tests {
         .execute(&pool)
         .await
         .expect("insert the rows of one millisecond");
-        learn_once(&pool, now).await;
+        learn_once(&pool, None, now).await;
         // The pass read the log up to its horizon, past the first batch and into the next.
         let cursor = store::cursor(&pool, "clinic")
             .await

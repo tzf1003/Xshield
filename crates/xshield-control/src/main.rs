@@ -90,7 +90,7 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
     })?;
     let key_sealer = context_sealer()?;
     let state = ControlState::new(
-        pool.clone(),
+        pool,
         admin_password_hash,
         console_origin,
         plain_http,
@@ -98,7 +98,7 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
     )
     .map_err(|error| error.to_string())?;
 
-    tokio::spawn(run_maintenance(pool));
+    tokio::spawn(run_maintenance(state.clone()));
 
     let listener = tokio::net::TcpListener::bind(listen).await?;
     axum::serve(

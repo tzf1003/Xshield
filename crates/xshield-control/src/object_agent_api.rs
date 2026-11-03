@@ -88,7 +88,9 @@ impl AgentView {
         let learning = record.spec.objects().learning();
         let today = day_of(u64::try_from(now).unwrap_or(0));
         Ok(Self {
-            model: agent_model::configured(pool).await.is_some(),
+            model: agent_model::configured(pool, state.key_sealer.as_ref())
+                .await
+                .is_some(),
             enabled: learning.agent.enabled,
             limit: i64::from(learning.agent.daily_limit),
             used: records::calls_on_day(pool, name, today).await?,
@@ -522,9 +524,11 @@ pub async fn run_now(
     {
         return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, "RUN_TOO_SOON"));
     }
-    let pool = state.pool.clone();
+    let background = Arc::clone(&state);
     tokio::spawn(async move {
-        if let Err(error) = run_manual(&pool, &record).await {
+        if let Err(error) =
+            run_manual(&background.pool, background.key_sealer.as_ref(), &record).await
+        {
             eprintln!(
                 "xshield-control: manual object learning failed for site {}: {error}",
                 record.spec.name()
@@ -551,7 +555,10 @@ pub async fn ask(
     if !learning.agent.enabled {
         return Err(ApiError::new(StatusCode::CONFLICT, "AGENT_OFF"));
     }
-    if agent_model::configured(&state.pool).await.is_none() {
+    if agent_model::configured(&state.pool, state.key_sealer.as_ref())
+        .await
+        .is_none()
+    {
         return Err(ApiError::new(StatusCode::CONFLICT, "AGENT_NOT_CONFIGURED"));
     }
     let open = row.state == "pending" || (row.state == "proposed" && row.source == "agent");
