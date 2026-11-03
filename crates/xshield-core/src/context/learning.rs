@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::log::{DecisionPath, Outcome};
 use super::objects::{ObjectMap, Reliability, Tier};
-use super::trace::Trace;
+use super::trace::{FINGERPRINT_SLOTS_MAX, FINGERPRINTS_PER_SLOT_MAX, Trace, TraceIdentity};
 
 /// Days of evidence a position is judged on.
 pub const WINDOW_DAYS: u64 = 7;
@@ -116,14 +116,7 @@ pub struct DecisionFacts {
 #[must_use]
 pub fn observe(record: &DecisionFacts) -> Observed {
     let day = record.at_millis / DAY_MILLIS;
-    let used = record.outcome == Outcome::Allowed
-        && record
-            .status
-            .is_some_and(|status| (200..300).contains(&status))
-        && matches!(
-            record.decision_path,
-            DecisionPath::FastAllow | DecisionPath::CachedAllow | DecisionPath::JevAllow
-        );
+    let used = answered_and_allowed(record);
     let refused = record.decision_path == DecisionPath::JevDeny;
     let mut observed = Observed::default();
     for value in &record.trace.values {
@@ -890,6 +883,226 @@ mod tier_tests {
     }
 }
 
+/// Most fingerprints a unit's evidence keeps at one response position on one UTC day. The smallest
+/// are kept. A unit whose values went past this is incomplete there, see [`TierFact::Seen`].
+pub const UNIT_FINGERPRINTS_MAX: usize = 64;
+
+/// The role label an administrator's session shows (`trace.session.identity.role`).
+pub const ADMIN_ROLE: &str = "admin";
+
+/// What one decision record says about the response positions it showed, for the tier evidence
+/// (docs/07 section 7.9.16). A unit is the user the session showed when the site declares user
+/// identities, and the session otherwise. Only the origin's own answers count, as for uses.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TierFact {
+    /// A non-admin unit got a 2xx carrying values at a response position. `fingerprints` are the
+    /// values it saw there. `complete` is false when the record kept only the smallest values of
+    /// the position, so the unit may have seen more.
+    Seen {
+        /// The response position, `METHOD route location`.
+        slot: String,
+        /// The unit.
+        unit: String,
+        /// The UTC day of the record.
+        day: u64,
+        /// The fingerprints the record kept at the position.
+        fingerprints: Vec<String>,
+        /// Whether the record kept every value the position showed.
+        complete: bool,
+    },
+    /// An admin unit got a 2xx carrying values at a response position.
+    Admin {
+        /// The response position.
+        slot: String,
+        /// The unit.
+        unit: String,
+        /// The UTC day of the record.
+        day: u64,
+    },
+    /// A non-admin unit was refused a request on a route: `METHOD route`, the prefix that the
+    /// route's response positions share.
+    Refused {
+        /// The route, `METHOD route`.
+        route: String,
+        /// The unit.
+        unit: String,
+        /// The UTC day of the record.
+        day: u64,
+    },
+    /// The record kept fewer positions than the response showed, so the unit may have seen a
+    /// position the record did not keep. It is incomplete at every position that day.
+    Capped {
+        /// The unit.
+        unit: String,
+        /// The UTC day of the record.
+        day: u64,
+    },
+}
+
+/// Whether the origin answered 2xx and the gateway let the answer through. A use counts by this test,
+/// and so does a response's evidence.
+#[must_use]
+fn answered_and_allowed(record: &DecisionFacts) -> bool {
+    record.outcome == Outcome::Allowed
+        && record
+            .status
+            .is_some_and(|status| (200..300).contains(&status))
+        && matches!(
+            record.decision_path,
+            DecisionPath::FastAllow | DecisionPath::CachedAllow | DecisionPath::JevAllow
+        )
+}
+
+/// Whether the record's session is an administrator's, by the role it showed.
+fn is_admin(record: &DecisionFacts) -> bool {
+    identity_of(record).and_then(|identity| identity.role.as_deref()) == Some(ADMIN_ROLE)
+}
+
+/// The identity a record's session showed, when it showed one.
+fn identity_of(record: &DecisionFacts) -> Option<&TraceIdentity> {
+    record
+        .trace
+        .session
+        .as_ref()
+        .and_then(|session| session.identity.as_ref())
+}
+
+/// The unit a record counts as: the user, when the site declares user identities, and the session
+/// otherwise. `None` when there is nothing to count: an anonymous session, or a site with users where
+/// the session has shown none.
+fn unit_of(record: &DecisionFacts, identified: bool) -> Option<&str> {
+    if identified {
+        identity_of(record)
+            .and_then(|identity| identity.user.as_deref())
+            .filter(|user| !user.is_empty())
+    } else {
+        Some(record.session.as_str()).filter(|session| !session.is_empty())
+    }
+}
+
+/// The `METHOD route` a response position key starts with: `GET /api/patients` for
+/// `GET /api/patients [].id`. `None` for a key without a route.
+#[must_use]
+pub fn route_prefix(slot: &str) -> Option<String> {
+    let mut parts = slot.splitn(3, ' ');
+    let method = parts.next()?;
+    let route = parts.next()?;
+    (!method.is_empty() && !route.is_empty()).then(|| format!("{method} {route}"))
+}
+
+/// The tier facts of one decision record. `identified` says whether the site declares user identity
+/// positions. A record of an anonymous session, or of a site with users where the session showed no
+/// user, yields nothing.
+#[must_use]
+pub fn observe_tiers(record: &DecisionFacts, identified: bool) -> Vec<TierFact> {
+    let Some(unit) = unit_of(record, identified).map(str::to_owned) else {
+        return Vec::new();
+    };
+    let day = record.at_millis / DAY_MILLIS;
+    let admin = is_admin(record);
+    let mut facts = Vec::new();
+    if answered_and_allowed(record)
+        && let Some(response) = &record.trace.response
+    {
+        for (slot, digests) in &response.fingerprints {
+            if digests.is_empty() {
+                continue;
+            }
+            if admin {
+                facts.push(TierFact::Admin {
+                    slot: slot.clone(),
+                    unit: unit.clone(),
+                    day,
+                });
+            } else {
+                facts.push(TierFact::Seen {
+                    slot: slot.clone(),
+                    unit: unit.clone(),
+                    day,
+                    fingerprints: digests.clone(),
+                    complete: digests.len() < FINGERPRINTS_PER_SLOT_MAX,
+                });
+            }
+        }
+        if !admin && response.fingerprints.len() >= FINGERPRINT_SLOTS_MAX {
+            facts.push(TierFact::Capped {
+                unit: unit.clone(),
+                day,
+            });
+        }
+    }
+    let refused =
+        record.decision_path == DecisionPath::JevDeny || matches!(record.status, Some(401 | 403));
+    if refused
+        && !admin
+        && let Some(route) = record
+            .trace
+            .values
+            .iter()
+            .find_map(|value| value.slot.as_deref())
+            .and_then(route_prefix)
+    {
+        facts.push(TierFact::Refused { route, unit, day });
+    }
+    facts
+}
+
+/// One non-admin unit's evidence at one response position over the window: the fingerprints it saw
+/// there, and whether every record of it kept all the values the position showed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeenUnit {
+    /// The fingerprints the unit saw at the position, over the window.
+    pub fingerprints: Vec<String>,
+    /// Whether none of its records at the position was cut to the smallest values.
+    pub complete: bool,
+}
+
+/// The tier evidence of one response position over the window, as the control plane reads it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TierEvidence {
+    /// The non-admin units that saw values at the position.
+    pub seen: Vec<SeenUnit>,
+    /// The admin units that got a 2xx carrying values at the position.
+    pub admin_units: u32,
+    /// The non-admin units refused a request on the position's route.
+    pub refused_units: u32,
+}
+
+/// The counts [`judge_tier`] reads, from the evidence of one response position.
+#[must_use]
+pub fn response_stats(evidence: &TierEvidence, identified: bool) -> ResponseStats {
+    let mut holders: BTreeMap<&str, u32> = BTreeMap::new();
+    for unit in &evidence.seen {
+        for fingerprint in &unit.fingerprints {
+            *holders.entry(fingerprint.as_str()).or_default() += 1;
+        }
+    }
+    let incomplete = evidence.seen.iter().filter(|unit| !unit.complete).count();
+    let mut complete_single = 0_u32;
+    for unit in &evidence.seen {
+        // Every other unit's records must be complete, so none of them could have seen this unit's
+        // single values without the record keeping them.
+        let others_incomplete = incomplete - usize::from(!unit.complete);
+        if others_incomplete == 0 {
+            let single = unit
+                .fingerprints
+                .iter()
+                .filter(|fingerprint| holders.get(fingerprint.as_str()) == Some(&1))
+                .count();
+            complete_single = complete_single.saturating_add(saturating_count(single));
+        }
+    }
+    ResponseStats {
+        identified,
+        units: saturating_count(evidence.seen.len()),
+        values: saturating_count(holders.len()),
+        shared: saturating_count(holders.values().filter(|count| **count >= 2).count()),
+        complete_single,
+        admin_units: evidence.admin_units,
+        refused_units: evidence.refused_units,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1252,5 +1465,294 @@ mod tests {
             outcome,
             trace: serde_json::from_value(trace).unwrap(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tier_evidence_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn facts(
+        session: &str,
+        identity: &Value,
+        status: Option<u16>,
+        path: DecisionPath,
+        response: Option<Value>,
+    ) -> DecisionFacts {
+        let mut trace = json!({
+            "v": 1,
+            "values_truncated": false,
+            "values": [{
+                "at": "path[1]", "value": "7", "kind": "reference", "inert": false,
+                "seen": true, "verified": true, "slot": "GET /api/patients path[1]", "sources": []
+            }],
+            "timing": {"judge_ms": 1},
+            "session": {"age_seconds": 1, "known_values": 0, "identity": identity}
+        });
+        if let Some(response) = response {
+            trace["response"] = response;
+        }
+        DecisionFacts {
+            at_millis: 2 * DAY_MILLIS + 5,
+            session: session.to_owned(),
+            status,
+            decision_path: path,
+            outcome: Outcome::Allowed,
+            trace: serde_json::from_value(trace).expect("a trace this build reads"),
+        }
+    }
+
+    fn answer(positions: &[(&str, &[&str])]) -> Value {
+        let fingerprints: serde_json::Map<String, Value> = positions
+            .iter()
+            .map(|(slot, digests)| ((*slot).to_owned(), json!(digests)))
+            .collect();
+        json!({
+            "content_type": "application/json", "bytes": 1, "observed": "json", "values": 1,
+            "new_values": 0, "fields": [], "entry_passed": false, "after_would_block": false,
+            "fingerprints": fingerprints
+        })
+    }
+
+    fn unit(fingerprints: &[&str], complete: bool) -> SeenUnit {
+        SeenUnit {
+            fingerprints: fingerprints
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            complete,
+        }
+    }
+
+    #[test]
+    fn an_ordinary_units_2xx_with_values_is_seen_with_its_fingerprints() {
+        let record = facts(
+            "s1",
+            &json!(null),
+            Some(200),
+            DecisionPath::FastAllow,
+            Some(answer(&[("GET /api/patients [].id", &["a1", "b2"][..])])),
+        );
+        assert_eq!(
+            observe_tiers(&record, false),
+            vec![TierFact::Seen {
+                slot: "GET /api/patients [].id".to_owned(),
+                unit: "s1".to_owned(),
+                day: 2,
+                fingerprints: vec!["a1".to_owned(), "b2".to_owned()],
+                complete: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_record_that_kept_the_maximum_is_incomplete_at_its_position() {
+        let digests = ["01", "02", "03", "04", "05", "06", "07", "08"];
+        let record = facts(
+            "s1",
+            &json!(null),
+            Some(200),
+            DecisionPath::FastAllow,
+            Some(answer(&[("GET /api/patients [].id", &digests[..])])),
+        );
+        assert!(matches!(
+            &observe_tiers(&record, false)[..],
+            [TierFact::Seen {
+                complete: false,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_site_with_users_counts_the_user_and_skips_a_session_that_showed_none() {
+        let response = || Some(answer(&[("GET /api/patients [].id", &["a1"][..])]));
+        let shown = facts(
+            "s1",
+            &json!({"user": "u1"}),
+            Some(200),
+            DecisionPath::FastAllow,
+            response(),
+        );
+        let unnamed = facts(
+            "s2",
+            &json!(null),
+            Some(200),
+            DecisionPath::FastAllow,
+            response(),
+        );
+        assert!(matches!(
+            &observe_tiers(&shown, true)[..],
+            [TierFact::Seen { unit, .. }] if unit == "u1"
+        ));
+        assert!(observe_tiers(&unnamed, true).is_empty());
+        assert!(matches!(
+            &observe_tiers(&shown, false)[..],
+            [TierFact::Seen { unit, .. }] if unit == "s1"
+        ));
+    }
+
+    #[test]
+    fn an_admin_gets_admin_facts_and_no_seen_ones() {
+        let record = facts(
+            "s9",
+            &json!({"user": "a1", "role": "admin"}),
+            Some(200),
+            DecisionPath::FastAllow,
+            Some(answer(&[("GET /api/patients [].id", &["a1"][..])])),
+        );
+        assert_eq!(
+            observe_tiers(&record, true),
+            vec![TierFact::Admin {
+                slot: "GET /api/patients [].id".to_owned(),
+                unit: "a1".to_owned(),
+                day: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_refusal_names_the_route_of_its_request() {
+        let denied = facts(
+            "s1",
+            &json!({"user": "u1"}),
+            Some(403),
+            DecisionPath::JevDeny,
+            None,
+        );
+        assert_eq!(
+            observe_tiers(&denied, true),
+            vec![TierFact::Refused {
+                route: "GET /api/patients".to_owned(),
+                unit: "u1".to_owned(),
+                day: 2,
+            }]
+        );
+        let origin = facts(
+            "s1",
+            &json!({"user": "u1"}),
+            Some(403),
+            DecisionPath::FastAllow,
+            None,
+        );
+        assert!(matches!(
+            &observe_tiers(&origin, true)[..],
+            [TierFact::Refused { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_response_showing_the_maximum_positions_marks_the_unit_capped() {
+        let names: Vec<String> = (0..FINGERPRINT_SLOTS_MAX)
+            .map(|index| format!("GET /api/patients [].f{index}"))
+            .collect();
+        let positions: Vec<(&str, &[&str])> = names
+            .iter()
+            .map(|name| (name.as_str(), &["a1"][..]))
+            .collect();
+        let record = facts(
+            "s1",
+            &json!(null),
+            Some(200),
+            DecisionPath::FastAllow,
+            Some(answer(&positions)),
+        );
+        assert!(
+            observe_tiers(&record, false)
+                .iter()
+                .any(|fact| matches!(fact, TierFact::Capped { .. }))
+        );
+    }
+
+    #[test]
+    fn a_route_is_its_method_and_path() {
+        assert_eq!(
+            route_prefix("GET /api/patients [].id").as_deref(),
+            Some("GET /api/patients")
+        );
+        assert_eq!(
+            route_prefix("DELETE /api/patients/{id} path[1]").as_deref(),
+            Some("DELETE /api/patients/{id}")
+        );
+        assert_eq!(route_prefix("GET"), None);
+    }
+
+    #[test]
+    fn a_single_value_counts_only_when_every_other_unit_is_complete() {
+        let evidence = TierEvidence {
+            seen: vec![unit(&["a"], true), unit(&["b"], true), unit(&["c"], false)],
+            admin_units: 0,
+            refused_units: 0,
+        };
+        let stats = response_stats(&evidence, true);
+        assert_eq!(
+            (
+                stats.units,
+                stats.values,
+                stats.shared,
+                stats.complete_single
+            ),
+            (3, 3, 0, 1)
+        );
+    }
+
+    #[test]
+    fn a_shared_value_is_one_two_or_more_units_saw() {
+        let evidence = TierEvidence {
+            seen: vec![unit(&["a", "b"], true), unit(&["b", "c"], true)],
+            admin_units: 1,
+            refused_units: 2,
+        };
+        let stats = response_stats(&evidence, false);
+        assert_eq!(
+            (
+                stats.units,
+                stats.values,
+                stats.shared,
+                stats.complete_single,
+                stats.admin_units,
+                stats.refused_units
+            ),
+            (2, 3, 1, 2, 1, 2)
+        );
+    }
+
+    #[test]
+    fn disjoint_units_judge_self_and_units_sharing_one_set_judge_public() {
+        let own = TierEvidence {
+            seen: (0..12)
+                .map(|index| SeenUnit {
+                    fingerprints: vec![format!("{index:02}a"), format!("{index:02}b")],
+                    complete: true,
+                })
+                .collect(),
+            admin_units: 0,
+            refused_units: 0,
+        };
+        let judged =
+            judge_tier(&response_stats(&own, true), Thresholds::default()).expect("judged");
+        assert_eq!(
+            (judged.tier, judged.reliability),
+            (Tier::Own, Reliability::High)
+        );
+
+        let shared: Vec<String> = (0..30).map(|index| format!("s{index:02}")).collect();
+        let public = TierEvidence {
+            seen: (0..10)
+                .map(|_| SeenUnit {
+                    fingerprints: shared.clone(),
+                    complete: true,
+                })
+                .collect(),
+            admin_units: 0,
+            refused_units: 0,
+        };
+        let judged =
+            judge_tier(&response_stats(&public, true), Thresholds::default()).expect("judged");
+        assert_eq!(
+            (judged.tier, judged.reliability),
+            (Tier::Public, Reliability::High)
+        );
     }
 }

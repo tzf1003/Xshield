@@ -374,6 +374,22 @@ impl ObjectMap {
         Some(self)
     }
 
+    /// The map with the tier judgement of a response position set: whose objects it shows, and how sure
+    /// the learning is. The entry keeps its kind, its identity and its paused flag. `None` when the map
+    /// does not declare the key, or when the entry carries an `accepts_public`, since an entry carries one
+    /// judgement at most.
+    #[must_use]
+    pub fn with_tier(mut self, key: &str, tier: Tier, reliability: Reliability) -> Option<Self> {
+        let place = *self.index.get(key)?;
+        let slot = self.slots.get_mut(place)?;
+        if slot.accepts_public.is_some() {
+            return None;
+        }
+        slot.tier = Some(tier);
+        slot.reliability = Some(reliability);
+        Some(self)
+    }
+
     /// The tier a response position is confirmed with, when the map confirms one and does
     /// not pause the entry. The judge and the acceptance learning read tiers through this.
     #[must_use]
@@ -801,6 +817,39 @@ mod judgement_tests {
         assert!(
             judged
                 .with_accepts_public("GET /api/unknown [].id", true, Reliability::High)
+                .is_none(),
+            "an undeclared key takes nothing"
+        );
+    }
+
+    #[test]
+    fn a_tier_judgement_goes_on_a_response_entry_without_an_acceptance() {
+        let judged = map(JUDGED);
+        let key = "GET /api/patients [].id";
+        let set = judged
+            .clone()
+            .with_tier(key, Tier::Public, Reliability::Medium)
+            .expect("a declared response entry takes the tier");
+        assert_eq!(set.tier_of(key), Some(Tier::Public));
+        assert_eq!(set.reliability_of(key), Some(Reliability::Medium));
+        assert_eq!(set.accepts_public_of(key), None);
+        let written = ObjectMap::try_from(ObjectMapDto::from(set)).expect("the map stays valid");
+        assert_eq!(written.tier_of(key), Some(Tier::Public));
+
+        assert!(
+            judged
+                .clone()
+                .with_tier(
+                    "DELETE /api/patients/{id} path[1]",
+                    Tier::Own,
+                    Reliability::High
+                )
+                .is_none(),
+            "an entry with an acceptance carries no tier"
+        );
+        assert!(
+            judged
+                .with_tier("GET /api/unknown [].id", Tier::Own, Reliability::High)
                 .is_none(),
             "an undeclared key takes nothing"
         );
