@@ -1606,6 +1606,10 @@ export interface ObjectSlotDetail extends ObjectSlotRow {
   history: ObjectHistoryEntry[];
   /** Effects of confirming the proposal, in the impact preview's shape. */
   impact: ImpactChange[];
+  /** False when the window held more decisions than it reads, so the counts may be low. */
+  impact_complete: boolean;
+  /** False when the action's impact is not estimated yet: a field position's. */
+  impact_estimated: boolean;
 }
 
 /** A candidate of the cold start: one named position and the class the rules read from it (console design 6 B). */

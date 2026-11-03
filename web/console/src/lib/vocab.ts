@@ -871,6 +871,8 @@ export const OBJECT_TEXT = {
     agentCites: "依据",
     agentReason: "理由（模型输出，按文本显示）",
     impact: "影响",
+    impactNotEstimated: "字段位置的影响暂未估算。",
+    impactIncomplete: "影响只统计了最近的一部分决策，数字可能偏小。",
     scope: "范围",
     scopeOf: (scope: string) => `仅 ${scope}（证据里的接口）`,
     history: "历史",

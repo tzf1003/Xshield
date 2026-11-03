@@ -77,6 +77,8 @@
       "count": 14
     }
   ],
+  "impact_complete": true,
+  "impact_estimated": true,
   "agent_status": null,
   "agent": null
 }

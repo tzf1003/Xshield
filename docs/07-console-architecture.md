@@ -614,7 +614,7 @@ CREATE TABLE jev_prompts (
 | `GET /api/sites/{name}/insights` | 调优建议和切换模式的就绪检查（7.9.11） |
 | `GET /api/sites/{name}/evidence` | 判定参数旁边显示的证据：最近 24 小时 Jev 耗时 p50/p95/p99、超时次数、调用上限触发次数和每分钟最高调用数、缓存放行次数 |
 | `GET /api/sites/{name}/objects` | 对象表：各状态计数、声明的类别、位置列表，可按 `state`、`class`、`q` 过滤；声明的位置和学习到的位置各一行，默认不列已退役的位置；已退役的位置在最后一次使用后保留 90 天（`KEEP_RETIRED_DAYS`），之后学习任务删除它们，再次出现时从头学习。学习位置的 id 是 `s<行号>`，声明位置的 id 是 `a` 加上键的 SHA-256 前 8 字节（十六进制），控制台只把 id 当不透明字符串 |
-| `GET /api/sites/{name}/objects/slots/{id}` | 一个位置的抽屉：流入的流向（份额、次数、会话，以及 Jev 通过和拒绝的次数）；有证据的流向最多 20 条，之后另列最多 20 条只有 Jev 判定的流向；示例请求（最多 3 个，最近的在前：请求位置列出用到它的请求，响应位置按返回值的观察时间列出返回过这个值的响应）。Jev 次数和示例都从决策记录读取，只统计学习窗口内且站点创建之后的记录（站点删除后决策记录保留，同名重建的站点不读旧记录），Jev 次数只看调用过 Jev 的记录（部分索引）。结构和历史待后续实现，当前为空。`impact` 是位置主操作（确认提议、恢复暂停的条目、暂停生效中的条目）让快速放行改变的数量，按最近一天计算，路径参数有值；字段位置的主操作暂不估计，此时 `impact_complete` 为 false。`impact_complete` 为 false 也表示窗口没有读完 |
+| `GET /api/sites/{name}/objects/slots/{id}` | 一个位置的抽屉：流入的流向（份额、次数、会话，以及 Jev 通过和拒绝的次数）；有证据的流向最多 20 条，之后另列最多 20 条只有 Jev 判定的流向；示例请求（最多 3 个，最近的在前：请求位置列出用到它的请求，响应位置按返回值的观察时间列出返回过这个值的响应）。Jev 次数和示例都从决策记录读取，只统计学习窗口内且站点创建之后的记录（站点删除后决策记录保留，同名重建的站点不读旧记录），Jev 次数只看调用过 Jev 的记录（部分索引）。结构和历史待后续实现，当前为空。`impact` 是位置主操作（确认提议、恢复暂停的条目、暂停生效中的条目）让快速放行改变的数量，按最近一天计算，只读站点创建之后的记录，路径参数有值；字段位置的主操作暂不估计，此时 `impact_estimated` 为 false（`impact_complete` 同为 false）。`impact_complete` 为 false 表示窗口没有读完，数量可能偏小 |
 | `POST /api/sites/{name}/objects/slots/{id}/dismiss` | 驳回学习中的提议或学习中的位置，成功返回 204。409：`SLOT_IS_DECLARED`（声明的位置）、`SLOT_NOT_REQUEST`（响应侧的位置）、`SLOT_STATE_CONFLICT`（状态不接受驳回） |
 | `POST /api/sites/{name}/objects/slots/{id}/ambiguous` | 标为歧义，规则不再提议，成功返回 204；错误码同上 |
 | `GET /api/sites/{name}/objects/bootstrap` | 冷启动的类别候选（24 小时窗口）；候选尚未计算，当前为空 |
