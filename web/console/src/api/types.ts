@@ -237,6 +237,9 @@ export interface RecentAccess {
   at_millis: number | null;
 }
 
+/** Why the credential that set a session up took no login response's values (docs/01 section 1.7). */
+export type LoginUnbound = "login_ambiguous" | "login_expired" | "login_unmatched";
+
 export interface TraceSession {
   age_seconds: number;
   known_values: number;
@@ -255,6 +258,16 @@ export interface TraceSession {
    * that made no Jev call.
    */
   recent?: RecentAccess[];
+  /**
+   * The login request whose response's values the session took when its credential started it (JSON credential
+   * sites, docs/01 section 1.7). Absent otherwise.
+   */
+  login_request_id?: RequestId;
+  /**
+   * Why the credential that set the session up took no login response's values (docs/01 section 1.7). Absent when
+   * it took them, or when no credential set the session up.
+   */
+  login_unbound?: LoginUnbound;
 }
 
 export interface TraceTiming {
@@ -289,6 +302,11 @@ export interface TraceResponse {
    * Absent when the response showed none, and always absent on a site without identity positions.
    */
   exposure?: ResponseExposure | null;
+  /**
+   * A JSON login response held until its credential starts a session: how many of its scalars were held (docs/01
+   * section 1.7). Absent otherwise.
+   */
+  pending_values?: number;
 }
 
 export interface ResponseShapeField {

@@ -11,8 +11,8 @@ import type {
   TraceSession,
 } from "../../api/types.ts";
 import { fmtElapsed, fmtInt, fmtLocalDateTime } from "../../lib/format.ts";
-import { isSessionLabel, shortSession } from "../../lib/ids.ts";
-import { OBJECT_JUDGEMENT } from "../../lib/vocab.ts";
+import { isSessionLabel, shortRequestId, shortSession } from "../../lib/ids.ts";
+import { LOGIN_ROW_TEXT, LOGIN_UNBOUND_TEXT, OBJECT_JUDGEMENT } from "../../lib/vocab.ts";
 import { Card, Empty } from "../../ui/Page.tsx";
 import { SafeText } from "../../ui/SafeText.tsx";
 import { sessionLists } from "./detail-model.ts";
@@ -23,8 +23,14 @@ export function SessionTab({ detail, requestId }: { detail: RequestDetail; reque
   const { summary, trace } = detail;
   const session = trace.session;
   if (!session) {
+    const held = trace.response?.pending_values;
     return (
       <Card title="会话上下文">
+        {held === undefined ? null : (
+          <div className="small">
+            {LOGIN_ROW_TEXT.held}：{fmtInt(held)} 个值，等待凭证开始会话时绑定，5 分钟内有效。
+          </div>
+        )}
         <Empty title="这条记录没有会话上下文">无会话或绕过的请求没有会话上下文。</Empty>
       </Card>
     );
@@ -94,6 +100,25 @@ export function SessionSummary({
                 <dt title={OBJECT_JUDGEMENT.identityRow}>{OBJECT_JUDGEMENT.identityRow}</dt>
                 <dd className="mono">
                   <SafeText text={identityWords(session.identity).join(" · ")} />
+                </dd>
+              </>
+            )}
+            {session.login_request_id ? (
+              <>
+                <dt>{LOGIN_ROW_TEXT.request}</dt>
+                <dd className="mono">
+                  <LinkedRequest id={session.login_request_id} className="mono">
+                    {shortRequestId(session.login_request_id)}
+                  </LinkedRequest>
+                </dd>
+              </>
+            ) : null}
+            {session.login_unbound === undefined ? null : (
+              <>
+                <dt>{LOGIN_ROW_TEXT.unbound}</dt>
+                <dd>
+                  {LOGIN_UNBOUND_TEXT[session.login_unbound].name}
+                  <div className="small dim">{LOGIN_UNBOUND_TEXT[session.login_unbound].desc}</div>
                 </dd>
               </>
             )}

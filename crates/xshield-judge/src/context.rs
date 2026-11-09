@@ -581,11 +581,12 @@ impl SessionContext {
         true
     }
 
-    /// Takes the values of the login response that set this session up (docs/01 section 1.7).
-    /// The credential is not a value of the session, so it is left out. Each value shows the
-    /// login response as its source.
+    /// Takes the values, and the identity, of the login response that set this session up (docs/01
+    /// section 1.7). The credential is not a value of the session, so it is left out. Each value
+    /// shows the login response as its source.
     fn take_login(&mut self, credential: &Digest16, login: HeldLogin) {
         self.login = Some(login.request_id);
+        self.identity.update(&login.identity);
         for value in login.values {
             if value.digest == *credential {
                 continue;
@@ -749,6 +750,9 @@ struct HeldLogin {
     request_id: u128,
     at_ms: u64,
     values: Vec<HeldValue>,
+    /// The identity the response declares, in the form the session keeps it: keyed hashes and
+    /// role labels only, with the values the request sent left out.
+    identity: SessionIdentity,
 }
 
 /// The held login responses, oldest first. Memory only: a restart loses them.
@@ -851,12 +855,20 @@ impl ContextStore {
     }
 
     /// Holds a JSON login response until the credential it issues starts a session (docs/01
-    /// section 1.7). Only the keyed hashes and field names of its values are kept.
-    pub fn hold_login(&mut self, request_id: u128, at_ms: u64, values: Vec<HeldValue>) {
+    /// section 1.7). Only the keyed hashes and field names of its values are kept, and the identity
+    /// it declares in the same keyed form.
+    pub fn hold_login(
+        &mut self,
+        request_id: u128,
+        at_ms: u64,
+        values: Vec<HeldValue>,
+        identity: SessionIdentity,
+    ) {
         self.held.hold(HeldLogin {
             request_id,
             at_ms,
             values,
+            identity,
         });
     }
 
@@ -1444,6 +1456,7 @@ mod tests {
             7,
             0,
             vec![held(&key, token, "token"), held(&key, "6", "bid")],
+            SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
         store.start_session(id, key.mac("value", token.as_bytes()), 1);
@@ -1467,11 +1480,45 @@ mod tests {
     }
 
     #[test]
+    fn a_held_login_declares_the_identity_it_stated_to_the_session_it_starts_and_no_other() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let token = "credential-token-0001";
+        let identity = SessionIdentity::declared(&key, &[(IdentityRole::User, "alice-0042")]);
+        store.hold_login(7, 0, vec![held(&key, token, "token")], identity);
+        let id = key.mac("session", token.as_bytes());
+        store.start_session(id, key.mac("value", token.as_bytes()), 1);
+        assert!(
+            store
+                .session(id, 1)
+                .identity()
+                .tag()
+                .is_some_and(|tag| tag.user.is_some()),
+            "the session takes the user the login stated"
+        );
+        let forged = b"forged-session-token";
+        store.start_session(key.mac("session", forged), key.mac("value", forged), 1);
+        assert_eq!(
+            store
+                .session(key.mac("session", forged), 1)
+                .identity()
+                .tag(),
+            None,
+            "a credential the login did not issue states no identity"
+        );
+    }
+
+    #[test]
     fn a_short_value_is_never_a_credential_a_login_can_give() {
         let key = key();
         let mut store = ContextStore::new();
         let short = "123456789012345";
-        store.hold_login(7, 0, vec![held(&key, short, "code")]);
+        store.hold_login(
+            7,
+            0,
+            vec![held(&key, short, "code")],
+            SessionIdentity::default(),
+        );
         let id = key.mac("session", short.as_bytes());
         store.start_session(id, key.mac("value", short.as_bytes()), 1);
         assert_eq!(
@@ -1490,8 +1537,18 @@ mod tests {
         let key = key();
         let mut store = ContextStore::new();
         let token = "shared-credential-0001";
-        store.hold_login(1, 0, vec![held(&key, token, "token")]);
-        store.hold_login(2, 10, vec![held(&key, token, "token")]);
+        store.hold_login(
+            1,
+            0,
+            vec![held(&key, token, "token")],
+            SessionIdentity::default(),
+        );
+        store.hold_login(
+            2,
+            10,
+            vec![held(&key, token, "token")],
+            SessionIdentity::default(),
+        );
         let id = key.mac("session", token.as_bytes());
         store.start_session(id, key.mac("value", token.as_bytes()), 20);
         let session = store.session(id, 20);
@@ -1505,7 +1562,12 @@ mod tests {
         let key = key();
         let mut store = ContextStore::new();
         let token = "expiring-credential-1";
-        store.hold_login(1, 0, vec![held(&key, token, "token")]);
+        store.hold_login(
+            1,
+            0,
+            vec![held(&key, token, "token")],
+            SessionIdentity::default(),
+        );
         let id = key.mac("session", token.as_bytes());
         let late = HELD_LOGIN_MS + 1;
         store.start_session(id, key.mac("value", token.as_bytes()), late);
@@ -1525,6 +1587,7 @@ mod tests {
                 index as u128 + 1,
                 0,
                 vec![held(&key, &token(index), "token")],
+                SessionIdentity::default(),
             );
         }
         assert_eq!(store.held.logins.len(), HELD_LOGINS_MAX);

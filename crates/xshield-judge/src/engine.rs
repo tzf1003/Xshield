@@ -17,8 +17,8 @@ use xshield_core::path_template::is_templatable;
 
 use crate::context::{
     CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, HeldValue,
-    LOGIN_CREDENTIAL_CHARS, Origin, Recent, SENT_MAX, SentRecord, SessionContext, Source, label,
-    request_number, request_text,
+    LOGIN_CREDENTIAL_CHARS, Origin, Recent, SENT_MAX, SentRecord, SessionContext, SessionIdentity,
+    Source, label, request_number, request_text,
 };
 use crate::exposure;
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
@@ -879,7 +879,21 @@ impl<J: JevPort> Judge<J> {
                 .collect();
             if held.iter().any(|value| value.candidate) {
                 summary.pending_values = Some(held.len());
-                inner.store.hold_login(request_id, observation.now_ms, held);
+                // The identity the response declares is held as the values are: keyed, and without
+                // what the request sent, which says nothing about who answers.
+                let shown: Vec<_> = claims
+                    .iter()
+                    .copied()
+                    .filter(|(_, value)| {
+                        !observation
+                            .sent
+                            .contains(&self.key.mac("value", value.as_bytes()))
+                    })
+                    .collect();
+                let identity = SessionIdentity::declared(&self.key, &shown);
+                inner
+                    .store
+                    .hold_login(request_id, observation.now_ms, held, identity);
             }
         }
         // The new-value count is the one of the first context the response
@@ -3027,6 +3041,41 @@ mod tests {
     /// The login body of a user whose basket is `bid`.
     fn login_body(token: &str, bid: u32) -> String {
         format!(r#"{{"authentication":{{"token":"{token}","bid":{bid}}}}}"#)
+    }
+
+    /// The login body of a user whose basket is `bid` and whose e-mail address, the identity the
+    /// login states, is `umail`.
+    fn login_with_user(token: &str, bid: u32, umail: &str) -> String {
+        format!(r#"{{"authentication":{{"token":"{token}","bid":{bid},"umail":"{umail}"}}}}"#)
+    }
+
+    #[tokio::test]
+    async fn a_login_response_declares_its_identity_once_its_credential_starts_the_session() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let spec = site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"account","name":"账号"}],
+                "slots":[{"key":"POST /login authentication.umail","class":"account","source":"admin","identity":"user"}]}"#,
+        );
+        let body = login_with_user(LOGIN_TOKEN, 6, "alice@example.test");
+        judge.observe(&spec, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        let entry = judge
+            .judge(&spec, &get("/api/home", None, Some(LOGIN_TOKEN), 1))
+            .await;
+        assert!(
+            identity_of(&entry.record).is_some_and(|identity| identity.user.is_some()),
+            "the user the login stated is the session's user"
+        );
+        // A credential the login did not issue declares no identity.
+        let forged = judge
+            .judge(
+                &spec,
+                &get("/api/home", None, Some("forged-session-token"), 2),
+            )
+            .await;
+        assert_eq!(identity_of(&forged.record), None);
     }
 
     #[tokio::test]
