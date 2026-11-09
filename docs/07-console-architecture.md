@@ -99,6 +99,7 @@ AGENTS.md 要求新增配置项、表、依赖之前先确认现有机制不够�
 | 最近访问 → 请求 | `trace.session.recent[].request_id` | Jev 看到的“最近访问”逐条可点 |
 | 经过的入口 → 请求 | `trace.session.entries_passed[].request_id` | 会话第一次经过某个入口的请求 |
 | 登录请求 → 新会话 | `trace.response.issued_session` | 登录响应下发了凭证，链接到新会话的时间线 |
+| 会话 → 登录请求（JSON 凭证站点） | `trace.session.login_request_id` | 会话的已见值来源为“登录响应”，点击打开那次登录，核对记入的值来自哪个响应 |
 | 记录 → 配置版本 | `site_version` | 判定时的站点配置（含 `advanced`），打开该版本的全文和差异 |
 | 记录 → 会话 | `session` | 会话时间线 |
 | 记录 → Jev 指令版本 | `jev.prompt` | 还原发给 Jev 的完整请求体 |
@@ -223,6 +224,8 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values_truncated` | 请求体未结构化或值数到上限（即 `ExtractedRequest::truncated`），或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4）。网关只拆 48 KiB 以内的请求体（`REQUEST_BODY_MAX`）：更大的请求在网关直接 413 拒绝、不拆值，所以体积不是这里的原因 |
 | `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条），其中的请求路径超过 256 字节时截到 256 字节（`TRACE_PATH_BYTES_MAX`）；`known_values` 是会话已见值数量 |
 | `session.identity` | 站点声明了身份位置且会话已见身份时才有：`user`、`org` 为键控哈希标签，`role` 为角色标签，规则见 [7.9.15](#7915-对象表的身份位置w1)。没有身份位置的站点不写这一段 |
+| `session.login_request_id` | JSON 凭证站点的会话由哪次登录建立时，那次登录请求的 ID。登录响应暂存的标量在那次绑定时记入会话（[01 1.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。没有时不写 |
+| `session.login_unbound` | 凭证建立会话时没有绑定到登录响应，原因为 `login_ambiguous`（对上多份暂存）、`login_expired`（暂存已过期）或 `login_unmatched`（没有对上）。没有时不写 |
 >| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
 | `timing` | `total_ms` 从收到请求头到响应写完；`judge_ms` 是判定耗时（含 Jev）；`origin_ms` 从发出上游请求到收到响应头 |
 | `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
@@ -230,6 +233,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `response.fields` | 出现次数最多的 12 个字段名及次数，形如 `[{ "field": "id", "count": 3 }]`；不存值本身 |
 | `response.fingerprints` | 按响应位置记的值指纹，键是 `METHOD 路由 位置`（与 `values[].slot` 同格式），值是该位置至多 8 个指纹，取最小的。每个指纹是站点派生的键控哈希的前 8 字节，写成 16 位十六进制：同一站点里同一个值在任何会话里指纹相同，换一个站点就不同。位置至多 16 个，按响应里出现的顺序取前面的。不存值本身；没有可记的值时省略。控制面用它统计同一位置的值被多少用户共享，以学习接口档位 |
 | `response.issued_session` | 响应下发了新凭证（登录）时，新会话的标签 |
+| `response.pending_values` | JSON 凭证站点的登录响应被暂存为待绑定登录时，暂存的标量数（[01 1.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。没有时不写 |
 | `response.entry_passed` | 这个响应让会话第一次经过某个入口 |
 | `response.after_would_block` | 这次请求是“本应拦截”但在观察模式下被转发，它的响应仍被学进上下文（[7.4.6](#746-附带发现观察模式下本应拦截请求的响应仍进入上下文)） |
 | `response.exposure` | 属性越权告警（W6，[7.9.17](#7917-属性越权告警w6)）：响应里有一个不属于本会话的用户类对象，同时有手机号、邮箱或身份证号类属性。`users` 为用户类位置（至多 4 个），`attributes` 为敏感属性的位置、`kind`（`phone`、`email`、`id_card`）和识别方式 `by`（`name` 按字段名，`format` 按值的格式）（至多 8 个），`truncated` 表示被截断。只记位置和类别，不存值。没有身份位置的站点、未见过身份的会话，以及没有告警的响应都不写这一项。只告警，不影响判定 |
