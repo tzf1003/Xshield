@@ -19,18 +19,26 @@ import { sessionLists } from "./detail-model.ts";
 import { timelineSearch } from "./DetailHead.tsx";
 import { keyed, LinkedRequest } from "./parts.tsx";
 
+/** The values a JSON login response held for its credential (docs/01 section 1.7). Shown whatever the
+ *  record's session is: an entry request without a credential carries the address's context, so a
+ *  login has a session in the record and still held values. */
+function HeldValues({ trace }: { trace: Trace }) {
+  const held = trace.response?.pending_values;
+  if (held === undefined) return null;
+  return (
+    <div className="small">
+      {LOGIN_ROW_TEXT.held}：{fmtInt(held)} 个值，等待凭证开始会话时绑定，5 分钟内有效。
+    </div>
+  );
+}
+
 export function SessionTab({ detail, requestId }: { detail: RequestDetail; requestId: string }) {
   const { summary, trace } = detail;
   const session = trace.session;
   if (!session) {
-    const held = trace.response?.pending_values;
     return (
       <Card title="会话上下文">
-        {held === undefined ? null : (
-          <div className="small">
-            {LOGIN_ROW_TEXT.held}：{fmtInt(held)} 个值，等待凭证开始会话时绑定，5 分钟内有效。
-          </div>
-        )}
+        <HeldValues trace={trace} />
         <Empty title="这条记录没有会话上下文">无会话或绕过的请求没有会话上下文。</Empty>
       </Card>
     );
@@ -38,6 +46,7 @@ export function SessionTab({ detail, requestId }: { detail: RequestDetail; reque
   const lists = sessionLists(session);
   return (
     <Card title="会话上下文">
+      <HeldValues trace={trace} />
       <SessionSummary
         trace={trace}
         entries={lists.entries}

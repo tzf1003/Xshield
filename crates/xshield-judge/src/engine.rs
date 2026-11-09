@@ -324,13 +324,17 @@ impl<J: JevPort> Judge<J> {
             .filter(|credential| !credential.is_empty())
             .map(|credential| self.key.mac("session", credential.as_bytes()));
         // A credential that no session holds yet starts its session from the JSON login response
-        // that issued it, when one is held (docs/01 section 1.7). This runs before anything reads
-        // the session, so the session is created already knowing what the login returned.
-        if let (Some(id), Some(credential)) = (session_id, request.credential) {
+        // that issued it, when one is held (docs/01 section 1.7). Only an entry starts it: after a
+        // login the first request lands on an entry, so a credential first seen anywhere else
+        // starts a session that knows no login. This runs before anything reads the session, so a
+        // session that does start is created already knowing what the login returned.
+        if let (Some(id), Some(credential), Some(_)) = (session_id, request.credential, entry) {
             let token = self
                 .key
                 .mac("value", credential_token(site, credential).as_bytes());
-            self.lock().store.start_session(id, token, request.now_ms);
+            self.lock()
+                .store
+                .start_session(site.name(), id, token, request.now_ms);
         }
         let mut extracted = extract_request(
             request.path,
@@ -893,7 +897,7 @@ impl<J: JevPort> Judge<J> {
                 let identity = SessionIdentity::declared(&self.key, &shown);
                 inner
                     .store
-                    .hold_login(request_id, observation.now_ms, held, identity);
+                    .hold_login(site.name(), request_id, observation.now_ms, held, identity);
             }
         }
         // The new-value count is the one of the first context the response
@@ -1097,16 +1101,37 @@ fn credential_token<'a>(site: &SiteSpec, credential: &'a str) -> &'a str {
     }
 }
 
-/// `value` without a leading authentication scheme, such as `Bearer `.
+/// `value` without a leading authentication scheme, such as `Bearer `. A scheme is a token
+/// (RFC 9110 section 11.1), so digits and some symbols may be in it.
 fn without_scheme(value: &str) -> &str {
     match value.split_once(' ') {
-        Some((scheme, rest))
-            if !scheme.is_empty() && scheme.bytes().all(|byte| byte.is_ascii_alphabetic()) =>
-        {
+        Some((scheme, rest)) if !scheme.is_empty() && scheme.bytes().all(is_token_char) => {
             rest.trim_start()
         }
         _ => value,
     }
+}
+
+/// A character of an HTTP token (RFC 9110 section 5.6.2).
+fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 /// Takes out of the request's values the ones that are the interface name (they
@@ -3161,14 +3186,12 @@ mod tests {
         let forged = judge
             .judge(
                 &site,
-                &get("/rest/basket/6", None, Some("forged-session-token"), 1),
+                &get("/api/home", None, Some("forged-session-token"), 1),
             )
             .await;
         let traced = forged.record.trace.session.expect("the session is traced");
         assert_eq!(traced.login_unbound, Some(LoginUnbound::Unmatched));
         assert_eq!(traced.login_request_id, None);
-        assert!(!forged.forward, "the forged session does not own basket 6");
-        assert_eq!(fake.calls(), 1);
         // The held login is still there for the credential it issued.
         let own = judge
             .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 2))
@@ -3180,6 +3203,47 @@ mod tests {
                 .and_then(|s| s.login_request_id)
                 .as_deref(),
             Some(RID)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_credential_first_seen_on_a_request_that_is_not_an_entry_takes_no_login() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        let body = login_body(LOGIN_TOKEN, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        // Only an entry starts a session from the login (docs/01 section 1.7).
+        let first = judge
+            .judge(&site, &get("/rest/basket/6", None, Some(LOGIN_TOKEN), 1))
+            .await;
+        let traced = first.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id, None);
+        assert_eq!(traced.login_unbound, None, "the login was not tried");
+        // The session exists now, so the entry after it does not take the login either.
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 2))
+            .await;
+        let later = entry.record.trace.session.expect("the session is traced");
+        assert_eq!(later.login_request_id, None);
+    }
+
+    #[test]
+    fn a_scheme_is_a_token_so_digits_and_symbols_may_be_in_it() {
+        assert_eq!(without_scheme("Bearer abc-123"), "abc-123");
+        assert_eq!(without_scheme("Token2 abc-123"), "abc-123");
+        assert_eq!(without_scheme("Key-v2.0   abc"), "abc");
+        assert_eq!(without_scheme("abc-123"), "abc-123", "no scheme, no change");
+        assert_eq!(
+            without_scheme("a=b c"),
+            "a=b c",
+            "= is not a token character"
+        );
+        assert_eq!(
+            without_scheme(" abc"),
+            " abc",
+            "an empty scheme is not a scheme"
         );
     }
 

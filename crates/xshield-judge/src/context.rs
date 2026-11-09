@@ -40,6 +40,11 @@ const CACHE_MAX: usize = 512;
 /// Most JSON login responses held for a credential no session has taken yet (docs/01 section
 /// 1.7). Past it the oldest goes.
 pub const HELD_LOGINS_MAX: usize = 1_000;
+/// Most values all held logins keep together. A login response can carry as many values as a
+/// response may (see `values::RESPONSE_VALUES_MAX`), and any anonymous entry response with a
+/// long value is held, so the count of logins alone does not bound memory. Past it the oldest
+/// goes.
+pub const HELD_VALUES_MAX: usize = 20_000;
 /// How long a held login waits for its credential, in milliseconds (docs/01 section 1.7).
 pub const HELD_LOGIN_MS: u64 = 5 * 60 * 1000;
 /// The shortest value a login response may carry as the session credential (docs/01 section 1.7).
@@ -747,6 +752,9 @@ pub struct HeldValue {
 /// A JSON login response held for the credential it issues.
 #[derive(Debug)]
 struct HeldLogin {
+    /// The site whose login this is. Only a credential of the same site takes it: the values and
+    /// the identity of a login belong to the site that answered it.
+    site: String,
     request_id: u128,
     at_ms: u64,
     values: Vec<HeldValue>,
@@ -759,32 +767,56 @@ struct HeldLogin {
 #[derive(Debug, Default)]
 struct HeldLogins {
     logins: VecDeque<HeldLogin>,
+    /// The values of all the held logins together, kept under [`HELD_VALUES_MAX`].
+    values: usize,
 }
 
 impl HeldLogins {
     fn hold(&mut self, login: HeldLogin) {
-        if self.logins.len() >= HELD_LOGINS_MAX {
-            self.logins.pop_front();
+        if login.values.len() > HELD_VALUES_MAX {
+            return;
         }
+        while !self.logins.is_empty()
+            && (self.logins.len() >= HELD_LOGINS_MAX
+                || self.values + login.values.len() > HELD_VALUES_MAX)
+        {
+            self.forget_oldest();
+        }
+        self.values += login.values.len();
         self.logins.push_back(login);
     }
 
-    /// Takes the one live held login that offers `token` as a candidate. Two live ones make the
-    /// credential ambiguous; when none is live but one has expired, the credential is expired.
-    /// Otherwise no held login offers it.
-    fn claim(&mut self, token: &Digest16, now_ms: u64) -> Result<HeldLogin, LoginUnbound> {
+    fn forget_oldest(&mut self) {
+        if let Some(oldest) = self.logins.pop_front() {
+            self.values -= oldest.values.len();
+        }
+    }
+
+    /// Takes the one live held login of `site` that offers `token` as a candidate. Two live ones
+    /// make the credential ambiguous; when none is live but one has expired, the credential is
+    /// expired. Otherwise no held login offers it.
+    fn claim(
+        &mut self,
+        site: &str,
+        token: &Digest16,
+        now_ms: u64,
+    ) -> Result<HeldLogin, LoginUnbound> {
         let live: Vec<usize> = self
             .logins
             .iter()
             .enumerate()
             .filter(|(_, login)| {
-                now_ms.saturating_sub(login.at_ms) <= HELD_LOGIN_MS && carries(login, token)
+                now_ms.saturating_sub(login.at_ms) <= HELD_LOGIN_MS && carries(login, site, token)
             })
             .map(|(index, _)| index)
             .collect();
         match live.as_slice() {
-            [index] => self.logins.remove(*index).ok_or(LoginUnbound::Unmatched),
-            [] if self.logins.iter().any(|login| carries(login, token)) => {
+            [index] => {
+                let login = self.logins.remove(*index).ok_or(LoginUnbound::Unmatched)?;
+                self.values -= login.values.len();
+                Ok(login)
+            }
+            [] if self.logins.iter().any(|login| carries(login, site, token)) => {
                 Err(LoginUnbound::Expired)
             }
             [] => Err(LoginUnbound::Unmatched),
@@ -793,12 +825,13 @@ impl HeldLogins {
     }
 }
 
-/// Whether a held login offers `token` as a candidate credential.
-fn carries(login: &HeldLogin, token: &Digest16) -> bool {
-    login
-        .values
-        .iter()
-        .any(|value| value.candidate && value.digest == *token)
+/// Whether a held login of `site` offers `token` as a candidate credential.
+fn carries(login: &HeldLogin, site: &str, token: &Digest16) -> bool {
+    login.site == site
+        && login
+            .values
+            .iter()
+            .any(|value| value.candidate && value.digest == *token)
 }
 
 /// All sessions of one gateway process, and the JSON login responses held for their credentials.
@@ -854,17 +887,19 @@ impl ContextStore {
             .is_some_and(|session| now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS)
     }
 
-    /// Holds a JSON login response until the credential it issues starts a session (docs/01
+    /// Holds a JSON login response of `site` until the credential it issues starts a session (docs/01
     /// section 1.7). Only the keyed hashes and field names of its values are kept, and the identity
     /// it declares in the same keyed form.
     pub fn hold_login(
         &mut self,
+        site: &str,
         request_id: u128,
         at_ms: u64,
         values: Vec<HeldValue>,
         identity: SessionIdentity,
     ) {
         self.held.hold(HeldLogin {
+            site: site.to_owned(),
             request_id,
             at_ms,
             values,
@@ -872,14 +907,14 @@ impl ContextStore {
         });
     }
 
-    /// Starts the session `id` for a credential that no live session holds, taking the values of
-    /// the held login that issued it (docs/01 section 1.7). `token` is the keyed hash of the
-    /// credential's text. A live session is left as it is.
-    pub fn start_session(&mut self, id: Digest16, token: Digest16, now_ms: u64) {
+    /// Starts the session `id` of `site` for a credential that no live session holds, taking the
+    /// values of the held login of that site that issued it (docs/01 section 1.7). `token` is the
+    /// keyed hash of the credential's text. A live session is left as it is.
+    pub fn start_session(&mut self, site: &str, id: Digest16, token: Digest16, now_ms: u64) {
         if self.contains(&id, now_ms) {
             return;
         }
-        let claim = self.held.claim(&token, now_ms);
+        let claim = self.held.claim(site, &token, now_ms);
         let session = self.session(id, now_ms);
         match claim {
             Ok(login) => session.take_login(&token, login),
@@ -911,6 +946,9 @@ impl ContextStore {
 
 #[cfg(test)]
 mod tests {
+    /// The site the held logins below belong to.
+    const SITE: &str = "juice";
+
     /// The use of a value as the engine makes it: a path value carries the index
     /// of its segment.
     fn used<'a>(value: &'a str, path: &'a str, key: Option<&'a str>) -> Used<'a> {
@@ -1453,13 +1491,14 @@ mod tests {
         let mut store = ContextStore::new();
         let token = "credential-token-0001";
         store.hold_login(
+            SITE,
             7,
             0,
             vec![held(&key, token, "token"), held(&key, "6", "bid")],
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
-        store.start_session(id, key.mac("value", token.as_bytes()), 1);
+        store.start_session(SITE, id, key.mac("value", token.as_bytes()), 1);
         let session = store.session(id, 1);
         assert_eq!(session.login_request(), Some(7));
         assert_eq!(session.login_unbound(), None);
@@ -1477,6 +1516,7 @@ mod tests {
             store.held.logins.is_empty(),
             "a taken login is no longer held"
         );
+        assert_eq!(store.held.values, 0, "its values leave the budget with it");
     }
 
     #[test]
@@ -1485,9 +1525,9 @@ mod tests {
         let mut store = ContextStore::new();
         let token = "credential-token-0001";
         let identity = SessionIdentity::declared(&key, &[(IdentityRole::User, "alice-0042")]);
-        store.hold_login(7, 0, vec![held(&key, token, "token")], identity);
+        store.hold_login(SITE, 7, 0, vec![held(&key, token, "token")], identity);
         let id = key.mac("session", token.as_bytes());
-        store.start_session(id, key.mac("value", token.as_bytes()), 1);
+        store.start_session(SITE, id, key.mac("value", token.as_bytes()), 1);
         assert!(
             store
                 .session(id, 1)
@@ -1497,7 +1537,12 @@ mod tests {
             "the session takes the user the login stated"
         );
         let forged = b"forged-session-token";
-        store.start_session(key.mac("session", forged), key.mac("value", forged), 1);
+        store.start_session(
+            SITE,
+            key.mac("session", forged),
+            key.mac("value", forged),
+            1,
+        );
         assert_eq!(
             store
                 .session(key.mac("session", forged), 1)
@@ -1514,13 +1559,14 @@ mod tests {
         let mut store = ContextStore::new();
         let short = "123456789012345";
         store.hold_login(
+            SITE,
             7,
             0,
             vec![held(&key, short, "code")],
             SessionIdentity::default(),
         );
         let id = key.mac("session", short.as_bytes());
-        store.start_session(id, key.mac("value", short.as_bytes()), 1);
+        store.start_session(SITE, id, key.mac("value", short.as_bytes()), 1);
         assert_eq!(
             store.session(id, 1).login_unbound(),
             Some(LoginUnbound::Unmatched)
@@ -1538,19 +1584,21 @@ mod tests {
         let mut store = ContextStore::new();
         let token = "shared-credential-0001";
         store.hold_login(
+            SITE,
             1,
             0,
             vec![held(&key, token, "token")],
             SessionIdentity::default(),
         );
         store.hold_login(
+            SITE,
             2,
             10,
             vec![held(&key, token, "token")],
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
-        store.start_session(id, key.mac("value", token.as_bytes()), 20);
+        store.start_session(SITE, id, key.mac("value", token.as_bytes()), 20);
         let session = store.session(id, 20);
         assert_eq!(session.login_unbound(), Some(LoginUnbound::Ambiguous));
         assert_eq!(session.login_request(), None);
@@ -1563,6 +1611,7 @@ mod tests {
         let mut store = ContextStore::new();
         let token = "expiring-credential-1";
         store.hold_login(
+            SITE,
             1,
             0,
             vec![held(&key, token, "token")],
@@ -1570,7 +1619,7 @@ mod tests {
         );
         let id = key.mac("session", token.as_bytes());
         let late = HELD_LOGIN_MS + 1;
-        store.start_session(id, key.mac("value", token.as_bytes()), late);
+        store.start_session(SITE, id, key.mac("value", token.as_bytes()), late);
         assert_eq!(
             store.session(id, late).login_unbound(),
             Some(LoginUnbound::Expired)
@@ -1584,6 +1633,7 @@ mod tests {
         let token = |index: usize| format!("credential-number-{index:08}");
         for index in 0..=HELD_LOGINS_MAX {
             store.hold_login(
+                SITE,
                 index as u128 + 1,
                 0,
                 vec![held(&key, &token(index), "token")],
@@ -1593,7 +1643,7 @@ mod tests {
         assert_eq!(store.held.logins.len(), HELD_LOGINS_MAX);
         let first = token(0);
         let id = key.mac("session", first.as_bytes());
-        store.start_session(id, key.mac("value", first.as_bytes()), 1);
+        store.start_session(SITE, id, key.mac("value", first.as_bytes()), 1);
         assert_eq!(
             store.session(id, 1).login_unbound(),
             Some(LoginUnbound::Unmatched),
@@ -1601,10 +1651,79 @@ mod tests {
         );
         let last = token(HELD_LOGINS_MAX);
         let id = key.mac("session", last.as_bytes());
-        store.start_session(id, key.mac("value", last.as_bytes()), 1);
+        store.start_session(SITE, id, key.mac("value", last.as_bytes()), 1);
         assert_eq!(
             store.session(id, 1).login_request(),
             Some(HELD_LOGINS_MAX as u128 + 1)
+        );
+    }
+
+    #[test]
+    fn a_login_held_for_one_site_is_not_taken_by_another_site() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let token = "credential-token-0001";
+        store.hold_login(
+            "alpha",
+            7,
+            0,
+            vec![held(&key, token, "token")],
+            SessionIdentity::default(),
+        );
+        let id = key.mac("session", token.as_bytes());
+        store.start_session("beta", id, key.mac("value", token.as_bytes()), 1);
+        assert_eq!(
+            store.session(id, 1).login_unbound(),
+            Some(LoginUnbound::Unmatched),
+            "the login of another site does not start the session"
+        );
+        assert_eq!(
+            store.held.logins.len(),
+            1,
+            "the login stays held for the site that answered it"
+        );
+    }
+
+    #[test]
+    fn the_values_of_the_held_logins_are_kept_under_one_budget() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let per_login = crate::values::RESPONSE_VALUES_MAX;
+        let logins = HELD_VALUES_MAX / per_login + 1;
+        for index in 0..logins {
+            let values = (0..per_login)
+                .map(|slot| {
+                    held(
+                        &key,
+                        &format!("value-{index:04}-{slot:04}-0123456789"),
+                        "field",
+                    )
+                })
+                .collect();
+            store.hold_login(
+                SITE,
+                index as u128 + 1,
+                0,
+                values,
+                SessionIdentity::default(),
+            );
+        }
+        assert!(store.held.values <= HELD_VALUES_MAX);
+        assert_eq!(store.held.logins.len(), HELD_VALUES_MAX / per_login);
+        assert_eq!(
+            store.held.logins.front().map(|login| login.request_id),
+            Some(2),
+            "the oldest login went first"
+        );
+        let counted: usize = store
+            .held
+            .logins
+            .iter()
+            .map(|login| login.values.len())
+            .sum();
+        assert_eq!(
+            counted, store.held.values,
+            "the count tracks the held values"
         );
     }
 }
