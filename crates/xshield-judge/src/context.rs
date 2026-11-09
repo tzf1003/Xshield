@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
 
-use xshield_core::context::{ADMIN_ROLE, IdentityRole, TraceIdentity, role_label};
+use xshield_core::context::{ADMIN_ROLE, IdentityRole, LoginUnbound, TraceIdentity, role_label};
 use xshield_core::kind::{Rules, Shown, Used, affinity, declares, shown_as};
 
 use crate::values::{ResponseValue, is_id_like};
@@ -37,6 +37,15 @@ pub const CACHE_MINUTES: u32 = 10;
 pub const CACHE_MS: u64 = 10 * 60 * 1000;
 const ENTRIES_MAX: usize = 16;
 const CACHE_MAX: usize = 512;
+/// Most JSON login responses held for a credential no session has taken yet (docs/01 section
+/// 1.7). Past it the oldest goes.
+pub const HELD_LOGINS_MAX: usize = 1_000;
+/// How long a held login waits for its credential, in milliseconds (docs/01 section 1.7).
+pub const HELD_LOGIN_MS: u64 = 5 * 60 * 1000;
+/// The shortest value a login response may carry as the session credential (docs/01 section 1.7).
+pub const LOGIN_CREDENTIAL_CHARS: usize = 16;
+/// The source a value taken from a login response is shown under (docs/01 section 1.7).
+pub const LOGIN_SOURCE: &str = "登录响应";
 
 /// A keyed hash of a value or credential.
 pub type Digest16 = [u8; 16];
@@ -445,6 +454,10 @@ pub struct SessionContext {
     sent_overflow: bool,
     /// Who the session is, as its identity responses declared it.
     identity: SessionIdentity,
+    /// The login response this session took its values from, when its credential set it up.
+    login: Option<u128>,
+    /// Why the credential that set this session up took no login response's values.
+    login_unbound: Option<LoginUnbound>,
 }
 
 impl SessionContext {
@@ -460,7 +473,21 @@ impl SessionContext {
             sent: HashSet::new(),
             sent_overflow: false,
             identity: SessionIdentity::default(),
+            login: None,
+            login_unbound: None,
         }
+    }
+
+    /// The login response this session took its values from, when its credential set it up.
+    #[must_use]
+    pub fn login_request(&self) -> Option<u128> {
+        self.login
+    }
+
+    /// Why the credential that set this session up took no login response's values.
+    #[must_use]
+    pub fn login_unbound(&self) -> Option<LoginUnbound> {
+        self.login_unbound
     }
 
     /// Who the session is, as its identity responses declared it.
@@ -515,9 +542,6 @@ impl SessionContext {
         let mut new = 0;
         for value in values {
             let digest = key.mac("value", value.value.as_bytes());
-            if self.sent.contains(&digest) {
-                continue;
-            }
             let origin = Origin {
                 field: value.field.clone(),
                 at: value.at.clone(),
@@ -525,25 +549,61 @@ impl SessionContext {
                 request_id: source.request_id,
                 at_ms: source.at_ms,
             };
-            if let Some(seen) = self.seen.get_mut(&digest) {
-                seen.note(origin);
-                continue;
+            if self.learn(digest, origin) {
+                new += 1;
             }
-            if self.order.len() >= SEEN_MAX
-                && let Some(oldest) = self.order.pop_front()
-            {
-                self.seen.remove(&oldest);
-            }
-            self.seen.insert(
-                digest,
-                Seen {
-                    origins: vec![origin],
-                },
-            );
-            self.order.push_back(digest);
-            new += 1;
         }
         new
+    }
+
+    /// Learns one value under `origin`. A value the session sent is not learned; a value it has
+    /// seen gains the origin. Returns whether the value is new to the session.
+    fn learn(&mut self, digest: Digest16, origin: Origin) -> bool {
+        if self.sent.contains(&digest) {
+            return false;
+        }
+        if let Some(seen) = self.seen.get_mut(&digest) {
+            seen.note(origin);
+            return false;
+        }
+        if self.order.len() >= SEEN_MAX
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.seen.remove(&oldest);
+        }
+        self.seen.insert(
+            digest,
+            Seen {
+                origins: vec![origin],
+            },
+        );
+        self.order.push_back(digest);
+        true
+    }
+
+    /// Takes the values of the login response that set this session up (docs/01 section 1.7).
+    /// The credential is not a value of the session, so it is left out. Each value shows the
+    /// login response as its source.
+    fn take_login(&mut self, credential: &Digest16, login: HeldLogin) {
+        self.login = Some(login.request_id);
+        for value in login.values {
+            if value.digest == *credential {
+                continue;
+            }
+            let origin = Origin {
+                field: value.field,
+                at: value.at,
+                request: LOGIN_SOURCE.to_owned(),
+                request_id: login.request_id,
+                at_ms: login.at_ms,
+            };
+            self.learn(value.digest, origin);
+        }
+    }
+
+    /// Records why the credential that set this session up took no login response.
+    fn refuse_login(&mut self, reason: LoginUnbound) {
+        self.login_unbound = Some(reason);
     }
 
     /// Notes values this session sent in a request the origin answered. Later
@@ -669,10 +729,79 @@ impl SessionContext {
     }
 }
 
-/// All sessions of one gateway process.
+/// One value of a held login response: its keyed hash, where it appeared, and whether it is long
+/// enough to be a credential. No text is kept (docs/01 section 1.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldValue {
+    /// The keyed hash of the value, keyed the way [`SessionContext`] keys its values.
+    pub digest: Digest16,
+    /// The field it appeared under.
+    pub field: String,
+    /// Its position in the response (see [`ResponseValue::at`]).
+    pub at: String,
+    /// Whether it is at least [`LOGIN_CREDENTIAL_CHARS`] characters long.
+    pub candidate: bool,
+}
+
+/// A JSON login response held for the credential it issues.
+#[derive(Debug)]
+struct HeldLogin {
+    request_id: u128,
+    at_ms: u64,
+    values: Vec<HeldValue>,
+}
+
+/// The held login responses, oldest first. Memory only: a restart loses them.
+#[derive(Debug, Default)]
+struct HeldLogins {
+    logins: VecDeque<HeldLogin>,
+}
+
+impl HeldLogins {
+    fn hold(&mut self, login: HeldLogin) {
+        if self.logins.len() >= HELD_LOGINS_MAX {
+            self.logins.pop_front();
+        }
+        self.logins.push_back(login);
+    }
+
+    /// Takes the one live held login that offers `token` as a candidate. Two live ones make the
+    /// credential ambiguous; when none is live but one has expired, the credential is expired.
+    /// Otherwise no held login offers it.
+    fn claim(&mut self, token: &Digest16, now_ms: u64) -> Result<HeldLogin, LoginUnbound> {
+        let live: Vec<usize> = self
+            .logins
+            .iter()
+            .enumerate()
+            .filter(|(_, login)| {
+                now_ms.saturating_sub(login.at_ms) <= HELD_LOGIN_MS && carries(login, token)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        match live.as_slice() {
+            [index] => self.logins.remove(*index).ok_or(LoginUnbound::Unmatched),
+            [] if self.logins.iter().any(|login| carries(login, token)) => {
+                Err(LoginUnbound::Expired)
+            }
+            [] => Err(LoginUnbound::Unmatched),
+            _ => Err(LoginUnbound::Ambiguous),
+        }
+    }
+}
+
+/// Whether a held login offers `token` as a candidate credential.
+fn carries(login: &HeldLogin, token: &Digest16) -> bool {
+    login
+        .values
+        .iter()
+        .any(|value| value.candidate && value.digest == *token)
+}
+
+/// All sessions of one gateway process, and the JSON login responses held for their credentials.
 #[derive(Debug, Default)]
 pub struct ContextStore {
     sessions: HashMap<Digest16, SessionContext>,
+    held: HeldLogins,
 }
 
 impl ContextStore {
@@ -719,6 +848,31 @@ impl ContextStore {
         self.sessions
             .get(id)
             .is_some_and(|session| now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS)
+    }
+
+    /// Holds a JSON login response until the credential it issues starts a session (docs/01
+    /// section 1.7). Only the keyed hashes and field names of its values are kept.
+    pub fn hold_login(&mut self, request_id: u128, at_ms: u64, values: Vec<HeldValue>) {
+        self.held.hold(HeldLogin {
+            request_id,
+            at_ms,
+            values,
+        });
+    }
+
+    /// Starts the session `id` for a credential that no live session holds, taking the values of
+    /// the held login that issued it (docs/01 section 1.7). `token` is the keyed hash of the
+    /// credential's text. A live session is left as it is.
+    pub fn start_session(&mut self, id: Digest16, token: Digest16, now_ms: u64) {
+        if self.contains(&id, now_ms) {
+            return;
+        }
+        let claim = self.held.claim(&token, now_ms);
+        let session = self.session(id, now_ms);
+        match claim {
+            Ok(login) => session.take_login(&token, login),
+            Err(reason) => session.refuse_login(reason),
+        }
     }
 
     /// What the session sent, for a session a response is about to issue a
@@ -1269,5 +1423,125 @@ mod tests {
         assert_eq!(session.lookup(&key, "5").unwrap().origins.len(), 2);
         session.remember(&key, &at("GET /api/records/7"), &[response("doc_id")]);
         assert_eq!(session.lookup(&key, "5").unwrap().origins.len(), 2);
+    }
+
+    /// A value of a held login, as the engine keeps it: keyed, with its field and position.
+    fn held(key: &ContextKey, text: &str, field: &str) -> HeldValue {
+        HeldValue {
+            digest: key.mac("value", text.as_bytes()),
+            field: field.into(),
+            at: field.into(),
+            candidate: text.chars().count() >= LOGIN_CREDENTIAL_CHARS,
+        }
+    }
+
+    #[test]
+    fn a_held_login_is_taken_by_the_one_credential_it_carries_and_its_text_stays_out() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let token = "credential-token-0001";
+        store.hold_login(
+            7,
+            0,
+            vec![held(&key, token, "token"), held(&key, "6", "bid")],
+        );
+        let id = key.mac("session", token.as_bytes());
+        store.start_session(id, key.mac("value", token.as_bytes()), 1);
+        let session = store.session(id, 1);
+        assert_eq!(session.login_request(), Some(7));
+        assert_eq!(session.login_unbound(), None);
+        let origin = &session
+            .lookup(&key, "6")
+            .expect("the basket is taken")
+            .origins[0];
+        assert_eq!(origin.request, LOGIN_SOURCE);
+        assert_eq!(origin.request_id, 7);
+        assert!(
+            session.lookup(&key, token).is_none(),
+            "the credential is not a value"
+        );
+        assert!(
+            store.held.logins.is_empty(),
+            "a taken login is no longer held"
+        );
+    }
+
+    #[test]
+    fn a_short_value_is_never_a_credential_a_login_can_give() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let short = "123456789012345";
+        store.hold_login(7, 0, vec![held(&key, short, "code")]);
+        let id = key.mac("session", short.as_bytes());
+        store.start_session(id, key.mac("value", short.as_bytes()), 1);
+        assert_eq!(
+            store.session(id, 1).login_unbound(),
+            Some(LoginUnbound::Unmatched)
+        );
+        assert_eq!(
+            store.held.logins.len(),
+            1,
+            "the held login waits for its window"
+        );
+    }
+
+    #[test]
+    fn two_live_logins_for_one_credential_are_ambiguous_and_both_stay_held() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let token = "shared-credential-0001";
+        store.hold_login(1, 0, vec![held(&key, token, "token")]);
+        store.hold_login(2, 10, vec![held(&key, token, "token")]);
+        let id = key.mac("session", token.as_bytes());
+        store.start_session(id, key.mac("value", token.as_bytes()), 20);
+        let session = store.session(id, 20);
+        assert_eq!(session.login_unbound(), Some(LoginUnbound::Ambiguous));
+        assert_eq!(session.login_request(), None);
+        assert_eq!(store.held.logins.len(), 2);
+    }
+
+    #[test]
+    fn a_login_past_its_window_is_expired_for_its_credential() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let token = "expiring-credential-1";
+        store.hold_login(1, 0, vec![held(&key, token, "token")]);
+        let id = key.mac("session", token.as_bytes());
+        let late = HELD_LOGIN_MS + 1;
+        store.start_session(id, key.mac("value", token.as_bytes()), late);
+        assert_eq!(
+            store.session(id, late).login_unbound(),
+            Some(LoginUnbound::Expired)
+        );
+    }
+
+    #[test]
+    fn the_held_logins_are_capped_and_the_oldest_goes_first() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let token = |index: usize| format!("credential-number-{index:08}");
+        for index in 0..=HELD_LOGINS_MAX {
+            store.hold_login(
+                index as u128 + 1,
+                0,
+                vec![held(&key, &token(index), "token")],
+            );
+        }
+        assert_eq!(store.held.logins.len(), HELD_LOGINS_MAX);
+        let first = token(0);
+        let id = key.mac("session", first.as_bytes());
+        store.start_session(id, key.mac("value", first.as_bytes()), 1);
+        assert_eq!(
+            store.session(id, 1).login_unbound(),
+            Some(LoginUnbound::Unmatched),
+            "the first login was pushed out"
+        );
+        let last = token(HELD_LOGINS_MAX);
+        let id = key.mac("session", last.as_bytes());
+        store.start_session(id, key.mac("value", last.as_bytes()), 1);
+        assert_eq!(
+            store.session(id, 1).login_request(),
+            Some(HELD_LOGINS_MAX as u128 + 1)
+        );
     }
 }

@@ -145,6 +145,8 @@
             "role": {"type": "string", "pattern": "^[a-z0-9_.:-]{1,32}$"}
           }
         },
+        "login_request_id": {"type": "string", "pattern": "^req_[0-9a-f]{32}$", "description": "会话由哪次登录响应的值建立（JSON 凭证站点，见 docs/01 1.7）；没有时不写。"},
+        "login_unbound": {"type": "string", "enum": ["login_ambiguous", "login_expired", "login_unmatched"], "description": "凭证建立会话时没有取得登录响应的值的原因（docs/01 1.7）；取得了或不是由凭证建立的会话时不写。"},
         "entries_passed": {
           "type": "array",
           "items": {
