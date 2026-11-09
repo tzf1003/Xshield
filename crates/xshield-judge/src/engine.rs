@@ -16,8 +16,9 @@ use xshield_core::kind::{Rules, Used};
 use xshield_core::path_template::is_templatable;
 
 use crate::context::{
-    CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, Origin, Recent, SENT_MAX,
-    SentRecord, SessionContext, Source, label, request_number, request_text,
+    CACHE_MINUTES, ContextKey, ContextStore, Digest16, EntryPass, HeldValue,
+    LOGIN_CREDENTIAL_CHARS, Origin, Recent, SENT_MAX, SentRecord, SessionContext, SessionIdentity,
+    Source, label, request_number, request_text,
 };
 use crate::exposure;
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
@@ -322,6 +323,19 @@ impl<J: JevPort> Judge<J> {
             .credential
             .filter(|credential| !credential.is_empty())
             .map(|credential| self.key.mac("session", credential.as_bytes()));
+        // A credential that no session holds yet starts its session from the JSON login response
+        // that issued it, when one is held (docs/01 section 1.7). Only an entry starts it: after a
+        // login the first request lands on an entry, so a credential first seen anywhere else
+        // starts a session that knows no login. This runs before anything reads the session, so a
+        // session that does start is created already knowing what the login returned.
+        if let (Some(id), Some(credential), Some(_)) = (session_id, request.credential, entry) {
+            let token = self
+                .key
+                .mac("value", credential_token(site, credential).as_bytes());
+            self.lock()
+                .store
+                .start_session(site.name(), id, token, request.now_ms);
+        }
         let mut extracted = extract_request(
             request.path,
             request.query,
@@ -441,6 +455,8 @@ impl<J: JevPort> Judge<J> {
             entries_passed: None,
             recent: None,
             identity: session.identity().tag(),
+            login_request_id: session.login_request().and_then(request_text),
+            login_unbound: session.login_unbound(),
         });
         // An unknown interface always goes to Jev: neither its values nor a cached
         // allow of another request can settle it. A path the map cannot place does too.
@@ -844,6 +860,46 @@ impl<J: JevPort> Judge<J> {
                 shape,
             );
         }
+        // A JSON login answered to a client with no credential is held until the credential it
+        // issues starts a session (docs/01 section 1.7). Values the request sent are left out, as
+        // an echo teaches nothing. Only a login with a candidate credential is worth holding.
+        if success
+            && entry
+            && seeded.is_none()
+            && issued.is_none()
+            && summary.observed == Observed::Json
+        {
+            let held: Vec<HeldValue> = values
+                .iter()
+                .filter_map(|value| {
+                    let digest = self.key.mac("value", value.value.as_bytes());
+                    (!observation.sent.contains(&digest)).then(|| HeldValue {
+                        digest,
+                        field: value.field.clone(),
+                        at: value.at.clone(),
+                        candidate: value.value.chars().count() >= LOGIN_CREDENTIAL_CHARS,
+                    })
+                })
+                .collect();
+            if held.iter().any(|value| value.candidate) {
+                summary.pending_values = Some(held.len());
+                // The identity the response declares is held as the values are: keyed, and without
+                // what the request sent, which says nothing about who answers.
+                let shown: Vec<_> = claims
+                    .iter()
+                    .copied()
+                    .filter(|(_, value)| {
+                        !observation
+                            .sent
+                            .contains(&self.key.mac("value", value.as_bytes()))
+                    })
+                    .collect();
+                let identity = SessionIdentity::declared(&self.key, &shown);
+                inner
+                    .store
+                    .hold_login(site.name(), request_id, observation.now_ms, held, identity);
+            }
+        }
         // The new-value count is the one of the first context the response
         // reaches: the address (a sign-up page) or the session.
         let mut new_values = None;
@@ -1034,6 +1090,52 @@ fn resolved_of<'a>(request: &RequestFacts<'a>) -> Cow<'a, Resolved> {
     request
         .route
         .map_or_else(|| Cow::Owned(Resolved::plain(request.path)), Cow::Borrowed)
+}
+
+/// The text a login response must carry to be this credential (docs/01 section 1.7). Only the
+/// `Authorization` header carries an authentication scheme in HTTP, so only its value is cut
+/// down to the token. Any other header, and a cookie, is the credential as it is: a custom header
+/// may hold a raw value with a space in it, and that value is not a scheme.
+fn credential_token<'a>(site: &SiteSpec, credential: &'a str) -> &'a str {
+    match site.session() {
+        SessionCredential::Header(name) if name.eq_ignore_ascii_case("authorization") => {
+            without_scheme(credential)
+        }
+        SessionCredential::Header(_) | SessionCredential::Cookie(_) => credential,
+    }
+}
+
+/// `value` without a leading authentication scheme, such as `Bearer `. A scheme is a token
+/// (RFC 9110 section 11.1), so digits and some symbols may be in it.
+fn without_scheme(value: &str) -> &str {
+    match value.split_once(' ') {
+        Some((scheme, rest)) if !scheme.is_empty() && scheme.bytes().all(is_token_char) => {
+            rest.trim_start()
+        }
+        _ => value,
+    }
+}
+
+/// A character of an HTTP token (RFC 9110 section 5.6.2).
+fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 /// Takes out of the request's values the ones that are the interface name (they
@@ -1320,6 +1422,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use xshield_core::context::LoginUnbound;
 
     /// The gateway id of the origin responses the tests observe.
     const RID: &str = "req_00000000000000000000000000000001";
@@ -2933,6 +3036,337 @@ mod tests {
             .await;
         assert!(verdict.forward);
         assert_eq!(fake.calls(), 0);
+    }
+
+    /// The credential a JSON login issues in its body (docs/01 section 1.7).
+    const LOGIN_TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.session-token";
+
+    /// A sessionless `POST /login` the origin answered with `body`.
+    fn json_login<'a>(body: &'a [u8], client: &'a str, now_ms: u64) -> Observation<'a> {
+        Observation {
+            route: None,
+            request_id: RID,
+            unread: None,
+            would_block: false,
+            credential: None,
+            client,
+            issued_credential: None,
+            method: "POST",
+            path: "/login",
+            status: 200,
+            content_type: Some("application/json"),
+            body,
+            now_ms,
+            sent: &[],
+            echo: &[],
+        }
+    }
+
+    /// A site whose `bid` field is the basket, as the juice site declares it.
+    fn basket_site() -> SiteSpec {
+        site(r#","mode":"enforce","advanced":{"field_kinds":[{"field":"bid","kind":"basket"}]}"#)
+    }
+
+    /// The login body of a user whose basket is `bid`.
+    fn login_body(token: &str, bid: u32) -> String {
+        format!(r#"{{"authentication":{{"token":"{token}","bid":{bid}}}}}"#)
+    }
+
+    /// The login body of a user whose basket is `bid` and whose e-mail address, the identity the
+    /// login states, is `umail`.
+    fn login_with_user(token: &str, bid: u32, umail: &str) -> String {
+        format!(r#"{{"authentication":{{"token":"{token}","bid":{bid},"umail":"{umail}"}}}}"#)
+    }
+
+    #[tokio::test]
+    async fn a_login_response_declares_its_identity_once_its_credential_starts_the_session() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let spec = site(
+            r#","mode":"enforce","objects":{
+                "classes":[{"id":"account","name":"账号"}],
+                "slots":[{"key":"POST /login authentication.umail","class":"account","source":"admin","identity":"user"}]}"#,
+        );
+        let body = login_with_user(LOGIN_TOKEN, 6, "alice@example.test");
+        judge.observe(&spec, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        let entry = judge
+            .judge(&spec, &get("/api/home", None, Some(LOGIN_TOKEN), 1))
+            .await;
+        assert!(
+            identity_of(&entry.record).is_some_and(|identity| identity.user.is_some()),
+            "the user the login stated is the session's user"
+        );
+        // A credential the login did not issue declares no identity.
+        let forged = judge
+            .judge(
+                &spec,
+                &get("/api/home", None, Some("forged-session-token"), 2),
+            )
+            .await;
+        assert_eq!(identity_of(&forged.record), None);
+    }
+
+    #[tokio::test]
+    async fn a_json_login_gives_the_session_its_credential_starts_the_values_it_returned() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        let body = login_body(LOGIN_TOKEN, 6);
+        let login = judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        assert_eq!(
+            login.pending_values,
+            Some(2),
+            "the token and the basket id are held"
+        );
+        // The first request after the login is the entry, and its credential starts the session.
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 1))
+            .await;
+        assert!(entry.forward);
+        let traced = entry.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
+        assert_eq!(traced.login_unbound, None);
+        // The user's own basket is known to the session, so it is read without Jev.
+        let own = judge
+            .judge(&site, &get("/rest/basket/6", None, Some(LOGIN_TOKEN), 2))
+            .await;
+        assert!(own.forward);
+        assert_eq!(own.record.decision_path, DecisionPath::FastAllow);
+        // Another basket was never shown to the session: it goes to Jev.
+        let other = judge
+            .judge(&site, &get("/rest/basket/7", None, Some(LOGIN_TOKEN), 3))
+            .await;
+        assert!(!other.forward);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn two_logins_from_one_address_keep_their_values_apart() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        let alice = "alice-session-token-01";
+        let bob = "bobs-session-token-002";
+        judge.observe(
+            &site,
+            &json_login(login_body(alice, 6).as_bytes(), "10.0.0.1", 0),
+        );
+        judge.observe(
+            &site,
+            &json_login(login_body(bob, 7).as_bytes(), "10.0.0.1", 1),
+        );
+        judge
+            .judge(&site, &get("/api/home", None, Some(alice), 2))
+            .await;
+        judge
+            .judge(&site, &get("/api/home", None, Some(bob), 3))
+            .await;
+        let alice_own = judge
+            .judge(&site, &get("/rest/basket/6", None, Some(alice), 4))
+            .await;
+        assert_eq!(alice_own.record.decision_path, DecisionPath::FastAllow);
+        let alice_other = judge
+            .judge(&site, &get("/rest/basket/7", None, Some(alice), 5))
+            .await;
+        assert!(!alice_other.forward, "bob's basket is not alice's");
+        let bob_own = judge
+            .judge(&site, &get("/rest/basket/7", None, Some(bob), 6))
+            .await;
+        assert_eq!(bob_own.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_credential_no_login_issued_takes_no_values_and_says_why() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        let body = login_body(LOGIN_TOKEN, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        let forged = judge
+            .judge(
+                &site,
+                &get("/api/home", None, Some("forged-session-token"), 1),
+            )
+            .await;
+        let traced = forged.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_unbound, Some(LoginUnbound::Unmatched));
+        assert_eq!(traced.login_request_id, None);
+        // The held login is still there for the credential it issued.
+        let own = judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 2))
+            .await;
+        assert_eq!(
+            own.record
+                .trace
+                .session
+                .and_then(|s| s.login_request_id)
+                .as_deref(),
+            Some(RID)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_custom_header_credential_is_matched_as_it_is_sent() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = SiteSpec::from_json(
+            r#"{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{"header":"X-Session"},
+               "entries":["/login","/api/home"],"mode":"enforce"}"#,
+        )
+        .expect("the test site is valid");
+        // The value has a space in it and its first word looks like a scheme. It is not an
+        // Authorization header, so the word is part of the credential, not a scheme to cut.
+        let token = format!("user-1 {LOGIN_TOKEN}");
+        let body = login_body(&token, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        let verdict = judge
+            .judge(&site, &get("/api/home", None, Some(token.as_str()), 1))
+            .await;
+        let traced = verdict.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
+        assert_eq!(traced.login_unbound, None);
+    }
+
+    #[tokio::test]
+    async fn a_credential_first_seen_on_a_request_that_is_not_an_entry_takes_no_login() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        let body = login_body(LOGIN_TOKEN, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        // Only an entry starts a session from the login (docs/01 section 1.7).
+        let first = judge
+            .judge(&site, &get("/rest/basket/6", None, Some(LOGIN_TOKEN), 1))
+            .await;
+        let traced = first.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id, None);
+        assert_eq!(traced.login_unbound, None, "the login was not tried");
+        // The session exists now, so the entry after it does not take the login either.
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 2))
+            .await;
+        let later = entry.record.trace.session.expect("the session is traced");
+        assert_eq!(later.login_request_id, None);
+    }
+
+    #[test]
+    fn a_scheme_is_a_token_so_digits_and_symbols_may_be_in_it() {
+        assert_eq!(without_scheme("Bearer abc-123"), "abc-123");
+        assert_eq!(without_scheme("Token2 abc-123"), "abc-123");
+        assert_eq!(without_scheme("Key-v2.0   abc"), "abc");
+        assert_eq!(without_scheme("abc-123"), "abc-123", "no scheme, no change");
+        assert_eq!(
+            without_scheme("a=b c"),
+            "a=b c",
+            "= is not a token character"
+        );
+        assert_eq!(
+            without_scheme(" abc"),
+            " abc",
+            "an empty scheme is not a scheme"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_held_logins_issuing_one_credential_take_nothing() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = basket_site();
+        let body = login_body(LOGIN_TOKEN, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.2", 1));
+        let verdict = judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 2))
+            .await;
+        let traced = verdict.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_unbound, Some(LoginUnbound::Ambiguous));
+        assert_eq!(traced.login_request_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_login_held_past_its_window_is_expired_for_its_credential() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = basket_site();
+        let body = login_body(LOGIN_TOKEN, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        let late = crate::context::HELD_LOGIN_MS + 1;
+        let verdict = judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), late))
+            .await;
+        let traced = verdict.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_unbound, Some(LoginUnbound::Expired));
+        assert_eq!(traced.login_request_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_already_exists_takes_no_login_seen_later() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        // The session starts before any login is seen, so its credential matches nothing yet.
+        judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 0))
+            .await;
+        let body = login_body(LOGIN_TOKEN, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 1));
+        let basket = judge
+            .judge(&site, &get("/rest/basket/6", None, Some(LOGIN_TOKEN), 2))
+            .await;
+        assert!(
+            !basket.forward,
+            "the login was not taken into the existing session"
+        );
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_login_that_echoes_what_it_was_sent_holds_only_what_it_issued() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = basket_site();
+        let body = format!(
+            r#"{{"authentication":{{"token":"{LOGIN_TOKEN}","bid":6,"umail":"alice@example.test"}}}}"#
+        );
+        let sent = [judge.key.mac("value", b"alice@example.test")];
+        let login = judge.observe(
+            &site,
+            &Observation {
+                sent: &sent,
+                ..json_login(body.as_bytes(), "10.0.0.1", 0)
+            },
+        );
+        assert_eq!(
+            login.pending_values,
+            Some(2),
+            "the echoed address is not held"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bearer_header_credential_is_matched_without_its_scheme() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = SiteSpec::from_json(
+            r#"{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{"header":"Authorization"},
+               "entries":["/login","/api/home"],"mode":"enforce"}"#,
+        )
+        .expect("the test site is valid");
+        let body = login_body(LOGIN_TOKEN, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        let bearer = format!("Bearer {LOGIN_TOKEN}");
+        let verdict = judge
+            .judge(&site, &get("/api/home", None, Some(bearer.as_str()), 1))
+            .await;
+        let traced = verdict.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
     }
 
     #[tokio::test]

@@ -22,6 +22,7 @@ pub use route::{Api, Body, RequestView, Resolved, Route, UnknownReason, header_n
 pub use trace::{
     Attempt, EXPOSURE_ATTRIBUTES_MAX, EXPOSURE_USERS_MAX, ExposedAttribute, Exposure,
     ExposureBasis, ExposureKind, FINGERPRINT_SLOTS_MAX, FINGERPRINTS_PER_SLOT_MAX, FieldCount,
-    ObjectFrom, ObservationSummary, Observed, PublicAccess, SHAPE_FIELDS_MAX, ShapeField, Skip,
-    Timing, Trace, TraceEntry, TraceIdentity, TraceRecent, TraceSession, TraceSource, TraceValue,
+    LoginUnbound, ObjectFrom, ObservationSummary, Observed, PublicAccess, SHAPE_FIELDS_MAX,
+    ShapeField, Skip, Timing, Trace, TraceEntry, TraceIdentity, TraceRecent, TraceSession,
+    TraceSource, TraceValue,
 };

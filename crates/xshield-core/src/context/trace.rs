@@ -317,6 +317,28 @@ pub struct TraceSession {
     /// shown none, so records of such sites are written as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<TraceIdentity>,
+    /// The login response whose values this session took when its credential set it up
+    /// (docs/01 section 1.7, JSON-credential sites). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_request_id: Option<String>,
+    /// Why the credential that set this session up took no login response's values
+    /// (docs/01 section 1.7). Absent when it took them, or when a response set the session up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_unbound: Option<LoginUnbound>,
+}
+
+/// Why a credential that set a session up took no login response's values (docs/01 section 1.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoginUnbound {
+    /// Two held logins carry the credential, so neither is taken.
+    #[serde(rename = "login_ambiguous")]
+    Ambiguous,
+    /// The held login that carries the credential has expired.
+    #[serde(rename = "login_expired")]
+    Expired,
+    /// No held login carries the credential.
+    #[serde(rename = "login_unmatched")]
+    Unmatched,
 }
 
 /// The identity a session showed. The user and the organization are labels of keyed
@@ -413,6 +435,10 @@ pub struct ObservationSummary {
     /// the response is forwarded as it is. Absent when the response showed none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exposure: Option<Exposure>,
+    /// A JSON login response held until a credential takes its values (docs/01 section 1.7):
+    /// how many values it holds. Absent when the response was not held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_values: Option<usize>,
 }
 
 impl ObservationSummary {
@@ -433,6 +459,7 @@ impl ObservationSummary {
             shape: None,
             fingerprints: BTreeMap::new(),
             exposure: None,
+            pending_values: None,
         }
     }
 }
@@ -685,6 +712,8 @@ mod tests {
             age_seconds: 1,
             known_values: 1,
             identity: None,
+            login_request_id: None,
+            login_unbound: None,
             entries_passed: None,
             recent: Some(vec![TraceRecent {
                 method: "GET".to_owned(),
@@ -710,6 +739,8 @@ mod tests {
             age_seconds: 1,
             known_values: 1,
             identity: None,
+            login_request_id: None,
+            login_unbound: None,
             entries_passed: Some(
                 (0..16)
                     .map(|index| TraceEntry {
@@ -786,6 +817,8 @@ mod tests {
                 org: Some("o".repeat(16)),
                 role: Some("r".repeat(32)),
             }),
+            login_request_id: Some(format!("req_{:032x}", u128::MAX)),
+            login_unbound: Some(LoginUnbound::Ambiguous),
             entries_passed: Some(
                 (0..16)
                     .map(|index| TraceEntry {
@@ -933,5 +966,28 @@ mod tests {
             serde_json::to_string(&field).unwrap(),
             r#"{"path":"[].doc_id","type":"number"}"#
         );
+    }
+
+    #[test]
+    fn an_unbound_login_is_written_under_its_reason_and_only_when_present() {
+        let mut session = TraceSession {
+            age_seconds: 1,
+            known_values: 0,
+            identity: None,
+            login_request_id: None,
+            login_unbound: None,
+            entries_passed: None,
+            recent: None,
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("login_"), "{json}");
+        session.login_unbound = Some(LoginUnbound::Expired);
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(
+            json.contains(r#""login_unbound":"login_expired""#),
+            "{json}"
+        );
+        let back: TraceSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, session);
     }
 }

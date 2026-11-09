@@ -11,6 +11,7 @@ import type {
   JevFailure,
   JevHealth,
   JevRoute,
+  LoginUnbound,
   ModelSource,
   NameReasonCode,
   ObjectEventKind,
@@ -155,6 +156,29 @@ export const UPSTREAM_LABEL: Record<UpstreamError, string> = {
   read_timeout: "读取超时",
   tls: "TLS 握手失败",
   other: "其他错误",
+};
+
+/** The session tab's login rows (docs/06 6.4.4, docs/07 7.4): the login request, and the reason a login went unbound. */
+export const LOGIN_ROW_TEXT = {
+  request: "登录请求",
+  unbound: "登录未绑定",
+  held: "登录响应已暂存",
+};
+
+/** Why the credential that set a session up took no login response's values (docs/01 section 1.7). */
+export const LOGIN_UNBOUND_TEXT: Record<LoginUnbound, { name: string; desc: string }> = {
+  login_ambiguous: {
+    name: "对上多份登录响应",
+    desc: "同一个凭证对上了多份未过期的登录响应，无法判断属于哪一份，所以没有记入任何值。",
+  },
+  login_expired: {
+    name: "登录响应已过期",
+    desc: "对得上的登录响应已超过 5 分钟，所以没有记入它的值。",
+  },
+  login_unmatched: {
+    name: "没有对上的登录响应",
+    desc: "没有待绑定的登录响应对得上这个凭证，所以没有记入任何值。",
+  },
 };
 
 export const REFUSED_LABEL: Record<RefusedReason, string> = {
