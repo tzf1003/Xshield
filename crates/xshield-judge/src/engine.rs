@@ -1092,12 +1092,16 @@ fn resolved_of<'a>(request: &RequestFacts<'a>) -> Cow<'a, Resolved> {
         .map_or_else(|| Cow::Owned(Resolved::plain(request.path)), Cow::Borrowed)
 }
 
-/// The text a login response must carry to be this credential (docs/01 section 1.7): a header
-/// credential without its authentication scheme, and a cookie value as it is.
+/// The text a login response must carry to be this credential (docs/01 section 1.7). Only the
+/// `Authorization` header carries an authentication scheme in HTTP, so only its value is cut
+/// down to the token. Any other header, and a cookie, is the credential as it is: a custom header
+/// may hold a raw value with a space in it, and that value is not a scheme.
 fn credential_token<'a>(site: &SiteSpec, credential: &'a str) -> &'a str {
     match site.session() {
-        SessionCredential::Header(_) => without_scheme(credential),
-        SessionCredential::Cookie(_) => credential,
+        SessionCredential::Header(name) if name.eq_ignore_ascii_case("authorization") => {
+            without_scheme(credential)
+        }
+        SessionCredential::Header(_) | SessionCredential::Cookie(_) => credential,
     }
 }
 
@@ -3204,6 +3208,28 @@ mod tests {
                 .as_deref(),
             Some(RID)
         );
+    }
+
+    #[tokio::test]
+    async fn a_custom_header_credential_is_matched_as_it_is_sent() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = SiteSpec::from_json(
+            r#"{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{"header":"X-Session"},
+               "entries":["/login","/api/home"],"mode":"enforce"}"#,
+        )
+        .expect("the test site is valid");
+        // The value has a space in it and its first word looks like a scheme. It is not an
+        // Authorization header, so the word is part of the credential, not a scheme to cut.
+        let token = format!("user-1 {LOGIN_TOKEN}");
+        let body = login_body(&token, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        let verdict = judge
+            .judge(&site, &get("/api/home", None, Some(token.as_str()), 1))
+            .await;
+        let traced = verdict.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
+        assert_eq!(traced.login_unbound, None);
     }
 
     #[tokio::test]
