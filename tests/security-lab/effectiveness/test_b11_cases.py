@@ -145,7 +145,7 @@ class WordsAndStatusesTests(unittest.TestCase):
         by_name = {case.name: case for case in regressions.CASES}
         total = by_name["b11-forged-sessions-total-cap"]
         self.assertEqual((total.status, total.expect, total.reason, total.site),
-                         ("known_gap", "block", "limit", lab.SITE_LIMIT))
+                         ("must", "block", "limit", lab.SITE_LIMIT))
         other = by_name["b11-other-address-unaffected"]
         self.assertEqual((other.status, other.expect, other.reason, other.site),
                          ("must", "allow", None, lab.SITE_LIMIT))

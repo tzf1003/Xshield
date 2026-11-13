@@ -4,7 +4,7 @@ A case runs on one site: the truth site for most findings, the site with a per-s
 observation-mode site for P1-5. Its status is fixed here: must when the gateway passes the case on main, known_gap
 when it fails and the review lists the finding. A known_gap case that passes is an unexpected pass, and the pipeline
 fails until the same change turns the case into must (plan 4.5, risk 4 of plan 12). The statuses below were taken
-from runs on main at b48c711 (WAF batch 2, PR #209) and from the batch 8 run on top of it; the pull request lists
+from runs on main at b48c711 (WAF batch 2, PR #209) and from the batch 8 run on top of it, and the forged-session case from the run on main at 8af2b5fa (WAF batch 11a, PR #218); the pull request lists
 them with the decision path of each case and says which run each change follows.
 
 P2-6 (eviction) is not here: it needs a list of about two thousand distinct values, and the clinic origin answers
@@ -340,7 +340,7 @@ CASES: tuple[Case, ...] = (
          note="a note that tells the model what to answer, on another doctor's patient"),
     Case("p3-method-override", "P3", "known_gap", "block", "access", SITE_TRUTH, method_override,
          requires=("tiers",), note="POST with X-HTTP-Method-Override: DELETE on a publicly found patient"),
-    Case("b11-forged-sessions-total-cap", "WAF 批次 11（PR #218）", "known_gap", "block", "limit", SITE_LIMIT,
+    Case("b11-forged-sessions-total-cap", "WAF 批次 11（PR #218）", "must", "block", "limit", SITE_LIMIT,
          forged_sessions_total_cap,
          note="eleven forged sessions from one address; the eleventh is refused once the address has spent 20 calls"),
     Case("b11-other-address-unaffected", "WAF 批次 11（PR #218）", "must", "allow", None, SITE_LIMIT,
