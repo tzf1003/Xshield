@@ -31,6 +31,7 @@ EXPECTED_CASES = (
     "p1-5-observe-learns-would-block", "p1-9-big-form",
     "p2-1-mass-assignment", "p2-3-header-injection", "p2-5-prompt-injection",
     "p3-method-override",
+    "b11-forged-sessions-total-cap", "b11-other-address-unaffected",
 )
 
 
