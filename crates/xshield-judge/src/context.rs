@@ -493,17 +493,6 @@ impl SessionContext {
         }
     }
 
-    /// The view of a credential that has no session yet: nothing seen, nothing sent. A session is
-    /// kept only once the origin has answered the credential, so a request with a credential the
-    /// store does not know is judged against this and leaves nothing behind. `unbound` is why no
-    /// held login could start the session, when one was looked for.
-    #[must_use]
-    pub fn unconfirmed(now_ms: u64, unbound: Option<LoginUnbound>) -> Self {
-        let mut session = Self::new(now_ms);
-        session.login_unbound = unbound;
-        session
-    }
-
     /// The login response this session took its values from, when its credential set it up.
     #[must_use]
     pub fn login_request(&self) -> Option<u128> {
@@ -1103,6 +1092,33 @@ impl ContextStore {
         } else {
             self.pending
                 .with(id, now_ms, |session| session.note_sent(digests));
+        }
+    }
+
+    /// Stages what a response issues the credential `id` for, when the gateway would have refused the
+    /// request that got it: the values that request sent, and what its own credential had sent before
+    /// (`inherited`). Like [`ContextStore::note_sent`] it creates no session, so the credential is
+    /// recognized only by a later response (docs/01 section 1.2).
+    pub fn stage_issued(
+        &mut self,
+        id: Digest16,
+        now_ms: u64,
+        inherited: Option<&SentRecord>,
+        digests: &[Digest16],
+    ) {
+        if digests.is_empty() && inherited.is_none() {
+            return;
+        }
+        let stage = |session: &mut SessionContext| {
+            if let Some(record) = inherited {
+                session.inherit_sent(record);
+            }
+            session.note_sent(digests);
+        };
+        if let Some(session) = self.existing(id, now_ms) {
+            stage(session);
+        } else {
+            self.pending.with(id, now_ms, stage);
         }
     }
 

@@ -380,6 +380,12 @@ fn get(host: &str, target: &str, cookie: Option<&str>) -> Reply {
     call(host, "GET", target, cookie, b"")
 }
 
+/// The origin answers an entry for the credential, which starts its session (docs/01 section 1.2).
+/// `/api/home` shows no patient, so the session has seen no value when the test's request comes.
+fn confirm(host: &str, cookie: &str) {
+    assert_eq!(get(host, "/api/home", Some(cookie)).status, 200);
+}
+
 fn origin_saw(prefix: &str) -> usize {
     harness()
         .origin_hits
@@ -455,6 +461,7 @@ fn a2_a_patient_the_session_never_saw_is_refused_before_the_origin() {
 
 #[test]
 fn a3_a_session_that_never_listed_anything_is_refused() {
+    confirm("enforce.test", "s-a3-fresh");
     let refused = get(
         "enforce.test",
         "/api/patients/patient-B-a3",
@@ -472,6 +479,7 @@ fn a3_a_session_that_never_listed_anything_is_refused() {
 
 #[test]
 fn a6_a7_a_redeemed_share_opens_and_an_unredeemed_one_does_not() {
+    confirm("enforce.test", "s-a7");
     let blocked = get(
         "enforce.test",
         "/api/patients/patient-S-shared",
@@ -514,11 +522,13 @@ fn b2_injection_in_an_allowed_place_is_refused() {
 
 #[test]
 fn c1_c2_when_jev_is_down_the_site_policy_decides() {
+    confirm("enforce.test", "s-c1");
     let denied = get("enforce.test", "/api/patients/jevfail-c1", Some("s-c1"));
     assert_eq!(denied.status, 403);
     assert_eq!(record(&denied).decision_path, DecisionPath::JevUnavailable);
     assert_eq!(origin_saw("/api/patients/jevfail-c1"), 0);
 
+    confirm("lenient.test", "s-c2");
     let allowed = get("lenient.test", "/api/patients/jevfail-c2", Some("s-c2"));
     assert_eq!(allowed.status, 200);
     let row = record(&allowed);
@@ -674,6 +684,7 @@ fn static_paths_are_forwarded_and_logged_as_bypass() {
 fn d1_a_request_with_many_long_values_is_written_within_the_trace_limit() {
     // Sixty values of 256 characters put the trace well over 16 KiB. The gateway
     // trims it before it writes the row, and the rest of the row is untouched.
+    confirm("observe.test", "s-d1");
     let values: Vec<String> = (0..60)
         .map(|index| format!("{index:03}{}", "x".repeat(253)))
         .collect();
@@ -702,6 +713,7 @@ fn d1_a_request_with_many_long_values_is_written_within_the_trace_limit() {
 fn d2_long_request_paths_stay_out_of_the_rows_that_follow() {
     // Ten requests with 3 KB paths enter the session's recent list. The next
     // judged request is still written within the limit, with each path cut.
+    confirm("observe.test", "s-d2");
     let long = "p".repeat(3000);
     for _ in 0..10 {
         let listed = get(
@@ -748,6 +760,7 @@ fn d2_long_request_paths_stay_out_of_the_rows_that_follow() {
 fn d3_a_long_key_keeps_the_values_of_its_request() {
     // One key of 40 KB sits among a few ordinary values. Cut to its bound, the key
     // and its location leave the values in the row.
+    confirm("observe.test", "s-d3");
     let long = "k".repeat(40 * 1024);
     let body = format!(r#"{{"{long}": "d3-value", "items": ["d3-a", "d3-b"]}}"#);
     let reply = call(

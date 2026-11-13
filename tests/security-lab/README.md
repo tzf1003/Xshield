@@ -57,6 +57,10 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | W4c | 管理员在公共搜索里搜到医生 B 的患者后删除 | 拦截，记为尝试越权：公共档的见过不证明删除 | `jev_deny` |
 | W4d | 管理员在管理档搜索里搜到患者后写备注（POST 子路径） | 放行，备注位置接受公共来源 | `fast_allow` |
 | W6 | 同一站点的评论接口：医生 A 读取自己患者的评论时，作者医生 B 的手机号和邮箱让判定记录的 `trace.response.exposure` 记一条告警（字段名 `phone`、`email`，记录里没有值）；读取本人资料、未声明身份的站点不告警 | 放行，告警按上述规则 | `fast_allow` |
+| F1 | 源站从未认可过的凭证（`SID=made-up`）访问非入口路径 | 拦截，401，源站未收到请求，不调用 Jev；判定记录的 `trace.unrecognized_credential` 为真。见下方说明 | `no_session` |
+| F2 | 身份站点（声明了用户身份）：未认可的凭证在 `/login` 拿到源站 200，随后访问非入口；对照站点（没有身份位置）同样的 200 | 身份站点：入口放行但不建立会话，非入口 401。对照站点：入口放行，非入口放行（源站答 401）。见下方说明 | `fast_allow`，`no_session`，`fast_allow`，`fast_allow` |
+| F3 | 源站直接发出、网关没见过的老会话（相当于网关重启后）：非入口先被拒；`GET /api/home` 声明医生身份之后，列表和列表里的患者放行 | 非入口 401；身份接口放行并建立会话；`/api/patients` 与患者详情放行 | `no_session`，`fast_allow`，`fast_allow`，`fast_allow` |
+| F4 | JSON 凭证站点（`Authorization` 头）：`POST /api/token-login` 登录后，带令牌的第一个请求落在非入口 `GET /api/comments` | 登录放行；第一个请求放行，会话的 `login_request_id` 为该次登录，没有 `login_unbound` | `jev_allow`，`fast_allow` |
 | F5 | 医生 A 登录后 `POST /api/admin/export`（功能表里的管理档功能） | 拦截，源站不收到请求。Jev 收到的 `state.request.function` 是 `{"tier":"admin","attempt":"over_privilege"}`，判定记录的 `trace.function.attempt` 为 `over_privilege`。见下方说明 | `jev_deny` |
 | F5b | 医生 A 新建患者后，对它 `POST /api/patients/{新编号}`，带请求头 `X-HTTP-Method-Override: DELETE` | 拦截，源站不收到请求。按更严的 `DELETE /api/patients/{id}` 判为越权尝试；`trace.function.key` 是 `POST /api/patients/{id}`，`entry` 是 `DELETE /api/patients/{id}` | `jev_deny` |
 | F6 | 管理员 `admin_root` 登录、访问首页（声明角色）后 `POST /api/admin/export` | 放行，源站收到，不新增 Jev 调用。`trace.function` 有 `tier`，没有 `attempt` | `fast_allow` |
@@ -89,6 +93,10 @@ A9 的第一条删除原来预期放行（已知缺口），标注档位之后�
 ### W4a 至 W4d 说明：管理员会话
 
 `admin` 站点的对象表把管理员搜索标为管理档（`tier: admin`，可靠性高），把首页的 `role` 声明为身份位置（`identity: role`）。源站只对角色为 `admin` 的会话返回管理员搜索，首页对管理员标注 `"role": "admin"`，其他会话没有这个字段。管理员会话见过的管理档响应证明它展示的对象，所以 W4a 的删除快速放行；W4b 的患者没有被见过，仍拦截；W4c 的管理员在公共搜索里见到的患者，删除仍是尝试越权；W4d 的备注位置接受公共来源，管理档的见过同样有效。
+
+### F1 至 F4 说明：源站认可之前的凭证
+
+凭证只有源站答复过才算会话（[docs/01 §1.2](../../docs/01-request-flow.md)）。F1 的 `SID=made-up` 源站没有发过，所以不是会话：非入口直接 401，不交 Jev，也不建立上下文；判定记录里 `trace.unrecognized_credential` 为真。F2 的身份站点上，`/login` 的 200 不建立会话，身份要等 `GET /api/home` 声明医生身份才有；没有身份位置的对照站点，同样的 200 则建立会话，同一凭证的非入口请求放行，源站答 401，证明请求确实到了源站。F3 的老会话由源站直接发出，测试里不经过网关登录，网关没有见过，所以先被拒；身份接口认可之后才恢复。F4 的 JSON 令牌登录绑定会话，与落点无关，令牌的第一个请求即使落在非入口也能绑定。
 
 ### F5 至 F13 说明：功能表
 

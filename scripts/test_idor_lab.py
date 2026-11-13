@@ -1054,6 +1054,85 @@ def judged_state(lab: Lab, method: str, path: str) -> dict:
     return matching[-1] if matching else {}
 
 
+def login_at_origin(lab: Lab, user: str, check: str) -> str:
+    """Logs `user` in straight at the origin, not through the edge: the session the origin keeps while
+    the gateway holds none of it, as after a restart (docs/04 section 4.3, F3). Returns the SID cookie."""
+    connection = http.client.HTTPConnection("127.0.0.1", lab.origin.port, timeout=10)
+    try:
+        connection.request("POST", "/login", body=json.dumps(login_form(user)).encode(),
+                           headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        response.read()
+        issued = [value for name, value in response.getheaders() if name.lower() == "set-cookie"]
+    finally:
+        connection.close()
+    cookie = next((value.split(";", 1)[0] for value in issued if value.startswith("SID=")), "")
+    lab.check(check, len(cookie) > len("SID="), "the origin set no SID cookie")
+    return cookie
+
+
+@scenario("F1", "未认可的凭证访问非入口路径：401，源站没收到，不调用 Jev，判定记录带 unrecognized_credential")
+def f1(lab: Lab) -> None:
+    before = jev_calls(lab)
+    for target in ["/api/patients/7001", "/metrics"]:
+        sent = lab.expect(f"F1 GET {target} with a credential the origin never answered", lab.send(
+            "plain.lab", "GET", target, cookie="SID=made-up"), Expect(401, "no_session", "blocked", False))
+        traced = ((sent.record or {}).get("trace") or {})
+        lab.check(f"F1 GET {target} is recorded as an unrecognized credential",
+                  traced.get("unrecognized_credential") is True,
+                  f"unrecognized_credential {traced.get('unrecognized_credential')}")
+    lab.check("F1 Jev is not asked", jev_calls(lab) == before, f"{jev_calls(lab) - before} new calls")
+
+
+@scenario("F2", "未认可的凭证在入口拿到源站 2xx：身份站点上不建立会话，非入口仍 401；无身份位置的站点上则建立")
+def f2(lab: Lab) -> None:
+    lab.expect("F2 the login page answers 200 to anyone, and the entry is judged as before", lab.send(
+        "identity.lab", "GET", "/login", cookie="SID=made-up"), Expect(200, "fast_allow", "allowed", True))
+    lab.expect("F2 a non-entry path with the same credential is still refused", lab.send(
+        "identity.lab", "GET", "/api/comments", cookie="SID=made-up"), Expect(401, "no_session", "blocked", False))
+    # The control: a site without an identity position starts the session from the same answer.
+    lab.expect("F2 control: on a site without an identity position the entry answer starts the session",
+               lab.send("plain.lab", "GET", "/login", cookie="SID=made-up-plain"),
+               Expect(200, "fast_allow", "allowed", True))
+    # The origin itself refuses a session it never issued, so the control asks for its 401: what matters
+    # is that the edge forwarded the request (fast_allow, served) and did not refuse it as no session.
+    lab.expect("F2 control: the same credential then reaches the origin on a non-entry path", lab.send(
+        "plain.lab", "GET", "/api/comments", cookie="SID=made-up-plain"),
+        Expect(401, "fast_allow", "allowed", True))
+
+
+@scenario("F3", "网关重启后的老会话（源站仍认可）：网关先见非入口被拒；身份接口认可之后，列表里的患者快速放行")
+def f3(lab: Lab) -> None:
+    cookie = login_at_origin(lab, "doctor_a", "F3 the origin issues a session at its own login")
+    lab.expect("F3 a non-entry path with the old session is refused first", lab.send(
+        "identity.lab", "GET", "/api/comments", cookie=cookie), Expect(401, "no_session", "blocked", False))
+    lab.expect("F3 the identity entry names the doctor, and the session starts", lab.send(
+        "identity.lab", "GET", "/api/home", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    listed = lab.expect("F3 the doctor's list is allowed", lab.send(
+        "identity.lab", "GET", "/api/patients", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    patients = listed.reply.json().get("patients", [])
+    patient_id = patients[0]["id"] if patients else "none"
+    lab.expect(f"F3 a patient of the list is allowed from the session", lab.send(
+        "identity.lab", "GET", f"/api/patients/{patient_id}", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+
+
+@scenario("F4", "JSON 凭证站点：登录后带令牌的第一个请求落在非入口，绑定成功并放行，没有绑定失败的原因")
+def f4(lab: Lab) -> None:
+    login = lab.expect("F4 the token login is judged and forwarded", lab.send(
+        "token.lab", "POST", "/api/token-login", json_body=login_form("doctor_a")),
+        Expect(200, "jev_allow", "allowed", True))
+    token = login.reply.json().get("authentication", {}).get("token", "")
+    first = lab.expect("F4 the first request with the token is on a non-entry path and is allowed", lab.send(
+        "token.lab", "GET", "/api/comments", authorization=f"Bearer {token}"),
+        Expect(200, "fast_allow", "allowed", True))
+    session = ((first.record or {}).get("trace") or {}).get("session") or {}
+    lab.check("F4 the login binds the session wherever the first request lands",
+              session.get("login_request_id") == login.reply.request_id,
+              f"login_request_id {session.get('login_request_id')}, want {login.reply.request_id}")
+    lab.check("F4 the binding left no reason for being unbound", session.get("login_unbound") is None,
+              f"login_unbound {session.get('login_unbound')}")
+
+
 @scenario("F5", "医生 POST /api/admin/export（管理档功能，非管理员）：交 Jev 判为越权尝试，拦截，源站没收到")
 def f5(lab: Lab) -> None:
     cookie = lab.login("functions.lab", "doctor_a", "F5 doctor A logs in")
