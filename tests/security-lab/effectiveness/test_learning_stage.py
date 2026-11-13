@@ -242,6 +242,70 @@ class ConvergenceTest(unittest.TestCase):
         self.assertEqual(learns, [1, 2, 3])
 
 
+class _FakeBootstrapApi:
+    """The control's answers to the calls round 0 makes; every configuration saved is recorded in `puts`."""
+
+    def __init__(self, spec: dict[str, Any], candidates: list[dict[str, Any]]) -> None:
+        self.spec = spec
+        self.candidates = candidates
+        self.puts: list[dict[str, Any]] = []
+
+    def call(self, method: str, path: str, document: Any = None, *, expect: tuple[int, ...] = (200,),
+             raw: bytes | None = None, content_type: str | None = None) -> Any:
+        if path.endswith("/objects/bootstrap"):
+            return {"candidates": self.candidates}
+        if method == "PUT":
+            self.puts.append(document)
+            return {}
+        if method == "GET":
+            return {"spec": copy.deepcopy(self.spec), "version": 1}
+        return {}  # POST /api/sites
+
+
+class BootstrapSelectionTest(unittest.TestCase):
+    """Round 0 confirms what the console preselects (no note, no conflict); the rest is kept apart, with its note."""
+
+    def setUp(self) -> None:
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.spec = site_spec("none", 1)
+
+    @staticmethod
+    def _candidate(key: str, **fields: Any) -> dict[str, Any]:
+        candidate = {"key": key, "side": "request", "kind": "patient", "name": "患者", "uses": 40, "sessions": 9,
+                     "note": None, "conflict": None}
+        candidate.update(fields)
+        return candidate
+
+    def test_a_candidate_with_a_note_or_a_conflict_is_not_written(self) -> None:
+        clear = "GET /api/patients/{id} path[2]"
+        candidates = [
+            self._candidate(clear),
+            self._candidate("GET /api/visits/{id} path[2]", note="名字较短，可能是缩写，请确认类别"),
+            self._candidate("GET /api/patients/{id} path[3]", conflict="doctor"),
+            self._candidate("GET /api/x/{id} path[2]", note="使用次数少，请确认"),
+        ]
+        api = _FakeBootstrapApi(self.spec, candidates)
+        learner = _Learner(["control"], "postgresql://db", Path(self.scratch.name), lambda message: None,
+                           self.spec["name"])
+        learner.api = api  # type: ignore[assignment]
+        with mock.patch.object(learner, "_await_partitions"), mock.patch.object(learner, "_await_startup_pass"):
+            learner.setup(self.spec, [])
+
+        self.assertEqual(len(api.puts), 1)
+        before = {slot["key"] for slot in self.spec.get("objects", {}).get("slots", [])}
+        written = {slot["key"] for slot in api.puts[0]["spec"]["objects"]["slots"]} - before
+        self.assertEqual(written, {clear}, "only the preselected candidate becomes a slot")
+        self.assertEqual([item["key"] for item in learner.bootstrap], [clear])
+        self.assertNotIn("note", learner.bootstrap[0], "learned.json's bootstrap keeps the scorer's fields only")
+        self.assertEqual([item["key"] for item in learner.bootstrap_unpicked], [
+            "GET /api/visits/{id} path[2]", "GET /api/patients/{id} path[3]", "GET /api/x/{id} path[2]"])
+        self.assertEqual(learner.bootstrap_unpicked[0]["note"], "名字较短，可能是缩写，请确认类别")
+        self.assertIsNone(learner.bootstrap_unpicked[0]["conflict"])
+        self.assertIsNone(learner.bootstrap_unpicked[1]["note"])
+        self.assertEqual(learner.bootstrap_unpicked[1]["conflict"], "doctor")
+
+
 class CleanupTest(unittest.TestCase):
     """The database is dropped and the control process stopped on success, failure and an interrupt."""
 
@@ -370,6 +434,10 @@ class LearnsOnPostgresTest(unittest.TestCase):
         self.assertGreaterEqual(len(learned["rounds"]), 3)
         self.assertEqual([doc["round"] for doc in learned["rounds"]], list(range(1, len(learned["rounds"]) + 1)))
         self.assertIn("events", document)
+        self.assertIn("bootstrap_unpicked", document)
+        for item in document["bootstrap_unpicked"]:
+            self.assertTrue(item["note"] is not None or item["conflict"] is not None,
+                            "an unpicked candidate has a note or a conflict")
         self.assertEqual(result["final_spec"]["name"], "clinic-none")
 
 
