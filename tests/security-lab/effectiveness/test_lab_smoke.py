@@ -28,7 +28,7 @@ EXPECTED_CASES = (
     "p0-2-limit-then-inject",
     "p0-3-fake-cookie-metrics", "p0-3-fake-cookie-export", "p0-3-function-level", "p0-3-function-level-metrics",
     "p1-1-rotation", "p1-2-search-id-then-open", "p1-3-preflight", "p1-4-conditional-304",
-    "p1-5-observe-learns-would-block", "p1-9-big-form",
+    "p1-5-observe-learns-would-block", "p1-9-big-form", "p1-9-big-form-on-object",
     "p2-1-mass-assignment", "p2-3-header-injection", "p2-5-prompt-injection",
     "p3-method-override",
 )
