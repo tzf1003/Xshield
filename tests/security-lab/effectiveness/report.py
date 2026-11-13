@@ -63,6 +63,10 @@ def conclusion(result: dict[str, Any], meta: dict[str, Any]) -> str:
     failed = [gate["name"] for gate in result["gates"] if gate["ok"] is False]
     verdict = "结论：通过" if not failed else f"结论：失败（未通过的门槛：{'、'.join(failed)}）"
     parts = [verdict]
+    if result["failures"]:
+        parts.append(f"失败项 {len(result['failures'])} 条")
+    if not result["baseline"]["compared"]:
+        parts.append("未与基线比较")
     for item in result["skipped"]:
         if item["section"] == "学习段":
             parts.append(f"学习段未执行（{item['why']}）")
@@ -181,6 +185,8 @@ def _baseline_lines(baseline: dict[str, Any]) -> list[str]:
     lines = [f"基线比较：退步 {len(baseline['regressions'])} 项，进步 {len(baseline['improvements'])} 项。"]
     lines += [f"- 退步：{item['name']}，基线 {_pct(item['baseline'])}，本次 {_pct(item['value'])}"
               for item in baseline["regressions"]]
+    if baseline["absent"]:
+        lines.append(f"基线里有、本次没有的指标（未比较）：{'、'.join(baseline['absent'])}")
     return lines
 
 
@@ -316,7 +322,8 @@ def report_document(result: dict[str, Any], meta: dict[str, Any]) -> dict[str, A
         "meta": {**meta, "skipped": result["skipped"]},
         "metrics": result["metrics"],
         "gates": result["gates"],
-        "baseline": {key: result["baseline"][key] for key in ("compared", "regressions", "improvements")},
+        "baseline": {key: result["baseline"][key]
+                     for key in ("compared", "regressions", "improvements", "absent")},
         "failures": result["failures"],
         "known_gaps": result["known_gaps"],
         "learning": result["learning"],

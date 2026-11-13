@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from effectiveness.builders import decision, observation, truth_doc
+from effectiveness.builders import decision, judgement, learned_doc, learning_round, observation, truth_doc
 from effectiveness.contracts import (
     ContractError,
     load_baseline,
@@ -85,8 +85,38 @@ class ContractTests(unittest.TestCase):
 
     def test_a_truth_tier_must_be_a_known_tier(self):
         doc = truth_doc(request=[], response=[("GET /api/search results[].id", "patient", "vip")])
-        self.assertIn("字段 tier 应为 self、org、admin 或 public",
+        self.assertIn("字段 tier 应为 self、org、admin、public 或 null",
                       self.message(load_truth, self.write("truth.json", doc)))
+
+    def test_a_response_position_may_have_no_tier(self):
+        doc = truth_doc(request=[], response=[("GET /api/search results[].id", "patient", None)])
+        self.assertIsNone(load_truth(self.write("truth.json", doc))["response_positions"][0]["tier"])
+
+    def learned_with(self, judgements: list[dict]) -> Path:
+        return self.write("learned.json", raw=json.dumps(learned_doc([learning_round(1, [], judgements)], [])))
+
+    def test_a_judgement_carries_a_tier_or_accepts_public(self):
+        path = self.learned_with([judgement("GET /api/search results[].id", "public"),
+                                  judgement("DELETE /api/patients/{id} path[2]", accepts=False)])
+        self.assertEqual(len(load_learned(path)["rounds"][0]["judgements"]), 2)
+
+    def test_a_judgement_with_both_or_neither_is_rejected(self):
+        both = dict(judgement("GET /api/search results[].id", "public"), accepts_public=True)
+        neither = {"key": "GET /api/search results[].id", "reliability": "high"}
+        for bad in (both, neither):
+            with self.subTest(bad=bad):
+                text = self.message(load_learned, self.learned_with([bad]))
+                self.assertIn("应恰好含 tier 或 accepts_public 其中一个", text)
+                self.assertIn("judgements[0]", text)
+
+    def test_a_judgement_value_is_checked(self):
+        bad_tier = judgement("GET /api/search results[].id", "vip")
+        self.assertIn("字段 tier 应为 self、org、admin 或 public",
+                      self.message(load_learned, self.learned_with([bad_tier])))
+        bad_accepts = judgement("DELETE /api/patients/{id} path[2]", accepts=False)
+        bad_accepts["accepts_public"] = "yes"
+        self.assertIn("字段 accepts_public 应为 true 或 false",
+                      self.message(load_learned, self.learned_with([bad_accepts])))
 
     def test_learned_needs_its_final_spec(self):
         doc = {"bootstrap": [], "rounds": []}

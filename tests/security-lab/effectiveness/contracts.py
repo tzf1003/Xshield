@@ -146,7 +146,8 @@ REQUEST_POSITION: Fields = {
 RESPONSE_POSITION: Fields = {
     "key": (_position_key, "“METHOD /路由 位置”格式的键"),
     "class": (_is_str, "字符串"),
-    "tier": (_one_of(TIERS), "self、org、admin 或 public"),
+    # Null is a position with no fixed tier (a share redemption, a comment author); L2 leaves it out (plan 12a).
+    "tier": (_optional(_one_of(TIERS)), "self、org、admin、public 或 null"),
     "learnable": (_is_bool, "true 或 false"),
 }
 TRUTH_OPTIONAL: Fields = {"why": (_is_str, "字符串")}
@@ -180,8 +181,12 @@ POSITION: Fields = {
 }
 JUDGEMENT: Fields = {
     "key": (_position_key, "“METHOD /路由 位置”格式的键"),
-    "tier": (_one_of(TIERS), "self、org、admin 或 public"),
     "reliability": (_one_of(RELIABILITIES), "low、medium 或 high"),
+}
+# A judgement carries exactly one of these: a tier on a response position, accepts_public on a request one.
+JUDGEMENT_VALUE: Fields = {
+    "tier": (_one_of(TIERS), "self、org、admin 或 public"),
+    "accepts_public": (_is_bool, "true 或 false"),
 }
 
 BASELINE: Fields = {"values": (_is_dict, "对象（指标名到数值）")}
@@ -277,6 +282,13 @@ def load_truth(path: Path) -> dict[str, Any]:
     return doc
 
 
+def _check_judgement(judgement: Any, where: str) -> None:
+    _check_fields(judgement, where, JUDGEMENT)
+    if ("tier" in judgement) == ("accepts_public" in judgement):
+        raise ContractError(f"{where}: 应恰好含 tier 或 accepts_public 其中一个")
+    _check_present(judgement, where, JUDGEMENT_VALUE)
+
+
 def load_learned(path: Path) -> dict[str, Any]:
     name = path.name
     doc = _read_json(path)
@@ -289,7 +301,7 @@ def load_learned(path: Path) -> dict[str, Any]:
         for index, position in enumerate(rnd["positions"]):
             _check_fields(position, f"{where}.positions[{index}]", POSITION)
         for index, judgement in enumerate(rnd["judgements"]):
-            _check_fields(judgement, f"{where}.judgements[{index}]", JUDGEMENT)
+            _check_judgement(judgement, f"{where}.judgements[{index}]")
     return doc
 
 

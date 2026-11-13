@@ -89,10 +89,12 @@ def decision(request_id: str, *, path: str = "jev_deny", outcome: str = "blocked
 
 
 def truth_doc(request: list[tuple[str, str, bool]], response: list[tuple[str, str, str]],
-              non_objects: tuple[str, ...] = ()) -> dict[str, Any]:
-    """A truth file. Request positions are (key, class, accepts_public), response ones (key, class, tier)."""
+              non_objects: tuple[str, ...] = (), identity: tuple[str, ...] = ()) -> dict[str, Any]:
+    """A truth file. Request positions are (key, class, accepts_public), response ones (key, class, tier).
+    The identity keys are declared user positions (plan 9.3)."""
     return {
-        "site": "clinic", "seed": 1, "classes": ["patient", "doctor"], "identity": [],
+        "site": "clinic", "seed": 1, "classes": ["patient", "doctor"],
+        "identity": [{"key": key, "identity": "user"} for key in identity],
         "request_positions": [{"key": key, "class": cls, "accepts_public": accepts, "learnable": True}
                               for key, cls, accepts in request],
         "response_positions": [{"key": key, "class": cls, "tier": tier, "learnable": True}
@@ -111,8 +113,15 @@ def position(key: str, *, cls: str | None = None, accepts: bool | None = None, t
             "accepts_public": accepts, "reliability": reliability}
 
 
-def judgement(key: str, tier: str, reliability: str = "high") -> dict[str, Any]:
-    return {"key": key, "tier": tier, "reliability": reliability}
+def judgement(key: str, tier: str | None = None, reliability: str = "high", *,
+              accepts: bool | None = None) -> dict[str, Any]:
+    """A pending proposal (plan 9.4): a tier on a response position, or accepts_public on a request position."""
+    item: dict[str, Any] = {"key": key, "reliability": reliability}
+    if accepts is None:
+        item["tier"] = tier
+    else:
+        item["accepts_public"] = accepts
+    return item
 
 
 def learning_round(number: int, positions: list[dict[str, Any]],

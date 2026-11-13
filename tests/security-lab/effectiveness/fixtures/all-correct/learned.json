@@ -58,8 +58,8 @@
           "class": "patient",
           "source": "rule",
           "tier": null,
-          "accepts_public": false,
-          "reliability": "high"
+          "accepts_public": null,
+          "reliability": null
         },
         {
           "key": "POST /api/patients/{id}/notes path[2]",
@@ -67,8 +67,8 @@
           "class": "patient",
           "source": "rule",
           "tier": null,
-          "accepts_public": true,
-          "reliability": "high"
+          "accepts_public": null,
+          "reliability": null
         },
         {
           "key": "GET /api/patients/{id} path[2]",
@@ -76,8 +76,8 @@
           "class": "patient",
           "source": "rule",
           "tier": null,
-          "accepts_public": false,
-          "reliability": "high"
+          "accepts_public": null,
+          "reliability": null
         },
         {
           "key": "GET /api/search results[].id",
@@ -108,6 +108,21 @@
         }
       ],
       "judgements": [
+        {
+          "key": "DELETE /api/patients/{id} path[2]",
+          "accepts_public": false,
+          "reliability": "high"
+        },
+        {
+          "key": "POST /api/patients/{id}/notes path[2]",
+          "accepts_public": true,
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/patients/{id} path[2]",
+          "accepts_public": false,
+          "reliability": "high"
+        },
         {
           "key": "GET /api/search results[].id",
           "tier": "public",
@@ -165,46 +180,30 @@
           "state": "confirmed",
           "class": "patient",
           "source": "rule",
-          "tier": null,
+          "tier": "public",
           "accepts_public": null,
-          "reliability": null
+          "reliability": "high"
         },
         {
           "key": "GET /api/patients patients[].id",
           "state": "confirmed",
           "class": "patient",
           "source": "rule",
-          "tier": null,
+          "tier": "self",
           "accepts_public": null,
-          "reliability": null
+          "reliability": "high"
         },
         {
           "key": "GET /api/comments comments[].author.id",
           "state": "confirmed",
           "class": "doctor",
           "source": "rule",
-          "tier": null,
+          "tier": "org",
           "accepts_public": null,
-          "reliability": null
+          "reliability": "high"
         }
       ],
-      "judgements": [
-        {
-          "key": "GET /api/search results[].id",
-          "tier": "public",
-          "reliability": "high"
-        },
-        {
-          "key": "GET /api/patients patients[].id",
-          "tier": "self",
-          "reliability": "high"
-        },
-        {
-          "key": "GET /api/comments comments[].author.id",
-          "tier": "org",
-          "reliability": "high"
-        }
-      ]
+      "judgements": []
     }
   ],
   "final_spec": {

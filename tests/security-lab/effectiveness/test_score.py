@@ -32,10 +32,12 @@ POST = "POST /api/patients/{id}/notes path[2]"
 SEARCH = "GET /api/search results[].id"
 COMMENTS = "GET /api/comments comments[].author.id"
 PAGE = "GET /api/search page"
+IDENTITY = "GET /api/home doctor.id"
 LEARN_TRUTH = truth_doc(
     request=[(DELETE, "patient", False), (POST, "patient", True)],
     response=[(SEARCH, "patient", "public"), (COMMENTS, "doctor", "org")],
     non_objects=(PAGE,),
+    identity=(IDENTITY,),
 )
 
 
@@ -111,6 +113,13 @@ class SessionValueTests(unittest.TestCase):
         result = self.probe_with_value(verified=True, echoed=True)
         self.assertEqual((result["metrics"]["S2"]["value"], result["metrics"]["S2"]["den"]), (0, 0))
 
+    def test_s1_leaves_out_a_shown_value_that_the_session_echoed(self):
+        rows = [observation("benign", request_id="b1", group="benign", category="benign_list", expect="allow",
+                            reason=None, refs=[reference("101", shown=True, echoed=True)])]
+        recs = [decision("b1", path="fast_allow", outcome="allowed", values=[entry("101", verified=True)])]
+        metric = score(rows, recs)["metrics"]["S1"]
+        self.assertEqual((metric["num"], metric["den"]), (0, 0))
+
 
 class ActivityTests(unittest.TestCase):
     def test_s3_and_s4_count_only_judged_benign_requests(self):
@@ -131,6 +140,14 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(score(rows, right)["metrics"]["S3"]["value"], 1.0)
         self.assertEqual(score(rows, wrong)["metrics"]["S3"]["value"], 0.5)
         self.assertEqual(score(rows, wrong)["metrics"]["S4"]["value"], 0.5)
+
+    def test_s3_and_s4_leave_out_a_benign_request_that_was_not_decided(self):
+        rows = [benign("b1"), benign("b2")]
+        recs = [decision("b1", path="fast_allow", outcome="allowed"),
+                decision("b2", path="bypass", outcome="allowed")]
+        metrics = score(rows, recs)["metrics"]
+        self.assertEqual((metrics["S3"]["num"], metrics["S3"]["den"]), (1, 1))
+        self.assertEqual(metrics["S4"]["den"], 1)
 
 
 class DefenceTests(unittest.TestCase):
@@ -235,6 +252,15 @@ class DefenceTests(unittest.TestCase):
         self.assertIs(gate(result, "P7 意外通过数")["ok"], True)
         self.assertFalse(result["known_gaps"][0]["unexpected_pass"])
         self.assertEqual(result["failures"], [])
+
+    def test_a_would_block_in_observe_mode_counts_as_a_block(self):
+        probe = score([observation("probe", request_id="p1")],
+                      [decision("p1", path="jev_deny", outcome="would_block", jev_record=jev())])
+        self.assertEqual(probe["metrics"]["P1"]["value"], 1.0)
+        self.assertEqual(probe["failures"], [])
+        allowed = score([benign("b1")], [decision("b1", path="jev_deny", outcome="would_block", jev_record=jev())])
+        self.assertEqual(allowed["metrics"]["P2"]["value"], 1.0)
+        self.assertEqual(allowed["failures"][0]["detail"], "应放行，实际拦截")
 
 
 class PopulationTests(unittest.TestCase):
@@ -399,6 +425,108 @@ class LearningTests(unittest.TestCase):
         self.assertIsNone(gate(result, "L1 误学数")["ok"])
         self.assertTrue(result["passed"])
         self.assertIn("学习段", [item["section"] for item in result["skipped"]])
+
+
+def confirmed_positions() -> list[dict[str, Any]]:
+    """The object table once the values are confirmed: tiers on the entries, no pending judgements."""
+    return [position(DELETE, cls="patient", accepts=False), position(POST, cls="patient", accepts=True),
+            position(SEARCH, cls="patient", tier="public"), position(COMMENTS, cls="doctor", tier="org")]
+
+
+class ConclusionTests(unittest.TestCase):
+    """The learner's current conclusion for each position (plan 9.4): a pending judgement if there is one,
+    otherwise the value the entry holds."""
+
+    def test_confirmed_values_on_the_entries_are_scored_without_judgements(self):
+        result = learning_score((confirmed_positions(), []), (confirmed_positions(), []))
+        metrics = result["metrics"]
+        self.assertEqual((metrics["L2"]["accuracy"]["value"], metrics["L2"]["coverage"]["value"]), (1.0, 1.0))
+        self.assertEqual((metrics["L3"]["accuracy"]["value"], metrics["L3"]["coverage"]["value"]), (1.0, 1.0))
+        self.assertEqual(metrics["L2"]["high"]["value"], 1.0)
+        self.assertIs(metrics["stability"]["value"], True)
+        for prefix in ("L2 误学数", "L3 误学数", "学习稳定性"):
+            self.assertIs(gate(result, prefix)["ok"], True, prefix)
+
+    def test_a_confirmed_wrong_tier_is_a_wrong_proposal(self):
+        positions = confirmed_positions()
+        positions[2] = position(SEARCH, cls="patient", tier="self")
+        result = learning_score((positions, []), (positions, []))
+        self.assertEqual((result["metrics"]["L2"]["accuracy"]["value"], result["metrics"]["L2"]["wrong"]), (0.5, 1))
+        self.assertIs(gate(result, "L2 误学数")["ok"], False)
+        rows = {row["key"]: row for row in result["learning"]}
+        self.assertEqual(rows[SEARCH]["why"], "档位不符")
+
+    def test_a_pending_judgement_overrides_the_confirmed_value(self):
+        positions = confirmed_positions()
+        positions[2] = position(SEARCH, cls="patient", tier="self")
+        result = learning_score((positions, [judgement(SEARCH, "public")]), (confirmed_positions(), []))
+        self.assertEqual(result["metrics"]["L2"]["accuracy"]["value"], 1.0)
+        self.assertIs(gate(result, "L2 误学数")["ok"], True)
+
+    def test_the_high_share_uses_the_reliability_of_the_confirmed_value(self):
+        positions = confirmed_positions()
+        positions[2] = position(SEARCH, cls="patient", tier="public", reliability="medium")
+        result = learning_score((positions, []), (positions, []))
+        self.assertEqual(result["metrics"]["L2"]["accuracy"]["value"], 1.0)
+        self.assertEqual(result["metrics"]["L2"]["high"]["value"], 0.5)
+
+    def test_an_identity_position_is_not_learning_output(self):
+        positions = right_positions() + [position(IDENTITY, cls="doctor", tier="admin")]
+        bootstrap = right_bootstrap() + [candidate(IDENTITY, "request", "doctor")]
+        result = learning_score((positions, right_judgements()), (positions, right_judgements()), bootstrap=bootstrap)
+        self.assertEqual((result["metrics"]["L0"]["wrong"], result["metrics"]["L1"]["wrong"]), (0, 0))
+        self.assertEqual(result["metrics"]["L2"]["wrong"], 0)
+        self.assertEqual([row for row in result["learning"] if row["side"] == "unknown"], [])
+
+    def test_a_tier_on_a_request_position_is_explained_in_its_row(self):
+        judgements = right_judgements() + [judgement(DELETE, "self")]
+        result = learning_score((right_positions(), judgements), (right_positions(), judgements))
+        rows = {row["key"]: row for row in result["learning"]}
+        self.assertEqual(rows[DELETE]["why"], "误学：请求位置没有档位")
+        self.assertIs(rows[DELETE]["ok"], False)
+
+    def test_an_accepts_public_on_a_response_position_is_a_wrong_proposal(self):
+        judgements = right_judgements() + [judgement(SEARCH, accepts=True)]
+        result = learning_score((right_positions(), judgements), (right_positions(), judgements))
+        self.assertEqual(result["metrics"]["L3"]["wrong"], 1)
+        self.assertAlmostEqual(result["metrics"]["L3"]["accuracy"]["value"], 2 / 3)
+        rows = {row["key"]: row for row in result["learning"]}
+        self.assertEqual(rows[SEARCH]["why"], "误学：响应位置没有接受公共来源的标注")
+
+    def test_a_response_position_with_no_truth_tier_is_left_out_of_the_denominator(self):
+        truth = truth_doc(request=[(DELETE, "patient", False)],
+                          response=[(SEARCH, "patient", "public"), (COMMENTS, "doctor", None)])
+        positions = [position(DELETE, cls="patient", accepts=False), position(SEARCH, cls="patient", tier="public"),
+                     position(COMMENTS, cls="doctor")]
+        learned = learned_doc([learning_round(1, positions, []), learning_round(2, positions, [])], [])
+        result = score([], [], truth=truth, learned=learned)
+        coverage = result["metrics"]["L2"]["coverage"]
+        self.assertEqual((coverage["num"], coverage["den"]), (1, 1))
+        self.assertEqual(result["metrics"]["L2"]["wrong"], 0)
+
+    def test_a_tier_proposed_where_the_truth_has_none_is_wrong(self):
+        truth = truth_doc(request=[(DELETE, "patient", False)],
+                          response=[(SEARCH, "patient", "public"), (COMMENTS, "doctor", None)])
+        positions = [position(DELETE, cls="patient", accepts=False), position(SEARCH, cls="patient", tier="public"),
+                     position(COMMENTS, cls="doctor", tier="org")]
+        learned = learned_doc([learning_round(1, positions, []), learning_round(2, positions, [])], [])
+        result = score([], [], truth=truth, learned=learned)
+        self.assertEqual(result["metrics"]["L2"]["wrong"], 1)
+        self.assertIs(gate(result, "L2 误学数")["ok"], False)
+        rows = {row["key"]: row for row in result["learning"]}
+        self.assertEqual(rows[COMMENTS]["why"], "误学：真值无档位")
+
+    def test_the_stability_compares_a_pending_round_with_the_confirmed_round_after_it(self):
+        result = learning_score((right_positions(), right_judgements()), (confirmed_positions(), []))
+        self.assertIs(result["metrics"]["stability"]["value"], True)
+        self.assertEqual(result["metrics"]["L2"]["accuracy"]["value"], 1.0)
+
+    def test_a_confirmed_value_that_changes_its_reliability_makes_the_rounds_unstable(self):
+        changed = confirmed_positions()
+        changed[2] = position(SEARCH, cls="patient", tier="public", reliability="medium")
+        result = learning_score((confirmed_positions(), []), (changed, []))
+        self.assertIs(result["metrics"]["stability"]["value"], False)
+        self.assertIs(gate(result, "学习稳定性")["ok"], False)
 
 
 class BaselineTests(unittest.TestCase):

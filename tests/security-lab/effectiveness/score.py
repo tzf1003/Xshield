@@ -29,6 +29,9 @@ from typing import Any, NamedTuple
 
 BENIGN_GROUPS = frozenset({"train", "benign"})
 FAST_PATHS = frozenset({"fast_allow", "cached_allow"})
+# The benign requests that the gateway decided (plan 3.1). A bypass, an unknown site or a request without
+# a session never reached a decision; jev_unavailable is unjudged and counts in P4 instead.
+JUDGED_PATHS = frozenset({"fast_allow", "cached_allow", "jev_allow", "jev_deny"})
 HIT_OUTCOMES = frozenset({"blocked", "would_block"})
 # Positions whose proposals count for learning: a retired, suspended or ambiguous position is not one.
 ACTIVE_STATES = frozenset({"proposed", "confirmed"})
@@ -186,8 +189,12 @@ def _tier_capabilities(truth: dict[str, Any] | None, learned: dict[str, Any] | N
     if truth is not None:
         caps["truth"] = any(bool(position.get("tier")) for position in truth["response_positions"])
     if learned is not None:
+        # The learned configuration declares tiers when its slots, or its active positions, carry one.
         slots = ((learned.get("final_spec") or {}).get("objects") or {}).get("slots") or []
-        caps["learned"] = any(bool(slot.get("tier")) for slot in slots)
+        rounds = learned.get("rounds") or []
+        positions = rounds[-1]["positions"] if rounds else []
+        caps["learned"] = any(bool(slot.get("tier")) for slot in slots) or any(
+            bool(position.get("tier")) and position["state"] in ACTIVE_STATES for position in positions)
     return caps
 
 
@@ -352,7 +359,7 @@ def _session_metrics(active: list[Pair]) -> dict[str, Any]:
             s2_den += 1
             if not ref["shown"] and _verified(pair.rec, ref["value"]):
                 s2_num += 1
-    judged = [pair for pair in benign if pair.rec["decision_path"] != "jev_unavailable"]
+    judged = [pair for pair in benign if pair.rec["decision_path"] in JUDGED_PATHS]
     fast = sum(pair.rec["decision_path"] in FAST_PATHS for pair in judged)
     calls = sum(_jev_calls(pair.rec) for pair in judged)
     return {
@@ -569,13 +576,45 @@ def _unseen(key: str, position: dict[str, Any], decisions: list[dict[str, Any]])
     return "没学到：流量不足"
 
 
-def _proposal_set(rnd: dict[str, Any]) -> tuple[set[tuple[Any, ...]], set[tuple[Any, ...]]]:
-    positions = {
-        (p["key"], p.get("class"), p.get("tier"), p.get("accepts_public"), p.get("reliability"))
-        for p in rnd["positions"] if p["state"] in ACTIVE_STATES
+def _conclusions(rnd: dict[str, Any], identity: set[str]) -> dict[str, dict[str, Any]]:
+    """The current conclusion for each key of a round (plan 9.4). A pending judgement gives the tier or
+    accepts_public it carries; otherwise the entry's own value counts, when the entry is active. Identity
+    positions are not learning output, so they get no conclusion."""
+    found: dict[str, dict[str, Any]] = {}
+    for position in rnd["positions"]:
+        if position["state"] in ACTIVE_STATES and position["key"] not in identity:
+            found[position["key"]] = {
+                "class": position.get("class"),
+                "tier": position.get("tier"),
+                "tier_reliability": position.get("reliability") if position.get("tier") is not None else None,
+                "accepts_public": position.get("accepts_public"),
+                "accepts_reliability": (position.get("reliability")
+                                        if position.get("accepts_public") is not None else None),
+            }
+    for judgement in rnd["judgements"]:
+        if judgement["key"] in identity:
+            continue
+        item = found.setdefault(judgement["key"], {
+            "class": None, "tier": None, "tier_reliability": None,
+            "accepts_public": None, "accepts_reliability": None,
+        })
+        if "tier" in judgement:
+            item["tier"] = judgement["tier"]
+            item["tier_reliability"] = judgement["reliability"]
+        if "accepts_public" in judgement:
+            item["accepts_public"] = judgement["accepts_public"]
+            item["accepts_reliability"] = judgement["reliability"]
+    return {key: item for key, item in found.items()
+            if any(item[name] is not None for name in ("class", "tier", "accepts_public"))}
+
+
+def _snapshot(conclusions: dict[str, dict[str, Any]]) -> set[tuple[Any, ...]]:
+    """What a round concludes, field by field: the proposal set that the stability check compares."""
+    return {
+        (key, item["class"], item["tier"], item["tier_reliability"],
+         item["accepts_public"], item["accepts_reliability"])
+        for key, item in conclusions.items()
     }
-    judgements = {(j["key"], j["tier"], j["reliability"]) for j in rnd["judgements"]}
-    return positions, judgements
 
 
 def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
@@ -587,11 +626,11 @@ def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
     request = {p["key"]: p for p in truth["request_positions"]}
     response = {p["key"]: p for p in truth["response_positions"]}
     non_objects = set(truth["non_objects"])
+    identity = {item["key"] for item in truth["identity"]}
     rounds = learned["rounds"]
     last = rounds[-1] if rounds else {"positions": [], "judgements": []}
-    active = [p for p in last["positions"] if p["state"] in ACTIVE_STATES]
-    judgements = last["judgements"]
-    candidates = learned["bootstrap"]
+    concl = _conclusions(last, identity)
+    candidates = [c for c in learned["bootstrap"] if c["key"] not in identity]
     truth_total = len(request) + len(response)
 
     # L0: cold-start candidates, which name a class from the route alone.
@@ -602,30 +641,33 @@ def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
     right0 = [c for c in candidates if candidate_right(c)]
     l0 = _lmetric(len(right0), len(candidates), _unique(right0), truth_total)
 
-    # L1: request-position classes proposed in the last round. A proposal on a response position
-    # belongs to L0 and L2, so it is left out here. A proposal on a non-object or unknown key is wrong (3.2).
-    props1 = [p for p in active if p.get("class") is not None and p["key"] not in response]
-    right1 = [p for p in props1 if p["key"] in request and request[p["key"]]["class"] == p["class"]]
-    l1 = _lmetric(len(right1), len(props1), _unique(right1), len(request))
+    # L1: request-position classes. A class on a response position is not scored in a round: it comes from
+    # the cold-start candidate, and L0 scores it. A class on a non-object or an unknown key is wrong (3.2).
+    props1 = [(key, found["class"]) for key, found in concl.items()
+              if found["class"] is not None and key not in response]
+    right1 = [key for key, cls in props1 if key in request and request[key]["class"] == cls]
+    l1 = _lmetric(len(right1), len(props1), len(right1), len(request))
 
-    # L2: response-position tiers, from the last round's judgements.
+    # L2: response-position tiers. Every key with a tier conclusion is a proposal. A tier on a request
+    # position, a non-object or an unknown key has no tier in the truth, so it is wrong.
     tiered = {key: p for key, p in response.items() if p.get("tier")}
-    # Every judgement is a proposal: a tier on a request position or a non-object has no tier in the truth.
-    props2 = list(judgements)
-    right2 = [j for j in props2 if j["key"] in tiered and tiered[j["key"]]["tier"] == j["tier"]]
-    l2 = _lmetric(len(right2), len(props2), _unique(right2), len(tiered),
-                  high=(_unique([j for j in right2 if j["reliability"] == "high"]), len(tiered)))
+    props2 = [(key, found) for key, found in concl.items() if found["tier"] is not None]
+    right2 = [key for key, found in props2 if key in tiered and tiered[key]["tier"] == found["tier"]]
+    high2 = [key for key in right2 if concl[key]["tier_reliability"] == "high"]
+    l2 = _lmetric(len(right2), len(props2), len(right2), len(tiered), high=(len(high2), len(tiered)))
 
-    # L3: request-position accepts_public, from the last round.
-    props3 = [p for p in active if p.get("accepts_public") is not None and p["key"] not in response]
-    right3 = [p for p in props3
-              if p["key"] in request and request[p["key"]]["accepts_public"] == p["accepts_public"]]
-    l3 = _lmetric(len(right3), len(props3), _unique(right3), len(request),
-                  high=(_unique([p for p in right3 if p.get("reliability") == "high"]), len(request)))
+    # L3: request-position accepts_public, with the same rule as L2.
+    props3 = [(key, found) for key, found in concl.items() if found["accepts_public"] is not None]
+    right3 = [key for key, found in props3
+              if key in request and request[key]["accepts_public"] == found["accepts_public"]]
+    high3 = [key for key in right3 if concl[key]["accepts_reliability"] == "high"]
+    l3 = _lmetric(len(right3), len(props3), len(right3), len(request), high=(len(high3), len(request)))
 
-    stable = _proposal_set(rounds[-1]) == _proposal_set(rounds[-2]) if len(rounds) >= 2 else None
+    stable = None
+    if len(rounds) >= 2:
+        stable = _snapshot(concl) == _snapshot(_conclusions(rounds[-2], identity))
 
-    rows = _learning_rows(request, response, non_objects, active, judgements, candidates, decisions)
+    rows = _learning_rows(request, response, non_objects, concl, candidates, decisions)
     gates = [
         _gate(LEARNING_GATE_NAMES[0], l0["wrong"], "== 0", l0["wrong"] == 0),
         _gate(LEARNING_GATE_NAMES[1], l1["wrong"], "== 0", l1["wrong"] == 0),
@@ -643,110 +685,102 @@ def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
     return {"metrics": metrics, "gates": gates, "rows": rows}, None
 
 
+def _wrong_row(key: str, side: str, truth: dict[str, Any], found: dict[str, Any] | None,
+               candidate: dict[str, Any] | None, why: str) -> dict[str, Any]:
+    """A row for a key that the truth holds as a non-object, or does not hold at all."""
+    return {
+        "key": key,
+        "side": side,
+        "truth": truth,
+        "learned": {
+            "class": (found or {}).get("class") or (candidate or {}).get("class"),
+            "tier": (found or {}).get("tier"),
+            "accepts_public": (found or {}).get("accepts_public"),
+        },
+        "ok": False,
+        "why": why,
+    }
+
+
 def _learning_rows(request: dict[str, Any], response: dict[str, Any], non_objects: set[str],
-                   active: list[dict[str, Any]], judgements: list[dict[str, Any]],
-                   candidates: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One row per truth position and per wrong key (report section 4)."""
-    position_of: dict[str, dict[str, Any]] = {}
-    for proposal in active:
-        position_of.setdefault(proposal["key"], proposal)
-    judgement_of: dict[str, dict[str, Any]] = {}
-    for judgement in judgements:
-        judgement_of.setdefault(judgement["key"], judgement)
+                   concl: dict[str, dict[str, Any]], candidates: list[dict[str, Any]],
+                   decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per truth position and per wrong key (report section 4). A proposal that a metric counts as
+    wrong gets a row with its reason, so the table explains each count."""
     candidate_of: dict[tuple[str, str], dict[str, Any]] = {}
     for candidate in candidates:
         candidate_of.setdefault((candidate["side"], candidate["key"]), candidate)
 
     rows: list[dict[str, Any]] = []
     for key, truth_position in request.items():
-        proposal = position_of.get(key)
-        learned_fields = {
-            "class": proposal.get("class") if proposal else None,
-            "accepts_public": proposal.get("accepts_public") if proposal else None,
-        }
-        mismatches = []
-        if proposal is None:
+        found = concl.get(key)
+        learned: dict[str, Any] = {}
+        if found is None:
             why = _unseen(key, truth_position, decisions)
         else:
-            if learned_fields["class"] != truth_position["class"]:
+            mismatches: list[str] = []
+            if found["class"] != truth_position["class"]:
                 mismatches.append("类别不符")
-            if learned_fields["accepts_public"] != truth_position["accepts_public"]:
+            if found["accepts_public"] != truth_position["accepts_public"]:
                 mismatches.append("接受公共来源不符")
+            if found["tier"] is not None:
+                mismatches.append("误学：请求位置没有档位")
             why = "；".join(mismatches)
+            learned = {"class": found["class"], "accepts_public": found["accepts_public"], "tier": found["tier"]}
         rows.append({
             "key": key,
             "side": "request",
             "truth": {"class": truth_position["class"], "accepts_public": truth_position["accepts_public"]},
-            "learned": learned_fields,
+            "learned": learned,
             "ok": not why,
             "why": why,
         })
 
     for key, truth_position in response.items():
-        proposal = position_of.get(key)
-        judgement = judgement_of.get(key)
+        found = concl.get(key)
         candidate = candidate_of.get(("response", key))
-        if proposal is not None and proposal.get("class") is not None:
-            learned_class = proposal["class"]
-        else:
-            learned_class = candidate["class"] if candidate else None
-        learned_fields = {
-            "class": learned_class,
-            "tier": judgement["tier"] if judgement else None,
-            "reliability": judgement["reliability"] if judgement else None,
-        }
+        # A class on a response position is not scored in a round; the table shows the candidate's class (L0).
+        learned = {"class": candidate["class"] if candidate else None}
         mismatches = []
-        if judgement is None:
-            why = _unseen(key, truth_position, decisions)
+        if candidate is not None and candidate["class"] != truth_position["class"]:
+            mismatches.append("类别不符")
+        if truth_position["tier"] is None:
+            # No tier in the truth: the position is left out of L2's denominator, and a tier proposed on it is wrong.
+            if found is not None and found["tier"] is not None:
+                learned["tier"] = found["tier"]
+                learned["reliability"] = found["tier_reliability"]
+                mismatches.append("误学：真值无档位")
+        elif found is None or found["tier"] is None:
+            mismatches.append(_unseen(key, truth_position, decisions))
         else:
-            if learned_class != truth_position["class"]:
-                mismatches.append("类别不符")
-            if judgement["tier"] != truth_position["tier"]:
+            learned["tier"] = found["tier"]
+            learned["reliability"] = found["tier_reliability"]
+            if found["tier"] != truth_position["tier"]:
                 mismatches.append("档位不符")
-            why = "；".join(mismatches)
+        if found is not None and found["accepts_public"] is not None:
+            learned["accepts_public"] = found["accepts_public"]
+            mismatches.append("误学：响应位置没有接受公共来源的标注")
+        why = "；".join(mismatches)
         rows.append({
             "key": key,
             "side": "response",
             "truth": {"class": truth_position["class"], "tier": truth_position["tier"]},
-            "learned": learned_fields,
+            "learned": learned,
             "ok": not why,
             "why": why,
         })
 
-    known = set(request) | set(response) | non_objects
     for key in sorted(non_objects):
-        proposal = position_of.get(key)
-        judgement = judgement_of.get(key)
-        candidate = candidate_of.get(("response", key))
-        if proposal is None and judgement is None and candidate is None:
-            continue
-        rows.append({
-            "key": key,
-            "side": "non_object",
-            "truth": {"object": False},
-            "learned": {
-                "class": (proposal or candidate or {}).get("class"),
-                "tier": judgement["tier"] if judgement else None,
-            },
-            "ok": False,
-            "why": "误学：真值为非对象",
-        })
-    unknown = ({p["key"] for p in active} | {j["key"] for j in judgements}
-               | {c["key"] for c in candidates}) - known
+        found = concl.get(key)
+        candidate = candidate_of.get(("response", key)) or candidate_of.get(("request", key))
+        if found is not None or candidate is not None:
+            rows.append(_wrong_row(key, "non_object", {"object": False}, found, candidate, "误学：真值为非对象"))
+
+    unknown = (set(concl) | {c["key"] for c in candidates}) - set(request) - set(response) - non_objects
     for key in sorted(unknown):
-        proposal = position_of.get(key)
-        judgement = judgement_of.get(key)
-        rows.append({
-            "key": key,
-            "side": "unknown",
-            "truth": {},
-            "learned": {
-                "class": proposal.get("class") if proposal else None,
-                "tier": judgement["tier"] if judgement else None,
-            },
-            "ok": False,
-            "why": "误学：真值里没有这个位置",
-        })
+        found = concl.get(key)
+        candidate = candidate_of.get(("response", key)) or candidate_of.get(("request", key))
+        rows.append(_wrong_row(key, "unknown", {}, found, candidate, "误学：真值里没有这个位置"))
     return rows
 
 
@@ -776,7 +810,7 @@ def compare_baseline(values: dict[str, float], baseline: dict[str, Any] | None) 
     """Compares each number with the baseline. A regression is a move in the wrong direction (only
     in-or-out comparisons: a metric that is not in the baseline is not compared)."""
     if baseline is None:
-        return {"compared": False, "regressions": [], "improvements": [], "reference": {}}
+        return {"compared": False, "regressions": [], "improvements": [], "reference": {}, "absent": []}
     reference = baseline.get("values", {})
     compared = {name: reference[name] for name in values if reference.get(name) is not None}
     regressions: list[dict[str, Any]] = []
@@ -790,4 +824,7 @@ def compare_baseline(values: dict[str, float], baseline: dict[str, Any] | None) 
             regressions.append({"name": name, "baseline": then, "value": now})
         elif better:
             improvements.append({"name": name, "baseline": then, "value": now})
-    return {"compared": True, "regressions": regressions, "improvements": improvements, "reference": compared}
+    # A baseline name that this run does not produce is listed, so a missing number is never silently skipped.
+    absent = sorted(name for name, value in reference.items() if value is not None and name not in values)
+    return {"compared": True, "regressions": regressions, "improvements": improvements,
+            "reference": compared, "absent": absent}

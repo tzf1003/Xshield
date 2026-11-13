@@ -99,5 +99,24 @@ class ReportTests(unittest.TestCase):
         document = report_document(fixture_result("all-correct"), META)
         for key in ("meta", "metrics", "gates", "baseline", "failures", "known_gaps", "learning", "passed"):
             self.assertIn(key, document)
-        self.assertEqual(set(document["baseline"]), {"compared", "regressions", "improvements"})
+        self.assertEqual(set(document["baseline"]), {"compared", "regressions", "improvements", "absent"})
         self.assertTrue(document["passed"])
+
+    def test_the_conclusion_says_when_no_baseline_was_compared(self):
+        self.assertIn("未与基线比较", conclusion(fixture_result("all-correct"), META))
+
+    def test_the_conclusion_counts_the_failures(self):
+        result = fixture_result("one-error-each")
+        self.assertIn(f"失败项 {len(result['failures'])} 条", conclusion(result, META))
+
+    def test_a_baseline_name_this_run_does_not_produce_is_listed_as_absent(self):
+        result = fixture_result("all-correct", baseline={"values": {"P1/zz_unknown/truth": 1.0}})
+        self.assertEqual(result["baseline"]["absent"], ["P1/zz_unknown/truth"])
+        self.assertIn("基线里有、本次没有的指标（未比较）：P1/zz_unknown/truth", render_markdown(result, META))
+        self.assertNotIn("未与基线比较", conclusion(result, META))
+
+    def test_the_known_gap_table_row_says_to_flip_an_unexpected_pass(self):
+        rows = [observation("gap", request_id="g1", group="regression", status="known_gap", ref="P1-2",
+                            reason="attack", note="UNION 查询没有被判为攻击")]
+        text = render_markdown(score(rows, [decision("g1", jev_record=jev(access="ALLOW", attack="ATTACK"))]), META)
+        self.assertIn("| gap | P1-2 | UNION 查询没有被判为攻击 | idor_direct | 真值 | 是，请把状态改为 must |", text)
