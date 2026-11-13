@@ -18,7 +18,7 @@ from unittest import mock
 
 from effectiveness import jev_relay
 from effectiveness.cli import KNOWN_GAPS_PATH, main
-from effectiveness.contracts import load_known_gaps
+from effectiveness.contracts import load_decisions, load_known_gaps
 from effectiveness.score import score
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -166,6 +166,18 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(listed, load_known_gaps(KNOWN_GAPS_PATH))
         self.assertTrue(listed)
         self.assertEqual(unlisted, [])
+
+    def test_the_score_command_reads_the_training_records_only_when_told_and_says_which(self):
+        folder = FIXTURES / "all-correct"
+        base = ["score", "--observations", str(folder / "observations.jsonl"),
+                "--decisions", str(folder / "decisions.jsonl"), "--known-gaps", str(NO_GAPS)]
+        with mock.patch("effectiveness.cli.score", wraps=score) as scored:
+            run_cli(*base, "--out", str(self.out / "all"))
+            run_cli(*base, "--training", str(folder / "decisions.jsonl"), "--out", str(self.out / "training"))
+        self.assertIsNone(scored.call_args_list[0].kwargs["training"])
+        self.assertEqual(scored.call_args_list[1].kwargs["training"], load_decisions(folder / "decisions.jsonl"))
+        self.assertIn("未给 --training", (self.out / "all" / "report.md").read_text(encoding="utf-8"))
+        self.assertIn("原因标签按训练段的判定记录计算", (self.out / "training" / "report.md").read_text(encoding="utf-8"))
 
     def test_help_exits_0(self):
         status, _, _ = run_cli("--help")
