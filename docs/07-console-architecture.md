@@ -591,7 +591,7 @@ CREATE TABLE jev_prompts (
 ### 7.8.2 分区与保留
 
 - 按 UTC 自然日分区，分区名 `decision_log_pYYYYMMDD`，范围 `[当日 00:00, 次日 00:00)` 的毫秒值。
-- 控制面启动时和之后每小时：确保从 7 天前（保留窗口的起点）到 7 天后的分区都存在（`CREATE TABLE IF NOT EXISTS … PARTITION OF … FOR VALUES FROM … TO …`）；删除上界早于“现在 − 7 天”的分区（先 `DETACH PARTITION … CONCURRENTLY` 再 `DROP TABLE`，不长时间锁父表）。分离若被打断，分区会停在“待分离”状态（`pg_inherits.inhdetachpending`），下一次维护先用 `DETACH PARTITION … FINALIZE` 完成分离再删除，不会每小时在它上面报错。
+- 控制面启动时和之后每小时：确保从 7 天前（保留窗口的起点）到 7 天后的分区都存在（`CREATE TABLE IF NOT EXISTS … PARTITION OF … FOR VALUES FROM … TO …`）；删除上界早于“现在 − 7 天”的分区（先 `DETACH PARTITION … CONCURRENTLY` 再 `DROP TABLE`，不长时间锁父表）。分离若被打断，分区会停在“待分离”状态（`pg_inherits.inhdetachpending`），下一次维护先用 `DETACH PARTITION … FINALIZE` 完成分离再删除，不会每小时在它上面报错。分离已经完成、删除被打断的过期日分区表不再挂在父表下，下一次维护直接删除它。
 - **往回补齐到保留窗口的起点，是为了导入**：首次部署控制面之后，网关文件模式留下的、仍在保留期内的较早记录（[7.9.9](#799-导入与导出)）也要有分区可写；空分区几乎没有成本。早于 `now − 7 天` 的日期不建分区，对应的记录不入库。
 - **提前 7 天建分区，是因为没有默认分区兜底**：控制面停机期间网关照常写入，提前量就是控制面最长能停机的时间；超过它网关的插入会失败，控制台显示日志缺口（[7.7.4](#774-日志发送)）。系统页在“今天没有分区”或“未来分区不足 2 天”时告警，`GET /api/system` 返回每个分区的范围。
 - 时钟严重偏离的行（`at_millis` 落在任何分区之外）无处可写，插入失败并计入 `write_errors`，不为它们留默认分区。

@@ -31,9 +31,6 @@ pub struct PartitionInfo {
     pub rows_estimate: i64,
     /// Total size on disk, table and indexes, in bytes.
     pub bytes: i64,
-    /// True when an earlier `DETACH ... CONCURRENTLY` was cancelled between its two halves
-    /// and left the partition detached-pending (docs/07 section 7.8.2).
-    pub detach_pending: bool,
 }
 
 /// Name of the partition holding `day`.
@@ -146,8 +143,12 @@ pub async fn ensure_partition(pool: &PgPool, day: NaiveDate) -> Result<(), Parti
 
 /// Drops every daily partition whose end is at or before `cutoff_millis`: first
 /// `DETACH PARTITION ... CONCURRENTLY`, so the parent table is not locked for
-/// long, then `DROP TABLE`. A partition that an earlier pass left detach-pending is
-/// finished with `DETACH PARTITION ... FINALIZE` instead. Returns the names dropped.
+/// long, then `DROP TABLE`. Returns the names dropped.
+///
+/// A run that was interrupted is finished by the next one: a partition whose
+/// detach was left pending is detached with `FINALIZE` (no other partition can
+/// be detached while one is pending), and a table that was detached but not
+/// dropped is dropped.
 ///
 /// # Errors
 /// Returns [`PartitionError`] when a statement fails.
@@ -155,13 +156,38 @@ pub async fn drop_partitions_ended_before(
     pool: &PgPool,
     cutoff_millis: i64,
 ) -> Result<Vec<String>, PartitionError> {
+    // Step 0 is a pending detach, finished before any other partition is detached;
+    // step 1 an attached partition; step 2 a table detached earlier and not dropped.
+    let rows = sqlx::query(
+        "SELECT c.relname AS name, 0 AS step
+         FROM pg_inherits i
+         JOIN pg_class c ON c.oid = i.inhrelid
+         JOIN pg_class p ON p.oid = i.inhparent
+         WHERE p.relname = 'decision_log' AND i.inhdetachpending
+         UNION ALL
+         SELECT c.relname, 1
+         FROM pg_inherits i
+         JOIN pg_class c ON c.oid = i.inhrelid
+         JOIN pg_class p ON p.oid = i.inhparent
+         WHERE p.relname = 'decision_log' AND NOT i.inhdetachpending
+         UNION ALL
+         SELECT c.relname, 2
+         FROM pg_class c
+         WHERE c.relkind = 'r' AND NOT c.relispartition
+           AND c.relname LIKE 'decision\\_log\\_p%' AND pg_table_is_visible(c.oid)
+         ORDER BY step, name",
+    )
+    .fetch_all(pool)
+    .await?;
     let mut dropped = Vec::new();
-    for partition in list_partitions(pool).await? {
+    for row in &rows {
+        let name: String = row.try_get("name")?;
+        let step: i32 = row.try_get("step")?;
         // Only names that are exactly a daily partition name reach the SQL below.
-        let Some(day) = day_of_partition(&partition.name) else {
+        let Some(day) = day_of_partition(&name) else {
             continue;
         };
-        if partition_name(day) != partition.name {
+        if partition_name(day) != name {
             continue;
         }
         let Some((_, end)) = day_bounds_millis(day) else {
@@ -172,21 +198,21 @@ pub async fn drop_partitions_ended_before(
         }
         // DETACH ... CONCURRENTLY cannot run inside a transaction block, so each
         // statement runs on the pool, one at a time.
-        let name = &partition.name;
-        if partition.detach_pending {
-            // Starting the detach again fails on a partition that is already pending, so an
-            // interrupted detach is completed first. Otherwise every later pass would stop
-            // at this partition and no partition after it would ever be dropped.
-            let finalize = format!("ALTER TABLE decision_log DETACH PARTITION \"{name}\" FINALIZE");
-            sqlx::query(AssertSqlSafe(finalize)).execute(pool).await?;
-        } else {
-            let detach =
-                format!("ALTER TABLE decision_log DETACH PARTITION \"{name}\" CONCURRENTLY");
+        let detach = match step {
+            0 => Some(format!(
+                "ALTER TABLE decision_log DETACH PARTITION \"{name}\" FINALIZE"
+            )),
+            1 => Some(format!(
+                "ALTER TABLE decision_log DETACH PARTITION \"{name}\" CONCURRENTLY"
+            )),
+            _ => None,
+        };
+        if let Some(detach) = detach {
             sqlx::query(AssertSqlSafe(detach)).execute(pool).await?;
         }
         let drop = format!("DROP TABLE \"{name}\"");
         sqlx::query(AssertSqlSafe(drop)).execute(pool).await?;
-        dropped.push(partition.name);
+        dropped.push(name);
     }
     Ok(dropped)
 }
@@ -199,8 +225,7 @@ pub async fn list_partitions(pool: &PgPool) -> Result<Vec<PartitionInfo>, Partit
     let rows = sqlx::query(
         "SELECT c.relname AS name,
                 GREATEST(c.reltuples, 0)::bigint AS rows_estimate,
-                pg_total_relation_size(c.oid)::bigint AS bytes,
-                i.inhdetachpending AS detach_pending
+                pg_total_relation_size(c.oid)::bigint AS bytes
          FROM pg_inherits i
          JOIN pg_class c ON c.oid = i.inhrelid
          JOIN pg_class p ON p.oid = i.inhparent
@@ -217,7 +242,6 @@ pub async fn list_partitions(pool: &PgPool) -> Result<Vec<PartitionInfo>, Partit
             name,
             rows_estimate: row.try_get("rows_estimate")?,
             bytes: row.try_get("bytes")?,
-            detach_pending: row.try_get("detach_pending")?,
         });
     }
     Ok(partitions)
@@ -251,7 +275,6 @@ pub async fn purge_edges_seen_before(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::{Connection, PgConnection};
 
     #[test]
     fn a_daily_partition_is_named_by_its_utc_day() {
@@ -298,52 +321,13 @@ mod tests {
     // The database tests need a reachable PostgreSQL instance and run when
     // `XSHIELD_TEST_DATABASE_URL` is set (scripts/test_postgres.sh does that).
 
+    /// A retention run drops every partition that ended before its cutoff, whichever
+    /// test made it, so the tests that run one take turns.
+    static RETENTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn connect_test_pool() -> PgPool {
         let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
         PgPool::connect(&url).await.expect("connect")
-    }
-
-    /// Leaves `name` detach-pending the way a cancelled `DETACH ... CONCURRENTLY` does: its
-    /// first half commits, and its second half waits for every transaction that holds a lock
-    /// on the partition. A transaction that reads the partition keeps such a lock, and a
-    /// statement timeout cancels the detach there. The lock is on the partition alone, so
-    /// other tests can meanwhile create partitions of the parent, which takes a lock on it.
-    async fn leave_detach_pending(pool: &PgPool, name: &str) {
-        let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
-        let mut reader = pool.begin().await.expect("begin");
-        sqlx::query(AssertSqlSafe(format!("SELECT count(*) FROM \"{name}\"")))
-            .execute(&mut *reader)
-            .await
-            .expect("read the partition");
-
-        // DETACH ... CONCURRENTLY cannot run inside a transaction block, so it gets its own
-        // connection, which is closed again before the pool is used.
-        let mut detacher = PgConnection::connect(&url).await.expect("connect");
-        sqlx::query("SET statement_timeout = '2s'")
-            .execute(&mut detacher)
-            .await
-            .expect("statement timeout");
-        let detach = format!("ALTER TABLE decision_log DETACH PARTITION \"{name}\" CONCURRENTLY");
-        let cancelled = sqlx::query(AssertSqlSafe(detach))
-            .execute(&mut detacher)
-            .await;
-        assert!(
-            cancelled.is_err(),
-            "the second half must wait for the reader"
-        );
-        drop(detacher);
-        reader.rollback().await.expect("release the partition");
-
-        let pending: bool = sqlx::query_scalar(
-            "SELECT i.inhdetachpending FROM pg_inherits i
-             JOIN pg_class c ON c.oid = i.inhrelid
-             WHERE c.relname = $1",
-        )
-        .bind(name)
-        .fetch_one(pool)
-        .await
-        .expect("pending flag");
-        assert!(pending, "{name} should be detach-pending");
     }
 
     #[tokio::test]
@@ -376,6 +360,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn drop_removes_only_the_partitions_that_ended_by_the_cutoff() {
+        let _turn = RETENTION.lock().await;
         let pool = connect_test_pool().await;
         // Two days that end at or before the cutoff, and one that ends after it.
         // The days lie in 1969 and 1970, which no other test uses, so dropping
@@ -386,9 +371,6 @@ mod tests {
         for day in [ended_first, ended_second, kept] {
             ensure_partition(&pool, day).await.expect("create");
         }
-        // An interrupted earlier pass left the first partition detach-pending. This pass must
-        // finish that detach and still drop it, and carry on with the partitions after it.
-        leave_detach_pending(&pool, &partition_name(ended_first)).await;
         // The cutoff is the start of 1970-01-01 UTC, where 1969-12-31 ends exactly.
         let (cutoff, _) = day_bounds_millis(kept).expect("bounds");
 
@@ -414,6 +396,104 @@ mod tests {
         drop_partitions_ended_before(&pool, kept_end)
             .await
             .expect("cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_table_detached_but_not_dropped_is_dropped_by_the_next_run() {
+        let _turn = RETENTION.lock().await;
+        let pool = connect_test_pool().await;
+        // 1968 is used by no other test.
+        let day = NaiveDate::from_ymd_opt(1968, 3, 1).expect("date");
+        let name = partition_name(day);
+        ensure_partition(&pool, day).await.expect("create");
+        sqlx::query(AssertSqlSafe(format!(
+            "ALTER TABLE decision_log DETACH PARTITION \"{name}\""
+        )))
+        .execute(&pool)
+        .await
+        .expect("detach");
+        let (_, end) = day_bounds_millis(day).expect("bounds");
+
+        let dropped = drop_partitions_ended_before(&pool, end)
+            .await
+            .expect("drop");
+
+        assert!(dropped.contains(&name));
+        let left: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1)")
+                .bind(&name)
+                .fetch_one(&pool)
+                .await
+                .expect("exists");
+        assert!(!left);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn an_interrupted_concurrent_detach_is_finished_by_the_next_run() {
+        let _turn = RETENTION.lock().await;
+        let pool = connect_test_pool().await;
+        // 1967 is used by no other test.
+        let pending = NaiveDate::from_ymd_opt(1967, 5, 1).expect("date");
+        let other = NaiveDate::from_ymd_opt(1967, 5, 2).expect("date");
+        for day in [pending, other] {
+            ensure_partition(&pool, day).await.expect("create");
+        }
+        let name = partition_name(pending);
+
+        // A transaction that has read the table keeps the detach waiting in its
+        // second phase, after the partition is marked as pending.
+        let mut reader = pool.begin().await.expect("begin");
+        sqlx::query("SELECT count(*) FROM decision_log WHERE at_millis < 0")
+            .execute(&mut *reader)
+            .await
+            .expect("read");
+        let detaching = {
+            let pool = pool.clone();
+            let name = name.clone();
+            tokio::spawn(async move {
+                sqlx::query(AssertSqlSafe(format!(
+                    "ALTER TABLE decision_log DETACH PARTITION \"{name}\" CONCURRENTLY"
+                )))
+                .execute(&pool)
+                .await
+            })
+        };
+        let mut marked = false;
+        for _ in 0..100 {
+            marked = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+                     WHERE c.relname = $1 AND i.inhdetachpending)",
+            )
+            .bind(&name)
+            .fetch_one(&pool)
+            .await
+            .expect("pending");
+            if marked {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(marked, "the detach never reached its pending phase");
+        sqlx::query(
+            "SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+             WHERE query LIKE 'ALTER TABLE decision_log DETACH PARTITION%CONCURRENTLY'
+               AND pid <> pg_backend_pid()",
+        )
+        .execute(&pool)
+        .await
+        .expect("cancel");
+        assert!(detaching.await.expect("join").is_err());
+        reader.rollback().await.expect("rollback");
+
+        let (_, end) = day_bounds_millis(other).expect("bounds");
+        let dropped = drop_partitions_ended_before(&pool, end)
+            .await
+            .expect("drop");
+
+        assert!(dropped.contains(&name));
+        assert!(dropped.contains(&partition_name(other)));
     }
 
     /// A minimal decision row at `at_millis`, for the window test.
