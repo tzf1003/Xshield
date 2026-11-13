@@ -423,7 +423,8 @@ pub struct NameReason {
 /// The kind a request position's name gives it. `route` is the request's route, `key` the query,
 /// form or body key of the position (`None` for a path position), and `segment` the index of a path
 /// position among the route's segments. A declared key gives no name, since its declaration decides,
-/// and a key that names no identifier gives none either: `name` is a word, not an object.
+/// and a key that names no identifier gives none either: `name` is a word, not an object. Only a bare
+/// identifier (`id`, `ids`) takes its parent's kind or the route word; `q` and `query` take nothing.
 #[must_use]
 pub fn request_name(
     route: &str,
@@ -453,6 +454,10 @@ pub fn request_name(
     if !kind_words(last).is_empty() {
         return None;
     }
+    // Only a bare identifier takes a name from its parent or from the route: `q` names nothing.
+    if !is_id_like(last.strip_suffix('s').unwrap_or(last)) {
+        return None;
+    }
     if let Some(word) = first_kind(kind_words(nearest(parent))) {
         return Some(NameReason {
             source: NameSource::Parent,
@@ -468,10 +473,18 @@ pub fn request_name(
     })
 }
 
-/// The kind a response position's name gives it. `field` is the field as the state keeps it, and
-/// `request` the `METHOD /path` that returned it. A declared field gives no name, and a field whose
-/// name is not an identifier gives none either. A bare `id` takes its parent's kind, else the
-/// endpoint's.
+/// Words that name a container of objects, not an object: `results[].id` is the id of some result, and
+/// the word says nothing about what that result is. `entries` reads as `entrie` once its plural is taken
+/// off, so both spellings are listed. Only the response naming reads this list.
+const CONTAINER_WORDS: [&str; 11] = [
+    "result", "item", "row", "record", "entry", "entrie", "element", "node", "hit", "content",
+    "page",
+];
+
+/// The kind a response position's name gives it. `field` is the field as the state keeps it, an array
+/// element as `prescriptions[].id`, and `request` the `METHOD /path` that returned it. A declared field
+/// gives no name, and a field whose name is not an identifier gives none either. A bare `id` takes its
+/// parent's kind, else the endpoint's; under a container word (`results[].id`) it takes none.
 #[must_use]
 pub fn response_name(field: &str, request: &str, rules: &Rules) -> Option<NameReason> {
     if declares(Shown { field, request }, rules) {
@@ -489,6 +502,11 @@ pub fn response_name(field: &str, request: &str, rules: &Rules) -> Option<NameRe
         return None;
     }
     if let Some(word) = first_kind(kind_words(nearest(parent))) {
+        // The endpoint's name would say nothing about the element, so a container's id takes none. Its
+        // kind has to come from where the value flows.
+        if CONTAINER_WORDS.contains(&word.as_str()) {
+            return None;
+        }
         return Some(NameReason {
             source: NameSource::Parent,
             word,
@@ -808,5 +826,68 @@ mod tests {
         };
         assert!(shows_kind(bare, &Rules::default(), "document"));
         assert!(!shows_kind(bare, &Rules::default(), "doctor"));
+    }
+
+    #[test]
+    fn an_array_element_takes_the_kind_of_its_array() {
+        let rules = Rules::default();
+        let prescription = response_name("prescriptions[].id", "GET /api/patients/{id}", &rules)
+            .expect("the array's name");
+        assert_eq!(
+            (prescription.source, prescription.word.as_str()),
+            (NameSource::Parent, "prescription")
+        );
+        let patient = response_name("patients[].id", "GET /api/admin/export", &rules)
+            .expect("the array's name");
+        assert_eq!(
+            (patient.source, patient.word.as_str()),
+            (NameSource::Parent, "patient")
+        );
+        // A top-level array has no parent object, so its bare id takes the endpoint's kind.
+        let endpoint = response_name("[].id", "GET /api/doctors", &rules).expect("an endpoint");
+        assert_eq!(
+            (endpoint.source, endpoint.word.as_str()),
+            (NameSource::Endpoint, "doctor")
+        );
+    }
+
+    #[test]
+    fn a_bare_id_under_a_container_word_names_no_kind() {
+        let rules = Rules::default();
+        for field in [
+            "results[].id",
+            "items[].id",
+            "data.rows[].id",
+            "entries[].id",
+        ] {
+            assert!(
+                response_name(field, "GET /api/admin/search", &rules).is_none(),
+                "{field} names no kind"
+            );
+        }
+        // A generic array name says nothing either, so the endpoint's name stands.
+        let generic = response_name("data[].id", "GET /api/doctors", &rules).expect("an endpoint");
+        assert_eq!(
+            (generic.source, generic.word.as_str()),
+            (NameSource::Endpoint, "doctor")
+        );
+    }
+
+    #[test]
+    fn a_key_that_is_not_an_identifier_takes_no_route_word() {
+        let rules = Rules::default();
+        // `q` is a search term, and the search route's word is no kind for it.
+        assert!(request_name("/api/admin/search", Some("q"), None, &rules).is_none());
+        assert!(request_name("/api/admin/search", Some("query.q"), None, &rules).is_none());
+        assert!(request_name("/api/admin/search", Some("query"), None, &rules).is_none());
+        // Bare identifiers still take the route word, singular or plural.
+        for key in ["id", "ids", "query.id", "query.ids"] {
+            let route = request_name("/api/admin/search", Some(key), None, &rules).expect(key);
+            assert_eq!(
+                (route.source, route.word.as_str()),
+                (NameSource::Route, "admin"),
+                "{key} takes the route word"
+            );
+        }
     }
 }

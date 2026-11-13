@@ -231,14 +231,14 @@ GET /api/patients ──响应里出现 id=7──┐
 | `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
 | `function` | 请求到达管理档条目，或它的功能未知时才有（见 7.9.18 的“在判定中的使用”）：`key` 是传输方法、一个空格和路由模板，凭证已脱敏；`entry` 是命中的管理档条目的键；`tier` 为 `admin`；`attempt` 为 `over_privilege`（非管理员会话，即尝试越权）；`known` 为 `false`（功能表没有这个功能）。不适用的 `entry`、`tier`、`attempt`、`known` 省略 |
 | `timing` | `total_ms` 从收到请求头到响应写完；`judge_ms` 是判定耗时（含 Jev）；`origin_ms` 从发出上游请求到收到响应头 |
-| `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
+| `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded`、`would_block`（观察模式下本应拦截的请求，响应不学，[7.4.6](#746-观察模式下本应拦截请求的响应不学习)） |
 | `response.values` / `new_values` | 从响应里取出的值数、其中会话原先没有的值数 |
 | `response.fields` | 出现次数最多的 12 个字段名及次数，形如 `[{ "field": "id", "count": 3 }]`；不存值本身 |
 | `response.fingerprints` | 按响应位置记的值指纹，键是 `METHOD 路由 位置`（与 `values[].slot` 同格式），值是该位置至多 8 个指纹，取最小的。每个指纹是站点派生的键控哈希的前 8 字节，写成 16 位十六进制：同一站点里同一个值在任何会话里指纹相同，换一个站点就不同。位置至多 16 个，按响应里出现的顺序取前面的。不存值本身；没有可记的值时省略。控制面用它统计同一位置的值被多少用户共享，以学习接口档位 |
 | `response.issued_session` | 响应下发了新凭证（登录）时，新会话的标签 |
 | `response.pending_values` | JSON 凭证站点的登录响应被暂存为待绑定登录时，暂存的值个数加长候选个数（[01 1.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。没有时不写 |
 | `response.entry_passed` | 这个响应让会话第一次经过某个入口 |
-| `response.after_would_block` | 这次请求是“本应拦截”但在观察模式下被转发，它的响应仍被学进上下文（[7.4.6](#746-附带发现观察模式下本应拦截请求的响应仍进入上下文)） |
+| `response.after_would_block` | 这次请求是“本应拦截”但在观察模式下被转发。它的响应不学习，`skip` 为 `would_block`（[7.4.6](#746-观察模式下本应拦截请求的响应不学习)） |
 | `response.exposure` | 属性越权告警（W6，[7.9.17](#7917-属性越权告警w6)）：响应里有一个不属于本会话的用户类对象，同时有手机号、邮箱或身份证号类属性。`users` 为用户类位置（至多 4 个），`attributes` 为敏感属性的位置、`kind`（`phone`、`email`、`id_card`）和识别方式 `by`（`name` 按字段名，`format` 按值的格式）（至多 8 个），`truncated` 表示被截断。只记位置和类别，不存值。没有身份位置的站点、未见过身份的会话，以及没有告警的响应都不写这一项。只告警，不影响判定 |
 
 ### 7.4.4 脱敏与上限
@@ -262,11 +262,15 @@ GET /api/patients ──响应里出现 id=7──┐
 }
 ```
 
-### 7.4.6 附带发现：观察模式下本应拦截请求的响应仍进入上下文
+### 7.4.6 观察模式下本应拦截请求的响应不学习
 
-`Judge::observe` 对所有转发出去的 2xx 响应学习，不看这次请求的结论。观察模式下“本应拦截”的请求照常转发，它的响应也被学进会话，之后引用这些值的请求会被快速放行；切到拦截模式后，前一个请求被拦，后面这些请求也会因为值未见而交给 Jev。因此观察期的“本应拦截”数量可能少于拦截模式下的真实拦截数。
+观察模式下，判定为“本应拦截”的请求照常转发，但它的响应对上下文不产生任何影响，与拦截模式下这个请求没有到源站一样：
 
-这不是控制台能修的问题，记录在这里交给判定线程决定（例如本应拦截的响应不学习）。控制台的做法：用 `trace.response.after_would_block` 标出这种学习，模式切换前的就绪检查里单列“由本应拦截请求学到的值被后续请求引用 N 次”。
+- 不学值（会话和地址两种上下文都不学），不暂存登录响应，不声明身份，不记入口通过，不进最近访问，不算属性越权告警，不上报结构。
+- 请求发出的值照常记下。签发了凭证时，新会话照常继承这些值，之后的回显不会被当作已见值学回来。
+- 摘要：`response.observed` 为 `skipped`，`skip` 为 `would_block`，`after_would_block` 为 `true`，`new_values` 为 0；`issued_session` 照常填。非 2xx 的响应仍按 `status` 记原因，判断顺序不变。
+
+这样观察期学到的值不会让切到拦截模式后的判定变宽松，观察期看到的“本应拦截”也和切换后实际拦截的请求一致。控制台在请求详情的学习一步里标出这类响应。升级前写下的记录仍保存着当时学到的值（`observed` 为 `json` 或 `html`），控制台把它们写成“本应拦截请求的响应也进入了上下文（旧版本的记录）”，时间线标“本应拦截学习”；判定日志保留 7 天，之后这类记录不再出现。就绪检查不再列“由本应拦截请求学到的值被引用次数”，这一项已删除。
 
 ### 7.4.7 档位在判定中的使用
 
@@ -292,10 +296,10 @@ GET /api/patients ──响应里出现 id=7──┐
 | `public`，可靠性 `medium` 或 `low` | 证明 | 证明 |
 | `org` | 证明 | 证明 |
 | 没有标档位 | 证明 | 证明 |
-| `self` | 不证明，因此不快速放行 | 不证明，因此不快速放行 |
+| `self` | 证明 | 证明 |
 | `admin` | 管理员会话证明，其他会话不证明（见下） | 同左 |
 
-只要有一个展示过该值的响应证明了它，值就被核验（`verified: true`）。`self` 从不单独证明，它只用来排除收紧：同一个值的来源里有 `self`，就不是尝试越权。没有任何响应展示过的值既不证明，也不是尝试越权，照常交给 Jev。
+只要有一个展示过该值的响应证明了它，值就被核验（`verified: true`）。`self` 和没有标档位的响应一样证明会话见过该对象（它展示的是会话自己的记录），它另外排除收紧：同一个值的来源里有 `self`，就不是尝试越权。没有任何响应展示过的值既不证明，也不是尝试越权，照常交给 Jev。
 
 管理员：管理档响应对管理员会话算正证，按正常逻辑判，与没有标档位的响应相同；对其他会话不证明。会话是否为管理员由身份位置决定（[7.9.15](#7915-对象表的身份位置w1)）：身份位置 `role` 声明的角色标签是 `admin`（`ADMIN_ROLE`）的会话就是管理员会话，其他标签和没有声明的会话都不是。角色只是辅助，不是放行理由：管理员没见过的对象照常拦，管理员在公共搜索里见过的对象照样是尝试越权。
 
@@ -303,7 +307,7 @@ GET /api/patients ──响应里出现 id=7──┐
 
 - `state`：`seen_as` 每一项在括号里附上来源位置的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`，没有标档位的来源不带括号。请求值带 `public_access`，形如 `{"accepts": false, "reliability": "high"}`，位置没有 `accepts_public` 时不带。尝试越权的值带 `"attempt": "over_privilege"`（[02 §2.2](02-jev.md#22-调用内容)）。
 - `trace`：`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability`，见 [7.4.3](#743-trace-结构)。
-- 没有标档位的站点：`state` 的数据、`trace` 的新字段与判定都与之前相同。指令文字（`ACCESS_INSTRUCTIONS`）新增了对档位的说明，所以指令版本号 `prompt`（见 [7.5.1](#751-jevrecord-v2)）对所有站点都变了，现在是 `jq_e290fa8a62172221`。
+- 没有标档位的站点：`state` 的数据、`trace` 的新字段与判定都与之前相同。指令文字（`ACCESS_INSTRUCTIONS`）新增了对档位的说明，所以指令版本号 `prompt`（见 [7.5.1](#751-jevrecord-v2)）对所有站点都变了，现在是 `jq_d5df87392a92b44d`（见 [7.5.5](#755-指令版本表)）。
 
 ## 7.5 Jev 调用上下文的保存
 
@@ -315,7 +319,9 @@ GET /api/patients ──响应里出现 id=7──┐
 | `prompt` | 指令版本 ID：`jq_` 加 `questions` JSON 的 SHA-256 前 16 位十六进制；全文在 `jev_prompts` 表（新增）。完整请求体由 `model`、`state`、`questions` 三者拼回，是“还原值”：键的顺序可能与实际发出的不同，字节数以 `request_bytes` 为准 |
 | `model` / `route` | 线上模型名（`typesafe-ai/jev`、`jev-1.13.0` 或 `XSHIELD_JEV_MODEL`）；线路 `gateway` / `direct` / `custom`（新增），没有加载配置时为 `none` |
 | `timeout_ms` | 这次调用实际使用的超时：站点 `advanced.jev_timeout_ms`，没写时取 `XSHIELD_JEV_TIMEOUT_MS`（新增） |
-| `trim` | `state` 裁剪级别 0–4（新增，见 7.5.3） |
+| `trim` | `state` 裁剪级别 0–4（新增，见 7.5.3）。分批时是展示那一批的级别 |
+| `batches` / `batch` | 分批时才有（新增，单批记录不带这两个字段）：`batches` 是 `state` 分成的批数，`batch` 是本记录展示的第几批，从 1 起。其余字段描述 `batch` 那一批：判拒的、失败的或 UNKNOWN 的，取序号最小的一批；全部放行时取把握最小的一批（`min(P(ALLOW), P(BENIGN))` 最小，相同取序号最小）。`millis` 是全部调用的墙上时间，`request_bytes` 是已发出各批之和，`usage` 把各批的数值字段相加、其他字段取展示的那一批 |
+| `left_out` | 分批超过 16 批时才有（新增，`None` 时不写出）：没有送出的值和片段数（[02.4](02-jev.md#24-输入上限与脱敏)）。有值时，结论只依据送出的部分，放行也不写放行缓存 |
 | `request_bytes` | 完整请求体字节数（新增） |
 | `http_status` | 模型服务的 HTTP 状态；超时和连接失败为 null（新增） |
 | `response` | 模型服务原始响应体，按 UTF-8 宽松解码，最多 8 KiB（新增）；超时和连接失败为 null |
@@ -332,7 +338,7 @@ GET /api/patients ──响应里出现 id=7──┐
 `state` 不带请求 ID，也不因控制台改变（Jev 不需要 ID，多写只增加 token）。控制台展示时把 `state` 和 `trace` 对齐：
 
 - `state.request.values` 由非惰性值按提取顺序构成，所以 `state.request.values[i]` 对应 `trace.values` 中第 i 个 `inert == false` 的元素。不用 `at` 对齐，因为数组元素会共享同一个 `at`（`body.ids[]`）。
-- `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`：`seen_as` 是 `sources` 的前缀，裁剪级别 3、4 只发 1 个来源，所以可以更短，不要求等长。
+- `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`：`seen_as` 是 `sources` 的前缀，裁剪级别 3 只发 1 个来源、级别 4 不发来源，所以可以更短，不要求等长。
 - `seen_as[j]` 括号中的档位和可靠性对应 `sources[j].tier` 和 `sources[j].reliability`（[7.4.7](#747-档位在判定中的使用)）。
 - `state.recent` 是最近访问的最后 N 条（N 由裁剪级别决定），对应 `trace.session.recent` 的最后 N 条。
 - `state.session.entries_passed[k]` 对应 `trace.session.entries_passed[k]`。
@@ -341,21 +347,23 @@ GET /api/patients ──响应里出现 id=7──┐
 
 **对不上时不猜**：`align.ts` 先校验非惰性值个数等于 `state.request.values` 长度，且每个下标上的 `at` 相同（两边都截到 256 字节再比，`sameName`，因为追溯里超长的 `at` 已被截断，见 7.4.3）；每个值的 `seen_as` 不比 `sources` 长（`trace.trimmed` 为真时来源可能已被减到 1 个，只比较公共前缀，多出的 `seen_as` 条目没有来源链接），且 `seen_as[j]` 逐字等于 `` `${sources[j].field} @ ${sources[j].request}` ``（网关生成 `seen_as` 的格式，`engine.rs`）——只比个数会放过次序互换，要求等长又会让裁剪过的正常记录失去来源链接；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
 
-实现要求：`build_state` 的输入和输出不变，新增一个单元测试固定一组输入的 `state` 字节（黄金样本），并断言 `state` 不含 `req_`；另一个测试用同一组输入生成 `trace`，断言按上面的规则能对齐，并覆盖脱敏值、被截断的长值、数组元素共享同一个 `at` 三种情形。
+分批的记录（带 `batches`）的 `state` 只含那一批的值，`trace.values` 是整次请求的，两者不一一对应。控制台对这种记录不做对齐，显示“这次请求分成 N 批送判，本批的 state 只含其中一部分值，来源链接不可用”，`state` 原文照常展示。
+
+实现要求：`build_states` 的单批输入和输出与之前一致，新增一个单元测试固定一组输入的 `state` 字节（黄金样本），并断言 `state` 不含 `req_`；另一个测试用同一组输入生成 `trace`，断言按上面的规则能对齐，并覆盖脱敏值、被截断的长值、数组元素共享同一个 `at` 三种情形。
 
 ### 7.5.3 裁剪级别
 
-`build_state` 依次尝试以下组合，取第一个不超过 8 KiB 的（现有代码 `state.rs`）：
+`build_states` 依次尝试级别 0 至 3，取第一个不超过 8 KiB 的：值都放在这一份里，记录的 `trim` 就是这个级别。都放不下时，请求值分批，每批按级别 3 装（[7.5.1](#751-jevrecord-v2) 的 `batches`）。但空壳（级别 3 的 `state` 去掉所有值，路径里的整值也算在内，两步的顺序见 [02.4](02-jev.md#24-输入上限与脱敏)）超过 4 KiB 时，所有批都按级别 4 装，让每批能装下的值不至于只有几个。分批最多 16 批（`JEV_BATCHES_MAX`）。路径里的整值每批都带，开头依次排列（[02.4](02-jev.md#24-输入上限与脱敏)）；其余值先送没核验的非输入值，再送其余整值，最后送其余片段（[02.5](02-jev.md#25-延迟费用与限流)）；没送出的记在 `left_out`。级别 4 只用在空壳过大的分批，或一个值独占一批、按级别 3 仍放不下的情况（现有代码 `state.rs`）：
 
-| `trim` | 最近访问条数 | 每个值的来源数 | 单值最长字符 |
+| `trim` | 最近访问条数 | 每个值的来源数 | 其他 |
 |---|---|---|---|
-| 0 | 10 | 3 | 512 |
-| 1 | 3 | 3 | 512 |
-| 2 | 0 | 3 | 512 |
-| 3 | 0 | 1 | 512 |
-| 4 | 0 | 1 | 128 |
+| 0 | 10 | 3 | |
+| 1 | 3 | 3 | |
+| 2 | 0 | 3 | |
+| 3 | 0 | 1 | 分批时每批用这一级，空壳超过 4 KiB 时改用级别 4 |
+| 4 | 0 | 0 | 去掉 `session.entries_passed`，`path` 截到 256 字符；只用于空壳过大的分批，或一个值独占一批仍放不下 |
 
-`build_state` 改为同时返回级别。控制台在 Jev 视图顶部写明“为满足 8 KiB 上限，最近访问从 10 条减到 3 条”这类说明。
+请求值不再截断，因此没有“单值最长字符”一列：超过 512 个字符的值切成片（[02.2](02-jev.md#22-调用内容)）。`at` 和每条 `seen_as` 超过 256 字符时截到 256 并加 `...`。控制台在 Jev 视图顶部写明“为满足 8 KiB 上限，最近访问从 10 条减到 3 条”这类说明；分批时写明“分 N 批送判”。
 
 ### 7.5.4 失败码
 
@@ -369,7 +377,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 | 按 `on_jev_unavailable` |
 | `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 | 按 `on_jev_unavailable` |
 | `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 | 按 `on_jev_unavailable` |
-| `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
+| `JEV_STATE_TOO_LARGE` | 分批后仍有单个值放不进 8 KiB（级别 4 也放不下），或没核验的非输入值（含片段）在 16 批内装不完。正常不出现。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
 | `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调）。没有发出调用 | 无 | 429（`rate_limited`），不论 `on_jev_unavailable` |
 
 ### 7.5.5 指令版本表
@@ -380,6 +388,7 @@ GET /api/patients ──响应里出现 id=7──┐
 |---|---|
 | `jq_e290fa8a62172221` | 功能表之前的指令：档位说明与尝试越权说明，没有 `state.request.function` 的说明 |
 | `jq_77be488d34440d84` | 功能表。新增 `state.request.function` 的说明（尝试越权答 DENY；未知功能只在路径含管理、运维、调试等词时答 DENY，其余照值判定），以及 DENY 标准里的“请求触及特权或运维功能”。新增的一段逐字与真实模型测试时相同（见 [02 2.2](02-jev.md)），改动须重新测试 |
+| `jq_d5df87392a92b44d` | 功能表之后的指令，加上分批的片段说明：`ACCESS` 增加“同一请求分几份送来，带 `part` 的值只判这一片”的说明，`ATTACK` 增加“片段边缘的载荷也算出现”的说明（见 [02 2.2](02-jev.md)）。这两句尚未用真实模型探测，定稿前须探测 |
 
 所有站点都会换用新 ID，不论它是否有功能表：指令文字对每个请求都一样。
 
@@ -405,7 +414,7 @@ advanced:
 | 字段 | 默认 | 取值 | 作用 | 调整的代价 |
 |---|---|---|---|---|
 | `jev_timeout_ms` | `XSHIELD_JEV_TIMEOUT_MS`，未设时 2000 | 100–30000 | 本站点每次 Jev 调用的超时 | 调大：慢链路下少按 `on_jev_unavailable` 处理，但要判定的请求最多多等这么久；调小：反之 |
-| `session_calls_per_minute` | 60 | 1–600 | 每个会话每分钟 Jev 调用上限，超出的请求回 429 拒绝，不论 `on_jev_unavailable` | 调大：单个会话能消耗的模型费用上限提高 |
+| `session_calls_per_minute` | 60 | 1–600 | 每个会话每分钟 Jev 调用上限，超出的请求回 429 拒绝，不论 `on_jev_unavailable`；同一来源地址建立的所有会话合计另有这个值 10 倍的上限，同样回 429（[02.5](02-jev.md#25-延迟费用与限流)） | 调大：单个会话能消耗的模型费用上限提高，同一地址的合计上限也按 10 倍提高 |
 | `address_calls_per_minute` | 30 | 1–600 | 没有会话的请求（登录、注册等入口）按客户端地址的同一上限 | NAT 或代理后多个用户共用一个地址时需要调大；调大后未登录请求能消耗的额度也提高 |
 | `allow_cache_minutes` | 10 | 0–60 | 同一会话、同一请求被 Jev 放行后直接复用结论的时长 | 调大：调用次数减少；修改配置或提示词后，旧的放行结论仍复用到期。已缓存的条目按写入时的时长到期 |
 | `secret_fields` | 空 | 最多 32 个词，每个 3–32 个字符，小写字母、数字、`_`、`-` | 追加在内置 9 个脱敏词之后（不能删除内置词），按“字段名或位置包含该词”匹配；命中的值发给 Jev 和写日志时都写成 `<redacted>` | 被脱敏的值 Jev 只看到长度，无法判断它是否越权。只加纯输入字段（身份证号、银行卡号），不要加对象引用字段；最短 3 个字符就是为了挡住 `id`、`no` 这类会把所有 ID 都脱敏的词 |
@@ -465,7 +474,7 @@ advanced:
 - `RequestFacts` 已有 `request_id`，判定时把它解析为 `u128` 用于写入缓存来源。
 - `Judgement.record` 对绕过路径不再是 `None`，而是简记录；判定记录填写 `trace.values`、`trace.session`、`trace.cache_source`、`trace.entry`、`trace.bypass`。
 - `Observation` 增加 `request_id` 和这次请求的结论；`Judge::observe` 返回 `ObservationSummary`（7.4.3 的 `response` 对象），代理把它写进同一请求的记录。
-- `build_state` 返回 `(String, trim)`；`request_body` 改为使用启动时构建一次的 `questions`，并暴露 `prompt_id()`。
+- `build_states` 返回 `Batched`：`states` 是 `(String, trim)` 的列表，装得下一份时只有一项，超过 8 KiB 时分批（7.5.3），最多 16 批；`left_out` 是没送出的值数；`request_body` 改为使用启动时构建一次的 `questions`，并暴露 `prompt_id()`。
 - 判定层在 `JEV_RESPONSE_INVALID`、`JEV_HTTP_ERROR` 时保存响应体前 8 KiB 和状态码。
 
 ### 7.7.3 代理
@@ -756,7 +765,7 @@ CREATE TABLE jev_prompts (
 ### 7.9.6 会话
 
 - `GET /api/sessions?site=&since_millis=&until_millis=&flag=blocked|jev&limit=`：在时间窗内按 `session` 聚合，返回标签、上下文类型、站点、首末时间、请求数、Jev 调用数、拦截与本应拦截数、签发它的请求 ID（来自 `trace.response.issued_session`），按最后活动倒序，最多 200 个。时间窗缺省 24 小时。
-- `GET /api/sessions/{label}?site=&only=judged|jev|blocks&cursor=`：会话摘要和按时间正序的请求行；每行附带 `learned`（`trace.response.new_values`）、`entry_passed`、`issued_session`，供时间线标注。签发这个会话的登录请求发生在会话建立之前，按客户端地址记账（`context = address`），带的不是这个会话标签；时间线把它按 `trace.response.issued_session = {label}` 另外查出，排在第一行。
+- `GET /api/sessions/{label}?site=&only=judged|jev|blocks&cursor=`：会话摘要和按时间正序的请求行；每行附带 `learned`（`trace.response.new_values`，响应没读过时为 null）、`entry_passed`、`issued_session`，供时间线标注。签发这个会话的登录请求发生在会话建立之前，按客户端地址记账（`context = address`），带的不是这个会话标签；时间线把它按 `trace.response.issued_session = {label}` 另外查出，排在第一行。
 
 ### 7.9.7 Jev
 
@@ -865,7 +874,7 @@ CREATE TABLE jev_prompts (
   - `secret_field_candidate`：Jev 记录的 `state` 里出现未脱敏、字段名明显是敏感个人信息的输入值（含 `ssn`、`idcard`、`id_card`、`passport`、`cardnum`、`card_number`、`cvc`、`iban`、`bankaccount`），推荐加入 `secret_fields`，理由里说明被脱敏的值 Jev 无法判断越权。
   - `hot_would_block`：本应拦截最多的路径模板（数字、十六进制、UUID 段替换为 `{id}`），不给配置动作，只链接到筛选后的请求列表。
   - `route_rule_candidate`：同一路径（没有路由、不是旁路、路径不含 `*`）有 20 个以上请求，且请求头名以 `-` 分隔的最后一个词，或正文字段路径的最后一个键（`body.<键路径>`），是方法词（`method`、`action`、`operation`、`op`、`cmd`、`command`、`rpc`、`func`、`function`、`service`、`api`，不分大小写）时，推荐动作为 `add_route`，即把该来源写成路由规则的 `name_from`。每条路径最多给 3 个来源，按请求数从多到少排序；每个来源都先按保存校验检查，网关会拒绝的不推荐。数字值的正文字段不算接口名。只读这些路径最近 2 万条请求，超过时 `complete` 为 false。入口路径也可能收到这条建议，应用前的影响预估会用 `entry_unreachable` 显示入口是否失效。建议的 `detail` 给出路径占本站点请求的比例（`share`）；推荐的来源里有正文字段时，还给出其中排在最前的一个（`field`，不含 `body.` 前缀）及它的不同取值数（`values`）。控制台的路由规则卡片读取这些数值。
-- `readiness`：观察开始时间（最近一次切到观察或创建站点的版本时间）、时间窗内本应拦截按判定路径计数、未处理建议数、Jev 健康、7.4.6 的“由本应拦截请求学到的值被引用次数”，以及时间窗内尝试越权的请求数（`attempts`，判定见 7.4.7）。尝试越权指请求的某个值只由公共响应展示过，而请求位置不接受公共来源；观察模式下这些请求照常转发并只计数，切到拦截后交 Jev 判定并要求拒绝。
+- `readiness`：观察开始时间（最近一次切到观察或创建站点的版本时间）、时间窗内本应拦截按判定路径计数、未处理建议数、Jev 健康，以及时间窗内尝试越权的请求数（`attempts`，判定见 7.4.7）。尝试越权指请求的某个值只由公共响应展示过，而请求位置不接受公共来源；观察模式下这些请求照常转发并只计数，切到拦截后交 Jev 判定并要求拒绝。
 
 忽略某条建议只存在浏览器 `localStorage`（按建议 `id`），不进数据库。
 
@@ -991,7 +1000,7 @@ CREATE TABLE jev_prompts (
 学习规则（控制面读决策记录，纯函数在 `xshield-core` 的 `context::learning`）。“单位”是站点声明了身份位置（W1 的 `identity` 字段，见 §7.9.15）时的用户，否则是会话。没有身份时，判断的可靠性降一档。阈值沿用 `objects.learning.thresholds`：`uses` 为“至少见到的值数”，`sessions` 为“至少的单位数”，90% 的一致程度固定为 900‰。值按指纹计：同一个值在各条记录里的指纹相同，控制面按（位置，指纹）统计见到它的单位数。不比较单位之间的集合相似度，因为不同查询得到的搜索结果集合也会互不相交。每条记录的每个位置最多带 8 个指纹（`trace.response.fingerprints`，取最小的 8 个）。列表满 8 个说明可能被截断，截断的值可能藏起另一个单位见到的同一个值，所以被两个单位或更多见到的计数是真实共享，只被一个单位见到的计数只在上述完整条件下才作证据。
 
 - `public`：非管理员单位不少于 `sessions` 个，见到的值不少于 `uses` 个，其中 900‰ 以上被两个单位或更多见到。
-- `self`：只被一个单位见到、且证据完整的值不少于 `uses` 个；在这些值与被两个单位或更多见到的值之和里，后者不超过 10‰（1%）。“证据完整”指该位置其他单位的记录都未满 8 个指纹。`self` 只用来排除收紧（目标值的来源里有 `self`，就不收紧），从不用来放行。误判只让位置维持现状，但会让搜索类接口漏检（按查询得到的互不相交的结果也会像自身），所以 `self` 的提议同样需要管理员确认。
+- `self`：只被一个单位见到、且证据完整的值不少于 `uses` 个；在这些值与被两个单位或更多见到的值之和里，后者不超过 10‰（1%）。“证据完整”指该位置其他单位的记录都未满 8 个指纹。`self` 的展示和没有标档位的响应一样证明会话见过对象，同时排除收紧（目标值的来源里有 `self`，就不收紧）。误判时，被误标的展示出来的值照样被核验并放行，与没有标档位时相同，但会让搜索类接口漏检（按查询得到的互不相交的结果也会像自身），所以 `self` 的提议同样需要管理员确认。
 - `admin`：至少一个管理员单位拿到 2xx；非管理员单位没有任何 2xx；被拒绝的非管理员单位不少于 `sessions` 个。
 - `org` 与介于两者之间的情况：规则不判断，不提议。`org` 需要每个单位的机构，留给学习代理，本次不实现。
 - 可靠性：单位数不少于阈值的两倍且一致程度不低于 980‰（`admin` 为被拒绝单位数不少于阈值的两倍）为 `high`；满足阈值但未达到这些条件为 `medium`；`low` 不提议。
