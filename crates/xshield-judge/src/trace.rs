@@ -212,7 +212,8 @@ pub fn redacted_path<'a>(path: &'a str, credential: Option<&str>) -> Cow<'a, str
     Cow::Owned(segments.join("/"))
 }
 
-fn cut(mut text: String, max: usize) -> String {
+/// `text` cut to at most `max` bytes, at a character boundary.
+pub(crate) fn cut(mut text: String, max: usize) -> String {
     if text.len() > max {
         let mut end = max;
         while !text.is_char_boundary(end) {

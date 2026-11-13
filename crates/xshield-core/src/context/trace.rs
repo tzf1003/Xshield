@@ -60,6 +60,11 @@ pub struct Trace {
     /// For a cached allow: the request whose Jev allow the cache reuses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_source: Option<String>,
+    /// What the site's function table says about the request (docs/07 section 7.9.18). Absent unless
+    /// the table decides it: an attempt, a function the table does not know, or an administrator's use
+    /// of an administrator-only function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<TraceFunction>,
     /// Durations in milliseconds.
     pub timing: Timing,
     /// What the origin's response taught the session; absent when the
@@ -325,6 +330,29 @@ pub struct TraceSession {
     /// (docs/01 section 1.7). Absent when it took them, or when a response set the session up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_unbound: Option<LoginUnbound>,
+}
+
+/// What the site's function table says about one request (docs/07 section 7.9.18). Written only when
+/// the table decides the request: it names an administrator-only function, or it does not know the
+/// request's function on a site that asks about unknown ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceFunction {
+    /// The function the request is looked up as: the upper-case transport method, one space, and the
+    /// route template of the path with the session credential redacted.
+    pub key: String,
+    /// The function of the table the request reaches, when that function is administrator-only. It can
+    /// differ from `key`: an `{id}` covers the request, a method override or an escaped slash names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    /// The tier of that function. Only `admin` is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// `over_privilege` when a session that is not an administrator's reached that function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<Attempt>,
+    /// `false` when the table does not list the function and the site asks about unknown functions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known: Option<bool>,
 }
 
 /// Why a credential that set a session up took no login response's values (docs/01 section 1.7).
@@ -954,6 +982,40 @@ mod tests {
         let back: TraceValue = serde_json::from_str(&json).unwrap();
         assert_eq!(back, row);
         assert_eq!(Attempt::OverPrivilege.as_str(), "over_privilege");
+    }
+
+    #[test]
+    fn a_trace_function_is_written_only_when_present_and_reads_back_equal() {
+        let plain = serde_json::to_string(&Trace::new()).unwrap();
+        assert!(!plain.contains("function"), "{plain}");
+        let read: Trace = serde_json::from_str(&plain).unwrap();
+        assert_eq!(read.function, None);
+
+        let mut row = Trace::new();
+        row.function = Some(TraceFunction {
+            key: "POST /api/admin/export".to_owned(),
+            entry: Some("POST /api/admin/export".to_owned()),
+            tier: Some("admin".to_owned()),
+            attempt: Some(Attempt::OverPrivilege),
+            known: None,
+        });
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains(r#""attempt":"over_privilege""#), "{json}");
+        assert!(!json.contains("known"), "{json}");
+        let back: Trace = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
+
+        let unknown = TraceFunction {
+            key: "GET /metrics".to_owned(),
+            entry: None,
+            tier: None,
+            attempt: None,
+            known: Some(false),
+        };
+        assert_eq!(
+            serde_json::to_string(&unknown).unwrap(),
+            r#"{"key":"GET /metrics","known":false}"#
+        );
     }
 
     #[test]

@@ -19,7 +19,8 @@ on_jev_unavailable: deny       # deny（默认）或 allow
 advanced:                      # 可选：站点级判定参数，省略的项取代码默认值
   jev_timeout_ms: 3000
   secret_fields: [ssn, idcard]
-objects:                       # 功能表（docs/07 7.9.18）：本版只读入和保存，网关还不按它判定
+objects:                       # 功能表（docs/07 7.9.18）：管理档条目让非管理员会话的访问送 Jev 判定
+  # ask_unknown_functions: true  # 可选：表里没有的功能也送 Jev 判定。本例不开；开之前先用观察模式看一段时间
   functions:
     - key: POST /api/admin/export
       source: rule
