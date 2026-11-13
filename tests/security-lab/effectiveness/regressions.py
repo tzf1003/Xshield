@@ -28,6 +28,7 @@ from .probes import (
 SITE_TRUTH = "clinic-truth"
 SITE_LIMIT = "clinic-truth-limit"  # on_jev_unavailable allow, and two Jev calls per session and minute
 SITE_OBSERVE = "clinic-truth-observe"  # observation mode: the request is forwarded and logged as would-block
+SITE_EVICT = "clinic-truth-evict"  # full mode only: a gateway of its own, so no other case's sessions share its table
 FORGED_SID = "SID=forged-" + "0" * 24  # a credential the gateway has never issued
 PADDING = 200  # query values before the one that carries the payload (P0-1: the gateway looks at 200)
 BIG_BODY = 48 * 1024 + 1024  # just over the 48 KiB the gateway inspects (P0-1)
@@ -43,6 +44,7 @@ class Case:
     site: str
     run: Callable[[Prober], None]
     requires: tuple[str, ...] = ()
+    full_only: bool = False  # run in the full mode only (plan 4.5, the eviction case)
     note: str = ""
 
 
@@ -306,6 +308,38 @@ def other_address_unaffected(p: Prober) -> None:
     p.request(session, "GET", f"/api/search?q={quote(term, safe='')}", scored=True)
 
 
+# The session table of the gateway holds SESSIONS_MAX sessions (crates/xshield-judge/src/context.rs). The eviction case
+# makes more logins than that from one address, so the table has to push sessions out. test_full checks the constant
+# against the source, so a change there shows up here.
+SESSIONS_MAX = 20_000
+DOCTOR_EVICT_SOURCE = 3  # 127.0.2.3: the doctor who browses first, and must still be known afterwards
+FLOOD_SOURCE = 4  # 127.0.2.4: the real logins that fill the table
+FLOOD_LOGINS = SESSIONS_MAX + 200
+
+
+def session_eviction(p: Prober) -> None:
+    """Full mode only (plan 4.5, WAF batch 11, PR #218). A doctor logs in from one address and browses her list. From
+    another address the same doctor then logs in FLOOD_LOGINS times, each login a session of its own, which overflows
+    the table. She then opens a patient from the list again. Her session is the oldest in the table, but a full table
+    pushes out a session of the address that holds the most sessions (context.rs, make_room), so hers survives and the
+    value she was shown is still known: the request is allowed. The flood is plain logins, with no model call, and its
+    requests are not scored or kept as setup. The time it took is recorded for the report."""
+    doctor = p.login(account(DOCTOR_A), source=_source_of(DOCTOR_EVICT_SOURCE))
+    listing = _payload(p.request(doctor, "GET", "/api/patients")).get("patients", [])
+    if not listing:
+        raise probes.ProbeError("the origin lists no patient for the doctor, so the case cannot be scored")
+    pid = str(listing[0]["id"])
+    flood = _source_of(FLOOD_SOURCE)
+    started = time.monotonic()
+    for _ in range(FLOOD_LOGINS):
+        reply = labkit.request(p.edge.port, p.site.host, "POST", "/login", source=flood,
+                               form={"username": account(DOCTOR_A), "password": probes.PASSWORD})
+        if reply.status != 302:
+            raise probes.ProbeError(f"a login of the flood answered {reply.status}, not 302; the case is not scored")
+    p.notes["b11-session-eviction"] = {"logins": FLOOD_LOGINS, "seconds": round(time.monotonic() - started, 3)}
+    p.request(doctor, "GET", f"/api/patients/{pid}", scored=True, refs=[("patient", pid)])
+
+
 CASES: tuple[Case, ...] = (
     Case("p0-1-pad-200", "P0-1", "must", "block", "attack", SITE_TRUTH, pad_200,
          note="injection after 200 query values"),
@@ -359,6 +393,9 @@ CASES: tuple[Case, ...] = (
     Case("b11-other-address-unaffected", "WAF 批次 11（PR #218）", "must", "allow", None, SITE_LIMIT,
          other_address_unaffected,
          note="a real doctor on another address still gets the model's answer after that address spent its total"),
+    Case("b11-session-eviction", "WAF 批次 11（PR #218）", "must", "allow", None, SITE_EVICT, session_eviction,
+         full_only=True,
+         note="a session survives a flood of real logins from another address that overflows the session table"),
 )
 
 
@@ -366,9 +403,17 @@ def case_names() -> tuple[str, ...]:
     return tuple(case.name for case in CASES)
 
 
-def run_all(probers: Mapping[str, Prober], *, only: frozenset[str] = frozenset()) -> None:
-    """Runs every case on its site. `probers` maps a site name to the prober of that site."""
+def full_only_names() -> tuple[str, ...]:
+    """The cases that only the full mode runs (the quick mode reports them as not run)."""
+    return tuple(case.name for case in CASES if case.full_only)
+
+
+def run_all(probers: Mapping[str, Prober], *, only: frozenset[str] = frozenset(), full: bool = False) -> None:
+    """Runs every case on its site. `probers` maps a site name to the prober of that site. A full-only case is left out
+    unless `full` is set."""
     for case in CASES:
+        if case.full_only and not full:
+            continue
         if case.site not in probers:
             raise probes.ProbeError(f"regression {case.name} needs the site {case.site}, which the lab did not start")
         prober = probers[case.site]
