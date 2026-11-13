@@ -172,10 +172,12 @@ class Lab:
 
     def send(self, host: str, method: str, target: str, *, cookie: str | None = None,
              form: dict[str, str] | None = None, json_body: dict | None = None,
-             headers: dict[str, str] | None = None, authorization: str | None = None) -> Sent:
+             headers: dict[str, str] | None = None, authorization: str | None = None,
+             source: str | None = None) -> Sent:
+        """One request through the edge, from the loopback address `source` when one is given."""
         if authorization:
             headers = {**(headers or {}), "Authorization": authorization}
-        return exchange(self.edge, self.origin_was_served, host, method, target,
+        return exchange(self.edge, self.origin_was_served, host, method, target, source=source,
                         cookie=cookie, form=form, json_body=json_body, headers=headers)
 
     def origin_was_served(self, request_id: str) -> bool:
@@ -202,9 +204,9 @@ class Lab:
         self.check(f"{check}: origin serves it without the edge", status == 200,
                    f"origin answered {status}")
 
-    def login(self, host: str, user: str, check: str = "") -> str:
+    def login(self, host: str, user: str, check: str = "", source: str | None = None) -> str:
         """Logs `user` in through the edge and returns the SID cookie for later requests."""
-        sent = self.send(host, "POST", "/login", json_body=login_form(user))
+        sent = self.send(host, "POST", "/login", json_body=login_form(user), source=source)
         cookie = ""
         for name, value in sent.reply.headers:
             if name.lower() == "set-cookie" and value.startswith("SID="):
@@ -516,6 +518,45 @@ def b2(lab: Lab) -> None:
         Expect(403, "jev_deny", "blocked", False))
 
 
+def long_note_form() -> dict:
+    """A note of 24 fields of 420 characters and one of 1,500: its state is cut into two batches or more
+    (docs/02 section 2.4), and the request names a patient id in its path."""
+    fields = {f"field{index:02d}": "正常的文字" * 84 for index in range(24)}
+    fields["remark"] = "正常的文字" * 300
+    return fields
+
+
+@scenario("B3", "医生 A 在搜到的自己新建患者上提交两批以上的长备注：放行，每一批都带着路径里的编号")
+def b3(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    patient = lab.expect("doctor A creates a patient", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "分批备注靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    query = "/api/search?q=" + urllib.parse.quote("分批备注靶患者", safe="")
+    found = lab.expect("doctor A searches the patient by name", lab.send(
+        "emr.lab", "GET", query, cookie=cookie), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the search shows the patient to doctor A", patient in shown, f"ids {shown}")
+    noted = lab.expect("doctor A sends the long note on the patient", lab.send(
+        "emr.lab", "POST", f"/api/patients/{patient}/notes", cookie=cookie, json_body=long_note_form()),
+        Expect(201, "jev_allow", "allowed", True))
+    batches = ((noted.record or {}).get("jev") or {}).get("batches") or 0
+    lab.check("the note was judged in at least two batches", batches >= 2, f"batches {batches}")
+
+
+@scenario("B4", "同样的长备注发给医生 B 的患者，医生 A 没见过这个编号：拦截")
+def b4(lab: Lab) -> None:
+    cookie_b = lab.login("emr.lab", "doctor_b")
+    other = lab.expect("doctor B creates a patient", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "他人分批靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_a = lab.login("emr.lab", "doctor_a")
+    lab.expect("doctor A sends the same long note on doctor B's patient", lab.send(
+        "emr.lab", "POST", f"/api/patients/{other}/notes", cookie=cookie_a, json_body=long_note_form()),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.origin_direct("B4 patient of doctor B", "GET", f"/api/patients/{other}", cookie_a)
+
+
 @scenario("C1", "Jev 超时或不可用，on_jev_unavailable=deny：拦截并注明原因")
 def c1(lab: Lab) -> None:
     cookie = lab.login("deny.lab", "doctor_a")
@@ -563,21 +604,53 @@ def c4(lab: Lab) -> None:
               PASSWORD not in logged, "password in the decision record")
 
 
+# The sessions of one address share a total of ten times the session limit (docs/02 section 2.5),
+# and every lab request comes from loopback, so the scenarios on limit.lab each use an address of
+# their own: the calls of the sessions of the other sites would otherwise count in their total.
 @scenario("C5", "同一会话一分钟内超过调用上限：超出部分拒绝并回 429")
 def c5(lab: Lab) -> None:
-    cookie = lab.login("limit.lab", "doctor_a")
+    source = "127.0.0.2"
+    cookie = lab.login("limit.lab", "doctor_a", source=source)
     lab.expect("first judged call", lab.send(
-        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第一条"}),
+        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第一条"}, source=source),
         Expect(201, "jev_allow", "allowed", True))
     lab.expect("second judged call", lab.send(
-        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第二条"}),
+        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第二条"}, source=source),
         Expect(201, "jev_allow", "allowed", True))
-    refused = lab.send("limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"})
+    refused = lab.send("limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"},
+                       source=source)
     lab.expect("third call is over the session limit", refused,
                Expect(429, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
     lab.check("the refusal says rate_limited whatever on_jev_unavailable is",
               refused.reply.json().get("error") == "rate_limited",
               refused.reply.body[:200].decode("utf-8", "replace"))
+
+
+@scenario("C9", "同一来源地址的会话合计超过单会话上限的 10 倍：超出部分拒绝并回 429，别的地址不受影响")
+def c9(lab: Lab) -> None:
+    # limit.lab allows 2 calls a minute per session, so 20 for all the sessions of one address.
+    source = "127.0.0.3"
+    cookies = [lab.login("limit.lab", "doctor_a", f"C9 session {index} logs in", source=source)
+               for index in range(11)]
+    for index, cookie in enumerate(cookies[:10]):
+        for call in range(2):
+            lab.expect(f"C9 session {index} call {call + 1}, inside both limits", lab.send(
+                "limit.lab", "POST", "/api/notes", cookie=cookie,
+                form={"note": f"第{index}个会话的第{call}条"}, source=source),
+                Expect(201, "jev_allow", "allowed", True))
+    before = len(lab.jev.bodies)
+    refused = lab.send("limit.lab", "POST", "/api/notes", cookie=cookies[10],
+                       form={"note": "第十一个会话"}, source=source)
+    lab.expect("C9 the eleventh session has used no call and is refused for the address total",
+               refused, Expect(429, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+    lab.check("C9 the refusal says rate_limited and no call reached Jev",
+              refused.reply.json().get("error") == "rate_limited" and len(lab.jev.bodies) == before,
+              refused.reply.body[:200].decode("utf-8", "replace"))
+    other = lab.login("limit.lab", "doctor_a", "C9 a session of another address logs in",
+                      source="127.0.0.4")
+    lab.expect("C9 a session of another address is not affected", lab.send(
+        "limit.lab", "POST", "/api/notes", cookie=other, form={"note": "另一个地址的笔记"},
+        source="127.0.0.4"), Expect(201, "jev_allow", "allowed", True))
 
 
 @scenario("G1", "JSON 凭证站点：登录响应里的长令牌绑定会话，入口放行；登录响应和列表都没给过的病人交 Jev 拦截")

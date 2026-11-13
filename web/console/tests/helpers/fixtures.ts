@@ -51,6 +51,9 @@ import requestDetailBasketJson from "../fixtures/request-detail-req_01a197394010
 import requestDetailLoginJson from "../fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json" with {
   type: "json",
 };
+import requestDetailRefusedJson from "../fixtures/request-detail-req_01a1973f5b2c3d4e6f708192a3b4c5d6.json" with {
+  type: "json",
+};
 import requestDetailSearchJson from "../fixtures/request-detail-req_01a1973ed5c0732b8f29804d7fc746d3.json" with {
   type: "json",
 };
@@ -97,6 +100,7 @@ export const requestDetails: RequestDetail[] = [
   wire(requestDetailLoginJson),
   wire(requestDetailBasketJson),
   wire(requestDetailSearchJson),
+  wire(requestDetailRefusedJson),
 ];
 export const sessionList: SessionListResponse = wire(sessionsJson);
 export const sessionTimeline: SessionTimeline = wire(sessionTimelineJson);
