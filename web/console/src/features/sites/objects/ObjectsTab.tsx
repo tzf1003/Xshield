@@ -6,12 +6,12 @@
 
 import { useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { useSiteObjects } from "../../../api/queries.ts";
+import { useSiteFunctions, useSiteObjects } from "../../../api/queries.ts";
 import type { ObjectSlotRow, SiteDetail, SiteSpec } from "../../../api/types.ts";
 import { useKeys } from "../../../app/keys.ts";
 import { useSetSearch } from "../../../app/scope.ts";
 import { effectiveLearning } from "../../../lib/objects-validate.ts";
-import { OBJECT_AGENT_TEXT, OBJECT_TEXT } from "../../../lib/vocab.ts";
+import { FUNCTION_VIEW, OBJECT_AGENT_TEXT, OBJECT_TEXT } from "../../../lib/vocab.ts";
 import { Empty, ErrorBar, Loading, Notice } from "../../../ui/Page.tsx";
 import { ColdStartPanel } from "./ColdStartPanel.tsx";
 import { DeclareKindDialog } from "./DeclareKindDialog.tsx";
@@ -24,6 +24,7 @@ import { ObjectCounters } from "./ObjectCounters.tsx";
 import { ObjectEventsDrawer } from "./ObjectEventsDrawer.tsx";
 import { JudgementPanel } from "./JudgementPanel.tsx";
 import { ObjectsBanner } from "./ObjectsBanner.tsx";
+import { FunctionsView } from "./FunctionsView.tsx";
 import { choiceOf, filtersOf, type SourceChoice } from "./objects-agent.ts";
 import { type ApplyOptions, classMatches, slotsOfClass } from "./objects-model.ts";
 import { sameJson } from "../spec-model.ts";
@@ -53,6 +54,8 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
     source: search.source,
     agent: search.agent,
   });
+  // The function table is read with the page's first view, so the radio can say how many proposals wait (7.9.20).
+  const functions = useSiteFunctions(site.name);
   const [text, setText] = useState(search.q ?? "");
   const [declareOpen, setDeclareOpen] = useState(false);
   // A kind the learning agent proposed for the position the declaration dialog opens for (console design 3.4).
@@ -64,7 +67,8 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
 
   const data = objects.data;
   const q = search.q ?? "";
-  const view: "class" | "slot" = search.view === "slot" ? "slot" : "class";
+  const view: "class" | "slot" | "functions" =
+    search.view === "slot" ? "slot" : search.view === "functions" ? "functions" : "class";
   const classes = (data?.classes ?? []).filter((item) => classMatches(item, q));
   const current = classes.find((item) => item.id === search.class) ?? classes[0];
   // The rows the page shows, in the order the keys step through them.
@@ -141,7 +145,19 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
   };
 
   let body: ReactNode;
-  if (empty && !skipped) {
+  if (view === "functions") {
+    body = (
+      <FunctionsView
+        site={site.name}
+        working={working}
+        data={functions.data}
+        failure={functions.isError ? functions.error : null}
+        onRetry={() => void functions.refetch()}
+        dirty={drafted}
+        onApply={onApply}
+      />
+    );
+  } else if (empty && !skipped) {
     body = (
       <ColdStartPanel
         site={site.name}
@@ -195,36 +211,40 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
     <div className="obj-stack">
       <ObjectsBanner site={site.name} events={data.events} />
 
-      <div className="obj-tools">
-        <ObjectCounters
-          counts={counts}
-          state={search.state}
-          onState={(next) => setSearch({ state: next }, true)}
-        />
-        <input
-          ref={searchBox}
-          type="search"
-          className="native-input obj-search"
-          aria-label={OBJECT_TEXT.search}
-          placeholder={OBJECT_TEXT.search}
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-        />
-      </div>
+      {view === "functions" ? null : (
+        <div className="obj-tools">
+          <ObjectCounters
+            counts={counts}
+            state={search.state}
+            onState={(next) => setSearch({ state: next }, true)}
+          />
+          <input
+            ref={searchBox}
+            type="search"
+            className="native-input obj-search"
+            aria-label={OBJECT_TEXT.search}
+            placeholder={OBJECT_TEXT.search}
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+          />
+        </div>
+      )}
 
-      <LearningStatusBar
-        site={site.name}
-        learning={data.learning_run}
-        autoLearn={autoLearn}
-        agentOn={agentOn}
-        agentHealth={data.agent_health}
-        now={now}
-        onRuns={() => setSearch({ runs: "1" }, true)}
-        onFilter={(next) => {
-          if ("agent" in next) setSearch(filtersOf(next.agent), true);
-          else setSearch({ state: next.state }, true);
-        }}
-      />
+      {view === "functions" ? null : (
+        <LearningStatusBar
+          site={site.name}
+          learning={data.learning_run}
+          autoLearn={autoLearn}
+          agentOn={agentOn}
+          agentHealth={data.agent_health}
+          now={now}
+          onRuns={() => setSearch({ runs: "1" }, true)}
+          onFilter={(next) => {
+            if ("agent" in next) setSearch(filtersOf(next.agent), true);
+            else setSearch({ state: next.state }, true);
+          }}
+        />
+      )}
 
       <div className="obj-tools">
         <div className="obj-tools-line">
@@ -247,52 +267,69 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
               />
               {OBJECT_TEXT.view.byPosition}
             </label>
+            <label className="adv-radio">
+              <input
+                type="radio"
+                name="object-view"
+                checked={view === "functions"}
+                onChange={() => setSearch({ view: "functions" }, true)}
+              />
+              {FUNCTION_VIEW.radio(functions.data?.proposals.length ?? 0)}
+            </label>
           </div>
-          <label className="small">
-            {OBJECT_AGENT_TEXT.filter.label}{" "}
-            <select
-              className="native-input"
-              value={choice}
-              onChange={(event) => setSearch(filtersOf(event.target.value as SourceChoice), true)}
-            >
-              <option value="all">{OBJECT_AGENT_TEXT.filter.all}</option>
-              <option value="admin">{OBJECT_AGENT_TEXT.filter.admin}</option>
-              <option value="rule">{OBJECT_AGENT_TEXT.filter.rule}</option>
-              <option value="agent">{OBJECT_AGENT_TEXT.filter.agent}</option>
-              {agentOn || choice === "waiting" ? (
-                <option value="waiting">{OBJECT_AGENT_TEXT.filter.waiting}</option>
-              ) : null}
-              {agentOn || choice === "failed" ? (
-                <option value="failed">{OBJECT_AGENT_TEXT.filter.failed}</option>
-              ) : null}
-            </select>
-          </label>
+          {view === "functions" ? null : (
+            <label className="small">
+              {OBJECT_AGENT_TEXT.filter.label}{" "}
+              <select
+                className="native-input"
+                value={choice}
+                onChange={(event) => setSearch(filtersOf(event.target.value as SourceChoice), true)}
+              >
+                <option value="all">{OBJECT_AGENT_TEXT.filter.all}</option>
+                <option value="admin">{OBJECT_AGENT_TEXT.filter.admin}</option>
+                <option value="rule">{OBJECT_AGENT_TEXT.filter.rule}</option>
+                <option value="agent">{OBJECT_AGENT_TEXT.filter.agent}</option>
+                {agentOn || choice === "waiting" ? (
+                  <option value="waiting">{OBJECT_AGENT_TEXT.filter.waiting}</option>
+                ) : null}
+                {agentOn || choice === "failed" ? (
+                  <option value="failed">{OBJECT_AGENT_TEXT.filter.failed}</option>
+                ) : null}
+              </select>
+            </label>
+          )}
         </div>
-        <div className="obj-tools-line">
-          <button type="button" className="btn" onClick={() => setDeclareOpen(true)}>
-            {OBJECT_TEXT.declareButton}
-          </button>
-          <button type="button" className="btn" onClick={() => setSynonymsOpen(true)}>
-            {OBJECT_TEXT.fromSynonyms}
-          </button>
-          <button type="button" className="btn" onClick={() => setLearningOpen(true)}>
-            {OBJECT_TEXT.learningButton}
-          </button>
-        </div>
+        {view === "functions" ? null : (
+          <div className="obj-tools-line">
+            <button type="button" className="btn" onClick={() => setDeclareOpen(true)}>
+              {OBJECT_TEXT.declareButton}
+            </button>
+            <button type="button" className="btn" onClick={() => setSynonymsOpen(true)}>
+              {OBJECT_TEXT.fromSynonyms}
+            </button>
+            <button type="button" className="btn" onClick={() => setLearningOpen(true)}>
+              {OBJECT_TEXT.learningButton}
+            </button>
+          </div>
+        )}
       </div>
 
-      {empty && skipped ? <Notice>{OBJECT_TEXT.coldStart.skipped}</Notice> : null}
-      <JudgementPanel
-        site={site.name}
-        judgements={data.judgements ?? []}
-        rows={data.slots}
-        classes={data.classes}
-        dirty={drafted}
-      />
+      {empty && skipped && view !== "functions" ? (
+        <Notice>{OBJECT_TEXT.coldStart.skipped}</Notice>
+      ) : null}
+      {view === "functions" ? null : (
+        <JudgementPanel
+          site={site.name}
+          judgements={data.judgements ?? []}
+          rows={data.slots}
+          classes={data.classes}
+          dirty={drafted}
+        />
+      )}
       {body}
 
       {/* Keyed by the position: the notice and the open picker of one position do not carry to the next. */}
-      {slot === undefined ? null : (
+      {slot === undefined || view === "functions" ? null : (
         <SlotDrawer
           key={slot}
           site={site.name}

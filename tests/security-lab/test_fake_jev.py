@@ -215,6 +215,47 @@ class IdealModelTest(unittest.TestCase):
                 attack_forms_of(texts)
 
 
+class KindTest(unittest.TestCase):
+    """The ideal model reads the kind in the brackets of a sighting; the marker rules take any sighting."""
+    forms = attack_forms_of(["' OR 1=1--"])
+
+    def patient(self, *seen_as: str, **extra: object) -> dict:
+        return document("/api/patients/PT-7002", [value("path[2]", "PT-7002", kind="reference", object="patient",
+                                                        seen_as=list(seen_as), **extra)])
+
+    def test_a_value_shown_only_as_another_kind_is_refused(self) -> None:
+        shown = self.patient("id @ GET /api/visits/{id} [visit] (tier self, reliability high)")
+        self.assertEqual(choices(shown, self.forms), ("DENY", "BENIGN"))
+
+    def test_without_attack_texts_the_same_state_is_allowed_as_before(self) -> None:
+        shown = self.patient("id @ GET /api/visits/{id} [visit] (tier self, reliability high)")
+        self.assertEqual(choices(shown), ("ALLOW", "BENIGN"))
+
+    def test_a_value_shown_as_the_same_kind_is_allowed(self) -> None:
+        shown = self.patient("id @ GET /api/search [patient] (tier public, reliability high)")
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+    def test_an_entry_without_brackets_still_counts(self) -> None:
+        self.assertEqual(choices(self.patient("id @ GET /api/search"), self.forms), ("ALLOW", "BENIGN"))
+
+    def test_one_sighting_of_the_same_kind_is_enough(self) -> None:
+        shown = self.patient("id @ GET /api/visits/{id} [visit]", "patients[].id @ GET /api/search [patient]")
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+    def test_brackets_in_a_list_field_do_not_hide_the_kind(self) -> None:
+        shown = self.patient("patients[].id @ GET /api/search [patient] (tier public, reliability high)")
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+    def test_a_value_without_an_object_is_judged_as_before(self) -> None:
+        shown = document("/api/patients/PT-7002", [value("path[2]", "PT-7002", kind="reference",
+                                                       seen_as=["id @ GET /api/visits/{id} [visit]"])])
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+    def test_a_verified_value_is_shown_whatever_its_kind(self) -> None:
+        shown = self.patient("id @ GET /api/visits/{id} [visit]", verified=True)
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+
 class FunctionTest(unittest.TestCase):
     """The function rules (docs/02 2.2): an attempt is refused, and an unknown function is refused on an operations path."""
 
@@ -235,10 +276,46 @@ class FunctionTest(unittest.TestCase):
     def test_an_unknown_function_on_an_ordinary_path_is_judged_on_its_values(self) -> None:
         self.assertEqual(choices(self.with_function("/api/comments", {"known": False})), ("ALLOW", "BENIGN"))
 
+    def test_an_unknown_bulk_export_is_refused_and_an_export_of_one_record_is_not(self) -> None:
+        self.assertEqual(
+            choices(self.with_function("/api/patients/export-all", {"known": False})), ("DENY", "BENIGN"))
+        self.assertEqual(
+            choices(self.with_function("/api/patients/export-pdf", {"known": False})), ("ALLOW", "BENIGN"))
+
     def test_without_a_function_the_answer_is_the_same_as_before(self) -> None:
         plain = document("/api/admin/search", [])
         self.assertEqual(choices(plain), ("ALLOW", "BENIGN"))
         self.assertNotIn("function", plain["state"]["request"])
+
+
+class UnsentPathIdTest(unittest.TestCase):
+    """A digit segment of the path needs a path value that carries it, in every batch (plan 3.5)."""
+
+    def test_a_path_id_carried_by_a_path_value_is_judged_by_the_rules_as_before(self) -> None:
+        shown = value("path[2]", "7005", "reference", verified=True)
+        self.assertEqual(choices(document("/api/patients/7005/notes", [shown], method="POST")), ("ALLOW", "BENIGN"))
+        unshown = value("path[2]", "7005", "reference")
+        self.assertEqual(choices(document("/api/patients/7005/notes", [unshown], method="POST")), ("DENY", "BENIGN"))
+
+    def test_a_path_id_without_a_path_value_is_refused_while_the_same_values_are_allowed_without_it(self) -> None:
+        batch = document("/api/patients/7005/notes", [value("body.field00", "正常的文字")], method="POST")
+        self.assertEqual(choices(batch), ("DENY", "BENIGN"))
+        without_id = document("/api/feedback", [value("body.field00", "正常的文字")], method="POST")
+        self.assertEqual(choices(without_id), ("ALLOW", "BENIGN"))
+
+    def test_a_path_without_a_digit_segment_is_not_affected(self) -> None:
+        names = document("/api/patients/PT-7001/notes", [value("body.field00", "正常的文字")], method="POST")
+        self.assertEqual(choices(names), ("ALLOW", "BENIGN"))
+        mixed = document("/api/v2a/7005x", [])
+        self.assertEqual(choices(mixed), ("ALLOW", "BENIGN"))
+
+    def test_the_ideal_model_refuses_it_too(self) -> None:
+        batch = document("/api/patients/7005/notes", [value("body.field00", "正常的文字")], method="POST")
+        self.assertEqual(choices(batch, attack_forms_of(["zzz-not-in-the-request"])), ("DENY", "BENIGN"))
+
+    def test_only_a_path_position_carries_the_id(self) -> None:
+        batch = document("/api/patients/7005/notes", [value("body.patient", "7005")], method="POST")
+        self.assertEqual(choices(batch), ("DENY", "BENIGN"))
 
 
 class ServedTest(unittest.TestCase):

@@ -181,6 +181,20 @@ test("an ID older than retention, a future ID and a malformed ID each give their
   await expect(page).toHaveURL(/\/requests\/req_not-a-real-id$/);
 });
 
+// A request that observe mode would refuse (docs/07 7.4.6): its response was not read into the context, so
+// the learning step says it is unlearned, and the attention line says the response stayed out of the context.
+const REFUSED = "req_01a1973f5b2c3d4e6f708192a3b4c5d6";
+
+test("a response that observe mode would refuse is named as unlearned, and the step says it stayed out", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto(`/requests/${REFUSED}`);
+  await expect(heading(page, "/rest/basket/6")).toBeVisible();
+  await expect(page.getByText("未观察：本应拦截，未学习")).toBeVisible();
+  await expect(page.getByText("本应拦截请求的响应没有进入上下文")).toBeVisible();
+});
+
 const TABS = [
   { name: "判定过程", search: "" },
   { name: "请求值", search: "?tab=values" },
@@ -371,4 +385,26 @@ test("the related rail offers to declare the field's class and to name this path
     "href",
     /\/sites\/juice\?tab=config&route=%2Frest%2Fbasket%2F6$/,
   );
+});
+
+/** A synthetic record: an ordinary session asks for an administrator's function on emr (docs/06 6.4.4). */
+const FUNCTION_ID = "req_c0ffee00c0ffee00c0ffee00c0ffee00";
+
+test("a request that asks for an administrator's function says why, in the explanation and in a functions step", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto(`/requests/${FUNCTION_ID}`);
+  await expect(heading(page, "/api/admin/export")).toBeVisible();
+
+  await expect(page.locator(".explain")).toContainText(
+    "请求的是管理档功能 POST /api/admin/export，这个会话不是管理员。",
+  );
+  const step = page
+    .getByRole("list", { name: "判定步骤" })
+    .locator("li")
+    .filter({ hasText: "管理档功能 POST /api/admin/export" });
+  await expect(step).toHaveCount(1);
+  await expect(step.getByText("功能", { exact: true })).toBeVisible();
+  await expect(step).toContainText("这个会话不是管理员，算尝试越权，交 Jev 并要求拒绝");
 });

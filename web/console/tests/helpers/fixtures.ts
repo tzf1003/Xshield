@@ -29,6 +29,7 @@ import type {
   SessionState,
   SessionTimeline,
   SiteDetail,
+  SiteFunctions,
   SiteListResponse,
   SiteVersionsResponse,
   StatsSummary,
@@ -38,6 +39,7 @@ import type {
 } from "../../src/api/types.ts";
 import countsJson from "../fixtures/counts.json" with { type: "json" };
 import evidenceJson from "../fixtures/evidence.json" with { type: "json" };
+import functionsJson from "../fixtures/functions.json" with { type: "json" };
 import insightsJson from "../fixtures/insights.json" with { type: "json" };
 import jevStatsJson from "../fixtures/jev-stats.json" with { type: "json" };
 import jevStatusJson from "../fixtures/jev-status.json" with { type: "json" };
@@ -51,7 +53,13 @@ import requestDetailBasketJson from "../fixtures/request-detail-req_01a197394010
 import requestDetailLoginJson from "../fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json" with {
   type: "json",
 };
+import requestDetailRefusedJson from "../fixtures/request-detail-req_01a1973f5b2c3d4e6f708192a3b4c5d6.json" with {
+  type: "json",
+};
 import requestDetailSearchJson from "../fixtures/request-detail-req_01a1973ed5c0732b8f29804d7fc746d3.json" with {
+  type: "json",
+};
+import requestDetailFunctionJson from "../fixtures/request-detail-req_c0ffee00c0ffee00c0ffee00c0ffee00.json" with {
   type: "json",
 };
 import requestsJson from "../fixtures/requests.json" with { type: "json" };
@@ -97,6 +105,8 @@ export const requestDetails: RequestDetail[] = [
   wire(requestDetailLoginJson),
   wire(requestDetailBasketJson),
   wire(requestDetailSearchJson),
+  wire(requestDetailFunctionJson),
+  wire(requestDetailRefusedJson),
 ];
 export const sessionList: SessionListResponse = wire(sessionsJson);
 export const sessionTimeline: SessionTimeline = wire(sessionTimelineJson);
@@ -121,6 +131,8 @@ export const statusDown: StatusResponse = wire(statusDownJson);
 export const session: SessionState = sessionJson;
 /** The object map of emr (console design 7): counts, classes, positions and events. */
 export const objectsEmr: ObjectsResponse = wire(objectsEmrJson);
+/** The function table of emr (console design 7, docs/07 7.9.20): two functions, three candidates, two proposals. */
+export const siteFunctions: SiteFunctions = wire(functionsJson);
 /** The map of a site that has none yet (juice): empty, so the cold start shows. */
 export const objectsEmpty: ObjectsResponse = wire(objectsEmptyJson);
 /** The drawer of position s2 of emr: a proposal with its flows, examples, shape and impact. */

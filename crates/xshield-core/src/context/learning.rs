@@ -14,7 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::path_template::function_template;
+use crate::kind::is_id_like;
+use crate::path_template::{function_template, is_plain_word};
 
 use super::log::{DecisionPath, Outcome};
 use super::objects::{KEY_MAX, ObjectMap, Reliability, Tier};
@@ -69,6 +70,11 @@ pub struct Vote {
     pub day: u64,
     /// The response positions the value was shown at, as the record names them.
     pub from: Vec<String>,
+    /// The user label the session showed, when it showed one. The acceptance judgement counts
+    /// users with it, and only on a site that declares identities (docs/07 section 7.9.16).
+    pub user: Option<String>,
+    /// Whether the session showed the administrator role (docs/07 section 7.4.7).
+    pub admin: bool,
 }
 
 /// One refusal by Jev of a request that used a position.
@@ -146,6 +152,8 @@ pub fn observe(record: &DecisionFacts) -> Observed {
                 session: record.session.clone(),
                 day,
                 from,
+                user: user_label(record).map(str::to_owned),
+                admin: is_admin(record),
             });
         }
         if refused {
@@ -163,18 +171,28 @@ pub fn observe(record: &DecisionFacts) -> Observed {
 /// per session and day at most.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Evidence {
-    /// The response positions each (session, day) vote was shown at.
-    votes: BTreeMap<(String, u64), Vec<String>>,
+    /// What each (session, day) vote keeps: the response positions it was shown at, and who used it.
+    votes: BTreeMap<(String, u64), Used>,
     /// The (session, day) pairs that were refused.
     denials: BTreeSet<(String, u64)>,
+}
+
+/// What the window keeps of one vote: the response positions it was shown at, and who used it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Used {
+    from: Vec<String>,
+    user: Option<String>,
+    admin: bool,
 }
 
 impl Evidence {
     /// Adds a vote. A second vote from the same session on the same day changes nothing.
     pub fn add_vote(&mut self, vote: Vote) {
-        self.votes
-            .entry((vote.session, vote.day))
-            .or_insert(vote.from);
+        self.votes.entry((vote.session, vote.day)).or_insert(Used {
+            from: vote.from,
+            user: vote.user,
+            admin: vote.admin,
+        });
     }
 
     /// Adds a denial. A session refused twice on one day counts once.
@@ -213,8 +231,9 @@ impl Evidence {
     #[must_use]
     pub fn kinds<'a>(&'a self, map: &'a ObjectMap) -> BTreeMap<&'a str, u32> {
         let mut kinds = BTreeMap::new();
-        for positions in self.votes.values() {
-            let mut named = positions
+        for used in self.votes.values() {
+            let mut named = used
+                .from
                 .iter()
                 .filter_map(|position| map.class_of(position));
             let Some(first) = named.next() else {
@@ -231,8 +250,8 @@ impl Evidence {
     #[must_use]
     pub fn flows(&self) -> Vec<FlowShare> {
         let mut counts: BTreeMap<&str, (u32, BTreeSet<&str>)> = BTreeMap::new();
-        for ((session, _), positions) in &self.votes {
-            for position in positions.iter().collect::<BTreeSet<&String>>() {
+        for ((session, _), used) in &self.votes {
+            for position in used.from.iter().collect::<BTreeSet<&String>>() {
                 let entry = counts.entry(position.as_str()).or_default();
                 entry.0 = entry.0.saturating_add(1);
                 entry.1.insert(session.as_str());
@@ -261,11 +280,14 @@ impl Evidence {
         self.votes.keys().map(|(_, day)| *day).max()
     }
 
-    /// One (session, response positions) pair per vote in the window, in session order.
-    pub fn uses(&self) -> impl Iterator<Item = (&str, &[String])> {
+    /// The sessions that showed the administrator role on a vote in the window.
+    #[must_use]
+    pub fn admin_sessions(&self) -> BTreeSet<String> {
         self.votes
             .iter()
-            .map(|((session, _), positions)| (session.as_str(), positions.as_slice()))
+            .filter(|(_, used)| used.admin)
+            .map(|((session, _), _)| session.clone())
+            .collect()
     }
 
     /// The sessions refused at this position in the window.
@@ -332,6 +354,86 @@ pub fn propose(evidence: &Evidence, map: &ObjectMap, thresholds: Thresholds) -> 
         sessions: evidence.sessions(),
         share_per_mille: share_of(count, votes),
     })
+}
+
+/// The kind the rules propose for a response position, from the uses of the values it was shown at (LQ-4a,
+/// the mirror of `propose` for the other side of a flow).
+///
+/// `votes` are the window's votes whose response positions include `position` (`Vote::from`). Each names the
+/// request position that used the value and the session and day of the use. A use counts toward the total,
+/// and toward a kind when its request position has a confirmed kind; a use whose request has no kind counts
+/// toward the total only, as `propose` counts it. A use is left out altogether when another source of the same
+/// value is declared with the request's kind: that source explains the value, so this position says nothing
+/// about it. One session counts once a day, and a day whose uses disagree about the kind counts toward the
+/// total only.
+///
+/// The position must be undeclared, and its field must read like an identifier: `results[].id` may be proposed,
+/// a page number or a count may not, since one of those can match a kind by chance. The thresholds and the
+/// share are the site's (`Thresholds`). The evidence must be the window's (the store reads it that way).
+#[must_use]
+pub fn propose_source(
+    position: &str,
+    votes: &[Vote],
+    map: &ObjectMap,
+    thresholds: Thresholds,
+) -> Option<Proposal> {
+    if map.declared_class_of(position).is_some() || !is_id_like(field_of(position)) {
+        return None;
+    }
+    // Per (session, day): the kind the day's uses hold, `None` when they hold none or disagree.
+    let mut uses: BTreeMap<(&str, u64), Option<&str>> = BTreeMap::new();
+    for vote in votes {
+        if !vote.from.iter().any(|from| from.as_str() == position) {
+            continue;
+        }
+        let kind = map.class_of(&vote.slot);
+        let explained = kind.is_some_and(|kind| {
+            vote.from
+                .iter()
+                .any(|from| from.as_str() != position && map.class_of(from) == Some(kind))
+        });
+        if explained {
+            continue;
+        }
+        uses.entry((vote.session.as_str(), vote.day))
+            .and_modify(|seen| {
+                if *seen != kind {
+                    *seen = None;
+                }
+            })
+            .or_insert(kind);
+    }
+    let total = saturating_count(uses.len());
+    let sessions: BTreeSet<&str> = uses.keys().map(|(session, _)| *session).collect();
+    let sessions = saturating_count(sessions.len());
+    if total < thresholds.votes || sessions < thresholds.sessions {
+        return None;
+    }
+    let mut kinds: BTreeMap<&str, u32> = BTreeMap::new();
+    for kind in uses.values().copied().flatten() {
+        *kinds.entry(kind).or_insert(0) += 1;
+    }
+    let (class, count) = kinds.into_iter().max_by_key(|(_, count)| *count)?;
+    if !meets_share(count, total, thresholds.share_per_mille) {
+        return None;
+    }
+    Some(Proposal {
+        class: class.to_owned(),
+        votes: total,
+        sessions,
+        share_per_mille: share_of(count, total),
+    })
+}
+
+/// The field a response position names: the last dotted part of its location, so `id` for
+/// `GET /api/search results[].id`.
+fn field_of(position: &str) -> &str {
+    let location = position
+        .rsplit_once(' ')
+        .map_or(position, |(_, location)| location);
+    location
+        .rsplit_once('.')
+        .map_or(location, |(_, field)| field)
 }
 
 /// Whether the evidence of a confirmed position points at another kind: one
@@ -507,7 +609,7 @@ pub struct AcceptJudgement {
     pub reliability: Reliability,
     /// The votes judged: those with at least one response position of a known tier.
     pub votes: u32,
-    /// The distinct sessions among them.
+    /// The distinct units among them: users where the site declares identities, sessions otherwise.
     pub sessions: u32,
     /// The share of judged votes, in thousandths, whose values came from public positions only.
     pub public_per_mille: u32,
@@ -517,11 +619,13 @@ pub struct AcceptJudgement {
 /// of the response positions the votes were shown at.
 ///
 /// A vote is judged when at least one of its response positions has a tier, and it counts as
-/// public when every such position is `public`. Votes of admin sessions are left out: an
-/// admin's use of public objects says nothing about ordinary users. So are votes of sessions
+/// public when every such position is `public`. Votes of the sessions in `admin_sessions` are left
+/// out: an admin's use of public objects says nothing about ordinary users. So are votes of sessions
 /// refused at the position, since a refused session is what the judge is there to stop.
 ///
-/// Without identities the sessions count as users, so the reliability drops one step.
+/// With identities (`identified`) the units are the users: the sessions of one user count once, and a
+/// vote that shows no user counts by its session. Without them the units are the sessions, and the
+/// reliability drops one step.
 #[must_use]
 pub fn judge_accepts_public(
     evidence: &Evidence,
@@ -533,12 +637,13 @@ pub fn judge_accepts_public(
     let refused = evidence.refused_sessions();
     let mut votes = 0_u32;
     let mut public = 0_u32;
-    let mut sessions = BTreeSet::new();
-    for (session, positions) in evidence.uses() {
-        if admin_sessions.contains(session) || refused.contains(session) {
+    let mut unit_keys = BTreeSet::new();
+    for ((session, _), used) in &evidence.votes {
+        if admin_sessions.contains(session) || refused.contains(session.as_str()) {
             continue;
         }
-        let mut tiers = positions
+        let mut tiers = used
+            .from
             .iter()
             .filter_map(|position| tier_of(position.as_str()))
             .peekable();
@@ -546,12 +651,15 @@ pub fn judge_accepts_public(
             continue;
         }
         votes = votes.saturating_add(1);
-        sessions.insert(session);
+        unit_keys.insert(match (identified, &used.user) {
+            (true, Some(user)) => (true, user.as_str()),
+            _ => (false, session.as_str()),
+        });
         if tiers.all(|tier| tier == Tier::Public) {
             public = public.saturating_add(1);
         }
     }
-    let sessions = saturating_count(sessions.len());
+    let sessions = saturating_count(unit_keys.len());
     if votes < thresholds.votes || sessions < thresholds.sessions {
         return None;
     }
@@ -599,6 +707,212 @@ fn grade(strong: bool, identified: bool) -> Option<Reliability> {
 
 fn doubled(count: u32) -> u32 {
     count.saturating_mul(2)
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::context::ObjectMap;
+
+    /// The response position a patient's search results are shown at.
+    const SEARCH: &str = "GET /api/search results[].id";
+    /// Request positions of a patient and of a prescription, both declared.
+    const PATIENT_USE: &str = "GET /patients/{id} path[1]";
+    const PRESCRIPTION_USE: &str = "GET /prescriptions/{id} path[1]";
+    /// A request position the map does not declare.
+    const UNKNOWN_USE: &str = "GET /files/{id} path[1]";
+    /// Declared response positions of the two kinds.
+    const PATIENTS: &str = "GET /api/patients patients[].id";
+    const PRESCRIPTIONS: &str = "GET /api/prescriptions prescriptions[].id";
+
+    /// The map of the two kinds, with `search` declared as well when it is given.
+    fn map_with(search: Option<serde_json::Value>) -> ObjectMap {
+        let mut slots = vec![
+            serde_json::json!({"key": PATIENT_USE, "class": "patient", "source": "admin"}),
+            serde_json::json!({"key": PRESCRIPTION_USE, "class": "prescription", "source": "admin"}),
+            serde_json::json!({"key": PATIENTS, "class": "patient", "source": "admin"}),
+            serde_json::json!({"key": PRESCRIPTIONS, "class": "prescription", "source": "admin"}),
+        ];
+        slots.extend(search);
+        let value = serde_json::json!({
+            "classes": [{"id": "patient", "name": "患者"}, {"id": "prescription", "name": "处方"}],
+            "slots": slots,
+        });
+        serde_json::from_value(value).expect("test map")
+    }
+
+    /// `count` uses of `request` by `sessions` sessions named `tag` and a number, each use on its own
+    /// day from `first_day` on, whose values were shown at `from`.
+    fn uses(
+        tag: &str,
+        request: &str,
+        count: u64,
+        sessions: u64,
+        first_day: u64,
+        from: &[&str],
+    ) -> Vec<Vote> {
+        (0..count)
+            .map(|index| Vote {
+                slot: request.to_owned(),
+                session: format!("{tag}{}", index % sessions),
+                day: first_day + index,
+                from: from.iter().map(|position| (*position).to_owned()).collect(),
+                user: None,
+                admin: false,
+            })
+            .collect()
+    }
+
+    /// The class, votes and share the proposal of `position` gives, when there is one.
+    fn judged(position: &str, votes: &[Vote], map: &ObjectMap) -> Option<(String, u32, u32)> {
+        propose_source(position, votes, map, Thresholds::default())
+            .map(|proposal| (proposal.class, proposal.votes, proposal.share_per_mille))
+    }
+
+    fn patient(votes: u32, share: u32) -> (String, u32, u32) {
+        ("patient".to_owned(), votes, share)
+    }
+
+    #[test]
+    fn values_that_patient_uses_show_are_proposed_as_patients() {
+        let votes = uses("a", PATIENT_USE, 20, 5, 1, &[SEARCH]);
+        assert_eq!(
+            judged(SEARCH, &votes, &map_with(None)),
+            Some(patient(20, 1_000))
+        );
+    }
+
+    #[test]
+    fn the_site_thresholds_are_the_votes_and_sessions_needed() {
+        let map = map_with(None);
+        assert_eq!(
+            judged(SEARCH, &uses("a", PATIENT_USE, 19, 5, 1, &[SEARCH]), &map),
+            None
+        );
+        assert_eq!(
+            judged(SEARCH, &uses("a", PATIENT_USE, 20, 4, 1, &[SEARCH]), &map),
+            None
+        );
+        let lower = Thresholds {
+            votes: 10,
+            sessions: 2,
+            share_per_mille: SHARE_PER_MILLE,
+        };
+        let votes = uses("a", PATIENT_USE, 10, 2, 1, &[SEARCH]);
+        assert!(propose_source(SEARCH, &votes, &map, lower).is_some());
+    }
+
+    #[test]
+    fn nine_tenths_of_the_votes_must_point_at_one_kind() {
+        let map = map_with(None);
+        let mut ninety = uses("a", PATIENT_USE, 18, 5, 1, &[SEARCH]);
+        ninety.extend(uses("b", PRESCRIPTION_USE, 2, 2, 100, &[SEARCH]));
+        assert_eq!(judged(SEARCH, &ninety, &map), Some(patient(20, 900)));
+        let mut eighty_five = uses("a", PATIENT_USE, 17, 5, 1, &[SEARCH]);
+        eighty_five.extend(uses("b", PRESCRIPTION_USE, 3, 3, 100, &[SEARCH]));
+        assert_eq!(judged(SEARCH, &eighty_five, &map), None);
+    }
+
+    #[test]
+    fn a_use_a_declared_source_of_its_kind_explains_does_not_count() {
+        let map = map_with(None);
+        let explained = uses("a", PATIENT_USE, 20, 5, 1, &[SEARCH, PATIENTS]);
+        assert_eq!(judged(SEARCH, &explained, &map), None);
+        // Ten explained uses leave ten, which is below the twenty the site needs.
+        let mut partly = uses("a", PATIENT_USE, 10, 5, 1, &[SEARCH, PATIENTS]);
+        partly.extend(uses("b", PATIENT_USE, 10, 5, 100, &[SEARCH]));
+        assert_eq!(judged(SEARCH, &partly, &map), None);
+    }
+
+    #[test]
+    fn a_declared_source_of_another_kind_does_not_explain_the_use() {
+        let votes = uses("a", PATIENT_USE, 20, 5, 1, &[SEARCH, PRESCRIPTIONS]);
+        assert_eq!(
+            judged(SEARCH, &votes, &map_with(None)),
+            Some(patient(20, 1_000))
+        );
+    }
+
+    #[test]
+    fn a_use_whose_request_has_no_kind_counts_toward_the_total_only() {
+        let map = map_with(None);
+        let unknown = uses("a", UNKNOWN_USE, 20, 5, 1, &[SEARCH]);
+        assert_eq!(judged(SEARCH, &unknown, &map), None);
+        let mut mostly = uses("a", PATIENT_USE, 18, 5, 1, &[SEARCH]);
+        mostly.extend(uses("b", UNKNOWN_USE, 2, 2, 100, &[SEARCH]));
+        assert_eq!(judged(SEARCH, &mostly, &map), Some(patient(20, 900)));
+    }
+
+    #[test]
+    fn a_day_whose_uses_disagree_counts_toward_the_total_only() {
+        let map = map_with(None);
+        // Session `m` uses both kinds on day 0: that day is a vote for no kind.
+        let mut votes = uses("a", PATIENT_USE, 19, 5, 1, &[SEARCH]);
+        votes.push(Vote {
+            slot: PATIENT_USE.to_owned(),
+            session: "m".to_owned(),
+            day: 0,
+            from: vec![SEARCH.to_owned()],
+            user: None,
+            admin: false,
+        });
+        votes.push(Vote {
+            slot: PRESCRIPTION_USE.to_owned(),
+            session: "m".to_owned(),
+            day: 0,
+            from: vec![SEARCH.to_owned()],
+            user: None,
+            admin: false,
+        });
+        assert_eq!(judged(SEARCH, &votes, &map), Some(patient(20, 950)));
+    }
+
+    #[test]
+    fn one_session_counts_once_a_day() {
+        let votes: Vec<Vote> = (0..20)
+            .map(|index| Vote {
+                slot: PATIENT_USE.to_owned(),
+                session: format!("s{}", index % 5),
+                day: 0,
+                from: vec![SEARCH.to_owned()],
+                user: None,
+                admin: false,
+            })
+            .collect();
+        assert_eq!(judged(SEARCH, &votes, &map_with(None)), None);
+    }
+
+    #[test]
+    fn a_field_that_does_not_read_like_an_identifier_is_never_proposed() {
+        let map = map_with(None);
+        for field in ["GET /api/search page", "GET /api/search results[].count"] {
+            let votes = uses("a", PATIENT_USE, 20, 5, 1, &[field]);
+            assert_eq!(judged(field, &votes, &map), None, "{field}");
+        }
+    }
+
+    #[test]
+    fn a_declared_or_paused_position_is_not_proposed() {
+        let votes = uses("a", PATIENT_USE, 20, 5, 1, &[SEARCH]);
+        let declared = serde_json::json!({"key": SEARCH, "class": "patient", "source": "rule"});
+        let paused = serde_json::json!({"key": SEARCH, "class": "patient", "source": "rule", "paused": true});
+        assert_eq!(judged(SEARCH, &votes, &map_with(Some(declared))), None);
+        assert_eq!(judged(SEARCH, &votes, &map_with(Some(paused))), None);
+    }
+
+    #[test]
+    fn a_vote_that_does_not_show_the_value_at_the_position_is_not_its_evidence() {
+        let votes = uses("a", PATIENT_USE, 20, 5, 1, &[PATIENTS]);
+        assert_eq!(judged(SEARCH, &votes, &map_with(None)), None);
+    }
+
+    #[test]
+    fn the_field_is_the_last_dotted_part_of_the_location() {
+        assert_eq!(field_of("GET /api/search results[].id"), "id");
+        assert_eq!(field_of("GET /api/search results[].meta.id"), "id");
+        assert_eq!(field_of("GET /api/search id"), "id");
+        assert_eq!(field_of("GET /doctor/{id} path[1]"), "path[1]");
+    }
 }
 
 #[cfg(test)]
@@ -765,6 +1079,8 @@ mod tier_tests {
                 session: format!("s{}", index % sessions),
                 day: index / sessions,
                 from: from(index).into_iter().map(str::to_owned).collect(),
+                user: None,
+                admin: false,
             });
         }
         evidence
@@ -877,6 +1193,82 @@ mod tier_tests {
         assert!(!judged.accepts_public);
         assert_eq!(judged.reliability, Reliability::Medium);
     }
+
+    /// Votes for `DELETE` from `sessions` sessions, each shown at `from`, where session `s<k>` belongs
+    /// to the user `u<k % users>`. Spread as `uses` spreads them.
+    fn identified_uses(count: u64, sessions: u64, users: u64, from: &str) -> Evidence {
+        let mut evidence = Evidence::default();
+        for index in 0..count {
+            let session = index % sessions;
+            evidence.add_vote(Vote {
+                slot: DELETE.to_owned(),
+                session: format!("s{session}"),
+                day: index / sessions,
+                from: vec![from.to_owned()],
+                user: Some(format!("u{}", session % users)),
+                admin: false,
+            });
+        }
+        evidence
+    }
+
+    #[test]
+    fn with_identities_the_sessions_of_each_user_count_once() {
+        // Forty votes from twenty sessions of ten users: ten units, enough for high.
+        let evidence = identified_uses(40, 20, 10, PATIENTS);
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!(judged.sessions, 10);
+        assert_eq!(judged.reliability, Reliability::High);
+    }
+
+    #[test]
+    fn the_sessions_of_one_user_are_one_unit() {
+        // Forty votes from twenty sessions of one user: one unit, below the five the thresholds need.
+        let evidence = identified_uses(40, 20, 1, PATIENTS);
+        assert_eq!(
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()),
+            None
+        );
+    }
+
+    #[test]
+    fn without_identities_the_same_votes_count_by_session_and_drop_a_step() {
+        let evidence = identified_uses(40, 20, 1, PATIENTS);
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), false, thresholds()).unwrap();
+        assert_eq!(judged.sessions, 20);
+        assert_eq!(judged.reliability, Reliability::Medium);
+    }
+
+    #[test]
+    fn an_administrator_session_on_an_identified_site_is_left_out() {
+        // Sessions s0 to s9 are the administrator's: their twenty votes are left out, and the
+        // other twenty count from ten users, one medium judgement.
+        let evidence = identified_uses(40, 20, 10, PATIENTS);
+        let admins: BTreeSet<String> = (0..10).map(|index| format!("s{index}")).collect();
+        let judged = judge_accepts_public(&evidence, tiers, &admins, true, thresholds()).unwrap();
+        assert_eq!((judged.votes, judged.sessions), (20, 10));
+        assert_eq!(judged.reliability, Reliability::Medium);
+    }
+
+    #[test]
+    fn the_administrator_sessions_are_those_that_showed_the_role() {
+        let mut evidence = uses(4, 2, |_| vec![PATIENTS]);
+        evidence.add_vote(Vote {
+            slot: DELETE.to_owned(),
+            session: "boss".to_owned(),
+            day: 9,
+            from: vec![PATIENTS.to_owned()],
+            user: Some("u9".to_owned()),
+            admin: true,
+        });
+        assert_eq!(
+            evidence.admin_sessions(),
+            BTreeSet::from(["boss".to_owned()])
+        );
+    }
 }
 
 /// Most fingerprints a unit's evidence keeps at one response position on one UTC day. The smallest
@@ -983,14 +1375,19 @@ fn identity_of(record: &DecisionFacts) -> Option<&TraceIdentity> {
         .and_then(|session| session.identity.as_ref())
 }
 
+/// The user label the record's session showed, when it showed one.
+fn user_label(record: &DecisionFacts) -> Option<&str> {
+    identity_of(record)
+        .and_then(|identity| identity.user.as_deref())
+        .filter(|user| !user.is_empty())
+}
+
 /// The unit a record counts as: the user, when the site declares user identities, and the session
 /// otherwise. `None` when there is nothing to count: an anonymous session, or a site with users where
 /// the session has shown none.
 fn unit_of(record: &DecisionFacts, identified: bool) -> Option<&str> {
     if identified {
-        identity_of(record)
-            .and_then(|identity| identity.user.as_deref())
-            .filter(|user| !user.is_empty())
+        user_label(record)
     } else {
         Some(record.session.as_str()).filter(|session| !session.is_empty())
     }
@@ -1275,18 +1672,20 @@ pub struct FunctionUse {
     pub units: u32,
 }
 
-/// Light siblings that contain a digit, at least this many, make the segment they differ at `{id}`
-/// (docs/07 section 7.9.19).
+/// Light siblings that are values, not route words (`is_plain_word`), at least this many, make the segment
+/// they differ at `{id}` (docs/07 section 7.9.19).
 pub const MERGE_IDS_MIN: usize = 10;
-/// Light siblings that contain no digit, at least this many, make the segment they differ at `{id}`. It is
+/// Light siblings that are route words, at least this many, make the segment they differ at `{name}`. It is
 /// far above [`MERGE_IDS_MIN`]: route words such as `users` and `orders` contain no digit either, and a
 /// small site has not yet reached the units to tell them from names.
 pub const MERGE_WORDS_MIN: usize = 50;
 /// Function keys one learning pass analyzes at most, the units used most first.
 pub const FUNCTION_KEYS_MAX: usize = 20_000;
 
-/// The segment a merged segment becomes.
-const MERGED_SEGMENT: &str = "{id}";
+/// The segment a merged value becomes: `{id}` covers a value and no route word (docs/07 section 7.9.18).
+const MERGED_ID: &str = "{id}";
+/// The segment a merged route word becomes: `{name}` covers any segment, so it is the wider placeholder.
+const MERGED_NAME: &str = "{name}";
 
 /// A function key as the merge works on it.
 struct Merging<'a> {
@@ -1313,11 +1712,12 @@ fn segments_of(path: &str) -> Vec<&str> {
 /// (docs/07 section 7.9.19). The result has an entry for every distinct key of `uses`.
 ///
 /// Segments merge level by level, from the first one. At a level, the keys sharing a method and the segments
-/// already decided before it form a group. In a group, each value of the segment at the level, other than
-/// `{id}`, is a child, weighed by the most units any of its keys used. A child lighter than
-/// `thresholds.sessions` is light. When at least [`MERGE_IDS_MIN`] light children contain a digit, or at
-/// least [`MERGE_WORDS_MIN`] light children contain none, every light child of that kind becomes `{id}` at
-/// that level. A heavy child is a function of its own and stays.
+/// already decided before it form a group. In a group, each value of the segment at the level, other than a
+/// placeholder (`{id}` or `{name}`), is a child, weighed by the most units any of its keys used. A child
+/// lighter than `thresholds.sessions` is light. When at least [`MERGE_IDS_MIN`] light children are values,
+/// not route words (`is_plain_word`), every one of them becomes `{id}` at that level. When at least
+/// [`MERGE_WORDS_MIN`] light children are route words, every one of them becomes `{name}`. A heavy child is
+/// a function of its own and stays.
 ///
 /// A key whose leading segments are the segments of one of `named_under` (the stems of the site's route
 /// paths, without the trailing slash) is kept as it is, and takes part in no step: its segments below a
@@ -1372,8 +1772,8 @@ pub fn merge_functions(
         .collect();
     let depth_max = keys.iter().map(|key| key.segments.len()).max().unwrap_or(0);
     for depth in 0..depth_max {
-        for index in merged_at(&keys, depth, thresholds) {
-            MERGED_SEGMENT.clone_into(&mut keys[index].segments[depth]);
+        for (index, placeholder) in merged_at(&keys, depth, thresholds) {
+            placeholder.clone_into(&mut keys[index].segments[depth]);
         }
     }
     keys.iter()
@@ -1388,9 +1788,13 @@ pub fn merge_functions(
         .collect()
 }
 
-/// The indices of the keys whose segment at `depth` becomes `{id}` at that level: the members of every group
-/// whose light children are numerous enough, as [`merge_functions`] describes.
-fn merged_at(keys: &[Merging<'_>], depth: usize, thresholds: Thresholds) -> Vec<usize> {
+/// The keys whose segment at `depth` becomes a placeholder at that level, each with its placeholder: the members
+/// of every group whose light children are numerous enough, as [`merge_functions`] describes.
+fn merged_at(
+    keys: &[Merging<'_>],
+    depth: usize,
+    thresholds: Thresholds,
+) -> Vec<(usize, &'static str)> {
     let mut groups: BTreeMap<(&str, Vec<&str>), Vec<usize>> = BTreeMap::new();
     for (index, key) in keys.iter().enumerate() {
         if key.held || key.segments.len() <= depth {
@@ -1404,7 +1808,7 @@ fn merged_at(keys: &[Merging<'_>], depth: usize, thresholds: Thresholds) -> Vec<
         let mut weights: BTreeMap<&str, u32> = BTreeMap::new();
         for &index in members {
             let value = keys[index].segments[depth].as_str();
-            if value != MERGED_SEGMENT {
+            if value != MERGED_ID && value != MERGED_NAME {
                 let weight = weights.entry(value).or_default();
                 *weight = (*weight).max(keys[index].units);
             }
@@ -1414,22 +1818,20 @@ fn merged_at(keys: &[Merging<'_>], depth: usize, thresholds: Thresholds) -> Vec<
             .filter(|(_, weight)| **weight < thresholds.sessions)
             .map(|(value, _)| *value)
             .collect();
-        let (with_digits, words): (Vec<&str>, Vec<&str>) = light
-            .into_iter()
-            .partition(|value| value.bytes().any(|byte| byte.is_ascii_digit()));
-        let mut chosen: BTreeSet<&str> = BTreeSet::new();
-        if with_digits.len() >= MERGE_IDS_MIN {
-            chosen.extend(with_digits);
+        let (values, words): (Vec<&str>, Vec<&str>) =
+            light.into_iter().partition(|value| !is_plain_word(value));
+        let mut chosen: BTreeMap<&str, &'static str> = BTreeMap::new();
+        if values.len() >= MERGE_IDS_MIN {
+            chosen.extend(values.into_iter().map(|value| (value, MERGED_ID)));
         }
         if words.len() >= MERGE_WORDS_MIN {
-            chosen.extend(words);
+            chosen.extend(words.into_iter().map(|value| (value, MERGED_NAME)));
         }
-        merged.extend(
-            members
-                .iter()
-                .copied()
-                .filter(|&index| chosen.contains(keys[index].segments[depth].as_str())),
-        );
+        merged.extend(members.iter().filter_map(|&index| {
+            chosen
+                .get(keys[index].segments[depth].as_str())
+                .map(|&placeholder| (index, placeholder))
+        }));
     }
     merged
 }
@@ -1503,6 +1905,8 @@ mod tests {
             session: session.to_owned(),
             day,
             from: from.map(str::to_owned).into_iter().collect(),
+            user: None,
+            admin: false,
         }
     }
 
@@ -1694,6 +2098,8 @@ mod tests {
                 "GET /api/docs [].id".to_owned(),
                 "GET /api/appointments [].doc_id".to_owned(),
             ],
+            user: None,
+            admin: false,
         });
         assert_eq!(evidence.votes(), 1);
         assert!(evidence.kinds(&map).is_empty());
@@ -1706,6 +2112,8 @@ mod tests {
                 "GET /api/other [].id".to_owned(),
                 "GET /api/appointments [].doc_id".to_owned(),
             ],
+            user: None,
+            admin: false,
         });
         assert_eq!(evidence.kinds(&map).get("doctor"), Some(&1));
     }
@@ -1859,6 +2267,35 @@ mod tier_evidence_tests {
             path: "/api/patients/7".to_owned(),
             client: "10.0.0.1".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_vote_keeps_the_user_and_the_role_its_session_showed() {
+        let admin = facts(
+            "s1",
+            &json!({"user": "0123456789abcdef", "role": "admin"}),
+            Some(200),
+            DecisionPath::FastAllow,
+            None,
+        );
+        let admin_vote = &observe(&admin).votes[0];
+        assert_eq!(admin_vote.user.as_deref(), Some("0123456789abcdef"));
+        assert!(admin_vote.admin);
+        let doctor = facts(
+            "s2",
+            &json!({"user": "fedcba9876543210"}),
+            Some(200),
+            DecisionPath::JevAllow,
+            None,
+        );
+        let doctor_vote = &observe(&doctor).votes[0];
+        assert_eq!(doctor_vote.user.as_deref(), Some("fedcba9876543210"));
+        assert!(!doctor_vote.admin);
+        // A session that showed no identity keeps neither.
+        let anonymous = facts("s3", &Value::Null, Some(200), DecisionPath::FastAllow, None);
+        let anonymous_vote = &observe(&anonymous).votes[0];
+        assert_eq!(anonymous_vote.user, None);
+        assert!(!anonymous_vote.admin);
     }
 
     fn answer(positions: &[(&str, &[&str])]) -> Value {
@@ -2408,8 +2845,8 @@ mod function_tests {
     }
 
     #[test]
-    fn words_merge_only_from_fifty_light_siblings() {
-        let few: Vec<FunctionUse> = (0..25)
+    fn fifty_word_children_merge_into_a_name() {
+        let few: Vec<FunctionUse> = (0..49)
             .map(|index| use_of(format!("GET /api/{}", word(index)), 1))
             .collect();
         let merged = merge_functions(&few, Thresholds::default(), &[]);
@@ -2417,15 +2854,57 @@ mod function_tests {
             assert_eq!(merged[&function.key], function.key);
         }
 
-        let mut many: Vec<FunctionUse> = (0..60)
+        let mut many: Vec<FunctionUse> = (0..50)
             .map(|index| use_of(format!("GET /u/{}", word(index)), 1))
             .collect();
         many.push(use_of("GET /u/settings", 30));
         let merged = merge_functions(&many, Thresholds::default(), &[]);
-        for function in many.iter().take(60) {
-            assert_eq!(merged[&function.key], "GET /u/{id}");
+        for function in many.iter().take(50) {
+            assert_eq!(merged[&function.key], "GET /u/{name}");
         }
         assert_eq!(merged["GET /u/settings"], "GET /u/settings");
+    }
+
+    #[test]
+    fn words_and_ids_at_one_level_merge_apart() {
+        let mut uses: Vec<FunctionUse> = (0..10)
+            .map(|index| use_of(format!("GET /products/PT-70{index:02}"), 1))
+            .collect();
+        uses.extend((0..50).map(|index| use_of(format!("GET /products/{}", word(index)), 1)));
+        uses.push(use_of("GET /products/featured", 30));
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for index in 0..10 {
+            assert_eq!(
+                merged[&format!("GET /products/PT-70{index:02}")],
+                "GET /products/{id}"
+            );
+        }
+        for index in 0..50 {
+            assert_eq!(
+                merged[&format!("GET /products/{}", word(index))],
+                "GET /products/{name}"
+            );
+        }
+        assert_eq!(merged["GET /products/featured"], "GET /products/featured");
+    }
+
+    #[test]
+    fn a_route_word_among_ids_stays_a_function() {
+        let mut uses: Vec<FunctionUse> = (0..10)
+            .map(|index| use_of(format!("GET /api/patients/PT-70{index:02}"), 1))
+            .collect();
+        uses.push(use_of("GET /api/patients/export-all", 1));
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for index in 0..10 {
+            assert_eq!(
+                merged[&format!("GET /api/patients/PT-70{index:02}")],
+                "GET /api/patients/{id}"
+            );
+        }
+        assert_eq!(
+            merged["GET /api/patients/export-all"],
+            "GET /api/patients/export-all"
+        );
     }
 
     #[test]
@@ -2457,7 +2936,7 @@ mod function_tests {
         }
         let merged = merge_functions(&uses, Thresholds::default(), &[]);
         for function in &uses {
-            assert_eq!(merged[&function.key], "GET /u/{id}/posts/{id}");
+            assert_eq!(merged[&function.key], "GET /u/{name}/posts/{id}");
         }
     }
 
@@ -2510,6 +2989,7 @@ mod function_tests {
         let mut uses: Vec<FunctionUse> = (0..12)
             .map(|index| use_of(format!("GET /products/PT-70{index:02}"), 1))
             .collect();
+        uses.extend((0..50).map(|index| use_of(format!("GET /products/{}", word(index)), 1)));
         uses.push(use_of("GET /products/featured", 30));
         let thresholds = Thresholds::default();
         let once = merge_functions(&uses, thresholds, &[]);

@@ -67,7 +67,8 @@ export type ResponseSkip =
   | "compressed"
   | "too_large"
   | "head"
-  | "not_forwarded";
+  | "not_forwarded"
+  | "would_block";
 
 // ------------------------------------------------------------------ request list (7.9.3)
 
@@ -290,7 +291,11 @@ export interface TraceResponse {
   issued_session: string | null;
   /** The response made the session pass an entry for the first time. */
   entry_passed: boolean;
-  /** The request was "would block" but forwarded, and its response was still learned (7.4.6). */
+  /**
+   * The request would be refused in enforce mode but was forwarded in observe mode. Its response is not
+   * read and teaches nothing (observed "skipped", docs/07 7.4.6). Records written before that change
+   * were read and did teach the session.
+   */
   after_would_block: boolean;
   /**
    * Response structure (field paths and types, never values). Present only when the route's
@@ -377,8 +382,14 @@ export interface JevRecord {
   route: JevRoute;
   /** Timeout this call actually used (site setting or deployment default). */
   timeout_ms: number;
-  /** Trim level 0 to 4 (7.5.3). */
+  /** Trim level 0 to 4 (7.5.3); with several batches, the level of the batch shown. */
   trim: number;
+  /** How many calls the state was cut into; present only when there were several (7.5.1). */
+  batches?: number;
+  /** The batch this record shows, from 1; present only together with `batches`. */
+  batch?: number;
+  /** Values and pieces not sent because the batches allowed no more (docs/02 2.4); present only when some. */
+  left_out?: number;
   request_bytes: number | null;
   http_status: number | null;
   /** Raw provider response, at most 8 KiB; null on timeout and connection failure. */
@@ -400,6 +411,8 @@ export interface JevStateValue {
   value: string;
   seen_as: string[];
   verified?: boolean;
+  /** `k/n` when this is piece k of n of a value the judge cut into pieces (docs/02 2.2). Pieces carry no `seen_as`. */
+  part?: string;
 }
 
 export interface JevState {
@@ -537,7 +550,7 @@ export interface SessionListResponse {
 }
 
 export interface TimelineRow extends RequestRow {
-  /** New values the response taught the session (`trace.response.new_values`). */
+  /** New values the response taught the session (`trace.response.new_values`); null when the response was not read. */
   learned: number | null;
   entry_passed: boolean;
   issued_session: string | null;
@@ -693,6 +706,80 @@ export interface ObjectFunctionEntry {
   tier?: "admin";
   /** How sure the rules are of the tier. Needs a tier. */
   reliability?: ObjectReliability;
+}
+
+/** The state of the function list (docs/07 7.9.20): read in full, over the key limit, or with learning off. */
+export type FunctionsStatus = "ok" | "over_limit" | "learning_off";
+
+/** A function of the table with its evidence over the window (`functions`, docs/07 7.9.20). */
+export interface FunctionRow {
+  key: string;
+  source: ObjectSource;
+  tier?: "admin";
+  reliability?: ObjectReliability;
+  ordinary_units: number;
+  admin_units: number;
+  refused_units: number;
+  last_seen: string | null;
+  on_entry: boolean;
+}
+
+/** A function the learning saw that the table does not name (`candidates`, docs/07 7.9.20). */
+export interface FunctionCandidate {
+  key: string;
+  ordinary_units: number;
+  admin_units: number;
+  refused_units: number;
+  last_seen: string | null;
+  requests_24h: number;
+  /** Units reach the threshold. The console selects by default the candidates that are suggested and not sensitive. */
+  suggested: boolean;
+  /** The template holds a word of an operations path (`admin`, `metrics`, `export`, ...). */
+  sensitive: boolean;
+  on_entry: boolean;
+}
+
+/** An administrator proposal the rules make (`proposals`, docs/07 7.9.19). `refused_units` is null without evidence. */
+export interface FunctionProposal {
+  key: string;
+  tier: "admin";
+  reliability: ObjectReliability;
+  admin_units: number;
+  refused_units: number | null;
+  last_seen: string | null;
+  in_table: boolean;
+}
+
+/** The traffic of the last day that neither the table nor the candidates name (`unlearned`, docs/07 7.9.20). */
+export interface UnlearnedTraffic {
+  requests: number;
+  unkeyed_requests: number;
+  /** False when the counts are lower bounds. */
+  complete: boolean;
+  top: Array<{ key: string; requests: number; sample: string }>;
+}
+
+/** `GET /api/sites/{name}/objects/functions` (docs/07 7.9.20). */
+export interface SiteFunctions {
+  status: FunctionsStatus;
+  window_days: number;
+  threshold_units: number;
+  /** Whether the site declares a user identity: its units are users, otherwise sessions. */
+  identified: boolean;
+  ordinary_units: number;
+  admin_units: number;
+  functions: FunctionRow[];
+  candidates: FunctionCandidate[];
+  proposals: FunctionProposal[];
+  unlearned: UnlearnedTraffic;
+}
+
+/** The body of `POST …/objects/functions/changes`: one batch, each list left out when it holds nothing (docs/07 7.9.20). */
+export interface FunctionChanges {
+  add?: string[];
+  admin?: Array<{ key: string; reliability: ObjectReliability }>;
+  open?: string[];
+  remove?: string[];
 }
 
 /** The identity a response position states about the session (`identity`, docs/07 7.9.15). */
@@ -923,11 +1010,19 @@ export interface Readiness {
   jev_health: JevHealth;
   jev_p95_ms: number | null;
   jev_timeout_ratio: number | null;
-  /** Requests that cited a value learned from a "would block" response (7.4.6). */
-  after_would_block_refs: number;
   /** Requests whose values were attempts to act on another user's object (7.4.7). */
   attempts: number;
+  /** The function table's part, when the table guards something (docs/07 7.9.11); null otherwise. */
+  functions: ReadinessFunctions | null;
   on_jev_unavailable: OnJevUnavailable;
+}
+
+/** The function table in the readiness check (docs/07 7.9.11). `unknown` is null when the site does not ask. */
+export interface ReadinessFunctions {
+  /** Requests by a session that is no administrator for an administrator's function. */
+  attempts: number;
+  /** Requests for a function the table does not list. */
+  unknown: number | null;
 }
 
 export interface Insights {
@@ -1008,7 +1103,6 @@ export interface FixedParams {
   state_bytes_max: number;
   request_body_max: number;
   response_parse_max: number;
-  request_values_max: number;
 }
 
 export interface SystemInfo {

@@ -225,7 +225,7 @@ class ClinicOriginTest(unittest.TestCase):
         self.assertNotEqual(first.snapshot(), other.snapshot())
         truth = self.origin.truth()
         self.assertEqual(set(truth), {"site", "seed", "classes", "identity", "request_positions",
-                                      "response_positions", "non_objects"})
+                                      "response_positions", "non_objects", "functions"})
         self.assertEqual(truth["site"], "clinic")
         self.assertEqual(truth["seed"], DEFAULT_SEED)
         for item in truth["request_positions"] + truth["response_positions"]:
@@ -243,6 +243,32 @@ class ClinicOriginTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             site_spec("half", 18080)
 
+    def test_the_login_page_answers_any_credential_with_200(self) -> None:
+        # WAF batch 11 (plan 4.5): the public page is how the gateway starts a session of a credential the origin
+        # never issued. Nothing else opens to such a credential.
+        forged = "forged-" + "0" * 23 + "1"
+        for token in (None, forged):
+            reply = _send(self.origin, "GET", "/login", token=token)
+            self.assertEqual(reply.status, 200)
+            self.assertIn("text/html", {name.lower(): value for name, value in reply.headers}["content-type"])
+        self.assertEqual(_send(self.origin, "GET", "/api/home", token=forged).status, 401)
+
+    def test_the_four_positions_the_traffic_never_uses_are_not_learnable_and_say_why(self) -> None:
+        # Design 2.9: the benign traffic never uses these values, so the learning cannot see them; the truth says so.
+        keys = {
+            "GET /api/directory doctors[].id", "GET /api/directory doctors[].org",
+            "GET /api/visits/{id} id", "GET /api/prescriptions/{id} id",
+        }
+        marked = {item["key"]: item for item in self.origin.truth()["response_positions"] if not item["learnable"]}
+        self.assertTrue(keys <= set(marked))
+        for key in keys:
+            self.assertIn("why", marked[key], key)
+        declared = {slot["key"] for slot in site_spec("truth", 18080)["objects"]["slots"]}
+        self.assertFalse(keys & declared)
+
+    def test_the_login_route_is_in_the_function_table(self) -> None:
+        self.assertIn("GET /login", [item["key"] for item in self.origin.truth()["functions"]])
+
 
 class TrainingTrafficTest(unittest.TestCase):
     def direct_run(self, seed: int) -> tuple[list[dict[str, Any]], Evidence]:
@@ -251,7 +277,8 @@ class TrainingTrafficTest(unittest.TestCase):
         self.addCleanup(origin.stop)
 
         def direct(host: str, method: str, target: str, **options: Any) -> labkit.Sent:
-            return labkit.Sent(labkit.request(origin.port, host, method, target, **options), None, False)
+            # The origin answers this client directly, so it served every answer of the run.
+            return labkit.Sent(labkit.request(origin.port, host, method, target, **options), None, True)
 
         evidence = Evidence()
         return run_training(direct, origin, seed, 12, 4, evidence=evidence), evidence
@@ -265,7 +292,14 @@ class TrainingTrafficTest(unittest.TestCase):
                      tuple((ref["class"], ref["value"]) for ref in row["refs"])) for row in rows]
 
         self.assertEqual(sequence(first), sequence(second))
-        self.assertTrue(all(row["group"] == "train" and row["expect"] == "allow" for row in first))
+        allowed = [row for row in first if row["expect"] == "allow"]
+        self.assertTrue(all(row["group"] == "train" for row in allowed))
+        # The administrator search of each ordinary doctor is the one row that expects a block (plan 4.5).
+        refused = [row for row in first if row["expect"] == "block"]
+        self.assertEqual(len(refused), 12)
+        self.assertTrue(all(row["group"] == "attack" and row["category"] == "function_level"
+                            and row["requires"] == ["functions"] and row["reason"] == "access"
+                            for row in refused))
         unexpected = [row["case"] for row in first if row["client_status"] not in row["expected_status"]]
         self.assertEqual(unexpected, [])
 

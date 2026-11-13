@@ -137,7 +137,6 @@ pub struct FixedParamsBody {
     pub state_bytes_max: i64,
     pub request_body_max: i64,
     pub response_parse_max: i64,
-    pub request_values_max: i64,
     pub queue_capacity: i64,
 }
 
@@ -274,7 +273,6 @@ fn runtime_params(reported: Option<&Value>) -> ParamsBody {
             state_bytes_max: field(fixed, "state_bytes_max").unwrap_or(8_192),
             request_body_max: field(fixed, "request_body_max").unwrap_or(49_152),
             response_parse_max: field(fixed, "response_parse_max").unwrap_or(1_048_576),
-            request_values_max: field(fixed, "request_values_max").unwrap_or(200),
             queue_capacity: field(fixed, "queue_capacity").unwrap_or(10_000),
         },
     }

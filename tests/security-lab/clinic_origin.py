@@ -35,6 +35,13 @@ SURNAMES = ("王", "李", "张", "刘", "陈", "杨", "黄", "赵", "周", "吴"
 GIVEN_NAMES = ("伟", "芳", "敏", "静", "丽", "强", "磊", "军", "洋", "娜", "秀英", "桂兰")
 ENTRIES = ("/login", "/api/token", "/api/home", "/api/patients", "/share/*")
 BYPASS = ("/static/*",)
+# The public login page, the same for every credential (WAF batch 11, plan 4.5): a session of a credential the origin
+# never issued starts with an answer like this one, so the gateway has a 2xx to learn the session from.
+LOGIN_PAGE = (
+    '<!doctype html><meta charset="utf-8"><title>登录</title>'
+    '<form method="post" action="/login"><input name="username"><input name="password" type="password">'
+    "<button>登录</button></form>\n"
+).encode("utf-8")
 CORS_HEADERS = (
     ("Access-Control-Allow-Origin", "*"),
     ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
@@ -72,16 +79,20 @@ RESPONSE_POSITIONS: tuple[dict[str, Any], ...] = (
     {"key": "GET /api/patients/{id} visits[].id", "class": "visit", "tier": "self", "learnable": True},
     {"key": "GET /api/patients/{id} prescriptions[].id", "class": "prescription", "tier": "self",
      "learnable": True},
-    {"key": "GET /api/visits/{id} id", "class": "visit", "tier": "self", "learnable": True},
+    {"key": "GET /api/visits/{id} id", "class": "visit", "tier": "self", "learnable": False,
+     "why": "训练流量不用就诊编号；学习只看得到参与了票的位置（设计稿 2.9）"},
     {"key": "GET /api/visits/{id} patient_id", "class": "patient", "tier": "self", "learnable": True},
-    {"key": "GET /api/prescriptions/{id} id", "class": "prescription", "tier": "self", "learnable": True},
+    {"key": "GET /api/prescriptions/{id} id", "class": "prescription", "tier": "self", "learnable": False,
+     "why": "训练流量不用处方编号；学习只看得到参与了票的位置（设计稿 2.9）"},
     {"key": "GET /api/prescriptions/{id} patient_id", "class": "patient", "tier": "self", "learnable": True},
     {"key": "GET /api/reports/{id} patient_id", "class": "patient", "tier": "self", "learnable": False,
      "why": "慢速 id，路由不化为 {id}"},
     {"key": "POST /api/patients id", "class": "patient", "tier": "self", "learnable": True},
     {"key": "GET /api/search results[].id", "class": "patient", "tier": "public", "learnable": True},
-    {"key": "GET /api/directory doctors[].id", "class": "doctor", "tier": "public", "learnable": True},
-    {"key": "GET /api/directory doctors[].org", "class": "org", "tier": "public", "learnable": True},
+    {"key": "GET /api/directory doctors[].id", "class": "doctor", "tier": "public", "learnable": False,
+     "why": "训练流量不用目录里的医生编号；学习只看得到参与了票的位置（设计稿 2.9）"},
+    {"key": "GET /api/directory doctors[].org", "class": "org", "tier": "public", "learnable": False,
+     "why": "训练流量不用目录里的医生机构；学习只看得到参与了票的位置（设计稿 2.9）"},
     {"key": "GET /api/admin/search results[].id", "class": "patient", "tier": "admin", "learnable": True},
     {"key": "GET /api/admin/export patients[].id", "class": "patient", "tier": "admin", "learnable": True},
     {"key": "GET /share/{code} patient.id", "class": "patient", "tier": None, "learnable": False,
@@ -94,6 +105,37 @@ RESPONSE_POSITIONS: tuple[dict[str, Any], ...] = (
 
 # Identity positions (docs/07 section 7.9.15). The token login names its user as well, but only the JSON
 # credential site declares it.
+# The function table of the truth site (docs/07 7.9.18): one entry per route the origin answers, except GET /metrics,
+# which is left out on purpose, so the gateway asks Jev about it (objects.ask_unknown_functions). The two
+# administrator routes are the administrator tier, at reliability high.
+FUNCTIONS: tuple[dict[str, Any], ...] = (
+    {"key": "GET /static/app.js", "source": "admin"},
+    {"key": "GET /login", "source": "admin"},
+    {"key": "POST /login", "source": "admin"},
+    {"key": "POST /api/token", "source": "admin"},
+    {"key": "GET /api/home", "source": "admin"},
+    {"key": "POST /api/session/refresh", "source": "admin"},
+    {"key": "GET /api/patients", "source": "admin"},
+    {"key": "POST /api/patients", "source": "admin"},
+    {"key": "GET /api/patients/{id}", "source": "admin"},
+    {"key": "PUT /api/patients/{id}", "source": "admin"},
+    {"key": "DELETE /api/patients/{id}", "source": "admin"},
+    {"key": "GET /api/patients/{id}/comments", "source": "admin"},
+    {"key": "POST /api/patients/{id}/notes", "source": "admin"},
+    {"key": "POST /api/patients/{id}/share", "source": "admin"},
+    {"key": "POST /api/patients/{id}/attachments", "source": "admin"},
+    {"key": "GET /share/{id}", "source": "admin"},
+    {"key": "GET /api/visits/{id}", "source": "admin"},
+    {"key": "GET /api/prescriptions/{id}", "source": "admin"},
+    {"key": "GET /api/reports/{id}", "source": "admin"},
+    {"key": "GET /api/search", "source": "admin"},
+    {"key": "GET /api/directory", "source": "admin"},
+    {"key": "GET /api/admin/search", "source": "admin", "tier": "admin", "reliability": "high"},
+    {"key": "GET /api/admin/export", "source": "admin", "tier": "admin", "reliability": "high"},
+    {"key": "POST /api/profile", "source": "admin"},
+    {"key": "POST /api/forms/intake", "source": "admin"},
+)
+
 IDENTITY: tuple[dict[str, Any], ...] = (
     {"key": "GET /api/home doctor.id", "class": "doctor", "identity": "user"},
     {"key": "GET /api/home doctor.org", "class": "org", "identity": "org"},
@@ -296,6 +338,7 @@ class ClinicOrigin:
             "request_positions": [dict(item) for item in REQUEST_POSITIONS],
             "response_positions": [dict(item) for item in RESPONSE_POSITIONS],
             "non_objects": list(NON_OBJECTS),
+            "functions": [{"key": item["key"], "tier": item.get("tier")} for item in FUNCTIONS],
         }
 
     def reference_state(self, credential: str | None, object_class: str, value: str) -> dict[str, bool]:
@@ -363,6 +406,8 @@ class ClinicOrigin:
             return Result(200, raw=b"xshield_clinic_origin_up 1\n", content_type="text/plain; charset=utf-8")
         if method == "GET" and path == "/static/app.js":
             return Result(200, raw=b"/* clinic lab app */\n", content_type="application/javascript; charset=utf-8")
+        if method == "GET" and path == "/login":
+            return Result(200, raw=LOGIN_PAGE, content_type="text/html; charset=utf-8")
         if method == "POST" and path == "/login":
             return self._login(_fields(headers, body))
         if method == "POST" and path == "/api/token":
@@ -629,7 +674,8 @@ def site_spec(config: str, origin_port: int, mode: str = "enforce") -> dict[str,
     """The lab site for one object-map configuration (plan 3.3).
 
     `none` declares only the identity positions: no object map, so the edge judges as a site without
-    one. `truth` declares every learnable position from the origin's truth, each at reliability high.
+    one. `truth` declares every learnable position from the origin's truth, each at reliability high, and the
+    origin's function table with ask_unknown_functions (every route but GET /metrics is in the table).
     """
     if config not in ("none", "truth"):
         raise ValueError(f"unknown configuration {config!r}")
@@ -651,15 +697,19 @@ def site_spec(config: str, origin_port: int, mode: str = "enforce") -> dict[str,
                               "tier": item["tier"], "reliability": "high"})
                 classes.add(item["class"])
     class_names = dict(CLASSES)
+    objects: dict[str, Any] = {
+        "classes": [{"id": cls, "name": class_names[cls]} for cls, _ in CLASSES if cls in classes],
+        "slots": slots,
+    }
+    if config == "truth":
+        objects["functions"] = [dict(item) for item in FUNCTIONS]
+        objects["ask_unknown_functions"] = True
     return {
         "name": name, "hosts": [f"{name}.lab"], "origin": f"http://127.0.0.1:{origin_port}",
         "session": {"cookie": "SID"}, "entries": list(ENTRIES), "bypass": list(BYPASS),
         "mode": mode, "on_jev_unavailable": "deny",
         "advanced": {"address_calls_per_minute": 600},
-        "objects": {
-            "classes": [{"id": cls, "name": class_names[cls]} for cls, _ in CLASSES if cls in classes],
-            "slots": slots,
-        },
+        "objects": objects,
     }
 
 

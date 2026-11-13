@@ -40,7 +40,7 @@ export const KEY_MAX = 256;
 /** The defaults of the learning settings (console design 3.5). Absent settings mean these values. */
 export const DEFAULT_LEARNING: LearningSettings = {
   auto_learn: true,
-  auto_tighten: true,
+  auto_tighten: false,
   agent: { enabled: false, daily_limit: 200 },
   thresholds: { uses: 20, sessions: 5 },
   auto_pause: true,

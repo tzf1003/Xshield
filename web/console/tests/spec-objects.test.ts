@@ -86,7 +86,7 @@ test("learning settings at their defaults are left out of a saved configuration"
     objects: {
       learning: {
         auto_learn: true,
-        auto_tighten: true,
+        auto_tighten: false,
         agent: { enabled: false, daily_limit: 200 },
         thresholds: { uses: 20, sessions: 5 },
         auto_pause: true,
@@ -346,7 +346,7 @@ const defaultsPlain: SiteSpec = {
   objects: {
     learning: {
       auto_learn: true,
-      auto_tighten: true,
+      auto_tighten: false,
       agent: { enabled: false, daily_limit: 200 },
       thresholds: { uses: 20, sessions: 5 },
       auto_pause: true,

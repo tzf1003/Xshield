@@ -19,7 +19,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
-use xshield_core::context::{Mode, OnJevUnavailable, SiteSpec, config::is_plain_path};
+use xshield_core::context::{
+    Mode, OnJevUnavailable, SiteSpec, config::is_plain_path, objects::ObjectMap,
+};
 use xshield_postgres::{
     decision_log_store::{self, RequestFilter},
     decision_stats::{self, Breakdown, JevStats, PathGroup, RefusedGroup, Scope},
@@ -360,12 +362,22 @@ pub struct ReadinessBody {
     pub jev_p95_ms: Option<i64>,
     /// Timeouts over calls, from 0 to 1; null when the window has no Jev call.
     pub jev_timeout_ratio: Option<f64>,
-    /// How often a value learned from a would-be refused request was cited later.
-    pub after_would_block_refs: i64,
     /// Requests of the window whose values were attempts to act on another user's object (docs/07
     /// section 7.4.7). Once the site enforces, the judge sends each to Jev, which is asked to refuse it.
     pub attempts: i64,
+    /// The function table at work in the window (docs/07 section 7.9.18); `None` when the site's table guards
+    /// nothing.
+    pub functions: Option<ReadinessFunctions>,
     pub on_jev_unavailable: OnJevUnavailable,
+}
+
+/// The function table's part of the readiness check (docs/07 section 7.9.11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessFunctions {
+    /// Requests by a session that is no administrator for an administrator's function.
+    pub attempts: i64,
+    /// Requests for a function the table does not list; `None` when the site does not ask about them.
+    pub unknown: Option<i64>,
 }
 
 /// `GET /api/sites/{name}/evidence` (docs/07 section 7.9.2): the Jev latency, timeouts,
@@ -1420,9 +1432,16 @@ async fn readiness_of(
         i64::from(Effective::of(&record.spec).jev_timeout_ms),
         last.len() == 5 && last.iter().all(Option::is_some),
     );
-    let refs =
-        decision_stats::after_would_block_references(pool, name, now - hours * HOUR_MILLIS).await?;
     let attempts = decision_stats::attempt_requests(pool, name, now - hours * HOUR_MILLIS).await?;
+    // The table's counts are read only for a site whose table guards something (docs/07 section 7.9.18).
+    let objects = record.spec.objects();
+    let functions = if objects.guards_functions() {
+        let (attempts, unknown) =
+            decision_stats::function_requests(pool, name, now - hours * HOUR_MILLIS).await?;
+        functions_readiness(objects, attempts, unknown)
+    } else {
+        None
+    };
     let ratio = (stats.calls > 0).then(|| stats.timeouts as f64 / stats.calls as f64);
     Ok(ReadinessBody {
         observing_since_millis: since.timestamp_millis(),
@@ -1431,9 +1450,23 @@ async fn readiness_of(
         jev_health: health.as_str().to_owned(),
         jev_p95_ms: whole_ms(stats.p95_ms),
         jev_timeout_ratio: ratio,
-        after_would_block_refs: refs,
         attempts,
+        functions,
         on_jev_unavailable: record.spec.on_jev_unavailable(),
+    })
+}
+
+/// The function part of the readiness check, from the site's objects and the two counts of the window (docs/07
+/// section 7.9.11): `None` when the table guards nothing; otherwise the attempts, and the unknown functions when the
+/// site asks about them.
+fn functions_readiness(
+    objects: &ObjectMap,
+    attempts: i64,
+    unknown: i64,
+) -> Option<ReadinessFunctions> {
+    objects.guards_functions().then(|| ReadinessFunctions {
+        attempts,
+        unknown: objects.asks_unknown_functions().then_some(unknown),
     })
 }
 
@@ -1861,6 +1894,53 @@ mod tests {
                 fields
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn readiness_reports_functions_only_for_a_guarding_site() {
+        let spec_with = |objects: Value| {
+            SiteSpec::from_json(
+                &json!({
+                    "name": "gw",
+                    "hosts": ["gw.example.com"],
+                    "origin": "http://10.0.0.5:8080",
+                    "session": {"cookie": "SESSIONID"},
+                    "entries": ["/login"],
+                    "objects": objects,
+                })
+                .to_string(),
+            )
+            .expect("test spec")
+        };
+        let admin_high = json!({
+            "key": "POST /api/admin/export", "source": "rule", "tier": "admin", "reliability": "high"
+        });
+        // An empty table guards nothing, whatever the counts are.
+        let empty = spec_with(json!({}));
+        assert_eq!(functions_readiness(empty.objects(), 3, 4), None);
+        // A table whose only administrator function is not of high reliability does not guard either.
+        let medium = spec_with(json!({"functions": [{
+            "key": "POST /api/admin/export", "source": "rule", "tier": "admin", "reliability": "medium"
+        }]}));
+        assert_eq!(functions_readiness(medium.objects(), 3, 4), None);
+        // A high administrator function guards; the site does not ask about unknown functions.
+        let guarded = spec_with(json!({"functions": [admin_high.clone()]}));
+        assert_eq!(
+            functions_readiness(guarded.objects(), 3, 4),
+            Some(ReadinessFunctions {
+                attempts: 3,
+                unknown: None,
+            })
+        );
+        // Asking about unknown functions adds their count.
+        let asking = spec_with(json!({"functions": [admin_high], "ask_unknown_functions": true}));
+        assert_eq!(
+            functions_readiness(asking.objects(), 3, 4),
+            Some(ReadinessFunctions {
+                attempts: 3,
+                unknown: Some(4),
+            })
         );
     }
 

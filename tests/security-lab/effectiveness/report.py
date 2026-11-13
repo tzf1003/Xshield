@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .score import CONFIG_ORDER
+from .score import CONFIG_ORDER, LEARNING_GATE_NAMES
 
 FAILURES_IN_TERMINAL = 10
+KIND_LABELS = {"wrong": "误学", "unmodeled": "未模板化", "miss": "没学到", "failure": "学到的配置上失败"}
 SECTION_TITLES = (
     "结论",
     "记分表",
@@ -74,7 +75,7 @@ def conclusion(result: dict[str, Any], meta: dict[str, Any]) -> str:
         parts.append("未与基线比较")
     for item in result["skipped"]:
         if item["section"] == "学习段":
-            parts.append(f"学习段未执行（{item['why']}）")
+            parts.append(f"学习段 SKIP（{item['why']}）")
     seed = "—" if meta.get("seed") is None else str(meta["seed"])
     parts.append(f"Jev 模式：{meta['jev']}")
     if meta.get("note"):
@@ -123,9 +124,18 @@ def score_rows(result: dict[str, Any]) -> list[tuple[str, str, str, str, str, st
 
     s1, s2, s3, s4 = metrics["S1"], metrics["S2"], metrics["S3"], metrics["S4"]
     rate("S1 正常引用核验率", "S1", s1["value"], "不低于基线", base_verdict("S1"))
+    for config, cell in s1["by_config"].items():  # one row per configuration, beside the total (plan 12a)
+        rate(f"S1 正常引用核验率 · {CONFIG_LABELS.get(config, config)}", f"S1/{config}", cell["value"],
+             "不低于基线", base_verdict(f"S1/{config}"))
     count("S2 误核验数", s2["value"], "必须为 0", _verdict(gates, "S2 误核验数"))
     rate("S3 快速放行占比", "S3", s3["value"], "不低于基线", base_verdict("S3"))
+    for config, cell in s3["by_config"].items():
+        rate(f"S3 快速放行占比 · {CONFIG_LABELS.get(config, config)}", f"S3/{config}", cell["value"],
+             "不低于基线", base_verdict(f"S3/{config}"))
     rows.append(("S4 每请求 Jev 调用数", _ratio(s4["value"]), "—", "—", "只报告", "—"))
+    for config, cell in s4["by_config"].items():
+        rows.append((f"S4 每请求 Jev 调用数 · {CONFIG_LABELS.get(config, config)}", _ratio(cell["value"]),
+                     "—", "—", "只报告", "—"))
 
     for layer, label in (("L0", "冷启动候选"), ("L1", "请求位置类别"),
                          ("L2", "响应位置档位"), ("L3", "请求位置接受公共来源")):
@@ -137,11 +147,22 @@ def score_rows(result: dict[str, Any]) -> list[tuple[str, str, str, str, str, st
              base_verdict(f"{layer}.accuracy"))
         rate(f"{layer} {label}覆盖率", f"{layer}.coverage", coverage, "不低于基线",
              base_verdict(f"{layer}.coverage"))
-        count(f"{layer} 误学数", wrong, "必须为 0", _verdict(gates, f"{layer} 误学数"))
+        count(f"{layer} 误学数（未登记）", wrong, "必须为 0", _verdict(gates, f"{layer} 误学数"))
+        if learning is not None:
+            count(f"{layer} 误学数（已登记为已知缺口）", learning["listed"], "不计门槛", "—")
+        if layer in ("L2", "L3") and learning is not None:
+            count(f"{layer} 其中类别不符（类别错、档位或接受公共来源对，计入准确率）",
+                  learning["class_wrong"], "不计门槛", "—")
     stability = metrics.get("stability")
     stable = stability["value"] if stability else None
     rows.append(("学习稳定性", "—" if stable is None else ("不变" if stable else "变化"),
                  "—", "—", "必须不变", _verdict(gates, "学习稳定性（不加数据再跑一轮，提议集合不变）")))
+    unmodeled = metrics.get("unmodeled")
+    count("未模板化的位置（未登记）", None if unmodeled is None else unmodeled["unlisted"],
+          "必须为 0", _verdict(gates, LEARNING_GATE_NAMES[5]))
+    known = result.get("learning_known")
+    stale = None if known is None or known["stale"] is None else len(known["stale"])
+    count("学习的已知缺口清单：已不再出现的条目", stale, "必须为 0", _verdict(gates, LEARNING_GATE_NAMES[6]))
 
     p1, p2, p3 = metrics["P1"], metrics["P2"], metrics["P3"]
     rate("P1 拦截率（总体）", "P1", p1["value"], "各类别不低于基线", base_verdict("P1"))
@@ -164,7 +185,33 @@ def _md_table(header: list[str], rows: list[list[str]]) -> list[str]:
     return lines
 
 
-def _defence_lines(result: dict[str, Any]) -> list[str]:
+NEEDS_LABELS = {"tiers": "需要档位", "functions": "需要功能表", "classes": "需要对象表"}
+
+
+def _gap_verdict(item: dict[str, Any]) -> str:
+    """Whether a known gap passed by mistake, or is left out of the scoring for a missing capability."""
+    if item["lacks"]:
+        return "不计分：" + "、".join(NEEDS_LABELS.get(name, name) for name in item["lacks"])
+    return "是，请把状态改为 must" if item["unexpected_pass"] else "否"
+
+
+def _needs_lines(needs: dict[str, Any]) -> list[str]:
+    """One line per capability that some rows lack (plan 9.3): the counts by configuration, then the regression
+    cases among them, so a gap that is not scored still shows its name."""
+    lines = []
+    for name, label in NEEDS_LABELS.items():
+        entry = needs.get(name)
+        if not entry:
+            continue
+        counts = "；".join(f"{CONFIG_LABELS.get(c, c)} {n} 条" for c, n in entry["counts"].items())
+        text = f"{label}（不计分）：{counts}"
+        if entry["cases"]:
+            text += f"；回归用例：{'、'.join(entry['cases'])}"
+        lines += ["", text]
+    return lines
+
+
+def _defence_lines(result: dict[str, Any], meta: dict[str, Any]) -> list[str]:
     metrics = result["metrics"]
     p1 = metrics["P1"]["by_category"]
     p2 = metrics["P2"]["by_category"]
@@ -179,10 +226,10 @@ def _defence_lines(result: dict[str, Any]) -> list[str]:
                     + [_cell(p2.get(category, {}).get(c)) for c in configs])
     lines = ["### 拦截率（P1）与误拦率（P2）", ""]
     lines += _md_table(header, rows) if rows else ["没有可计分的类别。"]
-    needs = result["needs_tiers"]
-    if needs:
-        lines += ["", "需要档位（不计分）：" + "；".join(
-            f"{CONFIG_LABELS.get(c, c)} {n} 条" for c, n in needs.items())]
+    lines += _needs_lines(result["needs"])
+    unsent = meta.get("unsent") or {}
+    lines += ["", "路径段未送出（载荷含路径分隔符，放不进一个路径段，按 4.3 不计入）："
+              f"攻击 {unsent.get('attack', 0)} 条，良性 {unsent.get('benign', 0)} 条。"]
     return lines
 
 
@@ -227,7 +274,7 @@ def _label_lines(checks: dict[str, Any]) -> list[str]:
 def _learning_lines(result: dict[str, Any]) -> list[str]:
     learning = [item for item in result["skipped"] if item["section"] == "学习段"]
     if learning:
-        return [f"学习段未执行：{learning[0]['why']}。"]
+        return [f"学习段：SKIP（{learning[0]['why']}）。"]
     rows = []
     for item in result["learning"]:
         truth = item["truth"]
@@ -239,10 +286,44 @@ def _learning_lines(result: dict[str, Any]) -> list[str]:
             _describe(learned),
             "✓" if item["ok"] else "✗",
             item["why"] or "—",
+            item.get("gap") or "—",
         ])
-    if not rows:
-        return ["没有真值位置，也没有学到的提议。"]
-    return _md_table(["位置", "侧", "真值", "学到", "结果", "原因"], rows)
+    lines = _md_table(["位置", "侧", "真值", "学到", "结果", "原因", "已知缺口"], rows) if rows \
+        else ["没有真值位置，也没有学到的提议。"]
+    return lines + _known_lines(result.get("learning_known"))
+
+
+def _entry_target(entry: dict[str, Any]) -> str:
+    kind = entry["kind"]
+    if kind == "wrong":
+        return f"{entry['metric']} {entry['key']}"
+    if kind == "unmodeled":
+        return entry["pattern"]
+    if kind == "miss":
+        return entry["key"]
+    return f"{entry['case']}（{CONFIG_LABELS.get(entry['config'], entry['config'])}）"
+
+
+def _known_lines(known: dict[str, Any] | None) -> list[str]:
+    """The learning known-gap list (plan 8, 12b): each entry, the probes it still matches, and the batch that fixes it.
+    A stale entry says what to do: delete it in the change that fixed the problem."""
+    if known is None:
+        return ["", "学习的已知缺口清单：学习段未执行，没有核对。"]
+    rows = [[
+        entry["id"],
+        KIND_LABELS.get(entry["kind"], entry["kind"]),
+        _entry_target(entry),
+        entry.get("learned") or "—",
+        entry["ref"],
+        "长期" if entry["lq"] is None else entry["lq"],
+        f"仍出现 {entry['matched']} 处" if entry["matched"] else "已不再出现：删除这一条",
+    ] for entry in known["entries"]]
+    lines = ["", "### 学习的已知缺口清单", ""]
+    lines += _md_table(["编号", "类别", "位置、模式或用例", "学到的值", "评审编号", "修法批次", "本次"], rows) if rows \
+        else ["清单是空的。"]
+    if not known["checked"]:
+        lines += ["", "本次只跑了一部分探针（--only），清单没有核对是否已不再出现。"]
+    return lines
 
 
 def _describe(fields: dict[str, Any]) -> str:
@@ -272,6 +353,43 @@ def _failure_rows(failures: list[dict[str, Any]]) -> list[list[str]]:
     ] for item in failures]
 
 
+def _share(num: int, den: int) -> str:
+    return "—" if not den else _pct(num / den)
+
+
+def _scan_block(scan: dict[str, Any] | None) -> list[str]:
+    """The confidence threshold scan of plan 3.4, printed only for a run with a real model (score.confidence_scan)."""
+    if scan is None:
+        return []
+    rows = [[
+        f"{item['threshold']:.2f}",
+        f"{item['benign_blocks']}（{_share(item['benign_blocks'], scan['benign_total'])}）",
+        f"{item['leaks_closed']} / {scan['probe_allows']}",
+        f"{item['unanswered']}（{_share(item['unanswered'], scan['judgements'])}）",
+    ] for item in scan["thresholds"]]
+    lines = ["", "### 置信度门槛扫描（3.4）", "",
+             "同一批判定记录按门槛重算，不重新发流量。放行的置信度与决策日志的 jev_confidence 同一算法"
+             "（两问各自最高概率中较小的一个）；恰好等于门槛的放行保留，低于门槛的放行按“答不上来”处理，"
+             "站点按 on_jev_unavailable: deny 计。", ""]
+    lines += _md_table(["门槛", "新增误拦（良性请求）", "减少的漏拦（探针：条 / 原被放行的）", "答不上来的 Jev 判定"], rows)
+    lines += ["", f"分母：良性请求 {scan['benign_total']} 条，有置信度的放行 {scan['allows']} 条，"
+              f"Jev 判定 {scan['judgements']} 次（分批的判定计一次）。只改判 jev_allow 的记录，以及复用了这类放行的 cached_allow；"
+              "fast_allow 和拦截不受影响；已知缺口的回归用例不计入（按记分表规则只在 P7 里计）。",
+              "这是一阶估计：一个请求改判后，后面的请求会少见到一些值，这部分连带影响没有算。"]
+    if scan["cache_unresolved"]:
+        lines.append(f"有 {scan['cache_unresolved']} 条缓存放行找不到它复用的放行记录，没有改判。")
+    return lines
+
+
+def _relay_line(relay: dict[str, Any]) -> str:
+    """The record or replay line of the cost section (plan 6 and batch 9)."""
+    if relay["mode"] == "replay":
+        return (f"- 回放未命中率：{relay['misses']} / {relay['calls']} 次调用（{_share(relay['misses'], relay['calls'])}），"
+                "未命中的调用收到 UNKNOWN，计为无法判定")
+    return (f"- 录制：{relay['recorded']} 条应答写入录制文件（转发 {relay['calls']} 次，"
+            f"没有得到可用应答 {relay['failures']} 次）")
+
+
 def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
     gates = result["gates"]
     passed = sum(gate["ok"] is True for gate in gates)
@@ -283,7 +401,8 @@ def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
     lines += _md_table(["指标", "本次", "基线", "变化", "门槛", "是否通过"],
                        [list(row) for row in score_rows(result)])
     lines += ["", *_baseline_lines(result["baseline"])]
-    lines += ["", f"## 3 {SECTION_TITLES[2]}", ""] + _defence_lines(result) + ["", *_label_lines(result["label_checks"])]
+    lines += ["", f"## 3 {SECTION_TITLES[2]}", ""] + _defence_lines(result, meta) + ["", *_label_lines(result["label_checks"])]
+    lines += _scan_block(result.get("confidence_scan"))
     lines += ["", f"## 4 {SECTION_TITLES[3]}", ""] + _learning_lines(result)
 
     must_failures = [item for item in result["failures"]
@@ -293,10 +412,9 @@ def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
                        _failure_rows(must_failures)) if must_failures else ["没有失败项。"]
     lines += ["", "### 已知缺口（known_gap）", ""]
     if result["known_gaps"]:
-        lines += _md_table(["用例", "评审编号", "现象", "类别", "配置", "意外通过"], [
+        lines += _md_table(["用例", "评审编号", "现象", "类别", "配置", "意外通过或不计分"], [
             [item["case"], item["ref"] or "—", item["note"] or "—", item["category"],
-             CONFIG_LABELS.get(item["config"], item["config"]),
-             "是，请把状态改为 must" if item["unexpected_pass"] else "否"]
+             CONFIG_LABELS.get(item["config"], item["config"]), _gap_verdict(item)]
             for item in result["known_gaps"]
         ])
     else:
@@ -319,6 +437,7 @@ def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
               f"{_ratio(costs['calls_per_judged_request'])}",
               f"- 判定耗时：中位数 {_count(costs['judge_ms_median'])} ms，p95 {_count(costs['judge_ms_p95'])} ms",
               f"- Jev 失败码：{failures}",
+              *([_relay_line(meta["jev_relay"])] if meta.get("jev_relay") else []),
               "", f"## 8 {SECTION_TITLES[7]}", ""]
     lines += [f"- {item['section']}：{item['why']}" for item in result["skipped"]] or ["没有。"]
     return "\n".join(lines) + "\n"
@@ -348,9 +467,11 @@ def report_document(result: dict[str, Any], meta: dict[str, Any]) -> dict[str, A
         "failures": result["failures"],
         "known_gaps": result["known_gaps"],
         "learning": result["learning"],
+        "learning_known": result.get("learning_known"),
         "label_checks": result["label_checks"],
         "costs": result["costs"],
         "counts": result["counts"],
-        "needs_tiers": result["needs_tiers"],
+        "needs": result["needs"],
+        "confidence_scan": result.get("confidence_scan"),
         "passed": result["passed"],
     }

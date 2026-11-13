@@ -57,6 +57,10 @@ pub struct Trace {
     /// The session context the decision was made against.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<TraceSession>,
+    /// The request carried a session credential that no session holds: the origin has not answered it
+    /// (docs/01 section 1.2), so the request was judged as one without a credential. Absent when false.
+    #[serde(skip_serializing_if = "is_false")]
+    pub unrecognized_credential: bool,
     /// For a cached allow: the request whose Jev allow the cache reuses.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_source: Option<String>,
@@ -577,6 +581,9 @@ pub enum Skip {
     Bypass,
     /// The request was refused before it reached the origin.
     NotForwarded,
+    /// Observe mode forwarded a request the gateway would refuse. Its response teaches nothing
+    /// (docs/07 section 7.4.6).
+    WouldBlock,
 }
 
 /// How often a field name occurred in a response.
@@ -982,6 +989,22 @@ mod tests {
         let back: TraceValue = serde_json::from_str(&json).unwrap();
         assert_eq!(back, row);
         assert_eq!(Attempt::OverPrivilege.as_str(), "over_privilege");
+    }
+
+    #[test]
+    fn an_unrecognized_credential_is_written_only_when_true_and_reads_back_equal() {
+        let plain = serde_json::to_string(&Trace::new()).unwrap();
+        assert!(!plain.contains("unrecognized_credential"), "{plain}");
+
+        let mut row = Trace::new();
+        row.unrecognized_credential = true;
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains(r#""unrecognized_credential":true"#), "{json}");
+        let back: Trace = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, row);
+        // A record written before the field existed reads as no unrecognized credential.
+        let before: Trace = serde_json::from_str(&plain).unwrap();
+        assert!(!before.unrecognized_credential);
     }
 
     #[test]

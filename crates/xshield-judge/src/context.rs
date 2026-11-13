@@ -3,6 +3,7 @@
 //! Values are stored only as keyed hashes. The store lives in gateway memory;
 //! a restart empties it and users re-enter through an entry.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 
@@ -466,6 +467,11 @@ pub struct SessionContext {
     login: Option<u128>,
     /// Why the credential that set this session up took no login response's values.
     login_unbound: Option<LoginUnbound>,
+    /// The source address group of the request or response that created the session, as a keyed
+    /// hash (the address itself is not kept). It decides whose session goes when the table is full
+    /// and whose Jev calls a session's calls are added to. The zero digest for a context that is
+    /// not a table session. A later request from another address does not change it.
+    origin: Digest16,
 }
 
 impl SessionContext {
@@ -483,18 +489,8 @@ impl SessionContext {
             identity: SessionIdentity::default(),
             login: None,
             login_unbound: None,
+            origin: Digest16::default(),
         }
-    }
-
-    /// The view of a credential that has no session yet: nothing seen, nothing sent. A session is
-    /// kept only once the origin has answered the credential, so a request with a credential the
-    /// store does not know is judged against this and leaves nothing behind. `unbound` is why no
-    /// held login could start the session, when one was looked for.
-    #[must_use]
-    pub fn unconfirmed(now_ms: u64, unbound: Option<LoginUnbound>) -> Self {
-        let mut session = Self::new(now_ms);
-        session.login_unbound = unbound;
-        session
     }
 
     /// The login response this session took its values from, when its credential set it up.
@@ -944,10 +940,23 @@ impl PendingSent {
     }
 }
 
+/// Takes one session out of the count of `origin`.
+fn forget_origin(origins: &mut HashMap<Digest16, usize>, origin: &Digest16) {
+    if let Some(count) = origins.get_mut(origin) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            origins.remove(origin);
+        }
+    }
+}
+
 /// All sessions of one gateway process, and the JSON login responses held for their credentials.
 #[derive(Debug, Default)]
 pub struct ContextStore {
     sessions: HashMap<Digest16, SessionContext>,
+    /// How many of `sessions` each origin created, kept with the table so that choosing whom to
+    /// evict does not have to count them (see [`ContextStore::make_room`]).
+    origins: HashMap<Digest16, usize>,
     held: HeldLogins,
     pending: PendingSent,
 }
@@ -959,28 +968,19 @@ impl ContextStore {
         Self::default()
     }
 
-    /// The session for `id`, created when absent. Expired sessions are
-    /// replaced by fresh ones; at capacity the least recently active goes.
-    pub fn session(&mut self, id: Digest16, now_ms: u64) -> &mut SessionContext {
+    /// The session for `id`, created when absent, and recorded as created from the address group
+    /// `origin`. Expired sessions are replaced by fresh ones. When the table is full the session
+    /// that goes belongs to the origin with the most sessions (see [`ContextStore::make_room`]).
+    pub fn session(&mut self, id: Digest16, origin: Digest16, now_ms: u64) -> &mut SessionContext {
         if self
             .sessions
             .get(&id)
             .is_some_and(|session| now_ms.saturating_sub(session.last_ms) > IDLE_MAX_MS)
         {
-            self.sessions.remove(&id);
+            self.remove_session(&id);
         }
         if !self.sessions.contains_key(&id) && self.sessions.len() >= SESSIONS_MAX {
-            self.sessions
-                .retain(|_, session| now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS);
-            if self.sessions.len() >= SESSIONS_MAX
-                && let Some(oldest) = self
-                    .sessions
-                    .iter()
-                    .min_by_key(|(_, s)| s.last_ms)
-                    .map(|(k, _)| *k)
-            {
-                self.sessions.remove(&oldest);
-            }
+            self.make_room(now_ms);
         }
         // A session that starts here takes what its credential's requests sent before the origin
         // accepted it (see `PendingSent`).
@@ -989,15 +989,96 @@ impl ContextStore {
         } else {
             self.pending.take(&id)
         };
-        let session = self
-            .sessions
-            .entry(id)
-            .or_insert_with(|| SessionContext::new(now_ms));
+        let session = match self.sessions.entry(id) {
+            Entry::Occupied(slot) => slot.into_mut(),
+            Entry::Vacant(slot) => {
+                *self.origins.entry(origin).or_insert(0) += 1;
+                let mut session = SessionContext::new(now_ms);
+                session.origin = origin;
+                slot.insert(session)
+            }
+        };
         if let Some(record) = pending {
             session.inherit_sent(&record);
         }
         session.last_ms = now_ms;
         session
+    }
+
+    /// Takes the session `id` out of the table, and out of the count of its origin.
+    fn remove_session(&mut self, id: &Digest16) {
+        if let Some(session) = self.sessions.remove(id) {
+            forget_origin(&mut self.origins, &session.origin);
+        }
+    }
+
+    /// Frees one place in a full table. Expired sessions go first. When that is not enough, the
+    /// session that goes is the least recently active one of the origin that has the most
+    /// sessions; of origins with as many, the one that holds the least recently active session of
+    /// the table. One address that makes any number of sessions therefore only pushes out its own,
+    /// and a session of another address goes only when that address has as many as the largest.
+    /// When every session has the same origin this is the table's least recently active session.
+    /// It is one pass over the table, as it was when the least recently active session of the whole
+    /// table went.
+    fn make_room(&mut self, now_ms: u64) {
+        let origins = &mut self.origins;
+        self.sessions.retain(|_, session| {
+            let live = now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS;
+            if !live {
+                forget_origin(origins, &session.origin);
+            }
+            live
+        });
+        if self.sessions.len() < SESSIONS_MAX {
+            return;
+        }
+        let most = self.origins.values().copied().max().unwrap_or(0);
+        let victim = if most <= 1 {
+            // One session each: every origin is as large as the largest.
+            self.oldest_session(|_| true)
+        } else {
+            let largest: Vec<Digest16> = self
+                .origins
+                .iter()
+                .filter(|(_, count)| **count == most)
+                .map(|(origin, _)| *origin)
+                .collect();
+            if let [only] = largest.as_slice() {
+                self.oldest_session(|origin| origin == only)
+            } else {
+                let tied: HashSet<Digest16> = largest.into_iter().collect();
+                self.oldest_session(|origin| tied.contains(origin))
+            }
+        };
+        if let Some(victim) = victim {
+            self.remove_session(&victim);
+        }
+    }
+
+    /// The least recently active session whose origin `wanted` accepts. The session id is the
+    /// last tie-break, so the choice does not depend on the map's order.
+    fn oldest_session(&self, wanted: impl Fn(&Digest16) -> bool) -> Option<Digest16> {
+        let mut oldest: Option<(u64, Digest16)> = None;
+        for (id, session) in &self.sessions {
+            // Most sessions are younger than the best so far: say so before anything else.
+            if oldest.is_some_and(|(last_ms, _)| session.last_ms > last_ms) {
+                continue;
+            }
+            let candidate = (session.last_ms, *id);
+            if oldest.is_none_or(|best| candidate < best) && wanted(&session.origin) {
+                oldest = Some(candidate);
+            }
+        }
+        oldest.map(|(_, id)| id)
+    }
+
+    /// The origin the live session `id` was created from, or `None` when there is no such session.
+    #[must_use]
+    pub fn origin_of(&self, id: &Digest16, now_ms: u64) -> Option<Digest16> {
+        self.sessions
+            .get(id)
+            .filter(|session| now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS)
+            .map(|session| session.origin)
     }
 
     /// Notes values a request sent in the session `id` has or, while it has none, for the session
@@ -1011,6 +1092,33 @@ impl ContextStore {
         } else {
             self.pending
                 .with(id, now_ms, |session| session.note_sent(digests));
+        }
+    }
+
+    /// Stages what a response issues the credential `id` for, when the gateway would have refused the
+    /// request that got it: the values that request sent, and what its own credential had sent before
+    /// (`inherited`). Like [`ContextStore::note_sent`] it creates no session, so the credential is
+    /// recognized only by a later response (docs/01 section 1.2).
+    pub fn stage_issued(
+        &mut self,
+        id: Digest16,
+        now_ms: u64,
+        inherited: Option<&SentRecord>,
+        digests: &[Digest16],
+    ) {
+        if digests.is_empty() && inherited.is_none() {
+            return;
+        }
+        let stage = |session: &mut SessionContext| {
+            if let Some(record) = inherited {
+                session.inherit_sent(record);
+            }
+            session.note_sent(digests);
+        };
+        if let Some(session) = self.existing(id, now_ms) {
+            stage(session);
+        } else {
+            self.pending.with(id, now_ms, stage);
         }
     }
 
@@ -1064,15 +1172,23 @@ impl ContextStore {
         });
     }
 
-    /// Starts the session `id` of `site` for a credential that no live session holds, taking the
-    /// values of the held login of that site that issued it (docs/01 section 1.7). `token` is the
-    /// keyed hash of the credential's text. A live session is left as it is.
-    pub fn start_session(&mut self, site: &str, id: Digest16, token: Digest16, now_ms: u64) {
+    /// Starts the session `id` of `site`, created from the address group `origin`, for a credential
+    /// that no live session holds, taking the values of the held login of that site that issued it
+    /// (docs/01 section 1.7). `token` is the keyed hash of the credential's text. A live session is
+    /// left as it is.
+    pub fn start_session(
+        &mut self,
+        site: &str,
+        id: Digest16,
+        origin: Digest16,
+        token: Digest16,
+        now_ms: u64,
+    ) {
         if self.contains(&id, now_ms) {
             return;
         }
         let claim = self.held.claim(site, &token, now_ms);
-        let session = self.session(id, now_ms);
+        let session = self.session(id, origin, now_ms);
         match claim {
             Ok(login) => session.take_login(&token, login),
             Err(reason) => session.refuse_login(reason),
@@ -1087,6 +1203,7 @@ impl ContextStore {
         &mut self,
         site: &str,
         id: Digest16,
+        origin: Digest16,
         token: Digest16,
         now_ms: u64,
     ) -> Option<LoginUnbound> {
@@ -1095,7 +1212,7 @@ impl ContextStore {
         }
         match self.held.claim(site, &token, now_ms) {
             Ok(login) => {
-                self.session(id, now_ms).take_login(&token, login);
+                self.session(id, origin, now_ms).take_login(&token, login);
                 None
             }
             Err(reason) => Some(reason),
@@ -1119,6 +1236,12 @@ impl ContextStore {
         self.sessions.len()
     }
 
+    /// The sessions the per-origin counts add up to: always [`ContextStore::len`].
+    #[cfg(test)]
+    fn counted(&self) -> usize {
+        self.origins.values().sum()
+    }
+
     /// Whether no session is held.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -1130,6 +1253,10 @@ impl ContextStore {
 mod tests {
     /// The site the held logins below belong to.
     const SITE: &str = "juice";
+
+    /// The address group the sessions of the tests below were created from, unless a test is
+    /// about origins.
+    const HOME: Digest16 = [1; 16];
 
     /// The use of a value as the engine makes it: a path value carries the index
     /// of its segment.
@@ -1193,6 +1320,152 @@ mod tests {
         assert_eq!(a.mac("value", b"x"), a.mac("value", b"x"));
     }
 
+    /// The id of the `n`th session, and the address group of the `n`th address, of the tests
+    /// that fill the table.
+    fn session_id(n: u32) -> Digest16 {
+        key().mac("session", &n.to_be_bytes())
+    }
+
+    fn address(n: u32) -> Digest16 {
+        key().mac("address-group", &n.to_be_bytes())
+    }
+
+    /// The size of a full table, as the number the tests count sessions with.
+    fn table() -> u32 {
+        u32::try_from(SESSIONS_MAX).unwrap()
+    }
+
+    /// Whether the live table holds all the sessions of these ids.
+    fn all_present(store: &ContextStore, ids: impl Iterator<Item = u32>, now_ms: u64) -> bool {
+        ids.into_iter()
+            .all(|n| store.contains(&session_id(n), now_ms))
+    }
+
+    #[test]
+    fn a_full_table_pushes_out_the_largest_address_not_the_oldest_session() {
+        let mut store = ContextStore::new();
+        // 1,000 addresses with one session each, all active before anything else.
+        for n in 0..1_000 {
+            store.session(session_id(n), address(n), u64::from(n));
+        }
+        // One address fills the rest of the table, then keeps making sessions.
+        let attacker = address(1_000_000);
+        for n in 0..19_000 {
+            store.session(session_id(10_000 + n), attacker, 10_000 + u64::from(n));
+        }
+        assert_eq!(store.len(), SESSIONS_MAX);
+        assert_eq!(store.counted(), SESSIONS_MAX);
+        for n in 0..5_000 {
+            store.session(session_id(100_000 + n), attacker, 100_000 + u64::from(n));
+        }
+        assert_eq!(store.len(), SESSIONS_MAX);
+        assert_eq!(store.counted(), SESSIONS_MAX);
+        assert!(
+            all_present(&store, 0..1_000, 200_000),
+            "the sessions of the other addresses are all still there"
+        );
+        // Its own oldest ones are what went.
+        assert!(!store.contains(&session_id(10_000), 200_000));
+        assert!(store.contains(&session_id(100_000 + 4_999), 200_000));
+    }
+
+    #[test]
+    fn the_smallest_address_survives_while_two_large_ones_compete() {
+        let mut store = ContextStore::new();
+        let (big, other, small) = (address(1), address(2), address(3));
+        for n in 0..50 {
+            store.session(session_id(n), small, u64::from(n));
+        }
+        for n in 0..10_000 {
+            store.session(session_id(1_000 + n), big, 1_000 + u64::from(n));
+        }
+        for n in 0..9_950 {
+            store.session(session_id(100_000 + n), other, 100_000 + u64::from(n));
+        }
+        assert_eq!(store.len(), SESSIONS_MAX);
+        assert_eq!(store.counted(), SESSIONS_MAX);
+        for n in 0..2_000 {
+            store.session(session_id(200_000 + n), big, 200_000 + u64::from(n));
+            store.session(session_id(300_000 + n), other, 300_000 + u64::from(n));
+        }
+        assert_eq!(store.len(), SESSIONS_MAX);
+        assert_eq!(store.counted(), SESSIONS_MAX);
+        assert!(all_present(&store, 0..50, 400_000));
+    }
+
+    #[test]
+    fn with_one_address_for_every_session_the_least_recently_active_goes() {
+        let mut store = ContextStore::new();
+        for n in 0..table() {
+            store.session(session_id(n), HOME, u64::from(n));
+        }
+        // The oldest session is used again, so the next oldest is now the one that goes.
+        assert!(store.existing(session_id(0), 50_000).is_some());
+        store.session(session_id(1_000_000), HOME, 60_000);
+        assert_eq!(store.len(), SESSIONS_MAX);
+        assert_eq!(store.counted(), SESSIONS_MAX);
+        assert!(store.contains(&session_id(0), 60_000));
+        assert!(!store.contains(&session_id(1), 60_000));
+        assert!(store.contains(&session_id(2), 60_000));
+    }
+
+    #[test]
+    fn of_two_equally_large_addresses_the_one_with_the_oldest_session_loses_one() {
+        let mut store = ContextStore::new();
+        let (first, second) = (address(1), address(2));
+        // `second` holds the oldest session of the table; both hold half of it.
+        for n in 0..(table() / 2) {
+            store.session(session_id(n), second, 10 + u64::from(n));
+            store.session(session_id(100_000 + n), first, 11 + u64::from(n));
+        }
+        store.session(session_id(1_000_000), address(3), 500_000);
+        assert_eq!(store.len(), SESSIONS_MAX);
+        assert_eq!(store.counted(), SESSIONS_MAX);
+        assert!(!store.contains(&session_id(0), 500_000));
+        assert!(store.contains(&session_id(100_000), 500_000));
+        // `second` has one session less now, so `first` is the largest and loses its oldest.
+        store.session(session_id(1_000_001), address(3), 500_001);
+        assert!(!store.contains(&session_id(100_000), 500_001));
+        assert!(store.contains(&session_id(1), 500_001));
+    }
+
+    #[test]
+    fn expired_sessions_go_before_any_live_one_and_the_counts_follow() {
+        let mut store = ContextStore::new();
+        let (old, young) = (address(1), address(2));
+        // 100 sessions that will have been idle for a day, and the rest of the table, all `young`.
+        for n in 0..100 {
+            store.session(session_id(n), old, 0);
+        }
+        for n in 0..(table() - 100) {
+            store.session(session_id(1_000 + n), young, 10 + u64::from(n));
+        }
+        assert_eq!(store.len(), SESSIONS_MAX);
+        let now = IDLE_MAX_MS + 5;
+        store.session(session_id(900_000), address(3), now);
+        assert_eq!(store.len(), SESSIONS_MAX - 100 + 1);
+        assert_eq!(store.counted(), store.len());
+        assert!(all_present(&store, 1_000..1_000 + 10, now));
+        // An expired session that is asked for again starts over, and is counted once.
+        store.session(session_id(1_000), young, now + 1);
+        store.session(session_id(1_000), address(4), now + 2);
+        assert_eq!(store.len(), SESSIONS_MAX - 100 + 1);
+        assert_eq!(store.counted(), store.len());
+    }
+
+    #[test]
+    fn a_session_keeps_the_origin_that_created_it() {
+        let mut store = ContextStore::new();
+        let id = session_id(1);
+        store.session(id, address(1), 1);
+        store.session(id, address(2), 2);
+        assert_eq!(store.origin_of(&id, 2), Some(address(1)));
+        // Once it has expired a new session starts under the origin of the request that finds it.
+        store.session(id, address(2), IDLE_MAX_MS + 10);
+        assert_eq!(store.origin_of(&id, IDLE_MAX_MS + 10), Some(address(2)));
+        assert_eq!(store.origin_of(&session_id(9), 2), None);
+    }
+
     #[test]
     fn a_session_takes_what_its_credential_sent_before_the_origin_accepted_it() {
         let key = key();
@@ -1201,7 +1474,7 @@ mod tests {
         // A refused request sent 7; the origin accepts the credential on a later answer.
         store.note_sent(id, 0, &[key.mac("value", b"7")]);
         assert_eq!(store.len(), 0, "a refused credential starts no session");
-        let session = store.session(id, 1);
+        let session = store.session(id, HOME, 1);
         // The echo of what the session sent is not learned.
         assert_eq!(
             session.remember(&key, &at("GET /api/home"), &[response("id", "7")]),
@@ -1216,7 +1489,7 @@ mod tests {
         let id = key.mac("session", b"late");
         store.stop_learning(id, 0);
         assert_eq!(store.len(), 0, "judging a request starts no session");
-        let session = store.session(id, 1);
+        let session = store.session(id, HOME, 1);
         assert_eq!(
             session.remember(&key, &at("GET /api/home"), &[response("id", "7")]),
             0
@@ -1256,7 +1529,7 @@ mod tests {
         let key = key();
         let mut store = ContextStore::new();
         let id = key.mac("session", b"cookie");
-        let session = store.session(id, 0);
+        let session = store.session(id, HOME, 0);
         session.remember(
             &key,
             &at("GET /api/patients"),
@@ -1278,7 +1551,7 @@ mod tests {
     fn the_field_name_decides_the_kind_and_the_best_origin_comes_last() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         session.remember(
             &key,
             &at("GET /rest/products/search"),
@@ -1315,7 +1588,7 @@ mod tests {
     fn a_payment_id_is_a_card_the_list_showed() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         session.remember(&key, &at("GET /api/Cards"), &[response("id", "7")]);
         let seen = session.lookup(&key, "7").unwrap();
         assert!(seen.is_specific(
@@ -1332,7 +1605,7 @@ mod tests {
     fn a_kind_word_inside_another_word_is_a_different_kind() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         session.remember(&key, &at("GET /api/docs"), &[response("doc_id", "2")]);
         session.remember(
             &key,
@@ -1360,7 +1633,7 @@ mod tests {
     fn a_lower_case_id_compound_names_the_kind_before_its_ending() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         session.remember(
             &key,
             &at("GET /api/home"),
@@ -1403,7 +1676,7 @@ mod tests {
     fn short_ids_only_count_for_the_same_kind_of_object() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         session.remember(&key, &at("GET /api/Deliverys"), &[response("id", "1")]);
         session.remember(
             &key,
@@ -1433,7 +1706,7 @@ mod tests {
     fn a_path_value_takes_the_route_word_right_before_it() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         session.remember(
             &key,
             &at("GET /api/doctors"),
@@ -1470,7 +1743,7 @@ mod tests {
     fn a_declared_name_that_looks_like_no_id_is_an_identifier() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         session.remember(&key, &at("GET /api/home"), &[response("doc", "2")]);
         let seen = session.lookup(&key, "2").unwrap();
         let spec = xshield_core::context::SiteSpec::from_json(
@@ -1557,7 +1830,7 @@ mod tests {
     fn a_repeated_field_from_one_request_keeps_its_first_origin() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         for index in 0..10u128 {
             let source = Source {
                 request: "GET /api/patients",
@@ -1632,11 +1905,11 @@ mod tests {
         let mut store = ContextStore::new();
         let id = key.mac("session", b"c");
         store
-            .session(id, 0)
+            .session(id, HOME, 0)
             .remember(&key, &at("GET /x"), &[response("id", "7")]);
         assert!(store.contains(&id, IDLE_MAX_MS));
         assert!(!store.contains(&id, IDLE_MAX_MS + 1));
-        let fresh = store.session(id, IDLE_MAX_MS + 1);
+        let fresh = store.session(id, HOME, IDLE_MAX_MS + 1);
         assert!(fresh.lookup(&key, "7").is_none());
         assert_eq!(fresh.age_seconds(IDLE_MAX_MS + 1), 0);
     }
@@ -1699,7 +1972,7 @@ mod tests {
     fn one_field_at_two_positions_is_two_origins_and_a_repeat_is_not_one_more() {
         let key = key();
         let mut store = ContextStore::new();
-        let session = store.session(key.mac("session", b"cookie"), 0);
+        let session = store.session(key.mac("session", b"cookie"), HOME, 0);
         let response = |position: &str| ResponseValue {
             field: "doc_id".into(),
             value: "5".into(),
@@ -1740,8 +2013,8 @@ mod tests {
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
-        store.start_session(SITE, id, key.mac("value", token.as_bytes()), 1);
-        let session = store.session(id, 1);
+        store.start_session(SITE, id, HOME, key.mac("value", token.as_bytes()), 1);
+        let session = store.session(id, HOME, 1);
         assert_eq!(session.login_request(), Some(7));
         assert_eq!(session.login_unbound(), None);
         let origin = &session
@@ -1776,10 +2049,10 @@ mod tests {
             identity,
         );
         let id = key.mac("session", token.as_bytes());
-        store.start_session(SITE, id, key.mac("value", token.as_bytes()), 1);
+        store.start_session(SITE, id, HOME, key.mac("value", token.as_bytes()), 1);
         assert!(
             store
-                .session(id, 1)
+                .session(id, HOME, 1)
                 .identity()
                 .tag()
                 .is_some_and(|tag| tag.user.is_some()),
@@ -1789,12 +2062,13 @@ mod tests {
         store.start_session(
             SITE,
             key.mac("session", forged),
+            HOME,
             key.mac("value", forged),
             1,
         );
         assert_eq!(
             store
-                .session(key.mac("session", forged), 1)
+                .session(key.mac("session", forged), HOME, 1)
                 .identity()
                 .tag(),
             None,
@@ -1816,9 +2090,9 @@ mod tests {
             SessionIdentity::default(),
         );
         let id = key.mac("session", short.as_bytes());
-        store.start_session(SITE, id, key.mac("value", short.as_bytes()), 1);
+        store.start_session(SITE, id, HOME, key.mac("value", short.as_bytes()), 1);
         assert_eq!(
-            store.session(id, 1).login_unbound(),
+            store.session(id, HOME, 1).login_unbound(),
             Some(LoginUnbound::Unmatched)
         );
         assert_eq!(
@@ -1850,8 +2124,8 @@ mod tests {
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
-        store.start_session(SITE, id, key.mac("value", token.as_bytes()), 20);
-        let session = store.session(id, 20);
+        store.start_session(SITE, id, HOME, key.mac("value", token.as_bytes()), 20);
+        let session = store.session(id, HOME, 20);
         assert_eq!(session.login_unbound(), Some(LoginUnbound::Ambiguous));
         assert_eq!(session.login_request(), None);
         assert_eq!(store.held.logins.len(), 2);
@@ -1872,9 +2146,9 @@ mod tests {
         );
         let id = key.mac("session", token.as_bytes());
         let late = HELD_LOGIN_MS + 1;
-        store.start_session(SITE, id, key.mac("value", token.as_bytes()), late);
+        store.start_session(SITE, id, HOME, key.mac("value", token.as_bytes()), late);
         assert_eq!(
-            store.session(id, late).login_unbound(),
+            store.session(id, HOME, late).login_unbound(),
             Some(LoginUnbound::Expired)
         );
     }
@@ -1897,17 +2171,17 @@ mod tests {
         assert_eq!(store.held.logins.len(), HELD_LOGINS_MAX);
         let first = token(0);
         let id = key.mac("session", first.as_bytes());
-        store.start_session(SITE, id, key.mac("value", first.as_bytes()), 1);
+        store.start_session(SITE, id, HOME, key.mac("value", first.as_bytes()), 1);
         assert_eq!(
-            store.session(id, 1).login_unbound(),
+            store.session(id, HOME, 1).login_unbound(),
             Some(LoginUnbound::Unmatched),
             "the first login was pushed out"
         );
         let last = token(HELD_LOGINS_MAX);
         let id = key.mac("session", last.as_bytes());
-        store.start_session(SITE, id, key.mac("value", last.as_bytes()), 1);
+        store.start_session(SITE, id, HOME, key.mac("value", last.as_bytes()), 1);
         assert_eq!(
-            store.session(id, 1).login_request(),
+            store.session(id, HOME, 1).login_request(),
             Some(HELD_LOGINS_MAX as u128 + 1)
         );
     }
@@ -1926,9 +2200,9 @@ mod tests {
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
-        store.start_session("beta", id, key.mac("value", token.as_bytes()), 1);
+        store.start_session("beta", id, HOME, key.mac("value", token.as_bytes()), 1);
         assert_eq!(
-            store.session(id, 1).login_unbound(),
+            store.session(id, HOME, 1).login_unbound(),
             Some(LoginUnbound::Unmatched),
             "the login of another site does not start the session"
         );
@@ -2023,8 +2297,11 @@ mod tests {
         let before = store.held.values;
         let newest = long(logins - 1, 0);
         let id = key.mac("session", newest.as_bytes());
-        store.start_session(SITE, id, key.mac("value", newest.as_bytes()), 1);
-        assert_eq!(store.session(id, 1).login_request(), Some(logins as u128));
+        store.start_session(SITE, id, HOME, key.mac("value", newest.as_bytes()), 1);
+        assert_eq!(
+            store.session(id, HOME, 1).login_request(),
+            Some(logins as u128)
+        );
         assert_eq!(store.held.values, before - per_login);
     }
 }

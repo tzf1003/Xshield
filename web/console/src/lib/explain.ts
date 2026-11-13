@@ -4,6 +4,7 @@
 import type {
   ApiInfo,
   DecisionPath,
+  JevAccess,
   JevAttack,
   JevRecord,
   Outcome,
@@ -18,8 +19,9 @@ import {
   isNameValue,
   unknownTitle,
 } from "./api-name.ts";
-import { clip } from "./format.ts";
+import { clip, FUNCTION_KEY_MAX } from "./format.ts";
 import { shortRequestId } from "./ids.ts";
+import { FUNCTION_VIEW } from "./vocab.ts";
 
 export type ExplainInput = {
   decision_path: DecisionPath;
@@ -41,7 +43,7 @@ const FAILURE_REASON: Record<string, string> = {
   JEV_RESPONSE_TOO_LARGE: "Jev 响应超过 64 KiB",
   JEV_RESPONSE_INVALID: "Jev 响应格式不符合约定",
   JEV_UNKNOWN: "Jev 答不上来",
-  JEV_STATE_TOO_LARGE: "上下文裁剪后仍超过 8 KiB，没有调用 Jev",
+  JEV_STATE_TOO_LARGE: "分批（最多 16 批）后仍装不下，没有调用 Jev（正常不出现）",
   JEV_CALL_LIMIT: "调用次数已达上限，没有调用 Jev",
 };
 
@@ -101,6 +103,22 @@ function historyOf(value: TraceValue | undefined, source: TraceSource | undefine
     : "从未出现过";
 }
 
+/**
+ * The function table's sentences (docs/06 6.4.4): an attempt on an administrator's function, and a function the table does
+ * not list. An administrator's session on an entry says nothing here, because it is not a finding.
+ */
+function functionLineOf(trace: Trace): string {
+  const fn = trace.function;
+  if (fn === undefined) return "";
+  const attempt =
+    fn.attempt === "over_privilege"
+      ? FUNCTION_VIEW.detail.explainAttempt(clip(fn.entry ?? fn.key, FUNCTION_KEY_MAX))
+      : "";
+  const unknown =
+    fn.known === false ? FUNCTION_VIEW.detail.explainUnknown(clip(fn.key, FUNCTION_KEY_MAX)) : "";
+  return `${attempt}${unknown}`;
+}
+
 function reasonOf(input: ExplainInput): string {
   const { trace, jev } = input;
   switch (input.decision_path) {
@@ -132,6 +150,15 @@ function reasonOf(input: ExplainInput): string {
         return `Jev 判定为攻击（ATTACK ${percentOf(jev?.attack, "ATTACK")}）：${where}含 \`${clip(target?.value ?? "", 24)}\`。`;
       }
       const value = offendingValue(checked);
+      // Without a value that was seen and not verified, the function line is the cause; the value sentence would
+      // say that a value was never seen, which is not the finding (docs/06 6.4.4).
+      if (
+        value === undefined &&
+        functionLineOf(trace) !== "" &&
+        topOf<JevAccess>(jev?.access ?? null) === "DENY"
+      ) {
+        return `Jev 判定越权（DENY ${percentOf(jev?.access, "DENY")}）。`;
+      }
       const source = value?.sources[0];
       const place = value ? `${locationWord(value.at)}${clip(value.value, 24)}` : "请求的值";
       return `Jev 判定越权（DENY ${percentOf(jev?.access, "DENY")}）：${place} 在这个会话里${historyOf(value, source)}。`;
@@ -184,5 +211,8 @@ export function explainRecord(input: ExplainInput): string {
   // An unknown interface is never an entry and never bypassed, which the reason below depends on.
   const named = input.api ?? null;
   const unknownLine = named !== null && "unknown" in named ? `${unknownTitle(named)}。` : "";
-  return [unknownLine, reason, action, upstream].filter((part) => part.length > 0).join("");
+  const functionLine = functionLineOf(input.trace);
+  return [unknownLine, functionLine, reason, action, upstream]
+    .filter((part) => part.length > 0)
+    .join("");
 }

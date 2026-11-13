@@ -26,6 +26,7 @@ import type {
   UpstreamError,
   ValueKind,
 } from "../api/types.ts";
+import { fmtInt } from "./format.ts";
 import type { ParseFailure } from "./logical-path.ts";
 
 export type Tone = "blocked" | "would" | "unjudged" | "ok" | "neutral";
@@ -135,7 +136,10 @@ export const FAILURE_INFO: Record<JevFailure, { short: string; desc: string }> =
   JEV_RESPONSE_TOO_LARGE: { short: "响应过大", desc: "响应超过 64 KiB" },
   JEV_RESPONSE_INVALID: { short: "响应无效", desc: "响应结构不符合约定" },
   JEV_UNKNOWN: { short: "答不上来", desc: "最高项是 UNKNOWN 或两项并列" },
-  JEV_STATE_TOO_LARGE: { short: "上下文过大", desc: "裁剪后仍超过 8 KiB，没有调用，返回 403" },
+  JEV_STATE_TOO_LARGE: {
+    short: "上下文过大",
+    desc: "分批（最多 16 批）后仍装不下，没有调用，返回 403（正常不出现）",
+  },
   JEV_CALL_LIMIT: { short: "达到上限", desc: "会话或地址每分钟调用次数用完，没有调用，返回 429" },
 };
 
@@ -146,6 +150,7 @@ export const SKIP_LABEL: Record<ResponseSkip, string> = {
   too_large: "超过 1 MiB",
   head: "HEAD 请求",
   not_forwarded: "请求没有转发",
+  would_block: "本应拦截，未学习",
 };
 
 export const UPSTREAM_LABEL: Record<UpstreamError, string> = {
@@ -282,6 +287,10 @@ export const ERROR_TEXT: Record<string, string> = {
   SITE_CONFIG_BYPASS_INVALID: "绕过最多 64 条，规则格式同入口",
   SITE_CONFIG_ADVANCED_INVALID: "高级判定参数有误，请检查各项的取值范围",
   SITE_CONFIG_OBJECTS_INVALID: "对象表的配置有误，请检查对象表的各项",
+  FUNCTION_CHANGED: "功能表已经变了，列表已刷新，请再确认一次",
+  FUNCTION_ON_ENTRY: "这个功能在入口上，不能确认为管理档",
+  JUDGEMENT_CHANGED: "这条提议已经变了，请看最新的提议后再确认",
+  JUDGEMENT_NOT_FOUND: "这条提议已经不在了，列表已刷新",
   INVALID_FILTER: "筛选条件有误",
   WINDOW_TOO_LARGE: "时间范围最长 7 天",
   TOO_MANY_IDS: "一次最多对照 1000 个请求 ID",
@@ -1076,8 +1085,8 @@ export const OBJECT_TEXT = {
     pending: "网关接受对象表的学习设置之后，这里的开关才能保存。现在只能查看当前的值。",
     autoLearn: { name: "自动学习", help: "关闭后只用手工声明，已确认的位置照常生效" },
     autoTighten: {
-      name: "自动收紧（推荐）",
-      help: "只会让快速放行变少的改动自动生效，例如把同时指医生和文档的 doc 拆成两个类别。每次都写成新版本，作者为“学习任务”，可以撤销。关闭后这类改动进入待确认。",
+      name: "自动收紧",
+      help: "开启后，只会让快速放行变少的改动自动生效，例如把同时指医生和文档的 doc 拆成两个类别。每次都写成新版本，作者为“学习任务”，可以撤销。关闭时不拆分类别。",
     },
     autoPause: {
       name: "自动暂停（推荐）",
@@ -1301,6 +1310,162 @@ export const FUNCTION_TEXT = {
   open: "对所有会话开放",
   admin: "仅管理员",
   noReliability: "无",
+} as const;
+
+/** The function view of the object map (docs/06 6.4.10, docs/07 7.9.18 to 7.9.20): its five blocks, the confirmation,
+ *  the switch and its estimate, and the readiness and request-detail lines that name a function. Names of functions and
+ *  paths are data: the view shows them as text, never as words of this file. */
+export const FUNCTION_VIEW = {
+  radio: (proposals: number) => (proposals > 0 ? `功能 ${proposals}` : "功能"),
+  status: {
+    summary: (days: number, ordinary: number, admin: number, identified: boolean) =>
+      `最近 ${days} 天：普通单位 ${fmtInt(ordinary)}，管理员单位 ${fmtInt(admin)}。单位是${identified ? "用户" : "会话"}。`,
+    overLimit: "功能键超过上限，学习这一轮没有判断：候选不可用，已有的提议是之前的结果。",
+    learningOff: "自动学习已关闭：下面是已有的证据，不会再更新。",
+    noAdmin: (days: number) =>
+      `最近 ${days} 天没有任何会话被认作管理员。管理档功能对每个会话都算尝试越权，拦截模式下会拦住所有人。先检查对象表里身份位置的角色声明。`,
+    bypass: "绕过规则下的路径不经判定，功能表管不到它们。",
+  },
+  proposals: {
+    title: (count: number) => `管理档提议 ${count}`,
+    lead: "学习发现只有管理员走过的功能。确认后非管理员会话请求它算尝试越权：交 Jev 判定并要求拒绝。",
+    evidence: (admin: number, refused: number | null, reliability: string) =>
+      `管理员单位 ${fmtInt(admin)} · 被源站拒绝的普通单位 ${fmtInt(refused)} · 可靠性 ${reliability}`,
+    inTable: "已在功能表里",
+    confirm: "确认为管理档",
+    mediumNote: "可靠性为中的管理档只记在功能表里，判定不按管理档处理。",
+    dismiss: "驳回",
+    dismissed: "已驳回，同一提议不再出现，除非证据得出另一个结论。",
+    reliability: (word: string) => `可靠性 ${word}`,
+  },
+  aria: {
+    add: (key: string) => `加入功能表 ${key}`,
+    admin: (key: string) => `确认为管理档 ${key}`,
+    dismiss: (key: string) => `驳回 ${key}`,
+    open: (key: string) => `取消管理档 ${key}`,
+    remove: (key: string) => `删除 ${key}`,
+  },
+  table: {
+    title: (count: number) => `功能表 ${count}`,
+    empty: "功能表还是空的。从下面的候选里确认要加入的功能。",
+    columns: {
+      key: "功能",
+      tier: "档位",
+      source: "来源",
+      ordinary: "普通单位",
+      admin: "管理员单位",
+      refused: "被拒绝",
+      last: "最近",
+      action: "操作",
+    },
+    tier: {
+      known: "已知",
+      high: "管理档 · 可靠性 高",
+      medium: "管理档 · 可靠性 中（不收紧）",
+      low: "管理档 · 可靠性 低（不收紧）",
+    },
+    source: { rule: "规则", admin: "管理员", agent: "学习代理" },
+    onEntry: {
+      tag: "在入口上",
+      desc: "入口上没有管理员身份的请求（包括登录）都算尝试越权。",
+    },
+    underBypass: { tag: "在绕过规则下", desc: "这个路径不经判定，条目不起作用。" },
+    openAdmin: "取消管理档",
+    remove: "删除",
+    pendingOpen: "将取消管理档",
+    pendingRemove: "将删除",
+  },
+  candidates: {
+    title: (count: number) => `候选 ${count}`,
+    lead: "学习在流量里见到、功能表还没有的功能。走过的单位少的排在前面。确认后它们成为已知功能。",
+    columns: {
+      key: "功能",
+      ordinary: "普通单位",
+      admin: "管理员单位",
+      refused: "被拒绝",
+      last: "最近",
+      requests: "24 小时请求数",
+    },
+    selectAll: "全选或全不选当前列表",
+    resetDefaults: "恢复默认勾选",
+    sensitive: {
+      tag: "名字敏感",
+      desc: "这类路径常常不该对所有人开放。加入功能表之后它就是已知功能，未知功能判定不再管它。",
+    },
+    belowThreshold: (threshold: number) => `不到 ${threshold} 个单位`,
+    none: "学习没有见到功能表之外的功能。",
+    entry: "入口",
+  },
+  unknownSwitch: {
+    title: "未知功能交 Jev",
+    lead: "打开后，功能表里没有的功能不再快速放行，交 Jev 判定；Jev 被告知这个功能不在站点的已知功能里。",
+    on: "开",
+    off: "关",
+    emptyTable: "功能表为空时不能打开。先确认候选。",
+    pending: "先确认或放弃上面的变更。",
+    impactOff: (
+      total: number,
+      candidates: number,
+      candidateRequests: number,
+      unlearned: number,
+      unkeyed: number,
+      complete: boolean,
+    ) =>
+      `最近 24 小时里现在被快速放行或缓存放行的请求中，功能不在功能表里的有 ${fmtInt(total)} 个${complete ? "" : "以上"}。打开后它们改为交 Jev 判定：${fmtInt(candidates)} 个候选功能上 ${fmtInt(candidateRequests)} 个，没学到的路径上 ${fmtInt(unlearned)} 个${unkeyed > 0 ? `，另有至多 ${fmtInt(unkeyed)} 个算不出功能键（预检或写法不规范的路径）` : ""}。${complete ? "" : "分组超过一次读取的上限，数字是下限。"}`,
+    impactOn: (total: number) =>
+      `开关已打开。按现在的功能表，最近 24 小时里还有 ${fmtInt(total)} 个放行过的请求属于未知功能。缓存放行过的未知功能请求仍会计入，这是预期的。`,
+    impactNone: "最近 24 小时没有功能表之外的放行请求。",
+    candidatesPending: (count: number) =>
+      `还有 ${fmtInt(count)} 个建议加入的候选没有确认，打开后它们的请求都会交 Jev。`,
+    observe: "观察模式下这些请求照常转发，只记为本应拦截。",
+    unlearned: {
+      title: "没学到的流量",
+      lead: "源站没有成功应答过的路径（404、被拒绝），所以学习没有记它们。",
+      columns: { key: "功能", requests: "请求数", sample: "示例" },
+    },
+  },
+  bar: {
+    pending: (add: number, admin: number, open: number, remove: number) =>
+      `待确认：加入 ${fmtInt(add)} · 管理档 ${fmtInt(admin)} · 取消管理档 ${fmtInt(open)} · 删除 ${fmtInt(remove)}`,
+    confirm: "确认变更…",
+    none: "没有待确认的变更",
+  },
+  confirm: {
+    title: "确认功能表的变更？",
+    ok: "确认并保存版本",
+    cancel: "取消",
+    add: (count: number) => `加入 ${count} 个已知功能`,
+    addSensitive: (count: number) =>
+      `下面 ${count} 个功能的名字敏感，确认它们确实对所有登录用户开放`,
+    admin: (count: number) => `确认 ${count} 个管理档`,
+    open: (count: number) => `取消 ${count} 个管理档`,
+    openNote: "这些功能之后对所有会话开放，学习可能再次提议。",
+    remove: (count: number) => `删除 ${count} 个功能`,
+    removeAsking: "删除后这些功能的请求会交 Jev 判定。",
+    emptiesTable: "未知功能判定开着时功能表不能删空。先关掉开关。",
+    onEntry: "在入口上：入口任何人都能走到，这个功能不能设为管理档，确认会被拒绝。",
+    afterNote: "确认后站点保存一个新版本，判定开始使用它。",
+    confirmed: "已确认。站点保存了一个新版本。",
+  },
+  readiness: {
+    attempts: (count: string) =>
+      `非管理员请求管理档功能 ${count} 个：交 Jev 判定并要求拒绝，拦截模式下被拦`,
+    attemptsNone: "没有非管理员请求管理档功能",
+    unknown: (count: string) =>
+      `未知功能的请求 ${count} 个：功能表里没有，已交 Jev 判定。属于正常功能的，在对象表的功能视图里加入`,
+    unknownNone: "没有未知功能的请求",
+  },
+  detail: {
+    attempt: (entry: string) =>
+      `管理档功能 ${entry}：这个会话不是管理员，算尝试越权，交 Jev 并要求拒绝`,
+    attemptRouted: (key: string, entry: string) =>
+      `请求是 ${key}，按 ${entry} 处理：这个会话不是管理员，算尝试越权，交 Jev 并要求拒绝`,
+    admin: (entry: string) => `管理档功能 ${entry}：管理员会话`,
+    unknown: (key: string) => `${key} 不在功能表里，按未知功能交 Jev`,
+    step: "功能",
+    explainAttempt: (entry: string) => `请求的是管理档功能 ${entry}，这个会话不是管理员。`,
+    explainUnknown: (key: string) => `功能 ${key} 不在功能表里。`,
+  },
 } as const;
 
 /** The learning settings in words, for the change list and the version conflict. */

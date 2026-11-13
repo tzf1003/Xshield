@@ -1025,40 +1025,6 @@ fn name_pattern(names: &[String]) -> Option<String> {
     (!alternatives.is_empty()).then(|| format!("({})", alternatives.join("|")))
 }
 
-/// Requests in `since_millis..` whose trace says they cite a value learned
-/// from a request that observe mode let through as would-be refused
-/// (docs/07 section 7.4.6).
-///
-/// # Errors
-/// Returns [`sqlx::Error`] when the query fails.
-pub async fn after_would_block_references(
-    pool: &PgPool,
-    site: &str,
-    since_millis: i64,
-) -> Result<i64, sqlx::Error> {
-    let count: i64 = sqlx::query_scalar(
-        "WITH learners AS (
-             SELECT request_id FROM decision_log
-             WHERE site = $1 AND at_millis >= $2
-               AND trace #>> '{response,after_would_block}' = 'true'
-             LIMIT 5000
-         )
-         SELECT count(*)::bigint FROM decision_log d
-         WHERE d.site = $1 AND d.at_millis >= $2
-           AND EXISTS (
-               SELECT 1
-               FROM jsonb_array_elements(COALESCE(d.trace -> 'values', '[]'::jsonb)) AS v,
-                    jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
-               WHERE s ->> 'request_id' IN (SELECT request_id FROM learners)
-           )",
-    )
-    .bind(site)
-    .bind(since_millis)
-    .fetch_one(pool)
-    .await?;
-    Ok(count)
-}
-
 /// Requests of a site's window that carry an attempt (docs/07 section 7.4.7): a value that only
 /// public responses showed, used at a position that takes no public source. Counted by request, not by
 /// value, from the `attempt` marks of the decision's values.
@@ -1084,6 +1050,30 @@ pub async fn attempt_requests(
     .fetch_one(pool)
     .await?;
     Ok(count)
+}
+
+/// The function table's two counts of a site's window (docs/07 section 7.9.11), read in one query: the requests
+/// that are an attempt on an administrator's function (`trace.function.attempt` is `over_privilege`), and the
+/// requests for a function the table does not list (`trace.function.known` is `false`). A request can be both.
+///
+/// # Errors
+/// Returns [`sqlx::Error`] when the query fails.
+pub async fn function_requests(
+    pool: &PgPool,
+    site: &str,
+    since_millis: i64,
+) -> Result<(i64, i64), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT
+             count(*) FILTER (WHERE d.trace -> 'function' ->> 'attempt' = 'over_privilege')::bigint,
+             count(*) FILTER (WHERE d.trace -> 'function' ->> 'known' = 'false')::bigint
+         FROM decision_log d
+         WHERE d.site = $1 AND d.at_millis >= $2",
+    )
+    .bind(site)
+    .bind(since_millis)
+    .fetch_one(pool)
+    .await
 }
 
 /// Counts of rows by decision path, failure code and context, under a scope.
@@ -1500,5 +1490,94 @@ mod tests {
             vec![("GET", "/api/reports/{id}", 2), ("GET", "/api/other", 1),]
         );
         assert!(groups[0].sample.starts_with("traffic-test-"));
+    }
+
+    /// Writes one decision row of `site` at `at_millis`, with the `trace` document given as text.
+    async fn insert_with_trace(pool: &PgPool, site: &str, at_millis: i64, trace: &str) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, method, path,
+                logical_path, decision_path, outcome, trace)
+             VALUES ($1, $2, $3, 'edge-test', 'host', 'client', 'GET', '/api/x', NULL, 'jev_allow',
+                'allowed', $4::jsonb)",
+        )
+        .bind(at_millis)
+        .bind(format!("function-test-{id}"))
+        .bind(site)
+        .bind(trace)
+        .execute(pool)
+        .await
+        .expect("insert");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn function_requests_counts_attempts_and_unknown_functions() {
+        let pool = connect_test_pool().await;
+        let day = NaiveDate::from_ymd_opt(2096, 7, 2).expect("date");
+        ensure_partition(&pool, day).await.expect("partition");
+        sqlx::query("DELETE FROM decision_log WHERE site IN ('function-test', 'function-other')")
+            .execute(&pool)
+            .await
+            .expect("clear the test sites");
+        let (day_start, _) = day_bounds_millis(day).expect("bounds");
+        let since = day_start + 1_000;
+        // An attempt on an administrator's function, by a session that is no administrator.
+        insert_with_trace(
+            &pool,
+            "function-test",
+            since + 1,
+            r#"{"function": {"key": "POST /api/admin/export", "entry": "POST /api/admin/export",
+                "tier": "admin", "attempt": "over_privilege"}}"#,
+        )
+        .await;
+        // A function the table does not list.
+        insert_with_trace(
+            &pool,
+            "function-test",
+            since + 2,
+            r#"{"function": {"key": "GET /metrics", "known": false}}"#,
+        )
+        .await;
+        // Both at once: an attempt, under a method the baseline does not know.
+        insert_with_trace(
+            &pool,
+            "function-test",
+            since + 3,
+            r#"{"function": {"key": "GET /api/admin/x", "entry": "GET /api/admin/x",
+                "tier": "admin", "attempt": "over_privilege", "known": false}}"#,
+        )
+        .await;
+        // An administrator's session on an administrator's function: no attempt, and the function is known.
+        insert_with_trace(
+            &pool,
+            "function-test",
+            since + 4,
+            r#"{"function": {"key": "GET /api/admin/y", "entry": "GET /api/admin/y", "tier": "admin"}}"#,
+        )
+        .await;
+        // A request the function table does not touch.
+        insert_with_trace(&pool, "function-test", since + 5, "{}").await;
+        // Outside the window, and of another site.
+        insert_with_trace(
+            &pool,
+            "function-test",
+            since - 1,
+            r#"{"function": {"key": "GET /metrics", "known": false}}"#,
+        )
+        .await;
+        insert_with_trace(
+            &pool,
+            "function-other",
+            since + 6,
+            r#"{"function": {"key": "GET /metrics", "known": false}}"#,
+        )
+        .await;
+
+        let counts = function_requests(&pool, "function-test", since)
+            .await
+            .expect("count the function requests");
+        assert_eq!(counts, (2, 2));
     }
 }
