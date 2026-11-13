@@ -94,6 +94,36 @@ RESPONSE_POSITIONS: tuple[dict[str, Any], ...] = (
 
 # Identity positions (docs/07 section 7.9.15). The token login names its user as well, but only the JSON
 # credential site declares it.
+# The function table of the truth site (docs/07 7.9.18): one entry per route the origin answers, except GET /metrics,
+# which is left out on purpose, so the gateway asks Jev about it (objects.ask_unknown_functions). The two
+# administrator routes are the administrator tier, at reliability high.
+FUNCTIONS: tuple[dict[str, Any], ...] = (
+    {"key": "GET /static/app.js", "source": "admin"},
+    {"key": "POST /login", "source": "admin"},
+    {"key": "POST /api/token", "source": "admin"},
+    {"key": "GET /api/home", "source": "admin"},
+    {"key": "POST /api/session/refresh", "source": "admin"},
+    {"key": "GET /api/patients", "source": "admin"},
+    {"key": "POST /api/patients", "source": "admin"},
+    {"key": "GET /api/patients/{id}", "source": "admin"},
+    {"key": "PUT /api/patients/{id}", "source": "admin"},
+    {"key": "DELETE /api/patients/{id}", "source": "admin"},
+    {"key": "GET /api/patients/{id}/comments", "source": "admin"},
+    {"key": "POST /api/patients/{id}/notes", "source": "admin"},
+    {"key": "POST /api/patients/{id}/share", "source": "admin"},
+    {"key": "POST /api/patients/{id}/attachments", "source": "admin"},
+    {"key": "GET /share/{id}", "source": "admin"},
+    {"key": "GET /api/visits/{id}", "source": "admin"},
+    {"key": "GET /api/prescriptions/{id}", "source": "admin"},
+    {"key": "GET /api/reports/{id}", "source": "admin"},
+    {"key": "GET /api/search", "source": "admin"},
+    {"key": "GET /api/directory", "source": "admin"},
+    {"key": "GET /api/admin/search", "source": "admin", "tier": "admin", "reliability": "high"},
+    {"key": "GET /api/admin/export", "source": "admin", "tier": "admin", "reliability": "high"},
+    {"key": "POST /api/profile", "source": "admin"},
+    {"key": "POST /api/forms/intake", "source": "admin"},
+)
+
 IDENTITY: tuple[dict[str, Any], ...] = (
     {"key": "GET /api/home doctor.id", "class": "doctor", "identity": "user"},
     {"key": "GET /api/home doctor.org", "class": "org", "identity": "org"},
@@ -296,6 +326,7 @@ class ClinicOrigin:
             "request_positions": [dict(item) for item in REQUEST_POSITIONS],
             "response_positions": [dict(item) for item in RESPONSE_POSITIONS],
             "non_objects": list(NON_OBJECTS),
+            "functions": [{"key": item["key"], "tier": item.get("tier")} for item in FUNCTIONS],
         }
 
     def reference_state(self, credential: str | None, object_class: str, value: str) -> dict[str, bool]:
@@ -629,7 +660,8 @@ def site_spec(config: str, origin_port: int, mode: str = "enforce") -> dict[str,
     """The lab site for one object-map configuration (plan 3.3).
 
     `none` declares only the identity positions: no object map, so the edge judges as a site without
-    one. `truth` declares every learnable position from the origin's truth, each at reliability high.
+    one. `truth` declares every learnable position from the origin's truth, each at reliability high, and the
+    origin's function table with ask_unknown_functions (every route but GET /metrics is in the table).
     """
     if config not in ("none", "truth"):
         raise ValueError(f"unknown configuration {config!r}")
@@ -651,15 +683,19 @@ def site_spec(config: str, origin_port: int, mode: str = "enforce") -> dict[str,
                               "tier": item["tier"], "reliability": "high"})
                 classes.add(item["class"])
     class_names = dict(CLASSES)
+    objects: dict[str, Any] = {
+        "classes": [{"id": cls, "name": class_names[cls]} for cls, _ in CLASSES if cls in classes],
+        "slots": slots,
+    }
+    if config == "truth":
+        objects["functions"] = [dict(item) for item in FUNCTIONS]
+        objects["ask_unknown_functions"] = True
     return {
         "name": name, "hosts": [f"{name}.lab"], "origin": f"http://127.0.0.1:{origin_port}",
         "session": {"cookie": "SID"}, "entries": list(ENTRIES), "bypass": list(BYPASS),
         "mode": mode, "on_jev_unavailable": "deny",
         "advanced": {"address_calls_per_minute": 600},
-        "objects": {
-            "classes": [{"id": cls, "name": class_names[cls]} for cls, _ in CLASSES if cls in classes],
-            "slots": slots,
-        },
+        "objects": objects,
     }
 
 

@@ -30,7 +30,7 @@ EXPECTS = frozenset({"block", "allow"})
 REASONS = frozenset({"access", "attack", "no_session", "limit"})
 STATUSES = frozenset({"must", "known_gap"})
 MODES = frozenset({"enforce", "observe"})
-CAPABILITIES = frozenset({"tiers"})
+CAPABILITIES = frozenset({"tiers", "functions", "classes"})
 TIERS = frozenset({"self", "org", "admin", "public"})
 RELIABILITIES = frozenset({"low", "medium", "high"})
 SIDES = frozenset({"request", "response"})
@@ -102,7 +102,7 @@ OBSERVATION: Fields = {
     "client_status": (_is_int, "整数"),
     "origin_served": (_optional(_is_bool), "true、false 或 null"),
     "refs": (_list_of(_is_ref), "对象数组，每项含 value、class、shown、echoed"),
-    "requires": (_list_of(_one_of(CAPABILITIES)), "能力名数组，目前只有 tiers"),
+    "requires": (_list_of(_one_of(CAPABILITIES)), "能力名数组，目前有 tiers、functions 和 classes"),
     "note": (_is_str, "字符串"),
 }
 # Optional: the driver's answer to "did the payload reach the model" (lab only). Used in the
@@ -151,6 +151,14 @@ RESPONSE_POSITION: Fields = {
     "learnable": (_is_bool, "true 或 false"),
 }
 TRUTH_OPTIONAL: Fields = {"why": (_is_str, "字符串")}
+# The function table of a site (plan 4.5, the 2026-11-13 item): an endpoint the site judges as a whole, with the
+# tier it needs. A truth without the field, or with an empty list, has no function table, so its functions
+# capability is missing and the rows that require it are not scored.
+TRUTH_TOP_OPTIONAL: Fields = {"functions": (_list_of(_is_dict), "对象数组，每项含 key 与 tier；没有这个字段表示没有功能表")}
+FUNCTION: Fields = {
+    "key": (_is_str, "字符串，如 GET /api/admin/export"),
+    "tier": (_optional(_one_of(TIERS)), "self、org、admin、public 或 null"),
+}
 
 LEARNED: Fields = {
     "bootstrap": (_list_of(_is_dict), "对象数组"),
@@ -279,6 +287,9 @@ def load_truth(path: Path) -> dict[str, Any]:
             seen[position["key"]] = where
     for index, identity in enumerate(doc["identity"]):
         _check_fields(identity, f"{name}:identity[{index}]", IDENTITY)
+    _check_present(doc, name, TRUTH_TOP_OPTIONAL)
+    for index, function in enumerate(doc.get("functions", [])):
+        _check_fields(function, f"{name}:functions[{index}]", FUNCTION)
     return doc
 
 
