@@ -103,9 +103,15 @@ jobs:
       # scripted Jev stand-in, so no model is called. The cargo steps above built the binary.
       - name: Acceptance scenarios (docs/04 4.3)
         run: python scripts/test_idor_lab.py
-      # docs/04 section 4.6: the unit tests of the measurement, then the quick measurement with its learning
-      # segment (PostgreSQL runs for the whole job). A failed gate fails the job. The report goes to the step
-      # summary and the output directory is kept whatever the outcome.
+      - name: PostgreSQL integration
+        run: scripts/test_postgres.sh
+      - run: python scripts/validate_library.py
+      - run: python scripts/check_env_docs.py
+      - run: python scripts/check_secrets.py
+      # docs/04 section 4.6: last in the job, so the checks above still run when a gate here fails. The unit
+      # tests of the measurement, then the quick measurement with its learning segment (PostgreSQL runs for the
+      # whole job). A failed gate fails the job. The report goes to the step summary and the output directory
+      # is kept whatever the outcome.
       - name: Measurement unit tests (docs/04 4.6)
         run: python -m unittest discover -s tests/security-lab -p "test_*.py"
       - name: Effectiveness measurement, quick mode (docs/04 4.6)
@@ -125,11 +131,6 @@ jobs:
           name: effectiveness-quick
           path: ${{ runner.temp }}/effectiveness
           if-no-files-found: warn
-      - name: PostgreSQL integration
-        run: scripts/test_postgres.sh
-      - run: python scripts/validate_library.py
-      - run: python scripts/check_env_docs.py
-      - run: python scripts/check_secrets.py
 
   # The fuzz targets (fuzz/) on the stable toolchain: every checked-in seed, including
   # each crash ever found, and fixed deterministic mutations of them. Coverage-guided
