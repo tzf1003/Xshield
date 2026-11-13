@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, JSON Schema and synthetic sample checks only. Not Rust behaviour (cargo test runs crates/xshield-core/tests/v4_samples.rs over the same samples), not WAF effectiveness and not model accuracy.",
   "passed": true,
-  "checks_total": 329,
-  "passed_count": 329,
+  "checks_total": 323,
+  "passed_count": 323,
   "checks": [
     {
       "name": "json:examples/sites-dev.json",
@@ -16,31 +16,6 @@
     },
     {
       "name": "json:schemas/site-config.schema.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "json:tests/site-config/auth-transition-flow.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "json:tests/site-config/browser-loop.gateway.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "json:tests/site-config/browser-loop.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "json:tests/site-config/pre-flow.json",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "json:tests/site-config/share-flow.json",
       "passed": true,
       "detail": ""
     },
@@ -1251,11 +1226,6 @@
     },
     {
       "name": "link:docs/05-v3-removal.md:02-jev.md",
-      "passed": true,
-      "detail": ""
-    },
-    {
-      "name": "link:docs/05-v3-removal.md:03-admin-config-audit.md",
       "passed": true,
       "detail": ""
     },
