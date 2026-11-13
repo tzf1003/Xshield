@@ -434,6 +434,7 @@ mod tests {
             day: Some(day),
             rows_estimate: 0,
             bytes: 0,
+            detach_pending: false,
         }
     }
 

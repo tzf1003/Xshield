@@ -31,6 +31,9 @@ pub struct PartitionInfo {
     pub rows_estimate: i64,
     /// Total size on disk, table and indexes, in bytes.
     pub bytes: i64,
+    /// True when an earlier `DETACH ... CONCURRENTLY` was cancelled between its two halves
+    /// and left the partition detached-pending (docs/07 section 7.8.2).
+    pub detach_pending: bool,
 }
 
 /// Name of the partition holding `day`.
@@ -143,7 +146,8 @@ pub async fn ensure_partition(pool: &PgPool, day: NaiveDate) -> Result<(), Parti
 
 /// Drops every daily partition whose end is at or before `cutoff_millis`: first
 /// `DETACH PARTITION ... CONCURRENTLY`, so the parent table is not locked for
-/// long, then `DROP TABLE`. Returns the names dropped.
+/// long, then `DROP TABLE`. A partition that an earlier pass left detach-pending is
+/// finished with `DETACH PARTITION ... FINALIZE` instead. Returns the names dropped.
 ///
 /// # Errors
 /// Returns [`PartitionError`] when a statement fails.
@@ -169,8 +173,17 @@ pub async fn drop_partitions_ended_before(
         // DETACH ... CONCURRENTLY cannot run inside a transaction block, so each
         // statement runs on the pool, one at a time.
         let name = &partition.name;
-        let detach = format!("ALTER TABLE decision_log DETACH PARTITION \"{name}\" CONCURRENTLY");
-        sqlx::query(AssertSqlSafe(detach)).execute(pool).await?;
+        if partition.detach_pending {
+            // Starting the detach again fails on a partition that is already pending, so an
+            // interrupted detach is completed first. Otherwise every later pass would stop
+            // at this partition and no partition after it would ever be dropped.
+            let finalize = format!("ALTER TABLE decision_log DETACH PARTITION \"{name}\" FINALIZE");
+            sqlx::query(AssertSqlSafe(finalize)).execute(pool).await?;
+        } else {
+            let detach =
+                format!("ALTER TABLE decision_log DETACH PARTITION \"{name}\" CONCURRENTLY");
+            sqlx::query(AssertSqlSafe(detach)).execute(pool).await?;
+        }
         let drop = format!("DROP TABLE \"{name}\"");
         sqlx::query(AssertSqlSafe(drop)).execute(pool).await?;
         dropped.push(partition.name);
@@ -186,7 +199,8 @@ pub async fn list_partitions(pool: &PgPool) -> Result<Vec<PartitionInfo>, Partit
     let rows = sqlx::query(
         "SELECT c.relname AS name,
                 GREATEST(c.reltuples, 0)::bigint AS rows_estimate,
-                pg_total_relation_size(c.oid)::bigint AS bytes
+                pg_total_relation_size(c.oid)::bigint AS bytes,
+                i.inhdetachpending AS detach_pending
          FROM pg_inherits i
          JOIN pg_class c ON c.oid = i.inhrelid
          JOIN pg_class p ON p.oid = i.inhparent
@@ -203,6 +217,7 @@ pub async fn list_partitions(pool: &PgPool) -> Result<Vec<PartitionInfo>, Partit
             name,
             rows_estimate: row.try_get("rows_estimate")?,
             bytes: row.try_get("bytes")?,
+            detach_pending: row.try_get("detach_pending")?,
         });
     }
     Ok(partitions)
@@ -236,6 +251,7 @@ pub async fn purge_edges_seen_before(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::{Connection, PgConnection};
 
     #[test]
     fn a_daily_partition_is_named_by_its_utc_day() {
@@ -287,6 +303,49 @@ mod tests {
         PgPool::connect(&url).await.expect("connect")
     }
 
+    /// Leaves `name` detach-pending the way a cancelled `DETACH ... CONCURRENTLY` does: its
+    /// first half commits, and its second half waits for every transaction that holds a lock
+    /// on the partition. A transaction that reads the partition keeps such a lock, and a
+    /// statement timeout cancels the detach there. The lock is on the partition alone, so
+    /// other tests can meanwhile create partitions of the parent, which takes a lock on it.
+    async fn leave_detach_pending(pool: &PgPool, name: &str) {
+        let url = std::env::var("XSHIELD_TEST_DATABASE_URL").expect("XSHIELD_TEST_DATABASE_URL");
+        let mut reader = pool.begin().await.expect("begin");
+        sqlx::query(AssertSqlSafe(format!("SELECT count(*) FROM \"{name}\"")))
+            .execute(&mut *reader)
+            .await
+            .expect("read the partition");
+
+        // DETACH ... CONCURRENTLY cannot run inside a transaction block, so it gets its own
+        // connection, which is closed again before the pool is used.
+        let mut detacher = PgConnection::connect(&url).await.expect("connect");
+        sqlx::query("SET statement_timeout = '2s'")
+            .execute(&mut detacher)
+            .await
+            .expect("statement timeout");
+        let detach = format!("ALTER TABLE decision_log DETACH PARTITION \"{name}\" CONCURRENTLY");
+        let cancelled = sqlx::query(AssertSqlSafe(detach))
+            .execute(&mut detacher)
+            .await;
+        assert!(
+            cancelled.is_err(),
+            "the second half must wait for the reader"
+        );
+        drop(detacher);
+        reader.rollback().await.expect("release the partition");
+
+        let pending: bool = sqlx::query_scalar(
+            "SELECT i.inhdetachpending FROM pg_inherits i
+             JOIN pg_class c ON c.oid = i.inhrelid
+             WHERE c.relname = $1",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .expect("pending flag");
+        assert!(pending, "{name} should be detach-pending");
+    }
+
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn ensure_partition_creates_the_day_and_is_idempotent() {
@@ -327,6 +386,9 @@ mod tests {
         for day in [ended_first, ended_second, kept] {
             ensure_partition(&pool, day).await.expect("create");
         }
+        // An interrupted earlier pass left the first partition detach-pending. This pass must
+        // finish that detach and still drop it, and carry on with the partitions after it.
+        leave_detach_pending(&pool, &partition_name(ended_first)).await;
         // The cutoff is the start of 1970-01-01 UTC, where 1969-12-31 ends exactly.
         let (cutoff, _) = day_bounds_millis(kept).expect("bounds");
 
