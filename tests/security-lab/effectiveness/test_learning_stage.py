@@ -146,12 +146,20 @@ class DatabaseToolsTest(unittest.TestCase):
         with database:
             pass
         (created, created_env), (dropped, dropped_env) = self.calls
-        self.assertEqual(created, ("createdb", "-h", "db.example", "-p", "6543", "-U", "alice", database.name))
-        self.assertEqual(dropped, ("dropdb", "-h", "db.example", "-p", "6543", "-U", "alice", "--if-exists",
+        self.assertEqual(created, ("createdb", "--no-password", "-h", "db.example", "-p", "6543", "-U", "alice", database.name))
+        self.assertEqual(dropped, ("dropdb", "--no-password", "-h", "db.example", "-p", "6543", "-U", "alice", "--if-exists",
                                    database.name))
         self.assertEqual(created_env["PGPASSWORD"], "s3cret")
         self.assertEqual(dropped_env["PGPASSWORD"], "s3cret")
         self.assertNotIn("s3cret", " ".join(created + dropped))
+
+    def test_neither_tool_can_stop_to_ask_for_a_password(self) -> None:
+        database = learning._TemporaryDatabase("postgresql://db.example:6543")
+        with database:
+            pass
+        (created, _), (dropped, _) = self.calls
+        self.assertIn("--no-password", created)
+        self.assertIn("--no-password", dropped)
 
     def test_a_database_that_cannot_be_dropped_is_named_with_the_command_to_drop_it(self) -> None:
         self.drop_fails = True

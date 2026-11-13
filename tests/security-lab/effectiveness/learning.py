@@ -20,9 +20,9 @@ confirmed position is written as an `objects.slots` entry (plan 5.1), never as a
 Without a usable PostgreSQL (createdb or dropdb missing, or the server refuses the connection) the
 stage returns status "skip" with the reason. A failure of the pipeline itself raises LearningError.
 
-learned.json keeps the share codes (`/share/SHR-...`, access codes in the paths) as they appear in the
-position keys. Treat it like the decision log: do not store it in a database, paste it into a PR, or put it
-in a shared folder.
+A learned.json made from a real site keeps the share codes (`/share/SHR-...`, access codes in the paths)
+as they appear in the position keys. Treat it like that site's decision log: do not commit it to the
+repository, paste it into a PR, or put it in a shared folder. The lab's codes are synthetic.
 
 Run it alone for debugging, from tests/security-lab:
     python3 -m effectiveness.learning --decisions FILE --out DIR [--truth FILE]
@@ -292,13 +292,14 @@ class _TemporaryDatabase:
         self.arguments, self.environment = _connection_arguments(base_url)
 
     def __enter__(self) -> _TemporaryDatabase:
-        created = _run_tool("createdb", *self.arguments, self.name, environment=self.environment)
+        # --no-password: fail at once when no password is available. Without it, libpq can wait for one on stdin.
+        created = _run_tool("createdb", "--no-password", *self.arguments, self.name, environment=self.environment)
         if created.returncode != 0:
             raise _NoDatabase(f"无法连接 PostgreSQL（createdb：{_first_line(created.stderr)}）")
         return self
 
     def __exit__(self, *_: object) -> bool:
-        dropped = _run_tool("dropdb", *self.arguments, "--if-exists", self.name, environment=self.environment)
+        dropped = _run_tool("dropdb", "--no-password", *self.arguments, "--if-exists", self.name, environment=self.environment)
         if dropped.returncode != 0:
             manual = " ".join(["dropdb", *self.arguments, "--if-exists", self.name])
             print(f"学习段：没能删除临时库 {self.name}（{_first_line(dropped.stderr)}）。"
