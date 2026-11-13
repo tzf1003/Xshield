@@ -4,7 +4,7 @@
 //! segment, a query or form value, a JSON scalar. Extraction is lossy by
 //! design: it only needs to be deterministic and bounded.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
@@ -34,6 +34,8 @@ const JSON_DEPTH_MAX: usize = 16;
 /// A field name longer than this is judged as a name that carries syntax (docs/01 section 1.3).
 const KEY_CHARS_MAX: usize = 64;
 const FIELD_MAX: usize = 32;
+/// Most distinct field names read for one multipart part. A part with more is read as one text.
+const PART_NAMES_MAX: usize = 4;
 
 /// One scalar found in a request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,20 +340,40 @@ pub fn extract_request(
     if body.is_empty() {
         return out;
     }
-    // A body whose text starts like a JSON object or array, and parses as one, is JSON whatever its
-    // type: this takes precedence over reading it as a form (docs/01 section 1.3).
+    let kind = content_type.map(media_kind).unwrap_or_default();
+    // A body whose text starts like a JSON object or array, and parses as one, is read as JSON
+    // whatever its type. It is also read as its type says, so one body can be both (docs/01 section
+    // 1.3).
     let text = body.trim_ascii();
-    if matches!(text.first(), Some(b'{' | b'[')) && walk_json(&mut out, text, "body", None) {
+    let json = matches!(text.first(), Some(b'{' | b'[')) && walk_json(&mut out, text, "body", None);
+    let lossy = String::from_utf8_lossy(body);
+    if kind == "application/x-www-form-urlencoded" {
+        // A form-typed body is read as its fields, every one of them.
+        pairs(&mut out, "body", &lossy);
         return out;
     }
-    let kind = content_type.map(media_kind).unwrap_or_default();
-    // The body is read as its media type says (docs/01 section 1.3). A body that does not read as
-    // structured data is judged as one text, unless it has no type and has the shape of a form.
-    let read = match kind.as_str() {
-        "application/x-www-form-urlencoded" => {
-            pairs(&mut out, "body", &String::from_utf8_lossy(body));
-            true
+    if kind.is_empty() {
+        // With no type, each reading that makes sense is taken (docs/01 section 1.3). A body of the
+        // strict shape of a form is read as its fields, every one of them. Any other body is read
+        // for the names that look like field names, and it is one text as well unless it is JSON or
+        // a form.
+        let form = form_shaped(body);
+        if form {
+            pairs(&mut out, "body", &lossy);
+        } else {
+            loose_pairs(&mut out, &lossy);
         }
+        if !json && !form {
+            whole_body(&mut out, body);
+        }
+        return out;
+    }
+    if json {
+        return out;
+    }
+    // The body is read as its media type says (docs/01 section 1.3). A body that does not read as
+    // structured data is judged as one text.
+    let read = match kind.as_str() {
         // Every multipart type with a boundary is read by its parts: form-data, mixed, related, ...
         kind if kind.starts_with("multipart/") => content_type
             .and_then(boundary_of)
@@ -360,13 +382,7 @@ pub fn extract_request(
         _ => false,
     };
     if !read {
-        if kind.is_empty() && form_shaped(body) {
-            // A body with no type whose shape is a form is read as its fields. Every byte of it is in
-            // a field, so nothing is left out and it is not truncated (docs/01 section 1.3).
-            pairs(&mut out, "body", &String::from_utf8_lossy(body));
-        } else {
-            whole_body(&mut out, body);
-        }
+        whole_body(&mut out, body);
     }
     out
 }
@@ -410,7 +426,8 @@ fn walk_json(out: &mut ExtractedRequest, bytes: &[u8], at: &str, key: Option<&st
 
 /// The parameters of a header value after its first part, such as `form-data; name="a"`. Names are
 /// lower case and quotes are taken off the values; a quoted value may hold `;` and a backslash
-/// escapes the next character (docs/01 section 1.3).
+/// escapes the next character. The plain parameters that RFC 2231 restores come after the written
+/// ones (docs/01 section 1.3).
 fn parameters(value: &str) -> Vec<(String, String)> {
     let mut pieces = Vec::new();
     let mut piece = String::new();
@@ -431,14 +448,16 @@ fn parameters(value: &str) -> Vec<(String, String)> {
         }
     }
     pieces.push(piece);
-    pieces
+    let written: Vec<(String, String)> = pieces
         .iter()
         .skip(1)
         .filter_map(|piece| {
             let (name, value) = piece.split_once('=')?;
             Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()))
         })
-        .collect()
+        .collect();
+    let restored = restored(&written);
+    written.into_iter().chain(restored).collect()
 }
 
 /// The boundary of a multipart body: the `boundary` parameter of its `Content-Type`.
@@ -450,10 +469,79 @@ fn boundary_of(content_type: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// The file name of an RFC 5987 `filename*` value, `charset'language'percent-encoded`. A value of
-/// another form is taken as it is.
-fn filename_star(value: &str) -> String {
-    let text = value.split_once("''").map_or(value, |(_, text)| text);
+/// The plain parameters RFC 2231 restores from the written ones (docs/01 section 1.3). `x*=` is
+/// `x`, and the numbered pieces `x*0=`, `x*1*=`, ... join in order into `x`; the first missing
+/// number ends them. A name written more than once is restored from its first value and from its
+/// last, and each reading that differs is kept, since parsers differ on which one they take.
+fn restored(written: &[(String, String)]) -> Vec<(String, String)> {
+    let mut values: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (name, value) in written {
+        values
+            .entry(name.as_str())
+            .or_default()
+            .push(value.as_str());
+    }
+    let bases: BTreeSet<&str> = values
+        .keys()
+        .filter_map(|name| name.split_once('*').map(|(base, _)| base))
+        .filter(|base| !base.is_empty())
+        .collect();
+    let mut restored = Vec::new();
+    for base in bases {
+        let first = restored_value(&values, base, false);
+        let last = restored_value(&values, base, true);
+        let readings = if first == last {
+            vec![first]
+        } else {
+            vec![first, last]
+        };
+        restored.extend(
+            readings
+                .into_iter()
+                .flatten()
+                .map(|value| (base.to_owned(), value)),
+        );
+    }
+    restored
+}
+
+/// The value RFC 2231 restores under `base`, from the first value written under each name, or from
+/// the last one when `last`. `None` when no piece of `base` is written.
+fn restored_value(values: &HashMap<&str, Vec<&str>>, base: &str, last: bool) -> Option<String> {
+    // A single encoded value, `base*=charset'lang'percent-encoded`.
+    if let Some(encoded) = picked(values, &format!("{base}*"), last) {
+        return Some(rfc2231_text(encoded, true));
+    }
+    let mut restored = String::new();
+    let mut pieces = 0_usize;
+    for index in 0.. {
+        if let Some(plain) = picked(values, &format!("{base}*{index}"), last) {
+            restored.push_str(plain);
+        } else if let Some(encoded) = picked(values, &format!("{base}*{index}*"), last) {
+            restored.push_str(&rfc2231_text(encoded, index == 0));
+        } else {
+            break;
+        }
+        pieces += 1;
+    }
+    (pieces > 0).then_some(restored)
+}
+
+/// The value written under `name`: the first one, or the last one when `last`.
+fn picked<'w>(values: &HashMap<&str, Vec<&'w str>>, name: &str, last: bool) -> Option<&'w str> {
+    let found = values.get(name)?;
+    let chosen = if last { found.last() } else { found.first() };
+    chosen.copied()
+}
+
+/// One RFC 2231 piece, percent-decoded. The first piece of an encoded value begins with
+/// `charset'lang'`, which is taken off; a piece without that prefix is taken as it is.
+fn rfc2231_text(piece: &str, first: bool) -> String {
+    let mut parts = piece.splitn(3, '\'');
+    let text = match (parts.next(), parts.next(), parts.next()) {
+        (Some(_), Some(_), Some(rest)) if first => rest,
+        _ => piece,
+    };
     percent_decode(text, false)
 }
 
@@ -545,6 +633,23 @@ fn split_headers(block: &[u8]) -> Option<(&[u8], &[u8])> {
     None
 }
 
+/// The lines of a part's headers, with each line that starts with a space or a tab joined to the
+/// line before it by one space (docs/01 section 1.3).
+fn header_lines(head: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for line in head.split('\n') {
+        let line = line.trim_end_matches('\r');
+        match lines.last_mut() {
+            Some(previous) if line.starts_with([' ', '\t']) => {
+                previous.push(' ');
+                previous.push_str(line.trim());
+            }
+            _ => lines.push(line.to_owned()),
+        }
+    }
+    lines
+}
+
 /// Reads a multipart body part by part (docs/01 section 1.3). Returns false, having read nothing,
 /// when the body has no part, so that it is read as one text.
 fn multipart_body(out: &mut ExtractedRequest, body: &[u8], boundary: &str) -> bool {
@@ -562,8 +667,9 @@ fn multipart_body(out: &mut ExtractedRequest, body: &[u8], boundary: &str) -> bo
 /// name, gives its file name only, as `body.<name>#filename` with no key, and its content is not
 /// read. Any other part is a text: its content is read under each of its field names, as a form
 /// field does, or as the JSON it holds when its own type says JSON. A part whose transfer encoding
-/// is base64 or quoted-printable is read decoded as well. A part whose headers never end is one
-/// text at `body`.
+/// is base64 or quoted-printable is read decoded as well. A part with more than [`PART_NAMES_MAX`]
+/// field names is read as one text at `body`, flagged. A part whose headers never end is one text
+/// at `body`.
 fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
     let Some((head, content)) = split_headers(block) else {
         out.truncated = true;
@@ -578,9 +684,9 @@ fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
     let head = String::from_utf8_lossy(head);
     let mut dispositions = Vec::new();
     let mut content_type = None;
-    let mut encodings: Vec<String> = Vec::new();
-    for line in head.split('\n') {
-        let Some((name, value)) = line.trim_end_matches('\r').split_once(':') else {
+    let mut decodings: Vec<String> = Vec::new();
+    for line in header_lines(&head) {
+        let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         let name = name.trim().to_ascii_lowercase();
@@ -589,9 +695,12 @@ fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
         } else if name == "content-type" && content_type.is_none() {
             content_type = Some(value.trim().to_owned());
         } else if name == "content-transfer-encoding" {
+            // Only base64 and quoted-printable change the content, so only they are read decoded.
             let encoding = value.trim().to_ascii_lowercase();
-            if !encodings.contains(&encoding) {
-                encodings.push(encoding);
+            if matches!(encoding.as_str(), "base64" | "quoted-printable")
+                && !decodings.contains(&encoding)
+            {
+                decodings.push(encoding);
             }
         }
     }
@@ -601,36 +710,38 @@ fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
         .collect();
     // Each distinct non-empty name is a field name of its own, because parsers differ on which of
     // several names they take. A part with no name, or with an empty one, is also read at `body`.
-    let mut names: Vec<String> = Vec::new();
+    let mut names: Vec<&str> = Vec::new();
     for (param, value) in &params {
-        if param == "name" && !value.is_empty() && !names.contains(value) {
-            names.push(value.clone());
+        if param == "name" && !value.is_empty() && !names.contains(&value.as_str()) {
+            names.push(value);
+            if names.len() > PART_NAMES_MAX {
+                break;
+            }
         }
     }
-    let nameless = names.is_empty()
-        || params
+    let mut places: Vec<(String, Option<String>)> = Vec::new();
+    if names.len() > PART_NAMES_MAX {
+        // Too many names to read each under its own place: the content is one text, and flagged.
+        out.truncated = true;
+        places.push(("body".to_owned(), None));
+    } else {
+        for name in names {
+            let at = format!("body.{name}");
+            push_unusual_key(out, &at, name);
+            places.push((at, Some(name.to_owned())));
+        }
+        let nameless = params
             .iter()
             .any(|(param, value)| param == "name" && value.is_empty());
-    let mut places: Vec<(String, Option<String>)> = Vec::new();
-    for name in names {
-        let at = format!("body.{name}");
-        push_unusual_key(out, &at, &name);
-        places.push((at, Some(name)));
-    }
-    if nameless {
-        places.push(("body".to_owned(), None));
+        if places.is_empty() || nameless {
+            places.push(("body".to_owned(), None));
+        }
     }
     // An empty file name is no file name, so such a part is a text and its content is judged.
-    let file_names: Vec<String> = params
+    let file_names: BTreeSet<&str> = params
         .iter()
-        .filter(|(param, _)| param == "filename" || param == "filename*")
-        .map(|(param, value)| {
-            if param == "filename*" {
-                filename_star(value)
-            } else {
-                value.clone()
-            }
-        })
+        .filter(|(param, _)| param == "filename")
+        .map(|(_, value)| value.as_str())
         .filter(|file_name| !file_name.is_empty())
         .collect();
     if !file_names.is_empty() {
@@ -638,7 +749,7 @@ fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
         out.truncated = true;
         for (at, _) in &places {
             for file_name in &file_names {
-                push(out, format!("{at}#filename"), None, file_name.clone());
+                push(out, format!("{at}#filename"), None, (*file_name).to_owned());
             }
         }
         return;
@@ -647,8 +758,8 @@ fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
         content_type.is_some_and(|content_type| is_json_media(&media_kind(&content_type)));
     read_text(out, content, is_json, &places);
     // Content that decodes to something else is read decoded too (docs/01 section 1.3).
-    for encoding in &encodings {
-        if let Some(decoded) = transfer_decoded(encoding, content) {
+    for decoding in &decodings {
+        if let Some(decoded) = transfer_decoded(decoding, content) {
             read_text(out, &decoded, is_json, &places);
         }
     }
@@ -691,22 +802,33 @@ fn transfer_decoded(encoding: &str, content: &[u8]) -> Option<Vec<u8>> {
     (!decoded.is_empty() && decoded != content).then_some(decoded)
 }
 
-/// The bytes of a base64 text, read leniently as origins read it (docs/01 section 1.3): every character
-/// outside the standard alphabet is dropped, blanks included, and the text stops at the first `=`. The
-/// full groups decode, and so does a tail of two or three symbols; a single dangling symbol is
-/// ignored. It never fails and never panics.
+/// The bytes of a base64 text, read as Python reads it without checking (docs/01 section 1.3):
+/// every character outside the standard alphabet is dropped, blanks included. A `=` ends the data
+/// only when it completes a group, a group of three symbols taking one and a group of two taking
+/// the second after its first; any other `=` is dropped and decoding goes on. Bits that do not make
+/// a whole byte at the end are dropped. It never fails and never panics; what decodes to nothing
+/// gives nothing.
 fn base64_decoded(text: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     // The bits not yet written out are the `spare` low bits of `bits`.
     let mut bits: u32 = 0;
     let mut spare: u32 = 0;
+    // The symbols in the group being read (0 to 3), and the `=` signs since the last symbol.
+    let mut group: u8 = 0;
+    let mut padding: u8 = 0;
     for &byte in text {
         if byte == b'=' {
-            break;
+            if group == 3 || (group == 2 && padding == 1) {
+                break;
+            }
+            padding = padding.saturating_add(1);
+            continue;
         }
         let Some(value) = base64_value(byte) else {
             continue;
         };
+        group = (group + 1) % 4;
+        padding = 0;
         bits = (bits << 6) | u32::from(value);
         spare += 6;
         if spare >= 8 {
@@ -810,6 +932,33 @@ fn pairs(out: &mut ExtractedRequest, prefix: &str, text: &str) {
         let value = percent_decode(value, true);
         push_unusual_key(out, &format!("{prefix}.{key}"), &key);
         push(out, format!("{prefix}.{key}"), Some(key), value);
+    }
+}
+
+/// The fields of a body that is not a strict form, for the names that look like field names: a name
+/// is kept when it holds only letters, digits and `_ - . [ ] % +` once its blanks at the ends are
+/// trimmed. The trimmed name is the key and the place of the value (docs/01 section 1.3). Other
+/// names are not fields, so the `=` in an XML attribute or in a JSON string makes no reference out
+/// of them.
+fn loose_pairs(out: &mut ExtractedRequest, text: &str) {
+    for pair in text.split('&').filter(|pair| !pair.is_empty()) {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let name = name.trim();
+        let field_name = !name.is_empty()
+            && name.chars().all(|c| {
+                c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '[' | ']' | '%' | '+')
+            });
+        if !field_name {
+            continue;
+        }
+        let key = percent_decode(name, true);
+        push_unusual_key(out, &format!("body.{key}"), &key);
+        push(
+            out,
+            format!("body.{key}"),
+            Some(key),
+            percent_decode(value, true),
+        );
     }
 }
 
@@ -1583,18 +1732,23 @@ mod tests {
 
     #[test]
     fn a_body_with_no_type_that_is_not_a_form_stays_one_text() {
-        for text in [
-            "a sentence with spaces",
-            "a=1&b",
-            "a=1\nb=2",
-            "a=1&&b=2",
-            "a=1&",
-            // A `;` may split fields at the origin, so this is not a form either.
-            "note=x;patient_id=8",
-        ] {
+        // Each body is one text at `body`, flagged. The names that look like field names are read
+        // too, before the text (docs/01 section 1.3).
+        let cases: [(&str, &[(&str, &str)]); 6] = [
+            ("a sentence with spaces", &[]),
+            ("a=1&b", &[("body.a", "1")]),
+            ("a=1\nb=2", &[("body.a", "1\nb=2")]),
+            ("a=1&&b=2", &[("body.a", "1"), ("body.b", "2")]),
+            ("a=1&", &[("body.a", "1")]),
+            // A `;` may split fields at the origin, so the field before it is read, and the text.
+            ("note=x;patient_id=8", &[("body.note", "x;patient_id=8")]),
+        ];
+        for (text, fields) in cases {
             let request = extract_request("/", None, None, text.as_bytes());
             assert!(request.truncated, "{text:?}");
-            assert_eq!(located(&request), [("body", text)], "{text:?}");
+            let mut expected = fields.to_vec();
+            expected.push(("body", text));
+            assert_eq!(located(&request), expected, "{text:?}");
         }
         // Other types are not read as forms, whatever their shape.
         let plain = extract_request("/", None, Some("text/plain"), b"patient_id=8&note=routine");
@@ -1726,6 +1880,28 @@ mod tests {
                 ("body.note", "' OR 1=1--")
             ]
         );
+        // A `=` after one symbol is dropped and the decoding goes on, so the second `=` in the
+        // middle does not end the data.
+        let request = read("base64", "J=yBPUiAxPTEtLQ==");
+        assert_eq!(
+            located(&request),
+            [
+                ("body.note", "J=yBPUiAxPTEtLQ=="),
+                ("body.note", "' OR 1=1--")
+            ]
+        );
+        // Two `=` after a group of two symbols end the data: `OA==eA` is `8`.
+        let request = read("base64", "OA==eA");
+        assert_eq!(
+            located(&request),
+            [("body.note", "OA==eA"), ("body.note", "8")]
+        );
+        // Unpadded base64 decodes as well.
+        let request = read("base64", "JyBPUiAxPTEtLQ");
+        assert_eq!(
+            located(&request),
+            [("body.note", "JyBPUiAxPTEtLQ"), ("body.note", "' OR 1=1--")]
+        );
     }
 
     #[test]
@@ -1755,6 +1931,188 @@ mod tests {
         );
         assert!(!multipart.truncated);
         assert!(values(&multipart).contains(&("body.patient_id", "8", false)));
+    }
+
+    #[test]
+    fn a_body_that_is_both_json_and_a_form_is_read_both_ways() {
+        let body = br#"{"a=":"&patient_id=8&b="}"#;
+        // Typed as a form: the fields, and the JSON values as well, none of it truncated.
+        let form = extract_request("/", None, Some("application/x-www-form-urlencoded"), body);
+        assert!(!form.truncated);
+        assert!(located(&form).contains(&("body.patient_id", "8")));
+        assert!(form.values.iter().any(
+            |value| value.at == "body.patient_id" && value.key.as_deref() == Some("patient_id")
+        ));
+        assert!(located(&form).contains(&("body.a=", "&patient_id=8&b=")));
+        // With no type: the same two readings, none of it truncated.
+        let typeless = extract_request("/", None, None, body);
+        assert!(!typeless.truncated);
+        assert!(located(&typeless).contains(&("body.patient_id", "8")));
+        assert!(typeless.values.iter().any(
+            |value| value.at == "body.patient_id" && value.key.as_deref() == Some("patient_id")
+        ));
+        assert!(located(&typeless).contains(&("body.a=", "&patient_id=8&b=")));
+        // Typed as text: JSON only, so no field of the form is read.
+        let text = extract_request("/", None, Some("text/plain"), body);
+        assert!(!text.truncated);
+        assert!(located(&text).contains(&("body.a=", "&patient_id=8&b=")));
+        assert!(
+            !located(&text)
+                .iter()
+                .any(|(at, _)| *at == "body.patient_id")
+        );
+    }
+
+    #[test]
+    fn typeless_bodies_take_every_reading_that_makes_sense() {
+        // A blank in a value takes the body out of the strict form, but the field names are read,
+        // and the whole text is one value as well.
+        let spaced = extract_request("/", None, None, b"note=a b&patient_id=8");
+        assert!(spaced.truncated);
+        assert!(located(&spaced).contains(&("body.patient_id", "8")));
+        assert!(spaced.values.iter().any(
+            |value| value.at == "body.patient_id" && value.key.as_deref() == Some("patient_id")
+        ));
+        assert!(located(&spaced).contains(&("body", "note=a b&patient_id=8")));
+        // JSON with a blank: its values, and the field names of the same text; not truncated.
+        let json = extract_request("/", None, None, br#"{"a": "&patient_id=8&b="}"#);
+        assert!(!json.truncated);
+        assert!(located(&json).contains(&("body.patient_id", "8")));
+        assert!(located(&json).contains(&("body.a", "&patient_id=8&b=")));
+        // A blank before the name: the key is the name without its blanks.
+        let blank = extract_request("/", None, None, b"x& patient_id=8");
+        assert!(blank.truncated);
+        assert!(blank.values.iter().any(
+            |value| value.at == "body.patient_id" && value.key.as_deref() == Some("patient_id")
+        ));
+        // Markup with an `=` in an attribute: the text only, with no keyed value.
+        let markup = extract_request("/", None, None, br#"<user id="5">t</user>"#);
+        assert!(markup.truncated);
+        assert_eq!(located(&markup), [("body", r#"<user id="5">t</user>"#)]);
+        // A JSON object: its values. It is also a strict form, so its one field, `{"token":"abc`,
+        // is read as well; the rule as written does not exempt it (see the report on this test).
+        let token = extract_request("/", None, None, br#"{"token":"abc=="}"#);
+        assert!(!token.truncated);
+        assert!(located(&token).contains(&("body.token", "abc==")));
+        assert!(!located(&token).iter().any(|(at, _)| *at == "body"));
+    }
+
+    #[test]
+    fn an_rfc_2231_parameter_is_restored_to_its_plain_name() {
+        let part = |disposition: &str| {
+            format!("--b\r\nContent-Disposition: {disposition}\r\n\r\n8\r\n--b--\r\n")
+        };
+        let multipart = Some("multipart/form-data; boundary=b");
+        // `name*=charset'lang'percent-encoded`, and numbered pieces, are the plain name.
+        for disposition in [
+            "form-data; name*=UTF-8''patient_id",
+            "form-data; name*0=\"patient\"; name*1=\"_id\"",
+            "form-data; name*0*=UTF-8''patient; name*1=\"_id\"",
+            "form-data; name*0*=UTF-8''patient; name*1*=%5Fid",
+        ] {
+            let request = extract_request("/", None, multipart, part(disposition).as_bytes());
+            assert_eq!(
+                located(&request),
+                [("body.patient_id", "8")],
+                "{disposition}"
+            );
+            assert_eq!(
+                request.values[0].key.as_deref(),
+                Some("patient_id"),
+                "{disposition}"
+            );
+            assert!(!request.truncated, "{disposition}");
+        }
+        // A written name and an encoded one name the part under each.
+        let both = extract_request(
+            "/",
+            None,
+            multipart,
+            part("form-data; name=\"note\"; name*=UTF-8''patient_id").as_bytes(),
+        );
+        assert_eq!(
+            located(&both),
+            [("body.note", "8"), ("body.patient_id", "8")]
+        );
+        // A boundary given in pieces splits the body.
+        let pieces = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary*0=a; boundary*1=b"),
+            b"--ab\r\nContent-Disposition: form-data; name=\"patient_id\"\r\n\r\n8\r\n--ab--\r\n",
+        );
+        assert_eq!(located(&pieces), [("body.patient_id", "8")]);
+        assert!(!pieces.truncated);
+        // The file name of an encoded `filename*` is the file name; an empty one is no file name.
+        let file = extract_request(
+            "/",
+            None,
+            multipart,
+            b"--b\r\nContent-Disposition: form-data; name=\"avatar\"; filename*=UTF-8''a.png\r\n\r\nSECRET-MARK\r\n--b--\r\n",
+        );
+        assert_eq!(located(&file), [("body.avatar#filename", "a.png")]);
+        // Numbered pieces that are missing, repeated or huge do not panic, and the written values
+        // stay.
+        let odd = extract_request(
+            "/",
+            None,
+            multipart,
+            part("form-data; name*1=\"_id\"; name*99999999999999999999=\"x\"; name*0=\"a\"; name*0=\"b\"")
+                .as_bytes(),
+        );
+        // A repeated first piece is restored from its first value and from its last: `a_id` and
+        // `b_id`.
+        assert!(!odd.truncated);
+        assert_eq!(
+            located(&odd),
+            [("body.a_id", "8"), ("body.b_id", "8")],
+            "the missing and huge pieces are no part of the name"
+        );
+    }
+
+    #[test]
+    fn a_folded_part_header_is_joined_before_it_is_read() {
+        let multipart = Some("multipart/form-data; boundary=b");
+        // A header line that starts with a blank continues the line before it, with one space.
+        let folded =
+            "--b\r\nContent-Disposition: form-data;\r\n name=\"patient_id\"\r\n\r\n8\r\n--b--\r\n";
+        let request = extract_request("/", None, multipart, folded.as_bytes());
+        assert_eq!(located(&request), [("body.patient_id", "8")]);
+        assert_eq!(request.values[0].key.as_deref(), Some("patient_id"));
+        assert!(!request.truncated);
+        // A folded file name makes a file part, whose content is not read.
+        let file = "--b\r\nContent-Disposition: form-data; name=\"avatar\";\r\n\tfilename=\"a.png\"\r\n\r\nSECRET-MARK\r\n--b--\r\n";
+        let request = extract_request("/", None, multipart, file.as_bytes());
+        assert_eq!(located(&request), [("body.avatar#filename", "a.png")]);
+        // A folded transfer encoding is read: base64 for `' OR 1=1--`.
+        let encoded = "--b\r\nContent-Disposition: form-data; name=\"note\"\r\nContent-Transfer-Encoding:\r\n base64\r\n\r\nJyBPUiAxPTEtLQ==\r\n--b--\r\n";
+        let request = extract_request("/", None, multipart, encoded.as_bytes());
+        assert_eq!(
+            located(&request),
+            [
+                ("body.note", "JyBPUiAxPTEtLQ=="),
+                ("body.note", "' OR 1=1--")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_part_with_many_field_names_is_one_flagged_text() {
+        let names: Vec<String> = (0..=super::PART_NAMES_MAX)
+            .map(|i| format!("name=\"n{i}\""))
+            .collect();
+        let body = format!(
+            "--b\r\nContent-Disposition: form-data; {}\r\n\r\n8\r\n--b--\r\n",
+            names.join("; ")
+        );
+        let request = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            body.as_bytes(),
+        );
+        assert!(request.truncated);
+        assert_eq!(located(&request), [("body", "8")]);
     }
 
     #[test]

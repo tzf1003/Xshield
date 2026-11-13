@@ -112,6 +112,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | B12 | 一个值里 600 个字符的填充之后是注入串 | 拦截 |
 | B13 | 120 个字段的正常表单 | 放行到源站 |
 | B14 | 没有 `Content-Type` 的表单，字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
+| B15 | 表单类型的请求体同时是能解析的 JSON，表单字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
 | C1 | Jev 超时或不可用，`on_jev_unavailable=deny` | 拦截，日志注明 |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，日志注明"未经判定" |
 | C3 | 观察模式下的 A2 | 转发，日志记"本应拦截" |

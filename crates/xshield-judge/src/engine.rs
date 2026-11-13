@@ -4581,6 +4581,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_form_typed_body_that_is_also_json_sends_its_id_and_the_unseen_id_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The body is JSON and a form at once. The origin reads the form, so `patient_id=8` is a
+        // field.
+        let body = r#"{"a=":"&patient_id=8&b="}"#;
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("application/x-www-form-urlencoded"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+        for body in &sent {
+            let prompt: serde_json::Value = serde_json::from_str(body).expect("the prompt is JSON");
+            assert_eq!(prompt["state"]["request"]["truncated"], json!(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_rfc_2231_field_name_sends_its_id_and_the_unseen_id_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The name is written as `name*=UTF-8''patient_id`. The origin reads it as `patient_id`, so
+        // the 8 is that field's reference, not an input of a field with no name.
+        let body =
+            "--b\r\nContent-Disposition: form-data; name*=UTF-8''patient_id\r\n\r\n8\r\n--b--\r\n";
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("multipart/form-data; boundary=b"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+    }
+
+    #[tokio::test]
     async fn a_base64_field_sends_its_decoded_injection_and_the_request_is_refused() {
         let fake = FakeJev::new();
         let judge = judge(&fake);

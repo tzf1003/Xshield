@@ -42,6 +42,7 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | B12 | 一个值里 600 个字符的填充之后是 `' OR 1=1 --` | 拦截 | `jev_deny` |
 | B13 | 120 个字段的正常表单 | 源站答 201，Jev 放行 | `jev_allow` |
 | B14 | 没有 `Content-Type` 的表单，字段 `patient_id` 引用医生 B 的患者 `PT-7004` | 拦截；Jev 收到的 `body.patient_id` 是 `reference` | `jev_deny` |
+| B15 | 表单类型的请求体同时是能解析的 JSON（`{"a":"&note=x&patient_id=PT-7004&b="}`），字段 `patient_id` 引用医生 B 的患者 `PT-7004` | 拦截；Jev 收到的 `body.patient_id` 是 `reference` | `jev_deny` |
 | C1 | Jev 返回 503 或超时，`on_jev_unavailable=deny` | 拦截，注明 `JEV_HTTP_ERROR` / `JEV_TIMEOUT` | `jev_unavailable` |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，记为未经判定 | `jev_unavailable`（`unjudged`） |
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |
