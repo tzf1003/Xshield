@@ -256,6 +256,32 @@ class KindTest(unittest.TestCase):
         self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
 
 
+class FunctionTest(unittest.TestCase):
+    """The function rules (docs/02 2.2): an attempt is refused, and an unknown function is refused on an operations path."""
+
+    def with_function(self, path: str, function: dict, method: str = "GET") -> dict:
+        document_ = document(path, [], method=method)
+        document_["state"]["request"]["function"] = function
+        return document_
+
+    def test_an_attempt_is_refused_whatever_else_the_request_says(self) -> None:
+        attempt = self.with_function("/api/admin/export", {"tier": "admin", "attempt": "over_privilege"}, "POST")
+        self.assertEqual(choices(attempt), ("DENY", "BENIGN"))
+
+    def test_an_unknown_function_on_an_operations_path_is_refused(self) -> None:
+        for path in ("/metrics", "/actuator/health", "/server-status", "/api/Backup/list", "/Admin/users"):
+            with self.subTest(path=path):
+                self.assertEqual(choices(self.with_function(path, {"known": False})), ("DENY", "BENIGN"))
+
+    def test_an_unknown_function_on_an_ordinary_path_is_judged_on_its_values(self) -> None:
+        self.assertEqual(choices(self.with_function("/api/comments", {"known": False})), ("ALLOW", "BENIGN"))
+
+    def test_without_a_function_the_answer_is_the_same_as_before(self) -> None:
+        plain = document("/api/admin/search", [])
+        self.assertEqual(choices(plain), ("ALLOW", "BENIGN"))
+        self.assertNotIn("function", plain["state"]["request"])
+
+
 class ServedTest(unittest.TestCase):
     def serve(self, attack_texts: list[str] | None = None) -> FakeJev:
         jev = FakeJev(attack_texts)

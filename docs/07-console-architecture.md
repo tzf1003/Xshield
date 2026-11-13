@@ -206,7 +206,7 @@ GET /api/patients ──响应里出现 id=7──┐
 
 网关写出 trace 时省略下面这些键，读取方（控制台、导出）把缺省的键当作 null、false 或空列表处理。上面的示例为了看清结构把所有键都列了出来，所以和实际输出不完全一致。
 
-- 顶层 `entry`、`bypass`、`refused`、`cache_source`、`session`、`response`、`upstream_error` 为 null 时省略；`values_truncated`、`trimmed` 为 false 时省略；`values` 为空时省略。
+- 顶层 `entry`、`bypass`、`refused`、`cache_source`、`function`、`session`、`response`、`upstream_error` 为 null 时省略；`values_truncated`、`trimmed` 为 false 时省略；`values` 为空时省略。
 - `values[].len` 为空、`values[].clipped` 为 false 时省略；`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability` 为空时省略，`values[].unplaced` 为 false 时省略；`response.skip` 为空时省略；`session.entries_passed`、`session.recent` 为空时省略。
 - 其余的 null 照常写出，例如 `values[].key`、`sources[].request_id`、`timing.origin_ms`、`response.content_type`。
 
@@ -228,7 +228,8 @@ GET /api/patients ──响应里出现 id=7──┐
 | `session.identity` | 站点声明了身份位置且会话已见身份时才有：`user`、`org` 为键控哈希标签，`role` 为角色标签，规则见 [7.9.15](#7915-对象表的身份位置w1)。没有身份位置的站点不写这一段 |
 | `session.login_request_id` | JSON 凭证站点的会话由哪次登录建立时，那次登录请求的 ID。登录响应暂存的标量在那次绑定时记入会话（[01 1.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。没有时不写 |
 | `session.login_unbound` | 凭证建立会话时没有绑定到登录响应，原因为 `login_ambiguous`（对上多份暂存）、`login_expired`（暂存已过期）或 `login_unmatched`（没有对上）。没有时不写 |
->| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
+| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
+| `function` | 请求到达管理档条目，或它的功能未知时才有（见 7.9.18 的“在判定中的使用”）：`key` 是传输方法、一个空格和路由模板，凭证已脱敏；`entry` 是命中的管理档条目的键；`tier` 为 `admin`；`attempt` 为 `over_privilege`（非管理员会话，即尝试越权）；`known` 为 `false`（功能表没有这个功能）。不适用的 `entry`、`tier`、`attempt`、`known` 省略 |
 | `timing` | `total_ms` 从收到请求头到响应写完；`judge_ms` 是判定耗时（含 Jev）；`origin_ms` 从发出上游请求到收到响应头 |
 | `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
 | `response.values` / `new_values` | 从响应里取出的值数、其中会话原先没有的值数 |
@@ -374,6 +375,13 @@ GET /api/patients ──响应里出现 id=7──┐
 ### 7.5.5 指令版本表
 
 网关启动时计算 `questions` JSON（两个问题的 `instructions` 和 `criteria`，代码常量）和它的 ID，执行 `INSERT INTO jev_prompts … ON CONFLICT (id) DO NOTHING`。控制台按 `jev.prompt` 读出指令全文，与 `model` 和 `state` 拼回完整请求体。同一份指令无论调用多少次只存一行；修改提示词（例如 [04.5](04-deployment-testing.md#45-首次真实-jev-调用记录) 的几轮修复）会产生新 ID，旧记录仍能还原当时的指令。
+
+| 指令 ID | 说明 |
+|---|---|
+| `jq_e290fa8a62172221` | 功能表之前的指令：档位说明与尝试越权说明，没有 `state.request.function` 的说明 |
+| `jq_77be488d34440d84` | 功能表。新增 `state.request.function` 的说明（尝试越权答 DENY；未知功能只在路径含管理、运维、调试等词时答 DENY，其余照值判定），以及 DENY 标准里的“请求触及特权或运维功能”。新增的一段逐字与真实模型测试时相同（见 [02 2.2](02-jev.md)），改动须重新测试 |
+
+所有站点都会换用新 ID，不论它是否有功能表：指令文字对每个请求都一样。
 
 ## 7.6 站点级判定参数（advanced）
 
@@ -1037,7 +1045,7 @@ CREATE TABLE jev_prompts (
 
 ### 7.9.18 功能表
 
-功能表是站点配置 `objects` 下的 `functions` 列表（[03.2](03-admin-config-audit.md#32-站点配置)）。对象表的位置说的是“某个接口里的某个值是哪一类对象”，装不下“这个接口本身归谁用”，所以功能单独成表。本节定义格式、校验和查找规则。本版只读入、校验和保存，网关的判定还不使用它，判定结果与没有功能表时相同；判定的启用、学习基线和确认写入见后续改动。
+功能表是站点配置 `objects` 下的 `functions` 列表（[03.2](03-admin-config-audit.md#32-站点配置)）。对象表的位置说的是“某个接口里的某个值是哪一类对象”，装不下“这个接口本身归谁用”，所以功能单独成表。本节定义格式、校验、查找规则，以及功能表在判定中的使用（见下文“在判定中的使用”）。功能表的学习基线和确认写入见后续改动。
 
 格式：
 
@@ -1076,11 +1084,50 @@ objects:
 - **段的比较**。条目模板和请求模板按 `/` 分段，段数必须相同。条目的 `{id}` 段覆盖请求的任意一个非空段。其他段先去掉请求段的第一个 `;` 及之后的部分，再与条目段做忽略 ASCII 大小写的比较；去掉之后为空的段不匹配任何字面段。逐字相等（或忽略大小写相等）的段数记为字面段数。位置条目的比较（`template_covers`）不改。
 - **为什么忽略大小写和 `;` 参数**。源站如果不分大小写（IIS、部分框架）或会剥掉 `;` 参数（Java 系），`/API/Admin/export` 与 `/api/admin;x/export` 到的是同一个功能，条目必须照样管住。源站如果区分，这些写法本来就是 404，多管一下没有代价。
 - **`function_of`**。在方法相同、覆盖请求的条目中取第一名：字面段数多的优先；一样多时，档位为 `admin` 且可靠性为 `high` 的优先，取更严的；再一样时，书写顺序靠前的优先。
-- **`HEAD` 和 `OPTIONS`**。`HEAD` 按 `GET` 查。`OPTIONS` 是预检，不带凭证，不参与功能查找：`function_of` 返回空，`admin_only` 为假。`knows_function` 对 `OPTIONS` 的判断是：任何方法下该路由已知即为真。
+- **`HEAD` 和 `OPTIONS`**。`HEAD` 按 `GET` 查。`OPTIONS` 是预检，不带凭证，不会命中管理档条目：`function_of` 返回空，`admin_only` 为假。对 `OPTIONS` 判断未知时，只要这条路由在任一方法下已知（功能表里有覆盖它的条目，或对象表里有声明过位置的同一路由），就算已知。
 - **`admin_only`**。`function_of` 的结果是 `admin` 档且可靠性为 `high`。可靠性不是 `high` 的条目不收紧，与位置条目的规矩相同。
 - **`knows_function`**。功能表有条目覆盖请求，或者对象表里有位置（暂停与否都算）的方法与请求方法相同（`HEAD` 按 `GET`）且模板覆盖请求，即为已知。位置声明过的接口，它的功能自动算已知，不必在功能表里重复登记。
 - **性能**。校验时把键按方法和段数分组，并把模板预先切分成段（每个请求只切分一次）。查找只看同方法、同段数的组，不扫全表，也不对每个键重新切分。对象表追加位置时同步更新这个索引。
 
+**开关 `objects.ask_unknown_functions`**。布尔，默认 `false`。为假时不写出这个键，现有站点的配置逐字不变。为真时，判定把功能表里没有的功能也送 Jev 判定（见下文“在判定中的使用”）。开关与 `functions` 并列，放在 `objects` 下，不放进 `learning`：它是判定的设置，不是学习的设置。
+
+- 不是布尔值：整段 `objects` 按解析失败处理，与其他字段的类型错误相同。
+- 功能表为空（省略，或为 `[]`）而开关为真：拒绝，位置是 `objects.ask_unknown_functions`，`reason` 为 `ask_without_functions`。空表没有基线，开关会把所有请求都送 Jev。界面在本地给出同样的说明，保存前就能看到。
+- 开关为真时，功能表每条条目的校验不变。
+
+**在判定中的使用**。功能表只在“接管判定”的站点上起作用：站点的功能表里有至少一条 `tier: admin`、`reliability: high` 的条目，或者开关为真。否则请求的处理与没有功能表时逐字相同，连路由模板都不计算。
+
+- **请求的功能**。传输方法转大写，加一个空格，加逻辑路径的路由模板（会话凭证已脱敏）。规范拼写里还有 `%2F` 或 `%5C` 时，再取一个模板：把它们换成 `/` 之后的模板。两个模板不同就都查，所以 `/api/admin%2Fexport` 和 `/api/x/..%2Fadmin/export` 都能找到 `POST /api/admin/export` 的条目。这是为了源站或其前面的代理先解码再路由的情况。双重编码（`%252F`）不解码查找，见下面的局限。
+- **方法覆盖**。请求头 `X-HTTP-Method-Override`、`X-HTTP-Method`、`X-Method-Override` 的每一次取值，以及请求值 `query._method`、`body._method`，去掉首尾空白并转大写后，是 3 到 7 个 ASCII 字母的才算；去重，去掉与传输方法相同的。覆盖不看传输方法是不是 `POST`。同一个头出现多次时，每个取值都算。
+- **大小写与 `HEAD`、`OPTIONS`**。传输方法先转大写再查，条目的方法都是大写。`HEAD` 按 `GET` 查；`OPTIONS` 不会命中管理档条目（见上）。
+- **管理档命中**。按顺序试传输方法，再试每个覆盖方法，每种方法配每个模板；第一个命中的管理档条目即为命中。`reliability` 不是 `high` 的管理档条目不收紧，与位置条目相同。
+- **尝试越权**：命中，且会话不是管理员。管理员会话命中时照常判定，`trace.function` 里记下档位，但没有 `attempt`。
+- **未知功能**：开关为真，且传输方法与第一条模板在基线里没有对应的功能。基线是功能表的条目，加上对象表里声明过位置的接口（暂停与否都算）。模板不能化为规范拼写的请求也算未知。未知只看传输方法和第一条模板：覆盖方法与解码后的模板不在基线里，不据此判未知。
+
+| 情况 | 快速放行 | 读放行缓存 | 写放行缓存 | `state` 的 `request.function` | `trace.function` |
+|---|---|---|---|---|---|
+| 尝试越权 | 不 | 不 | 不 | `{"tier":"admin","attempt":"over_privilege"}` | 有 |
+| 未知功能（不是尝试越权） | 不 | 可以 | 可以 | `{"known":false}` | 有 |
+| 尝试越权，同时未知 | 不 | 不 | 不 | `{"tier":"admin","attempt":"over_privilege","known":false}` | 有 |
+| 管理员会话命中管理档条目 | 与没有功能表时相同 | 相同 | 相同 | 没有；开关为真且传输方法未知时为 `{"known":false}` | 有（没有 `attempt`） |
+| 其他 | 相同 | 相同 | 相同 | 没有 | 没有 |
+
+- **尝试越权即使请求值全部核验过，也不快速放行**。值照常进入 `state`，带 `verified: true`。网关不自己拒绝尝试越权，交 Jev 并要求 DENY（指令的说明见 [02 2.2](02-jev.md)）。
+- **放行缓存**。`remember_allow` 遇到尝试越权直接返回：即使模型没有照指令答 DENY，这个放行也不被缓存。未知功能被 Jev 放行后可以走缓存，否则一个不在基线里的轮询接口会把会话的调用额度用完。缓存键已含对象表的摘要和管理员标志，改表或换开关会让旧缓存失效，不需要改键。
+- **不受管的请求**。`bypass` 的路径最先返回，功能表管不到它。没有凭证、又不在入口上的请求仍先得到 `no_session`（401），不调 Jev，不写 `trace.function`。
+- **Jev 不可用**。尝试越权和未知功能按站点的 `on_jev_unavailable` 处理，不加新的分支。`allow` 的站点在 Jev 不可用期间会转发这些请求，与值的尝试越权一致。
+- **观察模式**。尝试越权与未知功能在观察模式下记为 `would_block`，请求照常转发。建议先在观察模式下看 `trace.function`，确认管理功能和基线没有错配，再切到拦截。
+
+**已知局限**（不在本版解决，写在这里）：
+
+- 第 2 层只在声明了角色身份位置、且角色标签是 `admin` 的站点上有意义。没有任何会话被认作管理员的站点上，管理档条目会把真管理员也拦住。
+- 管理员会话在身份响应到达之前（刚登录、网关重启后）调管理功能会被拦。
+- 管理档条目落在入口上（比如把 `POST /login` 标成管理档）会拦住所有没有管理员身份的登录。控制台在后续改动里提示。
+- `bypass` 里的路径不受功能表管。
+- 未知与否只看传输方法；方法覆盖只在覆盖后的方法命中管理档条目时起作用。
+- 双重编码的斜杠（`%252F`）不解码查找。
+- 第 3 层的判断质量取决于模型。名字普通的管理接口（如 `GET /api/Users`）模型认不出来，那要靠第 2 层的条目。
+- `on_jev_unavailable: allow` 的站点在 Jev 不可用期间会转发尝试越权和未知功能的请求，与值的尝试越权一致。
 ### 7.9.19 功能的学习证据与管理档提议
 
 功能级越权需要按“功能”统计：哪些功能在正常流量里被走过（以后作为基线候选），哪些功能只有管理员走过（管理档提议）。本节说明学习任务怎样记录这两类证据并提出提议。这一步**不改变任何判定，也不改站点配置**：提议只写进库里，列表接口的 `judgements` 不列出它们，确认与页面属于后续的接口和页面（见本节末尾）。

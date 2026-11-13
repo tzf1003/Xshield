@@ -277,6 +277,9 @@ export function objectChanges(
   changes.push(...classChanges(before?.classes, after?.classes));
   changes.push(...slotChanges(before?.slots, after?.slots));
   changes.push(...functionChanges(before?.functions, after?.functions));
+  if ((before?.ask_unknown_functions === true) !== (after?.ask_unknown_functions === true)) {
+    changes.push(FUNCTION_TEXT.ask(after?.ask_unknown_functions === true));
+  }
   return changes;
 }
 
@@ -585,7 +588,7 @@ export function parseObjects(
   if (value === undefined || value === null) return { ok: true, value: undefined };
   if (!isRecord(value)) return { ok: false, message: DECLARE_TEXT.shape("objects") };
   for (const key of Object.keys(value)) {
-    if (!["learning", "classes", "slots", "functions"].includes(key))
+    if (!["learning", "classes", "slots", "functions", "ask_unknown_functions"].includes(key))
       return { ok: false, message: DECLARE_TEXT.unknownKey(key) };
   }
   const out: ObjectsSpec = {};
@@ -623,6 +626,12 @@ export function parseObjects(
       functions.push(parsed.value);
     }
     out.functions = functions;
+  }
+  if (value.ask_unknown_functions !== undefined && value.ask_unknown_functions !== null) {
+    if (typeof value.ask_unknown_functions !== "boolean") {
+      return { ok: false, message: DECLARE_TEXT.askShape };
+    }
+    out.ask_unknown_functions = value.ask_unknown_functions;
   }
   return { ok: true, value: out };
 }
@@ -727,6 +736,9 @@ export function checkObjects(objects: ObjectsSpec | undefined): string[] {
       messages.push(DECLARE_TEXT.functionReliabilityAlone(index + 1));
     }
   });
+  if (objects?.ask_unknown_functions === true && functions.length === 0) {
+    messages.push(DECLARE_TEXT.askWithoutFunctions);
+  }
   return messages;
 }
 
@@ -761,6 +773,9 @@ export function functionRefusalWords(
   reason: string | undefined,
   objects: ObjectsSpec | undefined,
 ): string | null {
+  if (field === "objects.ask_unknown_functions") {
+    return reason === "ask_without_functions" ? DECLARE_TEXT.askWithoutFunctions : null;
+  }
   const place = /^objects\.functions(?:\[(\d+)\])?$/.exec(field);
   if (place === null || reason === undefined) return null;
   const index = place[1] === undefined ? null : Number(place[1]) + 1;

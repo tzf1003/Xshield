@@ -94,6 +94,8 @@ function orderObjects(objects: ObjectsSpec | undefined): ObjectsSpec | undefined
   if (objects.functions !== undefined && objects.functions.length > 0) {
     out.functions = objects.functions.map(orderFunction);
   }
+  // The switch is written only when it is on, after the table it needs; off is the gateway's default and is left out.
+  if (objects.ask_unknown_functions === true) out.ask_unknown_functions = true;
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
