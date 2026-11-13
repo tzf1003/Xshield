@@ -10,6 +10,7 @@ use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use xshield_core::context::{SHAPE_FIELDS_MAX, ShapeField};
+use xshield_core::hex::hex_digit;
 use xshield_core::kind::kind_words;
 
 // The field and location rules are shared with the control plane's impact preview,
@@ -219,7 +220,9 @@ pub fn percent_decode(text: &str, plus: bool) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'%' if index + 2 < bytes.len() => {
-                if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                if let (Some(high), Some(low)) =
+                    (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+                {
                     out.push(high * 16 + low);
                     index += 3;
                 } else {
@@ -264,15 +267,6 @@ pub fn json_unescape(text: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-fn hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn push(out: &mut ExtractedRequest, at: String, key: Option<String>, value: String) {

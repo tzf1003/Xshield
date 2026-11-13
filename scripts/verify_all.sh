@@ -23,6 +23,10 @@
 #   XSHIELD_PLAYWRIGHT_PACKAGE  package.json whose @playwright/test the browser
 #                           loop uses (default web/console after `npm ci`).
 #   PGHOST/PGPORT/PGUSER/PGPASSWORD   server for the PostgreSQL steps.
+#   XSHIELD_TEST_DATABASE_BASE_URL    server URL without a database name, e.g.
+#                           postgresql://postgres:postgres@localhost:5432. Without it the
+#                           database-gated tests inside `cargo test` return without running,
+#                           and the summary reports that as SKIP test-database.
 #
 # A step whose tool is missing is reported as SKIP, never as success. The exit
 # status is non-zero when any step failed. The acceptance lab
@@ -112,6 +116,11 @@ group_rust() {
     run_step library python3 scripts/validate_library.py
     run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
     run_step test cargo test --workspace --all-targets --locked --no-fail-fast
+    # The database-gated tests in that run return at once without a server URL, and
+    # cargo counts them as passed. Say so, rather than let PASS cover them.
+    if [ -z "${XSHIELD_TEST_DATABASE_BASE_URL:-}" ]; then
+        skip_step test-database "XSHIELD_TEST_DATABASE_BASE_URL is not set: the database-gated tests in 'test' returned without running"
+    fi
     run_step doctest cargo test --workspace --doc --locked
     if have psql && have createdb; then
         run_step postgres scripts/test_postgres.sh
@@ -155,4 +164,4 @@ if [ "$passed" -eq 0 ]; then
     printf '\nno step was executed: every step was skipped\n'
     exit 3
 fi
-printf '\n%s step(s) passed; SKIP means the tool was missing\n' "$passed"
+printf '\n%s step(s) passed; SKIP means a tool or a setting was missing\n' "$passed"

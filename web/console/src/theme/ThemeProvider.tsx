@@ -14,6 +14,7 @@ import { type Density, palettes, type ThemeMode, type ThemePreference } from "./
 const THEME_KEY = "xshield.console.theme";
 const DENSITY_KEY = "xshield.console.density";
 const DARK_QUERY = "(prefers-color-scheme: dark)";
+const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
 type ThemeContextValue = {
   preference: ThemePreference;
@@ -42,12 +43,30 @@ function writeStored(key: string, value: string | null) {
   }
 }
 
-function systemDark(): boolean {
+function mediaMatches(query: string): boolean {
   try {
-    return window.matchMedia(DARK_QUERY).matches;
+    return window.matchMedia(query).matches;
   } catch {
     return false;
   }
+}
+
+/** Follows a media query for as long as the provider is mounted. */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState<boolean>(() => mediaMatches(query));
+  useEffect(() => {
+    let media: MediaQueryList | null = null;
+    try {
+      media = window.matchMedia(query);
+    } catch {
+      media = null;
+    }
+    if (!media) return undefined;
+    const onChange = () => setMatches(media?.matches ?? false);
+    media.addEventListener("change", onChange);
+    return () => media?.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
 }
 
 function parsePreference(raw: string | null): ThemePreference {
@@ -72,20 +91,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     parsePreference(readStored(THEME_KEY)),
   );
   const [density, setDensityState] = useState<Density>(() => parseDensity(readStored(DENSITY_KEY)));
-  const [dark, setDark] = useState<boolean>(systemDark);
-
-  useEffect(() => {
-    let query: MediaQueryList | null = null;
-    try {
-      query = window.matchMedia(DARK_QUERY);
-    } catch {
-      query = null;
-    }
-    if (!query) return undefined;
-    const onChange = () => setDark(query?.matches ?? false);
-    query.addEventListener("change", onChange);
-    return () => query?.removeEventListener("change", onChange);
-  }, []);
+  const dark = useMediaQuery(DARK_QUERY);
+  const reducedMotion = useMediaQuery(REDUCED_MOTION_QUERY);
 
   const mode: ThemeMode = preference === "system" ? (dark ? "dark" : "light") : preference;
 
@@ -120,11 +127,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         colorBorder: palette?.borderStrong,
         borderRadius: 6,
         borderRadiusLG: 10,
+        // Under reduced motion antd turns its own motion off too, so drawers and modals do not slide in.
+        motion: !reducedMotion,
         fontFamily:
           'system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
       },
     };
-  }, [mode, density]);
+  }, [mode, density, reducedMotion]);
 
   const value = useMemo(
     () => ({ preference, mode, density, setPreference, setDensity }),

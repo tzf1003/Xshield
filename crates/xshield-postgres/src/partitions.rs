@@ -443,10 +443,10 @@ mod tests {
         let name = partition_name(pending);
 
         // A transaction that has read the partition keeps the detach waiting in its
-        // second phase, after the partition is marked as pending. It reads only the
-        // partition: a lock on decision_log would hold back every partition that a
-        // test creates meanwhile, because CREATE TABLE ... PARTITION OF takes an
-        // ACCESS EXCLUSIVE lock on the parent, and the detach would never be marked.
+        // second phase, after the partition is marked as pending. It reads the partition
+        // rather than the parent: a lock on the parent queues every concurrent partition
+        // creation behind this transaction, and the detach's first phase needs the parent
+        // too, so it waits behind that creation and never marks the partition.
         let mut reader = pool.begin().await.expect("begin");
         sqlx::query(AssertSqlSafe(format!(
             "SELECT count(*) FROM \"{name}\" WHERE at_millis < 0"
