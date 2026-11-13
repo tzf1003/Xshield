@@ -63,21 +63,24 @@ binaries=(
 rm -rf -- "$stage"
 mkdir -p -- "$stage/bin" "$stage/docs"
 
+printf '==> console bundle\n'
+(
+    cd "$repo_root/web/console"
+    npm ci --no-audit --no-fund
+    # The control binary embeds web/console/dist at compile time
+    # (crates/xshield-control/build.rs), so the console is built first, as in
+    # the Dockerfile.
+    npm run build
+)
+
 printf '==> cargo build --release (target: %s)\n' "$target_dir"
 (cd "$repo_root" && cargo build --release --locked \
     -p xshield-edge -p xshield-control)
 for binary in "${binaries[@]}"; do
     install -m 0755 -- "$target_dir/release/$binary" "$stage/bin/$binary"
 done
-
-printf '==> console bundle\n'
-(
-    cd "$repo_root/web/console"
-    npm ci --no-audit --no-fund
-    # The bundle goes straight to the staging tree, never to web/console/dist.
-    npx tsc --noEmit
-    npx vite build --outDir "$stage/console" --emptyOutDir
-)
+# The tarball carries the same bundle the control binary embeds.
+cp -R -- "$repo_root/web/console/dist" "$stage/console"
 
 printf '==> assemble\n'
 cp -R -- "$repo_root/migrations" "$stage/migrations"
