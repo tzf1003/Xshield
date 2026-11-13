@@ -86,6 +86,13 @@ pub async fn start_run(
     trigger: Trigger,
     now_millis: i64,
 ) -> Result<Option<i64>, LearningStoreError> {
+    // Two starts of one site at the same moment would each see no run going; the
+    // lock makes the second wait and then see the first one's row.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('object_learning_run:' || $1, 0))")
+        .bind(site)
+        .execute(&mut *tx)
+        .await?;
     let id = sqlx::query_scalar(
         "INSERT INTO object_learning_runs (site, trigger, started_millis)
          SELECT $1::text, $2::text, $3::bigint
@@ -99,8 +106,9 @@ pub async fn start_run(
     .bind(now_millis)
     .bind(generation)
     .bind(RUN_STALE_MILLIS)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(id)
 }
 
@@ -971,6 +979,55 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert a call");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn starts_of_one_site_at_the_same_moment_make_one_run() {
+        let pool = connect_test_pool().await;
+        let site = "run-race";
+        sqlx::query("DELETE FROM object_learning_runs WHERE site = $1")
+            .bind(site)
+            .execute(&pool)
+            .await
+            .expect("clear the runs");
+        sqlx::query("DELETE FROM site_configs WHERE name = $1")
+            .bind(site)
+            .execute(&pool)
+            .await
+            .expect("clear the site");
+        let generation: DateTime<Utc> = sqlx::query_scalar(
+            "INSERT INTO site_configs (name, spec) VALUES ($1, '{}'::jsonb) RETURNING created_at",
+        )
+        .bind(site)
+        .fetch_one(&pool)
+        .await
+        .expect("insert the site");
+
+        let starts = (0..8).map(|_| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                start_run(&pool, site, generation, Trigger::Manual, 1_000_000).await
+            })
+        });
+        let mut started = 0;
+        for start in starts.collect::<Vec<_>>() {
+            if start.await.expect("join").expect("start").is_some() {
+                started += 1;
+            }
+        }
+        assert_eq!(started, 1);
+
+        sqlx::query("DELETE FROM object_learning_runs WHERE site = $1")
+            .bind(site)
+            .execute(&pool)
+            .await
+            .expect("clear the runs");
+        sqlx::query("DELETE FROM site_configs WHERE name = $1")
+            .bind(site)
+            .execute(&pool)
+            .await
+            .expect("clear the site");
     }
 
     #[tokio::test]

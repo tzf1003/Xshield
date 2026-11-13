@@ -42,8 +42,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | JSON request bodies with duplicate keys: the gateway judges the last one, an origin may use the first. | security | S | LOW | `crates/xshield-judge/src/values.rs:336`, cf. `crates/xshield-core/src/context/route.rs:623` |
 | Session and address contexts are not keyed by site, unlike held logins and shapes. | security | S | LOW | `engine.rs:325,439,912` |
 | Mixed-case path words up to 32 chars are inert, wider than docs/01 §1.3 (lower case, 24). Decision drift: fix code or doc. | security / docs | S–M | MED | `values.rs:156-165,305-309` |
-| Partition retention aborts forever after an interrupted `DETACH … CONCURRENTLY`; a failed DROP orphans the table. | bug | S–M | LOW | `crates/xshield-postgres/src/partitions.rs:172-175` |
-| Two learning runs of one site can start concurrently (check-then-act, no unique index or lock). | bug | S | LOW–MED | `crates/xshield-postgres/src/object_agent_store.rs:88-93`, `crates/xshield-control/src/object_agent_api.rs:519-526` |
 | The requests and Jev lists reset to a skeleton every 30 s because the preset window moves with the clock and is part of the query key. | bug | S–M | MED | `web/console/src/app/scope.ts:18-24`, `src/api/queries.ts:114-121`, `src/features/requests/RequestsPage.tsx:116-120,458` |
 | Bulk acknowledge fires N mutations on one observer; earlier failures are lost and each fires three invalidations. | bug | S | LOW | `web/console/src/features/sites/objects/ObjectsBanner.tsx:91-93` |
 | Routes and `yaml` are imported eagerly although docs/07 §7.10.1/§7.10.7 require lazy loading; the request list is not virtualised although the doc says it is. | perf / docs | M | LOW–MED | `web/console/src/app/router.tsx:20-29`, `src/lib/yaml.ts:4`, `src/features/requests/RequestTable.tsx:137` |
@@ -72,7 +70,7 @@ in docs/05 and the unused console dependencies were dropped on 2026-11-13: main 
 
 The first backlog row (a header credential redacted only together with its scheme) was fixed on 2026-11-13 without a plan file: see `redaction_secret` in `crates/xshield-judge/src/engine.rs` and `scrubbed` / `redacted_path` in `trace.rs`. Not covered by that fix: a row for an unknown host (404) has no site and therefore no credential to redact.
 
-Two more rows were fixed on 2026-11-13 without plan files (see `CHANGELOG.md`): the Jev limiter map growing past its cap, and CSV cells starting with a tab or carriage return. Two console rows followed: the quick-rule dialog's unbounded polling and the login `next` guard (now with unit tests in `web/console/tests/login-next.test.ts`).
+Two more rows were fixed on 2026-11-13 without plan files (see `CHANGELOG.md`): the Jev limiter map growing past its cap, and CSV cells starting with a tab or carriage return. Two console rows followed: the quick-rule dialog's unbounded polling and the login `next` guard (now with unit tests in `web/console/tests/login-next.test.ts`). Then two storage rows: partition retention recovering from an interrupted detach or a failed drop, and concurrent learning-run starts.
 
 ### Direction (options, not defects)
 
