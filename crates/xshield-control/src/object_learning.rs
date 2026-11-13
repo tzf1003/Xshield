@@ -13,15 +13,15 @@
 //! proposal needs and how many questions the agent may ask, with its `objects.learning`
 //! settings.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use xshield_core::context::learning::{
     DecisionFacts, Evidence, FUNCTION_KEYS_MAX, FunctionEvidence, KEEP_RETIRED_DAYS, RETIRE_DAYS,
-    Thresholds, WINDOW_DAYS, contradicts, day_of, judge_accepts_public, judge_function, judge_tier,
-    kind_share, merge_functions, observe, observe_functions, observe_tiers, propose,
-    propose_source, response_stats,
+    Thresholds, WINDOW_DAYS, contradicting_kind, contradicts, day_of, judge_accepts_public,
+    judge_function, judge_tier, kind_share, merge_functions, observe, observe_functions,
+    observe_tiers, propose, propose_source, response_stats,
 };
 use xshield_core::context::objects::KEY_MAX;
 use xshield_core::context::position::PositionState;
@@ -36,7 +36,7 @@ use xshield_postgres::object_learning_store::{
 };
 use xshield_postgres::object_tier_judgement_store::{self as tier_judgements, TierProposal};
 use xshield_postgres::object_tier_store::{self as tier_store, TierRead};
-use xshield_postgres::site_spec_store::{self, Change, SiteRecord, WriteOutcome};
+use xshield_postgres::site_spec_store::{self, Change, NOTE_MAX_CHARS, SiteRecord, WriteOutcome};
 
 use crate::agent_model::AgentModel;
 use crate::object_agent::{self, Place, Run};
@@ -246,7 +246,7 @@ async fn learn_site(
         }
     }
     judge_sources(run, pool, site, generation, oldest_day, now_millis).await?;
-    pause_drifted(run, pool, site, generation).await?;
+    pause_drifted(run, pool, site, generation, oldest_day).await?;
     tighten_split(run, pool, site, generation, oldest_day).await?;
     judge_accepts(pool, site, generation, oldest_day, now_millis).await?;
     judge_tiers(pool, site, generation, oldest_day, now_millis).await?;
@@ -476,6 +476,7 @@ async fn pause_drifted(
     pool: &PgPool,
     site: &str,
     generation: DateTime<Utc>,
+    oldest_day: u64,
 ) -> Result<(), store::LearningStoreError> {
     let record = match site_spec_store::get(pool, site).await {
         Ok(Some(record)) if record.created_at == generation => record,
@@ -496,13 +497,11 @@ async fn pause_drifted(
         .map(|row| row.slot)
         .filter(|slot| map.declared_class_of(slot).is_some() && !map.is_paused(slot))
         .collect();
-    let Some(first) = keys.first() else {
+    if keys.is_empty() {
         return Ok(());
-    };
-    let note = format!(
-        "学习任务自动暂停了 {} 个位置：{first} 等，证据已转向其他类别",
-        keys.len()
-    );
+    }
+    let evidence = store::load_evidence(pool, site, &keys, oldest_day).await?;
+    let note = pause_note(map, &keys, &evidence, thresholds_of(map.learning()));
     let paused = record
         .spec
         .clone()
@@ -528,6 +527,75 @@ async fn pause_drifted(
         }
     }
     Ok(())
+}
+
+/// The note of an automatic pause: how many positions it paused, the first of them, and then one clause for each
+/// paused position whose values now show another kind (LQ-7). A clause names the position with its kind, the kind
+/// its values show instead, and the response position that gives most of the votes of that kind, so the
+/// administrator knows the error may be on that side. Clauses that would take the note past its length limit are
+/// left out; the others are kept.
+fn pause_note(
+    map: &ObjectMap,
+    keys: &[String],
+    evidence: &HashMap<String, Evidence>,
+    thresholds: Thresholds,
+) -> String {
+    let mut note = format!(
+        "学习任务自动暂停了 {} 个位置：{} 等，证据已转向其他类别",
+        keys.len(),
+        keys.first().map_or("", String::as_str),
+    );
+    let mut added = false;
+    for clause in keys.iter().filter_map(|key| {
+        let found = evidence.get(key)?;
+        pause_clause(map, key, found, thresholds)
+    }) {
+        let separator = if added { "；" } else { "。" };
+        // The note ends with a full stop, which counts toward its length.
+        let length = note.chars().count() + separator.chars().count() + clause.chars().count() + 1;
+        if length > NOTE_MAX_CHARS {
+            continue;
+        }
+        note.push_str(separator);
+        note.push_str(&clause);
+        added = true;
+    }
+    if added {
+        note.push('。');
+    }
+    note
+}
+
+/// The clause a paused position's note carries: its kind, the share of all votes that the other kind now has, and
+/// the response position of that kind that gives the most votes. The share is the kind's, not the one position's,
+/// so a kind with two positions is not put on one of them (LQ-7). `None` when the evidence shows no other kind.
+fn pause_clause(
+    map: &ObjectMap,
+    key: &str,
+    evidence: &Evidence,
+    thresholds: Thresholds,
+) -> Option<String> {
+    let class = map.declared_class_of(key)?;
+    let (other, share_per_mille) = contradicting_kind(class, evidence, map, thresholds)?;
+    let source = evidence
+        .flows()
+        .into_iter()
+        .find(|flow| map.class_of(&flow.from) == Some(other))?;
+    let percent = (share_per_mille + 5) / 10;
+    Some(format!(
+        "{key}（{}）的值 {percent}% 来自{}类的位置，其中最多的是 {}，错的可能在来源一侧",
+        class_name(map, class),
+        class_name(map, other),
+        source.from,
+    ))
+}
+
+/// The name the console shows for a class id: the class's name, or the id when the map names no class for it.
+fn class_name<'a>(map: &'a ObjectMap, id: &'a str) -> &'a str {
+    map.classes()
+        .iter()
+        .find(|class| class.id == id)
+        .map_or(id, |class| class.name.as_str())
 }
 
 /// Splits the classes whose window votes show groups of positions that never share a value, when the
@@ -1002,6 +1070,116 @@ mod tests {
         assert_eq!(decision.state, LearnedState::Suspended);
         assert_eq!(decision.class, "doctor");
         assert_eq!(decision.share_per_mille, 0);
+    }
+
+    #[test]
+    fn the_pause_note_names_the_kind_the_values_show_and_the_source_with_most_votes() {
+        let note = pause_note(
+            &map(),
+            &[SLOT.to_owned()],
+            &HashMap::from([(SLOT.to_owned(), evidence(20, 5, DOCUMENT_FROM))]),
+            Thresholds::default(),
+        );
+        assert_eq!(
+            note,
+            "学习任务自动暂停了 1 个位置：GET /doctor/{id} path[1] 等，证据已转向其他类别。\
+             GET /doctor/{id} path[1]（医生）的值 100% 来自文档类的位置，其中最多的是 GET /api/docs [].id，错的可能在来源一侧。"
+        );
+    }
+
+    #[test]
+    fn two_positions_of_one_kind_share_one_percentage_and_the_one_with_most_votes_is_named() {
+        const NOTES_FROM: &str = "GET /api/notes [].id";
+        let map = serde_json::from_str::<ObjectMap>(
+            r#"{"classes": [{"id": "doctor", "name": "医生"}, {"id": "document", "name": "文档"}],
+                "slots": [
+                    {"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"},
+                    {"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "admin"},
+                    {"key": "GET /api/docs [].id", "class": "document", "source": "admin"},
+                    {"key": "GET /api/notes [].id", "class": "document", "source": "admin"}]}"#,
+        )
+        .unwrap();
+        // Ten votes from one document position, nine from the other and one from a doctor position: 19 of the 20
+        // votes are documents, and the first document position has the most of them.
+        let froms = std::iter::repeat_n(DOCUMENT_FROM, 10)
+            .chain(std::iter::repeat_n(NOTES_FROM, 9))
+            .chain(std::iter::once(DOCTOR_FROM));
+        let mut found = Evidence::default();
+        for (day, from) in (0_u64..).zip(froms) {
+            found.add_vote(xshield_core::context::learning::Vote {
+                slot: SLOT.to_owned(),
+                session: format!("s{}", day % 5),
+                day,
+                from: vec![from.to_owned()],
+                user: None,
+                admin: false,
+            });
+        }
+        let note = pause_note(
+            &map,
+            &[SLOT.to_owned()],
+            &HashMap::from([(SLOT.to_owned(), found)]),
+            Thresholds::default(),
+        );
+        assert_eq!(
+            note,
+            "学习任务自动暂停了 1 个位置：GET /doctor/{id} path[1] 等，证据已转向其他类别。\
+             GET /doctor/{id} path[1]（医生）的值 95% 来自文档类的位置，其中最多的是 GET /api/docs [].id，错的可能在来源一侧。"
+        );
+    }
+
+    #[test]
+    fn a_paused_position_whose_evidence_shows_no_other_kind_gets_no_clause() {
+        let note = pause_note(
+            &map(),
+            &[SLOT.to_owned()],
+            &HashMap::from([(SLOT.to_owned(), evidence(20, 5, DOCTOR_FROM))]),
+            Thresholds::default(),
+        );
+        assert_eq!(
+            note,
+            "学习任务自动暂停了 1 个位置：GET /doctor/{id} path[1] 等，证据已转向其他类别"
+        );
+    }
+
+    #[test]
+    fn clauses_that_would_take_the_pause_note_past_its_length_limit_are_left_out() {
+        let routes: Vec<String> = (0..12)
+            .map(|index| format!("GET /r{index}/{{id}} path[1]"))
+            .collect();
+        let slots: Vec<String> = routes
+            .iter()
+            .map(|key| format!(r#"{{"key": "{key}", "class": "doctor", "source": "admin"}}"#))
+            .collect();
+        let map = serde_json::from_str::<ObjectMap>(&format!(
+            r#"{{"classes": [{{"id": "doctor", "name": "医生"}}, {{"id": "document", "name": "文档"}}],
+                "slots": [{}, {{"key": "GET /api/docs [].id", "class": "document", "source": "admin"}}]}}"#,
+            slots.join(",")
+        ))
+        .unwrap();
+        let evidence: HashMap<String, Evidence> = routes
+            .iter()
+            .map(|key| {
+                let mut found = Evidence::default();
+                for index in 0..20_u32 {
+                    found.add_vote(xshield_core::context::learning::Vote {
+                        slot: key.clone(),
+                        session: format!("s{}", index % 5),
+                        day: u64::from(index),
+                        from: vec![DOCUMENT_FROM.to_owned()],
+                        user: None,
+                        admin: false,
+                    });
+                }
+                (key.clone(), found)
+            })
+            .collect();
+        let note = pause_note(&map, &routes, &evidence, Thresholds::default());
+        assert!(note.chars().count() <= NOTE_MAX_CHARS, "{note}");
+        assert!(note.contains("GET /r0/{id} path[1]（医生）的值 100%"));
+        // The first clauses fit and the last does not, so the note ends with a clause it names.
+        assert!(!note.contains("GET /r11/{id} path[1]"));
+        assert!(note.ends_with("错的可能在来源一侧。"));
     }
 
     #[test]
@@ -1761,11 +1939,13 @@ pub(crate) mod pass_tests {
             .await
             .expect("read the history");
         assert_eq!(history[0].change, Change::AutoPause);
-        assert!(
-            history[0]
-                .note
-                .as_deref()
-                .is_some_and(|note| note.contains("自动暂停"))
+        // The note names the kind the values show instead, and the source that gives most of the votes (LQ-7).
+        assert_eq!(
+            history[0].note.as_deref(),
+            Some(
+                "学习任务自动暂停了 1 个位置：GET /doctor/{id} path[1] 等，证据已转向其他类别。\
+                 GET /doctor/{id} path[1]（医生）的值 100% 来自文档类的位置，其中最多的是 GET /api/docs [].id，错的可能在来源一侧。"
+            )
         );
         let state: String = sqlx::query_scalar(
             "SELECT state FROM object_positions
