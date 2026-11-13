@@ -314,7 +314,7 @@ def other_address_unaffected(p: Prober) -> None:
 
 
 CASES: tuple[Case, ...] = (
-    Case("p0-1-pad-200", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, pad_200,
+    Case("p0-1-pad-200", "P0-1", "must", "block", "attack", SITE_TRUTH, pad_200,
          note="injection after 200 query values"),
     Case("p0-1-multipart", "P0-1", "must", "block", "attack", SITE_TRUTH, multipart,
          note="injection in multipart/form-data after 600 bytes of filler"),
@@ -328,9 +328,9 @@ CASES: tuple[Case, ...] = (
          note="benign JSON over 48 KiB"),
     Case("p0-2-limit-then-inject", "P0-2", "must", "block", "limit", SITE_LIMIT, limit_then_inject,
          note="injection after the session's Jev budget is spent, on-unavailable allow"),
-    Case("p0-3-fake-cookie-metrics", "P0-3", "known_gap", "block", "no_session", SITE_TRUTH, fake_cookie_metrics,
+    Case("p0-3-fake-cookie-metrics", "P0-3", "must", "block", "no_session", SITE_TRUTH, fake_cookie_metrics,
          note="forged credential on /metrics"),
-    Case("p0-3-fake-cookie-export", "P0-3", "known_gap", "block", "no_session", SITE_TRUTH, fake_cookie_export,
+    Case("p0-3-fake-cookie-export", "P0-3", "must", "block", "no_session", SITE_TRUTH, fake_cookie_export,
          note="forged credential on /api/admin/export"),
     Case("p0-3-function-level", "P0-3", "must", "block", "access", SITE_TRUTH, function_level_export,
          requires=("functions",), note="doctor's real session on /api/admin/export"),

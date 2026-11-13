@@ -107,6 +107,12 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | B2 | 参数里带注入、命令执行、路径穿越类内容 | 拦截 |
 | B3 | 医生 A 在搜到的自己新建患者上提交两批以上的长备注（路径里带编号） | 放行，判定记录 `batches` 不少于 2 |
 | B4 | 同样的长备注发给医生 B 的患者，医生 A 没见过这个编号 | 拦截 |
+| B10 | 查询串里垫 200 个惰性参数，后面是医生 B 的患者编号 | 拦截（Jev 收到 `query.patient_id` 为引用） |
+| B11 | multipart 表单的字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
+| B12 | 一个值里 600 个字符的填充之后是注入串 | 拦截 |
+| B13 | 120 个字段的正常表单 | 放行到源站 |
+| B14 | 没有 `Content-Type` 的表单，字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
+| B15 | 表单类型的请求体同时是能解析的 JSON，表单字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
 | C1 | Jev 超时或不可用，`on_jev_unavailable=deny` | 拦截，日志注明 |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，日志注明"未经判定" |
 | C3 | 观察模式下的 A2 | 转发，日志记"本应拦截" |
@@ -114,7 +120,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | C5 | 同一会话一分钟内超过调用上限 | 超出部分拒绝，回 429（`rate_limited`），不论 `on_jev_unavailable` |
 | C6 | JSON 凭证站点：用户 A 登录后第一次进入入口，再读取自己的购物车（登录响应里的 `bid`） | 放行，登录响应的值已记入会话；读取他人购物车仍拦截 |
 | C7 | 同一地址的两个用户先后登录，两份登录响应的值不同，各自的请求只带各自的凭证 | 各自会话只记入自己的登录值，互不串值 |
-| C8 | 请求带的凭证没有对上任何待绑定登录（伪造，或登录来自别处） | 不绑定，判定日志注明 `login_unmatched`，之后的判定与现在相同 |
+| C8 | 请求带的凭证没有对上任何待绑定登录（伪造，或登录来自别处） | 不绑定，判定日志注明 `login_unmatched`，`trace.unrecognized_credential` 为真，`session` 为空：入口请求按来源地址判定，非入口请求直接 401，不调用 Jev（见 [01](01-request-flow.md) 1.2、1.7） |
 | C9 | 同一来源地址的 11 个会话（站点设为每会话 2 次，合计 20 次）各调用 | 前 10 个会话各调用 2 次放行；第 11 个会话一次没用过也拒绝，回 429（`rate_limited`），Jev 没有被调用；另一个地址的会话不受影响 |
 | G1 | JSON 凭证站点（凭证为 `Authorization` 头）：登录响应里超过 128 字符的长令牌绑定会话；列表放行；登录响应和列表都没给过的患者 D 交 Jev | 登录放行；列表的 `login_request_id` 为该次登录，没有 `login_unbound`；患者 D 拦截，源站不收到请求 |
 | G2 | 同一站点：源站没发过的长令牌访问入口 | 放行到源站（源站答 401），判定记录的 `login_unbound` 为 `login_unmatched` |
@@ -127,6 +133,10 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | W4f | 同一站点：医生 A 在公共搜索里搜到医生 B 的患者后删除 | 拦截（尝试越权，交 Jev 判 DENY；本人档不放行别人的患者） |
 | W4g | 同一站点：医生 A 先在搜索里搜到自己的患者，删除被拦；之后它出现在自己的列表里，再删除 | 第一次拦截（尝试越权）；列表之后再删除放行 |
 | W6 | 站点声明身份，评论接口返回另一位医生的手机号与邮箱（[07.9.17](07-console-architecture.md#7917-属性越权告警w6)） | 放行；判定记录的 `trace.response.exposure` 记一条告警且不含值；读取本人资料、未声明身份的站点不告警 |
+| F1 | 编造的凭证（`SID=made-up`）访问非入口路径：`GET /api/patients/7001`，以及不带请求值的 `GET /metrics` | 401（`no_session`），源站没收到，不调用 Jev；判定记录的 `trace.unrecognized_credential` 为真，`session` 为空 |
+| F2 | 身份站点：编造的凭证在入口 `GET /login` 拿到源站 2xx（这个站点的身份位置在 `/api/home`，`/login` 的 2xx 没有声明用户），之后访问非入口 | 入口照常放行；随后的非入口请求仍 401。对照：没有身份位置的站点上，同一个入口的 2xx 认可凭证，之后的非入口请求转到源站 |
+| F3 | 身份站点：绕过网关直接向源站登录拿到 `SID`（模拟网关重启后的老会话），经网关先访问非入口，再访问 `GET /api/home`，再访问患者列表里的一个患者 | 第一个请求 401；`/api/home` 放行并声明身份；之后列表里的患者快速放行，按会话正常判定 |
+| F4 | JSON 凭证站点（`token.lab`）：`POST /api/token-login` 登录，带令牌的第一个请求落在非入口 | 绑定成功并放行，`trace.session.login_request_id` 指向登录，没有 `login_unbound` |
 | F5 | 医生登录后 `POST /api/admin/export`（功能表里的管理档功能） | 拦截，交 Jev 判为越权尝试（Jev 收到的 `function.attempt` 为 `over_privilege`），源站没收到；判定记录的 `trace.function` 带 `tier` 和 `attempt` |
 | F5b | 医生新建患者后 `POST /api/patients/{新编号}`，并带请求头 `X-HTTP-Method-Override: DELETE` | 拦截，按更严的 `DELETE /api/patients/{id}` 判为越权尝试；`trace.function.key` 仍是 `POST /api/patients/{id}` |
 | F6 | 管理员登录、访问首页后 `POST /api/admin/export` | 放行，快速放行，不交 Jev；`trace.function` 有 `tier`，没有 `attempt` |
