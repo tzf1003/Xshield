@@ -228,3 +228,5 @@ v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回�
 样本很小，只说明这组请求上的表现，不构成准确率。
 
 合入 PR 209 之后提示词变为 `jq_d5df87392a92b44d`，2026-11-13 在合并后的代码上又跑了一遍（74 次调用，耗时 179 到 370 毫秒）：69 条必须符合预期的请求全部符合。`DELETE /api/patients`（DENY 0.64）和 `POST /api/permissions/grant`（0.62）仍离平局较近；普通接口里 DENY 最高的仍是 `GET /api/wards/occupancy`（0.29）。6 条已知做不到的结果与前三遍在同一范围：`GET /trace` 这一遍被拦（DENY 0.53），`GET /api/accounts/all` 放行（0.44），商店 `/redirect?to=` 放行（ATTACK 0.37），`GET /api/config/ui` 仍被误拦（0.92），其余两条放行。
+
+合入 T4b 之后（`{id}` 不覆盖路由词，管理员会话不判未知功能），2026-11-13 在 PR 231 的代码上又跑了一遍（73 次调用，耗时 183 到 385 毫秒）：72 条必须符合预期的请求全部符合。`GET /api/patients/export-all` 现在作为未知功能交给模型并被拦（DENY 1.00），不再属于已知做不到的；带已核验编号的 `GET /api/patients/{id}/export-pdf` 放行（DENY 0.10）。管理员会话的 `GET /api/admin/reports` 和 `GET /api/admin/users/export` 快速放行，不调用模型，上面“另外两条只记录的请求”一段说的情况不再出现。`DELETE /api/patients`（DENY 0.58）和 `POST /api/permissions/grant`（0.66）仍离平局较近。其余 5 条已知做不到的与此前在同一范围：`GET /trace`（0.49）、`GET /api/accounts/all`（0.47）、商店 `GET /api/Users`（0.06）和 `/redirect?to=`（ATTACK 0.40）放行，`GET /api/config/ui` 仍被误拦（0.91）。
