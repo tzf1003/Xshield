@@ -17,10 +17,13 @@ from typing import Any
 from unittest import mock
 
 from effectiveness import jev_relay
-from effectiveness.cli import main
+from effectiveness.cli import KNOWN_GAPS_PATH, main
+from effectiveness.contracts import load_known_gaps
+from effectiveness.score import score
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+NO_GAPS = FIXTURES / "no-known-gaps.json"  # the fixture groups are not the lab's run, so the lab's list does not apply
 SCRIPT = ROOT / "scripts" / "measure_effectiveness.py"
 SECTIONS = ["## 1 结论", "## 2 记分表", "## 3 防护明细", "## 4 学习明细", "## 5 回归用例",
             "## 6 失败清单", "## 7 成本", "## 8 未执行的部分"]
@@ -36,7 +39,7 @@ def run_cli(*args: str) -> tuple[int, str, str]:
 def score_args(group: str, out: Path, *extra: str) -> list[str]:
     folder = FIXTURES / group
     args = ["score", "--observations", str(folder / "observations.jsonl"),
-            "--decisions", str(folder / "decisions.jsonl"), "--out", str(out)]
+            "--decisions", str(folder / "decisions.jsonl"), "--out", str(out), "--known-gaps", str(NO_GAPS)]
     for name, flag in (("truth.json", "--truth"), ("learned.json", "--learned")):
         if (folder / name).exists():
             args += [flag, str(folder / name)]
@@ -149,6 +152,20 @@ class CommandTests(unittest.TestCase):
                                  "--out", str(self.out / "x"))
         self.assertEqual(status, 2)
         self.assertIn("error:", err)
+
+    def test_the_score_command_reads_the_lab_known_gap_list_unless_told_otherwise(self):
+        folder = FIXTURES / "all-correct"
+        args = ["score", "--observations", str(folder / "observations.jsonl"),
+                "--decisions", str(folder / "decisions.jsonl"), "--truth", str(folder / "truth.json"),
+                "--learned", str(folder / "learned.json"), "--out", str(self.out / "gaps")]
+        with mock.patch("effectiveness.cli.score", wraps=score) as scored:
+            status, _, err = run_cli(*args)
+            run_cli(*args, "--known-gaps", str(NO_GAPS))
+        self.assertNotEqual(status, 2, err)
+        listed, unlisted = (call.kwargs["gap_entries"] for call in scored.call_args_list)
+        self.assertEqual(listed, load_known_gaps(KNOWN_GAPS_PATH))
+        self.assertTrue(listed)
+        self.assertEqual(unlisted, [])
 
     def test_help_exits_0(self):
         status, _, _ = run_cli("--help")

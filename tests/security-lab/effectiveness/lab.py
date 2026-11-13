@@ -52,7 +52,7 @@ from clinic_traffic import Evidence, run_training
 from fake_jev import FakeJev
 
 from . import jev_relay, probes, regressions
-from .cli import _commit
+from .cli import KNOWN_GAPS_PATH, _commit
 from .contracts import (
     ContractError, baseline_group, dump_json, load_baseline, load_known_gaps, write_baseline,
 )
@@ -62,7 +62,6 @@ from .score import baseline_values, confidence_scan, score
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUT = ROOT / "target" / "effectiveness" / "latest"
 BASELINE_PATH = ROOT / "tests" / "security-lab" / "effectiveness-baseline.json"
-KNOWN_GAPS_PATH = ROOT / "tests" / "security-lab" / "effectiveness-known-gaps.json"
 BASELINE_MODE = "quick"  # the group this run reads and writes; the full group comes with batch 7
 LIVE_ENDPOINT_VARIABLE = "XSHIELD_JEV_ENDPOINT"
 LIVE_KEY_VARIABLE = "XSHIELD_JEV_API_KEY"
@@ -174,7 +173,8 @@ def execute(options: Options, *, live: Live | None = None) -> int:
         result = score(observations, decisions, truth=truth, learned=_learned_document(learning),
                        baseline=group, gap_entries=_gap_entries(options),
                        check_gaps=not options.only,
-                       require_baseline=compared and group is None and not options.update_baseline)
+                       require_baseline=compared and group is None and not options.update_baseline,
+                       training=train_records)
         _mark_unrun(result, real=real, learning_why=learning["why"])
         if real:  # the scan needs a real model's probabilities; the ideal model's are fixed (plan 10, batch 9)
             result["confidence_scan"] = confidence_scan(protect_rows, protect_records)

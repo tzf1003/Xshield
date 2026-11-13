@@ -84,9 +84,12 @@ def score(
     gap_entries: Sequence[Mapping[str, Any]] = (),
     check_gaps: bool = True,
     require_baseline: bool = False,
+    training: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """`gap_entries` is the learning known-gap list (known_gaps.py); `check_gaps` False when the run cannot see every
-    probe (a --only run), so no entry can be called stale. `require_baseline` makes a missing baseline a failure."""
+    probe (a --only run), so no entry can be called stale. `require_baseline` makes a missing baseline a failure.
+    `training` is the training segment's decision records, the only ones the learning saw; the reason for a position
+    the learning did not learn reads these. None means every record in `decisions` (the score command)."""
     records = {record["request_id"]: record for record in decisions}
     pairs: list[Pair] = []
     missing: list[dict[str, Any]] = []
@@ -106,7 +109,8 @@ def score(
     metrics.update(_session_metrics(active))
     metrics.update(_defense_metrics(defend, active, pairs, caps))
     failures, known_gaps = _failures(pairs, missing, caps, exclude_suspicious)
-    learning, skip_reason = _learning(truth, learned, decisions, gap_entries, failures, check_gaps)
+    learning_decisions = decisions if training is None else training  # the learning saw the training segment only
+    learning, skip_reason = _learning(truth, learned, learning_decisions, gap_entries, failures, check_gaps)
     if learning is None:
         metrics.update({name: None for name in LEARNING_METRIC_NAMES})
         metrics["unmodeled"] = None

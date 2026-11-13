@@ -7,7 +7,7 @@
       "learned": "",
       "ref": "学习质量设计稿 2.1",
       "lq": null,
-      "note": "训练流量里这条路由有被 Jev 拒绝的请求，窗口内有拒绝记录时规则按设计不提议"
+      "note": "训练流量里这条路由只有 2 次请求、2 个会话，票数和会话数都低于学习门槛（20 票、5 个会话），规则按设计不提议"
     },
     {
       "id": "miss-admin-search-results",
@@ -16,16 +16,16 @@
       "learned": "",
       "ref": "学习质量设计稿 2.1",
       "lq": null,
-      "note": "训练流量里这条路由有被 Jev 拒绝的请求，窗口内有拒绝记录时规则按设计不提议"
+      "note": "训练流量里这条路由只有 14 次使用，票数达不到学习门槛 20，规则按设计不提议（学习输出里为 pending）"
     },
     {
-      "id": "miss-search-results-rejected",
+      "id": "miss-search-results-public",
       "kind": "miss",
       "key": "GET /api/search results[].id",
       "learned": "",
       "ref": "学习质量设计稿 2.5",
       "lq": "LQ-4a",
-      "note": "公共档的响应位置没有类别提议，被拒绝记录挡住；这是“搜到别人的患者后删除”的防护缺口"
+      "note": "公共档的响应位置没有类别提议（学习输出里为 pending）。训练段里这条路由的请求都放行、没有拒绝记录，所以不是被拒绝记录挡住；这是 LQ-4a 要修的缺口。"
     },
     {
       "id": "miss-notes-public-source",
