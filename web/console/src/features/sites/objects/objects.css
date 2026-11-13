@@ -309,3 +309,62 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* The administrator's proposals of the functions view (docs/06 6.4.10): the key and its evidence on the left, the
+   two actions on the right, level with the key. Scoped to this card, so the judgement list of the other views is
+   not changed. */
+.obj-fn-proposals .obj-judge-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.obj-fn-proposals .obj-judge-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.obj-fn-proposals .obj-judge-row:last-child {
+  border-bottom: 0;
+}
+
+.obj-fn-proposals .obj-judge-where {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.obj-fn-proposals .obj-judge-what {
+  grid-column: 1;
+  min-width: 0;
+}
+
+.obj-fn-proposals .obj-judge-actions {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* The bar under the functions view: the pending counts on the left, the confirmation on the right. */
+.obj-fn-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.obj-fn-bar-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

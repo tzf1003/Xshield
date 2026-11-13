@@ -51,6 +51,7 @@
     "jev_timeout_ratio": 0.0,
     "after_would_block_refs": 5,
     "attempts": 2,
+    "functions": {"attempts": 1, "unknown": 4},
     "on_jev_unavailable": "deny"
   },
   "complete": true

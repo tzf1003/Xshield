@@ -40,6 +40,17 @@
       "on_entry": false
     },
     {
+      "key": "GET /api/admin/reports",
+      "ordinary_units": 5,
+      "admin_units": 0,
+      "refused_units": 1,
+      "last_seen": "2026-11-12T00:00:00.000Z",
+      "requests_24h": 58,
+      "suggested": true,
+      "sensitive": true,
+      "on_entry": false
+    },
+    {
       "key": "GET /api/reports/{id}",
       "ordinary_units": 12,
       "admin_units": 1,
