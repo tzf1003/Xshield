@@ -20,6 +20,10 @@ confirmed position is written as an `objects.slots` entry (plan 5.1), never as a
 Without a usable PostgreSQL (createdb or dropdb missing, or the server refuses the connection) the
 stage returns status "skip" with the reason. A failure of the pipeline itself raises LearningError.
 
+learned.json keeps the share codes (`/share/SHR-...`, access codes in the paths) as they appear in the
+position keys. Treat it like the decision log: do not store it in a database, paste it into a PR, or put it
+in a shared folder.
+
 Run it alone for debugging, from tests/security-lab:
     python3 -m effectiveness.learning --decisions FILE --out DIR [--truth FILE]
 """
@@ -45,7 +49,7 @@ from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import labkit
 from clinic_origin import site_spec
@@ -145,6 +149,8 @@ def _import_rows(decisions_path: Path, base_spec: dict[str, Any]) -> list[tuple[
             record = json.loads(text)
         except ValueError as error:
             raise LearningError(f"{where} 不是 JSON：{error}") from error
+        if not isinstance(record, dict):
+            raise LearningError(f"{where} 不是 JSON 对象")
         if record.get("site") != site:
             raise LearningError(f"{where} 的站点是 {record.get('site')!r}，站点配置是 {site!r}")
         if not isinstance(record.get("at_millis"), int):
@@ -256,8 +262,25 @@ def _database_base_url() -> str:
     return f"postgresql://{user}@{os.environ.get('PGHOST', 'localhost')}:{os.environ.get('PGPORT', '5432')}"
 
 
-def _run_tool(tool: str, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([tool, *arguments], capture_output=True, text=True, check=False)
+def _connection_arguments(base_url: str) -> tuple[list[str], dict[str, str]]:
+    """The host, port and user of the server for createdb and dropdb, and its password in the environment,
+    never on the command line. The base URL names no database."""
+    parts = urlsplit(base_url)
+    arguments: list[str] = []
+    if parts.hostname:
+        arguments += ["-h", parts.hostname]
+    if parts.port:
+        arguments += ["-p", str(parts.port)]
+    if parts.username:
+        arguments += ["-U", unquote(parts.username)]
+    environment = dict(os.environ)
+    if parts.password is not None:
+        environment["PGPASSWORD"] = unquote(parts.password)
+    return arguments, environment
+
+
+def _run_tool(tool: str, *arguments: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([tool, *arguments], capture_output=True, text=True, check=False, env=environment)
 
 
 class _TemporaryDatabase:
@@ -266,17 +289,20 @@ class _TemporaryDatabase:
     def __init__(self, base_url: str) -> None:
         self.name = f"xshield_learning_{os.getpid()}_{secrets.token_hex(4)}"
         self.url = f"{base_url}/{self.name}"
+        self.arguments, self.environment = _connection_arguments(base_url)
 
     def __enter__(self) -> _TemporaryDatabase:
-        created = _run_tool("createdb", self.name)
+        created = _run_tool("createdb", *self.arguments, self.name, environment=self.environment)
         if created.returncode != 0:
             raise _NoDatabase(f"无法连接 PostgreSQL（createdb：{_first_line(created.stderr)}）")
         return self
 
     def __exit__(self, *_: object) -> bool:
-        dropped = _run_tool("dropdb", "--if-exists", self.name)
+        dropped = _run_tool("dropdb", *self.arguments, "--if-exists", self.name, environment=self.environment)
         if dropped.returncode != 0:
-            print(f"学习段：没能删除临时库 {self.name}（{_first_line(dropped.stderr)}）", file=sys.stderr)
+            manual = " ".join(["dropdb", *self.arguments, "--if-exists", self.name])
+            print(f"学习段：没能删除临时库 {self.name}（{_first_line(dropped.stderr)}）。"
+                  f"请手动删除：{manual}", file=sys.stderr)
         return False
 
 

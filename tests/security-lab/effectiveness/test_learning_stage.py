@@ -9,6 +9,7 @@ as skipped, not passed) when no PostgreSQL answers.
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 import signal
@@ -87,6 +88,13 @@ class ImportTest(unittest.TestCase):
         with self.assertRaisesRegex(LearningError, "没有决策记录"):
             learning._import_rows(self._file([""]), self.spec)
 
+    def test_a_row_that_is_not_a_json_object_is_refused_with_its_line(self) -> None:
+        path = self._file([json.dumps(_decision_line("clinic-none", 1)), "null"])
+        with self.assertRaisesRegex(LearningError, r"decisions\.jsonl:2 不是 JSON 对象"):
+            learning._import_rows(path, self.spec)
+        with self.assertRaisesRegex(LearningError, r"decisions\.jsonl:1 不是 JSON 对象"):
+            learning._import_rows(self._file(["[]"]), self.spec)
+
     def test_identity_positions_must_be_declared_by_the_base(self) -> None:
         truth = {"identity": [{"key": "GET /api/home doctor.id", "identity": "org"}]}
         with self.assertRaisesRegex(LearningError, "身份位置 GET /api/home doctor.id"):
@@ -113,6 +121,48 @@ class SkipTest(unittest.TestCase):
         self.assertEqual(result["status"], "skip")
         self.assertIn("connection refused", result["why"])
         self.assertIsNone(result["final_spec"])
+
+
+class DatabaseToolsTest(unittest.TestCase):
+    """createdb and dropdb reach the server that XSHIELD_TEST_DATABASE_BASE_URL names. The password goes in the
+    environment only, never on the command line."""
+
+    def setUp(self) -> None:
+        self.calls: list[tuple[tuple[str, ...], dict[str, str] | None]] = []
+        self.drop_fails = False
+
+        def tool(name: str, *arguments: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+            self.calls.append(((name, *arguments), environment))
+            failed = self.drop_fails and name == "dropdb"
+            return subprocess.CompletedProcess([name], 1 if failed else 0, "",
+                                               "server closed the connection\n" if failed else "")
+
+        patch = mock.patch.object(learning, "_run_tool", side_effect=tool)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_both_tools_get_the_server_and_the_password_only_in_the_environment(self) -> None:
+        database = learning._TemporaryDatabase("postgresql://alice:s3cret@db.example:6543")
+        with database:
+            pass
+        (created, created_env), (dropped, dropped_env) = self.calls
+        self.assertEqual(created, ("createdb", "-h", "db.example", "-p", "6543", "-U", "alice", database.name))
+        self.assertEqual(dropped, ("dropdb", "-h", "db.example", "-p", "6543", "-U", "alice", "--if-exists",
+                                   database.name))
+        self.assertEqual(created_env["PGPASSWORD"], "s3cret")
+        self.assertEqual(dropped_env["PGPASSWORD"], "s3cret")
+        self.assertNotIn("s3cret", " ".join(created + dropped))
+
+    def test_a_database_that_cannot_be_dropped_is_named_with_the_command_to_drop_it(self) -> None:
+        self.drop_fails = True
+        database = learning._TemporaryDatabase("postgresql://alice:s3cret@db.example:6543")
+        stderr = io.StringIO()
+        with mock.patch.object(sys, "stderr", stderr), database:
+            pass
+        warning = stderr.getvalue()
+        self.assertIn(database.name, warning)
+        self.assertIn(f"dropdb -h db.example -p 6543 -U alice --if-exists {database.name}", warning)
+        self.assertNotIn("s3cret", warning)
 
 
 class ConfirmationTest(unittest.TestCase):
@@ -319,7 +369,7 @@ class CleanupTest(unittest.TestCase):
         self.port = labkit.free_port()
         self.tools: list[tuple[str, ...]] = []
 
-        def tool(name: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        def tool(name: str, *arguments: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
             self.tools.append((name, *arguments))
             return subprocess.CompletedProcess([name], 0, "", "")
 

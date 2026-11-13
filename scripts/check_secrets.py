@@ -48,6 +48,11 @@ ALLOW: dict[tuple[str, str], str] = {
         "crates/xshield-control/src/agent_model.rs",
         "url-credentials",
     ): "a test endpoint with a made-up user and password, which the endpoint check must refuse",
+    (
+        "tests/security-lab/effectiveness/test_learning_stage.py",
+        "url-credentials",
+    ): "unit test input: a made-up user and password in a database URL, to check that createdb and dropdb "
+    "get the password only in the environment",
 }
 
 
