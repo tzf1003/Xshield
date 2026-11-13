@@ -346,8 +346,21 @@ export interface Trace {
   timing?: TraceTiming;
   response?: TraceResponse;
   upstream_error?: UpstreamError | null;
+  function?: TraceFunction;
   /** The trace was cut to its 16 KiB limit. */
   trimmed?: boolean;
+}
+
+/** The function a request reaches, when the site's function table decides it (trace.function, 7.4.3). */
+export interface TraceFunction {
+  /** Transport method, a space, and the route template, with session credentials redacted. */
+  key: string;
+  /** The administrator entry the request reached: a key of the site's function table. */
+  entry?: string;
+  tier?: "admin";
+  attempt?: "over_privilege";
+  /** False when the table does not list the function and the site asks about unknown functions. */
+  known?: boolean;
 }
 
 // ------------------------------------------------------------------ Jev exchange (7.5.1)
@@ -707,6 +720,8 @@ export interface ObjectsSpec {
   slots?: ObjectSlotEntry[];
   /** The function table: the interfaces the administrator confirmed, each with its source and optional admin tier. */
   functions?: ObjectFunctionEntry[];
+  /** Send the functions the table does not list to the judge (docs/07 7.9.18). Needs a table that is not empty. */
+  ask_unknown_functions?: boolean;
 }
 
 export interface SiteSpec {

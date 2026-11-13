@@ -193,7 +193,7 @@
         "functions": {
           "type": "array",
           "maxItems": 2048,
-          "description": "功能表：本站的接口功能，见 docs/07 7.9.18。本版只读入和保存，网关还不按它判定。",
+          "description": "功能表：本站的接口功能，见 docs/07 7.9.18。管理档条目（tier admin、reliability high）让非管理员会话访问它的请求送 Jev 判定；开关为真时，表里没有的功能也送 Jev 判定。",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -208,6 +208,7 @@
             "then": {"required": ["tier"]}
           }
         },
+        "ask_unknown_functions": {"type": "boolean", "description": "为真时，功能表里没有的功能送 Jev 判定，见 docs/07 7.9.18。需要功能表非空。"},
         "learning": {
           "type": "object",
           "additionalProperties": false,
@@ -219,7 +220,9 @@
             "agent": {"type": "object"}
           }
         }
-      }
+      },
+      "if": {"required": ["ask_unknown_functions"], "properties": {"ask_unknown_functions": {"const": true}}},
+      "then": {"required": ["functions"], "properties": {"functions": {"minItems": 1}}}
     }
   }
 }

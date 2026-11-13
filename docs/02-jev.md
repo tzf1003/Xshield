@@ -37,9 +37,28 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 { "at": "body.note", "kind": "input", "value": "……（512 个字符，接着下一片）", "part": "1/3", "seen_as": [] }
 ```
 
-`state` 放不进一份时（超过 8 KiB），请求值分成几批，每批一份 `state`，每份各自调用 Jev（[2.5](#25-延迟费用与限流)）。装批的顺序与上限见 [2.4](#24-输入上限与脱敏)：没核验的非输入值先装，其余不分片的值次之，片段最后，至多 16 批。各批的 `entry`、`session`、`method`、`path` 和 `truncated` 相同，只有 `values` 不同；分批时裁剪级别为 3（最近访问为 0，每值来源 1 条）。请求自身的空壳（不含值的 state）超过 4 KiB 时，所有批改用级别 4：`entries_passed` 置空，`path` 截到 256 字符，不列来源。
+`state` 放不进一份时（超过 8 KiB），请求值分成几批，每批一份 `state`，每份各自调用 Jev（[2.5](#25-延迟费用与限流)）。装批的顺序与上限见 [2.4](#24-输入上限与脱敏)：没核验的非输入值先装，其余不分片的值次之，片段最后，至多 16 批。各批的 `entry`、`session`、`method`、`path`、`truncated` 和 `function`（站点有功能表时）相同，只有 `values` 不同；分批时裁剪级别为 3（最近访问为 0，每值来源 1 条）。请求自身的空壳（不含值的 state，其中包括 `function`）超过 4 KiB 时，所有批改用级别 4：`entries_passed` 置空，`path` 截到 256 字符，不列来源。
 
 站点配置了档位（[07.4.7](07-console-architecture.md#747-档位在判定中的使用)）时，`seen_as` 的每一项在括号里附上来源响应的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`；请求值的位置配置了 `accepts_public` 时，值上带 `"public_access": {"accepts": false, "reliability": "high"}`。值被判为尝试越权时带 `"attempt": "over_privilege"`：这个值只由公共档响应展示过，而请求位置不接受公共来源。指令要求 Jev 对带 `attempt` 的值答 DENY，不论它在 `seen_as` 里出现过几次，因为公共搜索只证明源站展示过它，不证明本会话有权操作它。没有标档位的站点，`state` 的内容与之前相同。
+
+站点有功能表并接管判定（[07.9.18](07-console-architecture.md#7918-功能表)）时，`state.request` 多一个 `function` 对象，描述请求的功能。它有两个字段，都可以单独出现，也可以同时出现：
+
+- `"tier": "admin"` 与 `"attempt": "over_privilege"`：请求命中管理档条目，而会话不是管理员，即尝试越权。指令要求 Jev 对这次请求答 DENY，不论值如何。
+- `"known": false`：站点开了 `ask_unknown_functions`，而功能表和对象表都不认得这个请求的功能。指令只在路径或接口名本身显示特权或运维功能时才要求 DENY；普通页面、普通接口照值判定，不因“未知”而拒绝。
+
+请求没有触及这两类功能时，`request` 里没有 `function` 键，`state` 与之前相同。下面是医生会话请求 `POST /api/admin/export` 的例子（管理员的导出在这个站点上是管理功能）：
+
+```json
+"request": {
+  "method": "POST",
+  "path": "/api/admin/export",
+  "function": {"tier": "admin", "attempt": "over_privilege"},
+  "values": [],
+  "truncated": false
+}
+```
+
+指令新增一段，位置在“有对象引用值从未展示给本会话就答 DENY”那句之前，说明 `state.request.function` 的两种情况。`function.known` 为假时，只有路径或接口名本身显示管理、运维、调试、内部接口、备份、目录列表、批量导出或删除这类特权或运维功能，才答 DENY；路径普通的，照值判定，不因此拒绝。`function.attempt` 为 `over_privilege` 时答 DENY。`access` 问题 DENY 选项的说明也增加了“或请求触及特权或运维功能”，与这段指令对应。这段文字是对着真实模型调过的，逐字保留；改动它须重新用真实模型测试，并在 [07.5.5](07-console-architecture.md#755-指令版本表) 的版本表里登记新的指令 ID。
 
 两个问题：
 
@@ -77,6 +96,8 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 批数最多 16（`JEV_BATCHES_MAX`）。超过 16 批时只发前 16 批，没送出的值和片段数记在 `left_out`。这时结论照常按上面的合并规则定：全部放行则放行，但这样的放行不写进放行缓存，同样的请求下次会再判一次。控制台的 Jev 面板显示“攻击判定不完整：有 N 个值或片段没有送判”。
 
 这是一条残留的边界：把内容藏在 16 批（约 128 KiB 文本）之后，可以避开攻击判定。批次 10 会按路由平时的正文大小再收一层，把这个数字压下去。
+
+- 功能表接管判定且开关为真时，功能表和对象表都没有的接口，每次请求都先交给 Jev，直到一次放行进入缓存；之后在缓存时长内同一会话的同一请求不再调用。它们与其他请求共用每个会话每分钟 60 次的上限。上线前先在观察模式下统计 `trace.function` 里 `known` 为假的次数，再决定是否调大 `advanced.session_calls_per_minute`。
 - 每个会话每分钟最多 60 次 Jev 调用；没有会话的请求按来源 IP 每分钟最多 30 次，凭证还没有会话的请求（源站尚未认过这个凭证，见 [01](01-request-flow.md) 1.2）也算在来源 IP 上。超出的请求不发出调用，直接返回 429 拒绝，不论 `on_jev_unavailable` 如何设置，防止有人用大量不同请求消耗模型额度。两个上限站点可用 `advanced.session_calls_per_minute`、`advanced.address_calls_per_minute` 调整。额度按凭证和来源 IP 计，不按站点分开：同一个凭证在各站点的请求共用它的额度；学到的上下文则按站点分开（[01](01-request-flow.md) 1.2）。
 - 这些数值是起点，需要用真实站点的观察模式数据校准。控制台在每个参数旁显示最近 24 小时的耗时、超时和触发上限的次数，并在观察模式下给出调整建议。
 

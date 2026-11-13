@@ -64,6 +64,7 @@
         "values": {"type": "array", "items": {"$ref": "#/$defs/trace_value"}, "description": "请求拆出的全部请求值，按提取顺序，包括惰性值。"},
         "session": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/trace_session"}]},
         "cache_source": {"type": ["string", "null"], "description": "放行缓存命中时，复用的那次 Jev 放行所对应的请求 ID。"},
+        "function": {"$ref": "#/$defs/trace_function"},
         "timing": {
           "type": "object",
           "additionalProperties": false,
@@ -77,6 +78,19 @@
         "response": {"type": ["object", "null"], "description": "源站响应教给会话的内容（只有字段名和计数，没有值）。"},
         "upstream_error": {"type": ["string", "null"], "description": "源站无法应答时的失败类别。"},
         "trimmed": {"type": "boolean", "description": "为了控制在大小上限内，去掉了部分细节。"}
+      }
+    },
+    "trace_function": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key"],
+      "description": "请求的功能与功能表的关系，见 docs/07 7.4.3。键是传输方法、一个空格和路由模板，路径中的会话凭证已脱敏。",
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "entry": {"type": "string", "description": "请求到达的管理档条目的键（站点的功能表里的 key）。"},
+        "tier": {"type": "string", "enum": ["admin"]},
+        "attempt": {"type": "string", "enum": ["over_privilege"], "description": "非管理员会话到达管理档条目。"},
+        "known": {"type": "boolean", "description": "为假：功能表里没有这个功能，站点询问未知功能。"}
       }
     },
     "trace_value": {
