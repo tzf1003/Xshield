@@ -28,7 +28,7 @@ v4 的判定路径、控制面、控制台和迁移已经按本组文档实现�
 
 | 位置 | 处理 |
 |---|---|
-| `crates/xshield-core` | 保留领域 ID 和站点配置类型（按 [03.2](03-admin-config-audit.md#32-站点配置) 精简）；新增会话上下文、请求值提取、判定步骤；删除 `calibration`、资格与审批相关类型 |
+| `crates/xshield-core` | 已完成：只剩 `context`（站点配置、对象表与学习规则、判定记录）、`kind`、`model`、`path_template`、`constant_time`。v3 的 `site`、`domain`、`calibration`、`grant`、`identity`、`provenance`、`admission`、`investigation`、`ports` 等模块已无任何调用方，连同只服务于它们的示例、测试和 `tests/site-config/` 样例一并删除 |
 | `crates/xshield-gateway` | 已删除；代理、TLS、监听器、上下文存储、Jev 调用与判定日志写入由全新的 `crates/xshield-edge`（配合 `crates/xshield-judge`）取代，而非在原地改造 |
 | `crates/xshield-control` | 保留站点增改、模式切换；新增判定日志查询、配置历史与回滚、口令登录，以及请求追溯、影响预估、调优建议、判定日志导入导出（[07.9](07-console-architecture.md#79-控制面-api)）；删除审批状态机、案件、证据访问、保全、v3 的证据导出、校准报告、任务管理、API Key、OIDC |
 | `crates/xshield-worker` | 已删除整个 crate（离线 CLI、`model_eval`、outbox 发布器、校准、证据迁移/清理、ClickHouse 索引与检索）；它只剩控制面已删除的调用方，没有需要迁移到网关的能力，因为 `crates/xshield-judge` 已自带 Jev 客户端 |
@@ -39,8 +39,8 @@ v4 的判定路径、控制面、控制台和迁移已经按本组文档实现�
 | `sensor/` | 已删除（浏览器探针，连同其 CI 作业与验收脚本） |
 | `deploy/` | 已删除（含 `compose`）；v4 尚无参考部署，这是已知且接受的缺口（[04](04-deployment-testing.md)），不在本次改造中补上 |
 | `schemas/`、`examples/`、`validation/`、`templates/` | 已换成 v4 的站点配置和判定日志样例：契约为 `schemas/site-config.schema.json` 和 `schemas/decision-record.schema.json`，样例为 `examples/site-emr.yaml`、`examples/sites-dev.json`、`examples/decision-log.jsonl`，模板为 `templates/site.yaml`。v3 的契约、证据与清单样例、验收用例目录和对应校验已删除；`scripts/validate_library.py` 按 v4 重写，报告写入 `validation/`，`crates/xshield-core/tests/v4_samples.rs` 用代码解析同一批样例 |
-| `tests/`、`scripts/` | IDOR 靶场改造成 [04.3](04-deployment-testing.md#43-验收场景) 的场景；删除只服务于已删机制的回归脚本 |
-| `fuzz/` | 保留 `path_shape`、`site_config`、`page_fingerprint`、`upstream_address`；`seal_manifest` 随 `xshield-audit` 删除 |
+| `tests/`、`scripts/` | IDOR 靶场改造成 [04.3](04-deployment-testing.md#43-验收场景) 的场景；只服务于已删机制的回归脚本已删除（最后两个是 `scripts/bench_fsync.py` 和 `scripts/register_juice_shop.py`） |
+| `fuzz/` | 目标改为 v4 解析器：`request_path`（请求路径的规范写法与模板）和 `site_config`（v4 站点配置 `SiteSpec`）。原先的 `path_shape`、`page_fingerprint`、`upstream_address` 和 v3 的 `site_config` 只测 `xshield-core` 里已删除的 v3 模块，随这些模块删除；`seal_manifest` 随 `xshield-audit` 删除 |
 
 建议按"先新增 v4 判定路径并跑通验收场景，再批量删除 v3 模块"的顺序改造，避免中间状态既没有旧能力也没有新能力。
 

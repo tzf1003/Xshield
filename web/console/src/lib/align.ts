@@ -1,7 +1,7 @@
 // Aligns what Jev saw (`state`) with what the trace recorded (docs/07 7.5.2 and 7.5.3). The state
 // itself is never changed, so the alignment is a view over two parallel structures.
 
-import type { EntryPass, RecentAccess, TraceSource, TraceValue } from "../api/types.ts";
+import type { RecentAccess, TraceSource, TraceValue } from "../api/types.ts";
 
 /** The longest location or key name the trace keeps, in bytes (docs/07 7.4.3). */
 export const TRACE_NAME_BYTES_MAX = 256;
@@ -62,11 +62,6 @@ export function alignRecent(
   return all.slice(all.length - count);
 }
 
-/** `state.session.entries_passed[k]` is `trace.session.entries_passed[k]`. */
-export function alignEntries(traceEntries: EntryPass[] | null | undefined): EntryPass[] {
-  return traceEntries ?? [];
-}
-
 /** The `seen_as` text the gateway writes for one source: `field @ request` (xshield-judge's engine). */
 export function seenAsText(source: TraceSource): string {
   return `${source.field} @ ${source.request}`;
@@ -85,22 +80,6 @@ export function seenAsAligned(seenAs: string[], sources: TraceSource[], trimmed:
     return source !== undefined && text === seenAsText(source);
   });
 }
-
-export type TrimLevel = {
-  level: number;
-  recent: number;
-  sources: number;
-  valueChars: number;
-};
-
-/** The trim table of docs/07 7.5.3, in the order the gateway tries them. */
-export const TRIM_LEVELS: TrimLevel[] = [
-  { level: 0, recent: 10, sources: 3, valueChars: 512 },
-  { level: 1, recent: 3, sources: 3, valueChars: 512 },
-  { level: 2, recent: 0, sources: 3, valueChars: 512 },
-  { level: 3, recent: 0, sources: 1, valueChars: 512 },
-  { level: 4, recent: 0, sources: 1, valueChars: 128 },
-];
 
 /** The note shown above the Jev view when `trim` is not zero (docs/06 6.4.5). */
 export function trimNote(trim: number): string | null {

@@ -42,9 +42,9 @@ jobs:
           echo "$files"
           match() { if printf '%s\n' "$files" | grep -Eq "$1"; then echo true; else echo false; fi; }
           {
-            echo "web=$(match '^(web/console/|tests/site-config/|\.github/)')"
-            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|migrations/|tests/site-config/|\.github/)')"
-            echo "fuzz=$(match '^(crates/xshield-core/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|tests/site-config/|\.github/)')"
+            echo "web=$(match '^(web/console/|\.github/)')"
+            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|migrations/|\.github/)')"
+            echo "fuzz=$(match '^(crates/xshield-core/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|\.github/)')"
           } >> "$GITHUB_OUTPUT"
 
   validate:
@@ -109,8 +109,6 @@ jobs:
       - run: python scripts/check_env_docs.py
       - run: python scripts/check_secrets.py
 
-  # Licenses, RustSec advisories, yanked crates and registry sources (deny.toml).
-  # It reads Cargo.lock only, so it needs no database or build.
   # The fuzz targets (fuzz/) on the stable toolchain: every checked-in seed, including
   # each crash ever found, and fixed deterministic mutations of them. Coverage-guided
   # runs are in fuzz.yml. The crate is its own workspace, so it is linted here.
@@ -137,6 +135,8 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
 
+  # Licenses, RustSec advisories, yanked crates and registry sources (deny.toml).
+  # It reads Cargo.lock only, so it needs no database or build.
   supply-chain:
     runs-on: ubuntu-latest
     timeout-minutes: 10

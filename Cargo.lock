@@ -3057,7 +3057,6 @@ dependencies = [
  "chrono",
  "http",
  "http-body-util",
- "hyper",
  "hyper-rustls",
  "hyper-util",
  "openssl",
@@ -3080,7 +3079,6 @@ version = "4.0.0-rc1"
 dependencies = [
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "subtle",
  "zeroize",
 ]

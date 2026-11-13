@@ -4,7 +4,6 @@
 import type {
   ApiInfo,
   DecisionPath,
-  JevAccess,
   JevAttack,
   JevRecord,
   Outcome,
@@ -186,14 +185,4 @@ export function explainRecord(input: ExplainInput): string {
   const named = input.api ?? null;
   const unknownLine = named !== null && "unknown" in named ? `${unknownTitle(named)}。` : "";
   return [unknownLine, reason, action, upstream].filter((part) => part.length > 0).join("");
-}
-
-export function jevAnswerTop(jev: JevRecord | null): {
-  access: JevAccess | null;
-  attack: JevAttack | null;
-} {
-  return {
-    access: topOf<JevAccess>(jev?.access ?? null),
-    attack: topOf<JevAttack>(jev?.attack ?? null),
-  };
 }

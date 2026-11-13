@@ -55,10 +55,6 @@ function withCursor(query: string, cursor: string | null): string {
   return `${query}${separator}cursor=${encodeURIComponent(cursor)}`;
 }
 
-export function useSession() {
-  return useQuery({ queryKey: keys.session, queryFn: api.session, retry: false });
-}
-
 export function useSites(enabled = true) {
   return useQuery({
     queryKey: keys.sites,
@@ -237,14 +233,6 @@ export function useLogin() {
       client.setQueryData(keys.session, { authenticated: true });
       void client.invalidateQueries({ queryKey: keys.session });
     },
-  });
-}
-
-export function useLogout() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.logout(),
-    onSettled: () => client.setQueryData(keys.session, { authenticated: false }),
   });
 }
 

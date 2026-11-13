@@ -1201,11 +1201,6 @@ export interface ModelVersionWire {
   key_last4?: string | null;
 }
 
-/** One saved version as the page holds it: `config` read back into the types of the form (lib/model-form.ts). */
-export interface ModelVersion extends Omit<ModelVersionWire, "config"> {
-  config: ModelValues;
-}
-
 // ------------------------------------------------------------------ import (7.9.9)
 
 export interface ImportResult {
@@ -1220,51 +1215,8 @@ export interface ImportResult {
 
 // ------------------------------------------------------------------ errors and session
 
-export interface ApiErrorBody {
-  error: string;
-  field?: string;
-  current_version?: number;
-}
-
 export interface SessionState {
   authenticated: boolean;
-}
-
-/** Query parameters of `GET /api/requests`, `/counts` and `/export` (7.9.3). */
-export interface RequestFilters {
-  site?: string;
-  since_millis?: number;
-  until_millis?: number;
-  outcome?: string;
-  decision_path?: string;
-  method?: string;
-  status?: string;
-  /** Matches the logical path (`path:` in the filter bar); without route rules it is the URL path. */
-  path?: string;
-  /** Case-sensitive substring of the interface name (`api:`). */
-  api?: string;
-  /** Requests whose interface name could not be read: a reason code, or `any` (`api:unknown`). */
-  api_unknown?: UnknownApiReason | "any";
-  /** Requests with a value of this object class (`object:`). */
-  object?: string;
-  session?: string;
-  client?: string;
-  request_id?: string;
-  jev_access?: string;
-  jev_attack?: string;
-  jev_failure?: string;
-  max_confidence?: number;
-  min_ms?: number;
-  site_version?: number;
-  entry?: "true" | "false";
-  /** Rows that carry a Jev exchange only (the Jev calls page). */
-  has_jev?: "true";
-  jev_trimmed?: "true" | "false";
-  min_jev_ms?: number;
-  /** `all` also returns bypass and unknown-site rows; the default leaves them out (7.9.3). */
-  scope?: "all";
-  cursor?: string;
-  limit?: number;
 }
 
 // ------------------------------------------------------------------ Status and rollout (7.9.13)

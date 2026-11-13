@@ -1,40 +1,14 @@
-//! Minimal M0 core for Xshield.
+//! The domain logic of Xshield v4, shared by the gateway, the judge and the control plane.
 //!
-//! This crate owns validated domain identifiers, management identity,
-//! deterministic stage results, request orchestration, and the ports needed by
-//! that orchestration. It performs no network, storage, or origin side effects.
+//! This crate owns the site configuration, the request and response values a judgement
+//! reads, the object map and its learning rules, the model settings, and the decision
+//! record. It performs no network, storage, or origin side effects
+//! (`tests/dependency_boundary.rs` keeps it that way).
 
 #![warn(missing_docs)]
 
-pub mod access;
-pub mod admin;
-pub mod admission;
-pub mod application;
-pub mod audit;
-pub mod calibration;
 pub mod constant_time;
 pub mod context;
-pub mod domain;
-pub mod edge_channel;
-pub mod edge_descriptors;
-pub mod grant;
-pub mod identity;
-pub mod investigation;
 pub mod kind;
 pub mod model;
-pub mod model_evaluation_admission;
-pub mod path_shape;
 pub mod path_template;
-pub mod ports;
-pub mod provenance;
-pub mod query;
-pub mod query_pagination;
-pub mod secret_env;
-pub mod site;
-pub use site::{
-    GatewayApplyAck, GatewayApplyRequest, GatewayApplySite, SecurityEntry, SiteAuthBinding,
-    SiteAuthRevoke, SiteAuthTransition, SiteConfig, SiteCryptoConfig, SiteHealthCheckConfig,
-    SiteIdentityConfig, SiteIssuedBy, SiteLimitsConfig, SitePageActions, SitePolicyConfig,
-    SiteRequestCrypto, SiteResourceGrant, SiteResponseCrypto, SiteRouteConfig, SiteSecretReference,
-    SiteSensorHtml, SiteSensorHtmlAdapter, SiteShareIssue, SiteWafConfig,
-};

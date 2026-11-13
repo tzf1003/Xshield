@@ -1,5 +1,5 @@
-//! Dependency-graph gate for the pure domain crate (AGENTS.md "领域层纯逻辑；只通过
-//! ports访问存储/模型/秘密/网络").
+//! Dependency-graph gate for the pure domain crate: storage, models, secrets and the
+//! network belong to the crates that depend on it.
 //!
 //! `cargo test --workspace` in CI runs this file, so a change that makes
 //! `xshield-core` reach a database driver, an HTTP client/server stack, an async
@@ -10,10 +10,8 @@
 //! dependencies together, so the walk is deliberately conservative.
 //!
 //! Source files are additionally scanned for socket I/O from `std::net`; plain
-//! address value types (`IpAddr`, `SocketAddr`) stay allowed because the domain
-//! validates upstream addresses without opening connections. `std::fs` is not
-//! banned: `secret_env` reads mounted secret files, which is not a database or
-//! HTTP boundary.
+//! address value types (`IpAddr`, `SocketAddr`) stay allowed because they open
+//! no connection.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -42,11 +40,9 @@ const FORBIDDEN_PREFIXES: &[(&str, &str)] = &[
     ("rustls", "TLS stack"),
     ("openssl", "TLS stack"),
     ("xshield-postgres", "storage adapter"),
-    ("xshield-audit", "journal adapter"),
-    ("xshield-evidence", "evidence storage adapter"),
     ("xshield-edge", "edge adapter"),
     ("xshield-control", "control-plane adapter"),
-    ("xshield-worker", "worker adapter"),
+    ("xshield-judge", "model adapter"),
 ];
 
 /// Socket I/O entry points of the standard library that bypass every port.
@@ -216,7 +212,7 @@ fn domain_crate_dependency_closure_reaches_no_database_http_runtime_or_adapter_c
     let packages = parse_lock(&lock);
     let reached = closure(&packages, "xshield-core").unwrap();
     // The walk really happened: the declared direct dependencies are reachable.
-    for direct in ["serde", "serde_json", "sha2", "subtle"] {
+    for direct in ["serde", "serde_json", "subtle", "zeroize"] {
         assert!(
             reached.iter().any(|(name, _)| name == direct),
             "{direct} missing from the xshield-core closure"
@@ -232,7 +228,7 @@ fn domain_crate_dependency_closure_reaches_no_database_http_runtime_or_adapter_c
     assert_eq!(
         violations(&lock, "xshield-core").unwrap(),
         Vec::<String>::new(),
-        "xshield-core must reach storage/network only through its ports"
+        "xshield-core must not reach storage or the network"
     );
 }
 
