@@ -183,6 +183,34 @@ class NaturalOrderTests(unittest.TestCase):
         self.assertIsNone(full.natural_order(ordered, natural)["natural"]["tier"])
 
 
+class GateTests(unittest.TestCase):
+    def test_the_natural_order_gate_passes_only_when_the_natural_search_result_learns_public_at_high(self):
+        def natural(tier: str | None, reliability: str | None) -> dict:
+            return {"natural": {"agreement": 971, "tier": tier, "reliability": reliability}}
+
+        self.assertTrue(full.natural_order_gate(natural("public", "high"))["ok"])
+        self.assertFalse(full.natural_order_gate(natural("public", "medium"))["ok"])
+        self.assertFalse(full.natural_order_gate(natural("own", "high"))["ok"])
+        self.assertFalse(full.natural_order_gate(natural(None, None))["ok"])
+        self.assertFalse(full.natural_order_gate(None)["ok"])
+        self.assertEqual(full.natural_order_gate(natural("public", "high"))["value"], "public，high")
+
+    def test_the_polluted_search_then_delete_position_must_not_learn_to_accept_public_sources(self):
+        self.assertTrue(full.polluted_delete_gate({"delete_accepts_public": None})["ok"])
+        self.assertTrue(full.polluted_delete_gate({"delete_accepts_public": False})["ok"])
+        self.assertFalse(full.polluted_delete_gate({"delete_accepts_public": True})["ok"])
+        self.assertFalse(full.polluted_delete_gate(None)["ok"])
+        self.assertEqual(full.polluted_delete_gate({"delete_accepts_public": None})["value"], "没有结论")
+
+    def test_the_pollution_reads_the_delete_conclusion_of_the_polluted_run(self):
+        polluted = learning_of()
+        polluted["conclusions"] = {full.POLLUTED_DELETE_KEY: {"accepts_public": True}}
+        result = full.pollution(learning_of(), polluted, attackers=21, benign_sessions=192)
+        self.assertIs(result["delete_accepts_public"], True)
+        without = full.pollution(learning_of(), learning_of(), attackers=1, benign_sessions=9)
+        self.assertIsNone(without["delete_accepts_public"])
+
+
 def _result(**overrides) -> dict:
     """The parts of a report that comparable() reads, with timings and request IDs that a second run would change."""
     result = {
@@ -358,7 +386,8 @@ class FullReportTests(unittest.TestCase):
                 "two_pass": {"differing": [], "seconds": [200.0, 201.0]}}
         text = render_markdown(result, meta)
         for fragment in ("### 收敛成本（L4）", "首次到顶", "### 抗污染（L5）", "发现：混入攻击后误学 1 个位置",
-                         "攻击会话的请求：每个都本应拦截", "搜索后打开", "### 删除穿插在搜索之间（自然顺序，只报告）",
+                         "攻击会话的请求：每个都本应拦截", "搜索后打开", "### 删除穿插在搜索之间（自然顺序，门槛）",
+                         "门槛未通过：自然顺序下公共搜索结果没有学到档位",
                          "两遍核对：两遍的记分、门槛、失败项和学习明细逐位相同",
                          "同一批 4 个请求", "b11-session-eviction）：20200 次登录，用时 61.5 秒"):
             self.assertIn(fragment, text)
