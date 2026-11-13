@@ -499,10 +499,13 @@ class LearningTests(unittest.TestCase):
         self.assertAlmostEqual(result["metrics"]["L0"]["accuracy"]["value"], 0.75)
         self.assertIs(gate(result, "L0 误学数")["ok"], False)
 
-    def test_a_key_the_truth_does_not_have_counts_as_wrong(self):
+    def test_a_key_the_truth_does_not_have_is_unmodeled_not_a_wrong_label(self):
         judgements = right_judgements() + [judgement("GET /api/nowhere items[].id", "public")]
         result = learning_score((right_positions(), judgements), (right_positions(), judgements))
-        self.assertEqual(result["metrics"]["L2"]["wrong"], 1)
+        self.assertEqual(result["metrics"]["L2"]["wrong"], 0)
+        self.assertEqual(result["metrics"]["L2"]["unmodeled"], 1)
+        self.assertEqual(result["metrics"]["unmodeled"]["unlisted"], 1)
+        self.assertIs(gate(result, "未模板化的位置")["ok"], False)
         self.assertEqual(len([row for row in result["learning"] if row["side"] == "unknown"]), 1)
 
     def test_stability_fails_when_the_last_round_changes_a_judgement(self):
