@@ -8,12 +8,13 @@
 -- The rows share the table of the response tiers (0010), its pruning and its generation guard, so this
 -- migration only widens the kind check. It backfills nothing and changes no other constraint.
 --
---   function          an ordinary unit used the function; the unit is the user, or the session where the
---                     site declares no users
+--   function          a unit with an identity used the function as an ordinary use: on an entry, any such
+--                     unit (an administrator's use there included); off an entry, only a unit that is no
+--                     administrator. The unit is the user, or the session where the site declares no users
 --   function_anon     a unit without an identity used it: `s:` and the session label, or `a:` and the
 --                     client address
---   function_admin    an administrator's unit used it
---   function_refused  an ordinary unit was refused it
+--   function_admin    an administrator's unit used it, on an entry too
+--   function_refused  an ordinary unit was refused it, off an entry
 
 ALTER TABLE object_response_evidence DROP CONSTRAINT object_response_evidence_kind_check;
 ALTER TABLE object_response_evidence ADD CONSTRAINT object_response_evidence_kind_check
