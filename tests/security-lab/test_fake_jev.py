@@ -254,6 +254,8 @@ class ServedTest(unittest.TestCase):
         self.assertTrue(jev.carries("O'Brien"))
         self.assertTrue(jev.carries("' OR 1=1--", call=1))
         self.assertFalse(jev.carries("' OR 1=1--", call=0))
+        self.assertTrue(jev.carries("' OR 1=1--", since=1))
+        self.assertFalse(jev.carries("' OR 1=1--", since=2))
         self.assertFalse(jev.carries("DROP TABLE"))
 
     def test_a_blank_text_cannot_be_looked_for(self) -> None:

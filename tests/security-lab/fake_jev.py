@@ -161,18 +161,19 @@ class FakeJev:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/v1/systemone"
 
-    def carries(self, text: str, call: int | None = None) -> bool:
+    def carries(self, text: str, call: int | None = None, *, since: int = 0) -> bool:
         """Whether `text` lies wholly inside one path or value Jev was shown, after `normalize`.
 
-        `call` picks one judgement by its index in `states` (0 is the first); without it any
-        judgement counts. It tells a payload that never reached the model from one the model
-        judged wrongly.
+        `call` picks one judgement by its index in `states` (0 is the first). Without it, every
+        judgement from index `since` on counts, so a caller can ask about the judgements its own
+        request caused. It tells a payload that never reached the model from one the model judged
+        wrongly.
         """
         form = normalize(text)
         if not form.strip():
             raise ValueError("a blank text is inside every request")
         with self.lock:
-            states = list(self.states) if call is None else [self.states[call]]
+            states = [self.states[call]] if call is not None else self.states[since:]
         return any(form in normalize(item) for state in states for item in _items(state["request"]))
 
     def start(self) -> None:
