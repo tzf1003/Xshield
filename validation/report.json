@@ -1,8 +1,8 @@
 {
   "scope": "Document syntax, JSON Schema and synthetic sample checks only. Not Rust behaviour (cargo test runs crates/xshield-core/tests/v4_samples.rs over the same samples), not WAF effectiveness and not model accuracy.",
   "passed": true,
-  "checks_total": 323,
-  "passed_count": 323,
+  "checks_total": 334,
+  "passed_count": 334,
   "checks": [
     {
       "name": "json:examples/sites-dev.json",
@@ -755,6 +755,21 @@
       "detail": ""
     },
     {
+      "name": "fences:08-state-machines.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "no_tool_tokens:08-state-machines.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:CHANGELOG.md:plans/README.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
       "name": "link:CHANGELOG.md:docs/00-overview.md",
       "passed": true,
       "detail": ""
@@ -956,6 +971,11 @@
     },
     {
       "name": "link:README.md:docs/07-console-architecture.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:README.md:docs/08-state-machines.md",
       "passed": true,
       "detail": ""
     },
@@ -1596,6 +1616,41 @@
     },
     {
       "name": "link:docs/07-console-architecture.md:03-admin-config-audit.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:plans/README.md:001-no-cached-allow-for-truncated-requests.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:plans/README.md:002-count-login-attempts-before-verifying.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:plans/README.md:003-scope-automatic-events-to-site-generation.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:plans/README.md:004-read-json-suffix-media-types.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:plans/README.md:005-drop-stale-live-poll-responses.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:plans/README.md:006-site-mutations-report-failure-and-refresh.md",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "link:plans/README.md:007-release-and-ci-tooling-drift.md",
       "passed": true,
       "detail": ""
     },

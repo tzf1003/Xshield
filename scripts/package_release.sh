@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Builds release binaries and the console bundle and assembles one tarball.
 #
-# Build output is large (a release Rust build is tens of GB), so nothing is
-# written to a default location: the caller names both directories and the
+# Build output is large (a release Rust build is tens of GB), so nothing but the
+# git-ignored console bundle (web/console/dist) is written inside the repository: the caller names both directories and the
 # script refuses any that lie inside the repository.
 #
 #   XSHIELD_DIST_DIR   where the staging tree and the tarball go

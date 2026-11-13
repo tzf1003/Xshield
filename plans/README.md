@@ -12,15 +12,19 @@ small and verifiable; everything else is listed under "Backlog" for the maintain
 
 | Plan | Title | Category | Priority | Effort | Depends on | Status |
 |------|-------|----------|----------|--------|------------|--------|
-| [001](001-no-cached-allow-for-truncated-requests.md) | A request with unread values never reuses or stores a cached allow | security | P1 | S | — | TODO |
-| [002](002-count-login-attempts-before-verifying.md) | Concurrent wrong passwords cannot exceed the sign-in limit | security | P1 | S | — | TODO |
-| [003](003-scope-automatic-events-to-site-generation.md) | A re-created site does not show the automatic changes of the site it replaced | bug | P2 | S | — | TODO |
-| [004](004-read-json-suffix-media-types.md) | `application/…+json` bodies are read as JSON everywhere | bug | P2 | S | — | TODO |
-| [005](005-drop-stale-live-poll-responses.md) | The live request list never shows rows fetched for a filter the page has left | bug | P2 | S | — | TODO |
-| [006](006-site-mutations-report-failure-and-refresh.md) | Deleting a site reports failure; import and rollback refresh what they changed | bug | P2 | S | — | TODO |
-| [007](007-release-and-ci-tooling-drift.md) | Release script, advisory exceptions and CI filters match the code that exists | dx | P2 | S | — | TODO |
+| [001](001-no-cached-allow-for-truncated-requests.md) | A request with unread values never reuses or stores a cached allow | security | P1 | S | — | DONE |
+| [002](002-count-login-attempts-before-verifying.md) | Concurrent wrong passwords cannot exceed the sign-in limit | security | P1 | S | — | DONE |
+| [003](003-scope-automatic-events-to-site-generation.md) | A re-created site does not show the automatic changes of the site it replaced | bug | P2 | S | — | DONE |
+| [004](004-read-json-suffix-media-types.md) | `application/…+json` bodies are read as JSON everywhere | bug | P2 | S | — | DONE |
+| [005](005-drop-stale-live-poll-responses.md) | The live request list never shows rows fetched for a filter the page has left | bug | P2 | S | — | DONE |
+| [006](006-site-mutations-report-failure-and-refresh.md) | Deleting a site reports failure; import and rollback refresh what they changed | bug | P2 | S | — | DONE |
+| [007](007-release-and-ci-tooling-drift.md) | Release script, advisory exceptions and CI filters match the code that exists | dx | P2 | S | — | DONE |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
+
+Plans 001–007 were executed on 2026-11-13 by executor agents in isolated worktrees and reviewed
+against their done criteria; the branch was then rebased onto main `8680518`. Verification that
+actually ran is listed in the pull request.
 
 ## Dependency notes
 
@@ -56,13 +60,21 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | Database-gated Rust tests return early and count as PASS when no database is configured; `verify_all.sh` does not export the URL. | tests | S | LOW | `crates/xshield-edge/tests/postgres.rs:61,249`, `scripts/verify_all.sh:114` |
 | The edge PostgreSQL tests use a hand-copied schema instead of `migrations/`. | tests | S–M | LOW | `crates/xshield-edge/tests/postgres.rs:30-33` |
 | Acceptance scenarios C6–C8 are documented as run by CI but are not in the lab script. | tests | M | LOW | `docs/04-deployment-testing.md:75-77,89`, `scripts/test_idor_lab.py` |
-| `check_env_docs.py` accepts variables that docs/05 lists as deleted; docs still say "109 variables". | dx / docs | S | LOW | `scripts/check_env_docs.py:46-48`, `docs/05-v3-removal.md:49,65-79`, `docs/03-admin-config-audit.md:81` |
-| README, docs/00 and docs/05 still say the code is the v3 implementation; `verify_all.sh` header lists steps that do not exist and omits the acceptance lab that CI runs. | docs / dx | S | LOW | `README.md:11,30,35`, `docs/00-overview.md:3`, `scripts/verify_all.sh:8,99-121` |
 | Actions are referenced by mutable tag or branch, including in the job that pushes and signs images. | dx / security | S | LOW | `.github/workflows/ci.yml:84,130`, `release-images.yml:62-82` |
 | CI `validate` has no timeout and no cargo cache; the Dockerfile copies the whole tree before the cargo build. | dx | S–M | LOW–MED | `.github/workflows/ci.yml:50-110`, `Dockerfile:28-31` |
-| `cryptography`, `@ant-design/icons` and `dayjs` are declared but imported nowhere. | deps | S | LOW | `scripts/requirements.txt:3`, `web/console/package.json:20,32` |
+| `cryptography` is pinned in `scripts/requirements.txt` but imported by no script. | deps | S | LOW | `scripts/requirements.txt:3` |
 | One global mutex serialises every site's judge and observe calls, with HMAC work inside it. | perf | M | LOW | `engine.rs:442-450,852-929` |
 | Per-address login limiting treats every IPv6 address separately and there is no global cap on concurrent password checks. | security | S | LOW | `crates/xshield-control/src/auth.rs:285,371` |
+
+Found while executing the plans (not yet investigated):
+
+- A request that reaches the 200-value cap may never be judgeable: with 250 query parameters the state sent to Jev exceeded its 8 KiB cap and the verdict was "Jev unavailable" (`crates/xshield-judge/src/engine.rs`, `STATE_BYTES_MAX`).
+- After a failed site delete the new error bar is rendered behind the still-open confirmation dialog; showing it inside the dialog needs a change to `web/console/src/features/sites/SiteHeader.tsx`.
+- During the browser suite the dev server logged `TypeError: Cannot read properties of null (reading 'prev')` from `web/console/src/features/request-detail/DetailHead.tsx`, caught by the route error boundary; no spec failed on it.
+- `scripts/package_release.sh` was not run end to end (a release build is tens of GB); watch its first real run.
+
+Rows about README/docs v3 status statements, the `verify_all.sh` header, the deleted-variable list
+in docs/05 and the unused console dependencies were dropped on 2026-11-13: main fixed them in #180 and #181.
 
 ### Direction (options, not defects)
 
