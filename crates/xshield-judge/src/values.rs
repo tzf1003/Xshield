@@ -2388,6 +2388,21 @@ mod tests {
                 .iter()
                 .any(|value| value.at == "body._method" && value.value == "DELETE")
         );
+        // A form-typed body that parses as JSON, whose form reading does not name `_method` (the `;` keeps it
+        // inside a value), still holds `_method` in its bytes: it is flagged, and nothing is read as a field.
+        let form_semicolon = extract_request(
+            "/api/users/5",
+            None,
+            Some("application/x-www-form-urlencoded"),
+            br#"{"a":"x;_method=DELETE"}"#,
+        );
+        assert!(form_semicolon.method_field_unread);
+        assert!(
+            !form_semicolon
+                .values
+                .iter()
+                .any(|value| value.at == "body._method")
+        );
         let untyped = extract_request(
             "/api/users/5",
             None,
