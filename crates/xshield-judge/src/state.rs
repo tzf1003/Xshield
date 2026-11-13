@@ -172,7 +172,7 @@ fn render(input: &StateInput<'_>, recent: usize, seen_per_value: usize, cap: usi
         .iter()
         .map(|value| render_value(input, value, cap, seen_per_value))
         .collect();
-    json!({
+    let state = json!({
         "entry": { "matched": input.entry_matched },
         "session": { "age_seconds": input.session_age_seconds, "entries_passed": input.entries_passed },
         "recent": recent,
@@ -183,7 +183,10 @@ fn render(input: &StateInput<'_>, recent: usize, seen_per_value: usize, cap: usi
             "truncated": input.truncated,
         },
     })
-    .to_string()
+    .to_string();
+    // The values and the path are redacted above. `seen_as` and `recent` quote earlier requests,
+    // so the finished text is checked once more: the credential leaves the gateway nowhere.
+    crate::trace::scrubbed(&state, input.credential).into_owned()
 }
 
 /// Serializes the `state`, trimming `recent`, `seen_as` and long values in that

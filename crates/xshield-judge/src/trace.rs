@@ -2,6 +2,8 @@
 //! request values as the session saw them, the links to the requests that
 //! showed them, and the query string with secrets removed.
 
+use std::borrow::Cow;
+
 use xshield_core::context::trace::{TRACE_NAME_BYTES_MAX, TRACE_PATH_BYTES_MAX, VALUE_CHARS_MAX};
 use xshield_core::context::{
     Attempt, ObjectFrom, PublicAccess, Reliability, Tier, TraceEntry, TraceRecent, TraceSource,
@@ -11,7 +13,7 @@ use xshield_core::context::{
 use crate::context::{EntryPass, Origin, Recent, request_text};
 use crate::slots::origin_slot;
 use crate::state::{REDACTED, is_secret_name};
-use crate::values::{RequestValue, value_kind};
+use crate::values::{RequestValue, percent_decode, value_kind};
 
 /// Largest query string a row keeps, in bytes.
 pub const QUERY_BYTES_MAX: usize = 2 * 1024;
@@ -79,10 +81,15 @@ pub fn value_entry(
                 let tier = place.origin_tiers.get(index).copied().flatten();
                 TraceSource {
                     field: origin.field.clone(),
-                    request: origin.request.clone(),
+                    request: scrubbed(&origin.request, credential).into_owned(),
                     request_id: request_text(origin.request_id),
                     at_millis: nonzero(origin.at_ms),
-                    slot: origin_slot(origin).map(|slot| cut(slot, TRACE_NAME_BYTES_MAX)),
+                    slot: origin_slot(origin).map(|slot| {
+                        cut(
+                            scrubbed(&slot, credential).into_owned(),
+                            TRACE_NAME_BYTES_MAX,
+                        )
+                    }),
                     object_from: object.as_ref().map(|_| ObjectFrom::Map),
                     object,
                     tier: tier.map(|(tier, _)| tier),
@@ -90,7 +97,10 @@ pub fn value_entry(
                 }
             })
             .collect(),
-        slot: Some(cut(place.slot, TRACE_NAME_BYTES_MAX)),
+        slot: Some(cut(
+            scrubbed(&place.slot, credential).into_owned(),
+            TRACE_NAME_BYTES_MAX,
+        )),
         object_from: place.object.as_ref().map(|_| ObjectFrom::Map),
         object: place.object,
         public_access,
@@ -131,9 +141,7 @@ fn shown(
 /// secret words or it carries the session credential.
 #[must_use]
 pub fn redacted_query(query: &str, credential: Option<&str>, secret_words: &[String]) -> String {
-    let carries_credential = |text: &str| {
-        credential.is_some_and(|credential| !credential.is_empty() && text.contains(credential))
-    };
+    let carries_credential = |text: &str| carries(text, credential, true);
     let mut out = String::with_capacity(query.len().min(QUERY_BYTES_MAX));
     for (index, pair) in query.split('&').enumerate() {
         if index > 0 {
@@ -151,6 +159,57 @@ pub fn redacted_query(query: &str, credential: Option<&str>, secret_words: &[Str
         }
     }
     cut(out, QUERY_BYTES_MAX)
+}
+
+/// A credential shorter than this is not searched for inside paths and whole documents: so short
+/// a text is an ordinary word or number there (`files`, `7`), and redacting every such segment
+/// would hide the request from the judge. Request values and query pairs are compared at any
+/// length, as before.
+pub const SCRUB_BYTES_MIN: usize = 8;
+
+/// `text` with every occurrence of the session credential replaced: the last check on a text
+/// that is about to leave the gateway, for the places that quote earlier requests.
+#[must_use]
+pub fn scrubbed<'a>(text: &'a str, credential: Option<&str>) -> Cow<'a, str> {
+    match credential {
+        Some(credential) if credential.len() >= SCRUB_BYTES_MIN && text.contains(credential) => {
+            Cow::Owned(text.replace(credential, REDACTED))
+        }
+        _ => Cow::Borrowed(text),
+    }
+}
+
+/// Whether `text` carries the credential, as written or percent-encoded (`plus`: in a query).
+fn carries(text: &str, credential: Option<&str>, plus: bool) -> bool {
+    credential.is_some_and(|credential| {
+        !credential.is_empty()
+            && (text.contains(credential) || percent_decode(text, plus).contains(credential))
+    })
+}
+
+/// The path with every segment that carries the session credential redacted. The path goes to
+/// Jev and into the log, and the credential must reach neither.
+#[must_use]
+pub fn redacted_path<'a>(path: &'a str, credential: Option<&str>) -> Cow<'a, str> {
+    let credential = credential.filter(|credential| credential.len() >= SCRUB_BYTES_MIN);
+    if !carries(path, credential, false) {
+        return Cow::Borrowed(path);
+    }
+    let segments: Vec<&str> = path
+        .split('/')
+        .map(|segment| {
+            if carries(segment, credential, false) {
+                REDACTED
+            } else {
+                segment
+            }
+        })
+        .collect();
+    // A credential with a `/` in it spans segments: no single segment carries it.
+    if segments.iter().all(|segment| *segment != REDACTED) {
+        return Cow::Borrowed(REDACTED);
+    }
+    Cow::Owned(segments.join("/"))
 }
 
 fn cut(mut text: String, max: usize) -> String {
@@ -204,6 +263,36 @@ mod tests {
         assert_eq!(
             redacted_query(query, Some("SESS1"), &words),
             "q=a%20b&password=<redacted>&ssn=<redacted>&<redacted>&x"
+        );
+    }
+
+    #[test]
+    fn a_credential_in_the_path_or_percent_encoded_in_the_query_is_redacted() {
+        assert_eq!(redacted_path("/a/b", Some("SESSION-1")), "/a/b");
+        assert_eq!(redacted_path("/a/b", None), "/a/b");
+        assert_eq!(
+            redacted_path("/reset/xSESSION-1y/done", Some("SESSION-1")),
+            "/reset/<redacted>/done"
+        );
+        assert_eq!(
+            redacted_path("/reset/abcd%2Befgh", Some("abcd+efgh")),
+            "/reset/<redacted>"
+        );
+        // A credential with a slash in it spans segments, so the whole path goes.
+        assert_eq!(
+            redacted_path("/x/abcd/efgh/y", Some("abcd/efgh")),
+            "<redacted>"
+        );
+        // A short credential is an ordinary path word: the path is left as it is.
+        assert_eq!(redacted_path("/api/files/7", Some("files")), "/api/files/7");
+        assert_eq!(
+            scrubbed("id @ GET /t/SESSION-1/x", Some("SESSION-1")),
+            "id @ GET /t/<redacted>/x"
+        );
+        assert_eq!(scrubbed("GET /api/files", Some("files")), "GET /api/files");
+        assert_eq!(
+            redacted_query("t=a%2Fb%3D&x=1", Some("a/b="), &[]),
+            "<redacted>&x=1"
         );
     }
 

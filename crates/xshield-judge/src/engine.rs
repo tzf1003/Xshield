@@ -30,7 +30,7 @@ use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
 };
 use crate::tiers;
-use crate::trace::{Place, entry_trace, recent_trace, redacted_query, value_entry};
+use crate::trace::{Place, entry_trace, recent_trace, redacted_path, redacted_query, value_entry};
 use crate::values::{
     ExtractedRequest, ResponseValue, extract_request, extract_response_facts, json_unescape,
     path_segment, percent_decode,
@@ -256,6 +256,8 @@ struct Turn<'a> {
     extracted: &'a ExtractedRequest,
     cache_key: &'a Digest16,
     tuning: &'a Tuning<'a>,
+    /// The session credential as it must be redacted (see [`redaction_secret`]).
+    secret: Option<&'a str>,
 }
 
 impl<J: JevPort> Judge<J> {
@@ -362,6 +364,7 @@ impl<J: JevPort> Judge<J> {
             extracted: &extracted,
             cache_key: &cache_key,
             tuning: &tuning,
+            secret: redaction_secret(Some(site), request),
         };
         let mut jev = None;
         let mut sent = Vec::new();
@@ -598,7 +601,7 @@ impl<J: JevPort> Judge<J> {
                 seen.is_some(),
                 verified,
                 &ranked,
-                request.credential,
+                turn.secret,
                 tuning.secret_words,
                 place,
             ));
@@ -649,10 +652,10 @@ impl<J: JevPort> Judge<J> {
             entries_passed: &entries,
             recent: snapshot.recent.iter().collect(),
             method: request.method,
-            path: turn.resolved.logical_path(),
+            path: &redacted_path(turn.resolved.logical_path(), turn.secret),
             values,
             truncated: turn.extracted.truncated,
-            credential: request.credential,
+            credential: turn.secret,
             secret_words: tuning.secret_words,
         };
         let (state, trim) = match build_state(&input) {
@@ -840,6 +843,14 @@ impl<J: JevPort> Judge<J> {
         let as_sent = values.clone();
         self.without_echo(&mut values, observation.echo);
 
+        // The recent requests are only ever shown (to Jev and in the log), so a path that carries
+        // the credential is remembered redacted. An origin keeps its request as it was: positions
+        // are matched on it, and it is scrubbed where it is shown.
+        let secret = observation
+            .credential
+            .map(|credential| credential_token(site, credential))
+            .filter(|secret| !secret.is_empty());
+        let shown_path = redacted_path(resolved.logical_path(), secret);
         let request = format!("{} {}", observation.method, resolved.logical_path());
         let request_id = request_number(observation.request_id);
         let source = Source {
@@ -945,7 +956,7 @@ impl<J: JevPort> Judge<J> {
             }
             session.record_request(Recent {
                 method: observation.method.to_owned(),
-                path: resolved.logical_path().to_owned(),
+                path: shown_path.clone().into_owned(),
                 status: observation.status,
                 request_id,
                 at_ms: observation.now_ms,
@@ -1108,6 +1119,16 @@ fn credential_token<'a>(site: &SiteSpec, credential: &'a str) -> &'a str {
     }
 }
 
+/// The text that must never reach Jev or the log for this request: the session credential, and for
+/// an `Authorization` header its token without the scheme. A client that repeats its bearer token
+/// in the query, the body or the path sends the bare token, never `Bearer <token>`, and the bare
+/// token is part of the full header value, so matching on it covers both.
+fn redaction_secret<'a>(site: Option<&SiteSpec>, request: &RequestFacts<'a>) -> Option<&'a str> {
+    let credential = request.credential?;
+    let secret = site.map_or(credential, |site| credential_token(site, credential));
+    (!secret.is_empty()).then_some(secret)
+}
+
 /// `value` without a leading authentication scheme, such as `Bearer `. A scheme is a token
 /// (RFC 9110 section 11.1), so digits and some symbols may be in it.
 fn without_scheme(value: &str) -> &str {
@@ -1187,6 +1208,7 @@ fn base_row(
     resolved: &Resolved,
 ) -> DecisionRecord {
     let secret_words = site.map_or(&[][..], |site| site.advanced().secret_fields());
+    let secret = redaction_secret(site, request);
     DecisionRecord {
         at_millis: request.now_ms,
         request_id: request.request_id.to_owned(),
@@ -1198,13 +1220,13 @@ fn base_row(
         session: String::new(),
         context: None,
         method: request.method.to_owned(),
-        path: request.path.to_owned(),
-        logical_path: resolved.logical_path().to_owned(),
+        path: redacted_path(request.path, secret).into_owned(),
+        logical_path: redacted_path(resolved.logical_path(), secret).into_owned(),
         api: resolved.api().cloned(),
         request_headers: request.request_headers.to_vec(),
         query: request
             .query
-            .map(|query| redacted_query(query, request.credential, secret_words)),
+            .map(|query| redacted_query(query, secret, secret_words)),
         status: None,
         decision_path: DecisionPath::NoSession,
         outcome: Outcome::Blocked,
@@ -3952,6 +3974,72 @@ mod tests {
             Judge::<FakeJev>::credential_from(&header, Some("SID=x"), Some("Bearer t")),
             Some("Bearer t")
         );
+    }
+
+    #[tokio::test]
+    async fn a_bearer_token_repeated_without_its_scheme_reaches_neither_jev_nor_the_log() {
+        use crate::state::REDACTED;
+        const TOKEN: &str = "tok-5ecret-0123456789";
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = SiteSpec::from_json(
+            r#"{"name":"h","hosts":["h.test"],"origin":"http://o:1","session":{"header":"Authorization"},"entries":["/login"],"mode":"enforce"}"#,
+        )
+        .unwrap();
+        let credential = format!("Bearer {TOKEN}");
+        let path = format!("/api/echo/{TOKEN}/detail");
+        let query = format!("t={TOKEN}&page=2");
+        let body = format!(r#"{{"jwt":"{TOKEN}","note":"x"}}"#);
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get(&path, Some(&query), Some(&credential), 1_000)
+        };
+        let first = judge.judge(&site, &request).await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        // The origin answers, so the request joins the session's recent requests and origins.
+        judge.observe(
+            &site,
+            &Observation {
+                path: &path,
+                method: "POST",
+                body: br#"{"id":"41"}"#,
+                ..list_response(&credential, 1_500)
+            },
+        );
+        let second = judge
+            .judge(&site, &get("/api/items/41", None, Some(&credential), 2_000))
+            .await;
+        let third = judge
+            .judge(&site, &get("/api/items/77", None, Some(&credential), 3_000))
+            .await;
+        assert!(fake.calls() >= 2, "later requests are asked about too");
+        assert!(
+            fake.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(1)
+                .any(|sent| sent.contains("/api/echo/<redacted>/detail")),
+            "a later state quotes the earlier request, without the token"
+        );
+
+        for sent in fake.sent.lock().unwrap().iter() {
+            assert!(!sent.contains(TOKEN), "Jev was sent the token: {sent}");
+        }
+        for judgement in [&first, &second, &third] {
+            let row = serde_json::to_string(&judgement.record).unwrap();
+            assert!(!row.contains(TOKEN), "the log row carries the token: {row}");
+        }
+        assert_eq!(first.record.path, format!("/api/echo/{REDACTED}/detail"));
+        assert_eq!(
+            first.record.query.as_deref(),
+            Some(format!("{REDACTED}&page=2").as_str())
+        );
+        // A row refused before judging redacts the same way.
+        let refused = refused_row(Some(&site), &request, DecisionPath::BodyNotInspectable, 413);
+        assert!(!serde_json::to_string(&refused).unwrap().contains(TOKEN));
     }
 
     #[test]
