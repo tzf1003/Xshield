@@ -140,6 +140,8 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 - **真实 Jev**：用同一组场景加一批正常业务流量调用真实 Jev，记录误拦和漏拦。没有实测数据之前，不对外宣称准确率。
 
   `crates/xshield-judge/tests/live_jev.rs` 是这组真实调用的测试（默认忽略）：`XSHIELD_JEV_ROUTE=direct XSHIELD_JEV_API_KEY=... cargo test -p xshield-judge --test live_jev -- --ignored --nocapture`，每个场景打印一行判定、概率和耗时。
+
+  功能表的真实调用是其中的 `live_function_table`：75 例加 2 条只记录的请求，发给四个站点（两个 emr 站点、一个带管理员身份位置的站点、一个商店），每条核对网关送给 Jev 的 `function`。其中 3 例是已知做不到的（`KnownGap`，只打印，不算失败）。同一文件里的 `function_cases_reach_jev_as_intended` 不需要密钥，CI 里用桩模型运行：它只核对每条请求是否带着用例写明的 `function` 送到了模型面前，不核对模型的结论。
 - **代码质量**：沿用 `cargo fmt`、`cargo clippy`、`cargo test` 和 `scripts/verify_all.sh`。
 
 v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回归已随对应功能一起删除。
