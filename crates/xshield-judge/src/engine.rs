@@ -4180,6 +4180,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_base64_field_sends_its_decoded_injection_and_the_request_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The note is base64 for `' OR 1=1--`. The origin decodes it, so the decoded text is judged too.
+        let body = "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nJyBPUiAxPTEtLQ==\r\n--b--\r\n";
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("multipart/form-data; boundary=b"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert!(fake.sent().iter().any(|body| {
+            sent_values(body)
+                .iter()
+                .any(|item| item["at"] == "body.note" && item["value"] == "' OR 1=1--")
+        }));
+    }
+
+    #[tokio::test]
     async fn three_hundred_ids_the_session_saw_as_their_own_kind_are_fast_allowed() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
