@@ -287,6 +287,7 @@ export const ERROR_TEXT: Record<string, string> = {
   BODY_TOO_LARGE: "内容过大（配置最大 64 KiB，导入文件最大 100 MiB）",
   MODEL_ENV_KEY_MISSING: "环境变量里没有可用的密钥，不能改回",
   MODEL_KEY_REQUIRED: "这组配置还没有密钥，请填写后再保存",
+  MODEL_KEY_ENDPOINT_CHANGED: "地址变了，已保存的密钥只用于原来的地址，请重新填写密钥",
   MODEL_KEY_UNAVAILABLE: "控制台没有配置密钥加密，暂时不能保存密钥",
   MODEL_KEY_UNREADABLE: "已保存的密钥读不出来，请重新填写",
   MODEL_NOTE_INVALID: "备注最长 200 个字符",

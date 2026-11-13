@@ -290,12 +290,80 @@ async fn logout_clears_the_session_cookie() {
     let app = router(test_state());
     let response = send(
         &app,
-        request("POST", "/api/logout", None, None, Body::empty()),
+        request(
+            "POST",
+            "/api/logout",
+            None,
+            Some("application/json"),
+            Body::empty(),
+        ),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let cookie = header_text(response.headers(), header::SET_COOKIE).unwrap_or_default();
     assert!(cookie.contains("Max-Age=0"), "{cookie}");
+}
+
+#[tokio::test]
+async fn a_write_that_a_page_of_another_site_could_send_is_refused() {
+    let app = router(test_state());
+    // Refused before the session is looked at: a form, plain text, or no type at all,
+    // with or without a body.
+    for (uri, content_type) in [
+        ("/api/logout", None),
+        ("/api/logout", Some("text/plain")),
+        ("/api/sites/emr/objects/run", None),
+        (
+            "/api/sites/emr/rollback",
+            Some("application/x-www-form-urlencoded"),
+        ),
+        ("/api/import", Some("text/plain")),
+        ("/api/import", Some("application/json")),
+        ("/api/import", None),
+    ] {
+        let response = send(
+            &app,
+            request("POST", uri, None, content_type, Body::empty()),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "{uri} {content_type:?}"
+        );
+        assert_eq!(body_json(response).await["error"], "UNSUPPORTED_MEDIA_TYPE");
+    }
+    let put = send(
+        &app,
+        request("PUT", "/api/sites/emr", None, None, Body::empty()),
+    )
+    .await;
+    assert_eq!(put.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    // The right type goes on to the session check.
+    for (uri, content_type) in [
+        (
+            "/api/sites/emr/objects/run",
+            "application/json; charset=utf-8",
+        ),
+        ("/api/import", "application/x-ndjson"),
+    ] {
+        let response = send(
+            &app,
+            request("POST", uri, None, Some(content_type), Body::empty()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+    }
+    // Reads and deletes are not form-sendable writes and are left alone.
+    let read = send(&app, get("/api/requests", None)).await;
+    assert_eq!(read.status(), StatusCode::UNAUTHORIZED);
+    let delete = send(
+        &app,
+        request("DELETE", "/api/sites/emr", None, None, Body::empty()),
+    )
+    .await;
+    assert_eq!(delete.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

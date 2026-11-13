@@ -9,6 +9,7 @@ import {
   agentCanShare,
   agentEffective,
   agentKeyRequired,
+  endpointMoved,
   agentProblems,
   agentTestable,
   agentValues,
@@ -123,6 +124,23 @@ test("agentProblems checks the timeout in seconds", () => {
   assert.deepEqual(agentProblems({ ...form, timeout: "400" }, false), {
     timeout: MODEL_TEXT.timeoutRange(5, 120, MODEL_TEXT.unitSeconds),
   });
+});
+
+test("endpointMoved asks for the key again when the form names another address", () => {
+  const saved = formFromValues("jev", {
+    route: "custom",
+    endpoint: "https://jev.internal.example/v1/systemone",
+    model: "jev-1",
+    timeout_ms: 2000,
+  });
+  assert.equal(endpointMoved({ ...saved, endpoint: ` ${saved.endpoint} ` }, saved), false);
+  assert.equal(endpointMoved({ ...saved, timeout: "3000" }, saved), false);
+  assert.equal(
+    endpointMoved({ ...saved, endpoint: "https://collector.example.net/v1/systemone" }, saved),
+    true,
+  );
+  // Another route has another fixed address.
+  assert.equal(endpointMoved(withChoice("jev", saved, "direct"), saved), true);
 });
 
 test("agentKeyRequired asks for the agent's own key once a form stops sharing Jev's", () => {

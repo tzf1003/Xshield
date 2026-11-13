@@ -32,6 +32,7 @@ import {
   agentTestable,
   agentValues,
   clockText,
+  endpointMoved,
   describeTest,
   formChanges,
   formFromValues,
@@ -172,7 +173,7 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
   const { modal } = App.useApp();
 
   const saved = jevForm(jev);
-  const keyRequired = jev.source === "env" || !jev.key.set;
+  const keyRequired = jev.source === "env" || !jev.key.set || endpointMoved(form, saved);
   const problems: FormProblems = jevProblems(form, keyRequired);
   const valid = Object.keys(problems).length === 0;
   const tested = test.passed !== null && sameForm(test.passed.form, form);
@@ -272,7 +273,8 @@ export function JevModelCard({ jev, now }: { jev: JevModelsState; now: number })
     setConflict(null);
     setSaveError(null);
     // The dialog opens only when the version saves as it is; otherwise the form asks for the key it needs first.
-    setSaveOpen(Object.keys(jevProblems(next, keyRequired)).length === 0);
+    const keyNeeded = jev.source === "env" || !jev.key.set || endpointMoved(next, saved);
+    setSaveOpen(Object.keys(jevProblems(next, keyNeeded)).length === 0);
   };
 
   const backToEnv = () => {
@@ -470,7 +472,8 @@ export function AgentModelCard({
   const saved = agentForm(agent);
   // The key is shared only when both sides run on the Vercel AI Gateway and the console holds Jev's key (design 2.2).
   const shareAllowed = agentCanShare(form, jevRoute, jevConsole);
-  const keyRequired = agentKeyRequired(form.shareKey, agent.key);
+  const keyRequired =
+    agentKeyRequired(form.shareKey, agent.key) || (!form.shareKey && endpointMoved(form, saved));
   const problems: FormProblems = agentProblems(form, keyRequired);
   const valid = Object.keys(problems).length === 0;
   const tested = test.passed !== null && sameForm(test.passed.form, form);
@@ -550,7 +553,9 @@ export function AgentModelCard({
   const restore = (version: number, config: ModelValues) => {
     const next = formFromValues("agent", config);
     const effective = agentEffective(next, jevRoute, jevConsole);
-    const keyNeeded = agentKeyRequired(effective.shareKey, agent.key);
+    const keyNeeded =
+      agentKeyRequired(effective.shareKey, agent.key) ||
+      (!effective.shareKey && endpointMoved(effective, saved));
     setForm(next);
     setReadVersion(agent.version);
     setRestored(version);

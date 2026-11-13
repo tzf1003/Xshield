@@ -237,7 +237,8 @@ pub fn router(state: Arc<ControlState>) -> Router {
         .merge(public)
         .merge(gated)
         .merge(import)
-        .fallback(static_files::serve);
+        .fallback(static_files::serve)
+        .layer(middleware::from_fn(json_writes_only));
     if state.console_origin.is_some() {
         app = app.layer(middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -304,6 +305,37 @@ fn object_routes() -> Router<Arc<ControlState>> {
             "/api/sites/{name}/objects/agent-sample",
             get(object_agent_api::sample),
         )
+}
+
+/// Refuses a `POST`, `PUT` or `PATCH` to the API that is not sent as
+/// `application/json` (`application/x-ndjson` for the import), body or no body
+/// (docs/07 section 7.9.1). A page of another site can make the browser send a
+/// form or a plain-text request with the administrator's cookie, but not one of
+/// these types without the API's consent, so such a request stops here.
+async fn json_writes_only(request: Request, next: Next) -> Response {
+    let write = matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::PATCH
+    );
+    let path = request.uri().path();
+    if write && path.starts_with("/api/") {
+        let wanted = if path == "/api/import" {
+            "application/x-ndjson"
+        } else {
+            "application/json"
+        };
+        let sent = request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
+        if !sent.is_some_and(|sent| sent.eq_ignore_ascii_case(wanted)) {
+            return ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE")
+                .into_response();
+        }
+    }
+    next.run(request).await
 }
 
 /// Replaces the framework's plain-text 413 with the API's JSON error code.
