@@ -25,7 +25,7 @@ from effectiveness.builders import (
     suspicious_probe,
     truth_doc,
 )
-from effectiveness.score import compare_baseline, score
+from effectiveness.score import _flatten, compare_baseline, score
 
 DELETE = "DELETE /api/patients/{id} path[2]"
 POST = "POST /api/patients/{id}/notes path[2]"
@@ -275,7 +275,7 @@ class PopulationTests(unittest.TestCase):
     def test_a_configuration_without_tiers_is_needs_tiers_not_a_failure(self):
         rows = [observation("tiered", request_id="t1", config="none", requires=("tiers",))]
         result = score(rows, [decision("t1", path="fast_allow", outcome="allowed")])
-        self.assertEqual(result["needs_tiers"], {"none": 1})
+        self.assertEqual(result["needs"]["tiers"]["counts"], {"none": 1})
         self.assertEqual(result["failures"], [])
         self.assertIsNone(result["metrics"]["P1"]["value"])
         self.assertTrue(result["passed"])
@@ -284,9 +284,106 @@ class PopulationTests(unittest.TestCase):
         truth = truth_doc(request=[], response=[(SEARCH, "patient", "public")])
         rows = [observation("tiered", request_id="t1", config="truth", requires=("tiers",))]
         result = score(rows, [decision("t1", path="fast_allow", outcome="allowed")], truth=truth)
-        self.assertEqual(result["needs_tiers"], {})
+        self.assertEqual(result["needs"], {})
         self.assertEqual(result["metrics"]["P1"]["value"], 0.0)
         self.assertEqual(result["failures"][0]["detail"], "应拦截，实际放行")
+
+
+class FunctionTableTests(unittest.TestCase):
+    """A row that requires functions is scored only where the configuration has a function table (plan 9.3,
+    the 2026-11-13 item). Without one it is left out and named, and a known gap of that kind stays listed."""
+
+    def function_row(self, config: str = "truth", status: str = "must") -> dict[str, Any]:
+        return observation("function-case", request_id="f1", group="regression", status=status,
+                           category="function_level", expect="block", reason="access", config=config,
+                           requires=("functions",))
+
+    def with_table(self) -> dict[str, Any]:
+        truth = truth_doc(request=[], response=[(SEARCH, "patient", "public")])
+        truth["functions"] = [{"key": "GET /api/admin/export", "tier": "admin"}]
+        return truth
+
+    def test_without_a_function_table_the_row_is_left_out_and_named(self):
+        result = score([self.function_row()], [decision("f1", path="fast_allow", outcome="allowed")])
+        self.assertEqual(result["needs"]["functions"]["counts"], {"truth": 1})
+        self.assertEqual(result["needs"]["functions"]["cases"], ["function-case"])
+        self.assertEqual(result["failures"], [])
+        self.assertIsNone(result["metrics"]["P1"]["value"])
+        self.assertTrue(result["passed"])
+
+    def test_a_known_gap_without_a_function_table_stays_listed(self):
+        rows = [self.function_row(status="known_gap")]
+        result = score(rows, [decision("f1", path="fast_allow", outcome="allowed")])
+        self.assertEqual(len(result["known_gaps"]), 1)
+        self.assertEqual(result["known_gaps"][0]["lacks"], ["functions"])
+        self.assertFalse(result["known_gaps"][0]["unexpected_pass"])
+        self.assertEqual(result["failures"], [])
+
+    def test_with_a_function_table_an_unblocked_function_row_loses_the_point(self):
+        result = score([self.function_row()], [decision("f1", path="fast_allow", outcome="allowed")],
+                       truth=self.with_table())
+        self.assertEqual(result["needs"], {})
+        self.assertEqual(result["metrics"]["P1"]["value"], 0.0)
+        self.assertEqual(result["failures"][0]["detail"], "应拦截，实际放行")
+
+    def test_with_a_function_table_a_block_for_access_scores(self):
+        record = decision("f1", path="jev_deny", outcome="blocked", jev_record=jev("DENY", "BENIGN"))
+        result = score([self.function_row()], [record], truth=self.with_table())
+        self.assertEqual(result["metrics"]["P1"]["value"], 1.0)
+        self.assertEqual(result["metrics"]["P3"]["value"], 1.0)
+        self.assertEqual(result["failures"], [])
+
+    def test_a_block_row_is_not_part_of_the_benign_activity(self):
+        admin = observation("admin-refused", request_id="a1", group="attack", category="function_level",
+                            expect="block", reason="access", config="none", requires=("functions",))
+        rows = [benign("b1"), admin]
+        records = [decision("b1", path="fast_allow", outcome="allowed"),
+                   decision("a1", path="jev_allow", outcome="allowed", jev_record=jev("ALLOW", "BENIGN"))]
+        metrics = score(rows, records)["metrics"]
+        self.assertEqual((metrics["S3"]["num"], metrics["S3"]["den"]), (1, 1))
+        self.assertEqual(metrics["S4"]["den"], 1)
+
+
+class PerConfigTests(unittest.TestCase):
+    """S1, S3 and S4 each give a column per configuration, so one failing configuration cannot hide behind the
+    total (plan 12a). A wrong input loses its own column, and the baseline names that column."""
+
+    def scored(self, truth_fast: bool, truth_verified: bool) -> dict[str, Any]:
+        rows = [observation(config, request_id=f"{config}-1", group="benign", category="benign_list", expect="allow",
+                            reason=None, config=config, refs=[reference("101", shown=True)])
+                for config in ("none", "truth")]
+        records = [
+            decision("none-1", path="fast_allow", outcome="allowed", values=[entry("101", verified=True)]),
+            decision("truth-1", path="fast_allow" if truth_fast else "jev_allow", outcome="allowed",
+                     values=[entry("101", verified=truth_verified)],
+                     jev_record=None if truth_fast else jev("ALLOW", "BENIGN")),
+        ]
+        return score(rows, records)["metrics"]
+
+    def test_a_right_configuration_gives_each_column_its_value(self):
+        metrics = self.scored(truth_fast=True, truth_verified=True)
+        self.assertEqual(metrics["S1"]["by_config"]["truth"]["value"], 1.0)
+        self.assertEqual(metrics["S3"]["by_config"]["truth"]["value"], 1.0)
+        self.assertEqual(metrics["S4"]["by_config"]["truth"]["value"], 0.0)
+        self.assertEqual(metrics["S3"]["by_config"]["none"]["value"], 1.0)
+
+    def test_a_wrong_column_is_not_hidden_by_the_total(self):
+        metrics = self.scored(truth_fast=False, truth_verified=False)
+        self.assertEqual(metrics["S1"]["value"], 0.5)  # the total: one of two values verified
+        self.assertEqual(metrics["S1"]["by_config"]["truth"]["value"], 0.0)
+        self.assertEqual(metrics["S1"]["by_config"]["none"]["value"], 1.0)
+        self.assertEqual(metrics["S3"]["by_config"]["truth"]["value"], 0.0)
+        self.assertEqual(metrics["S4"]["by_config"]["truth"]["value"], 1.0)
+
+    def test_the_baseline_names_the_column_that_fell(self):
+        right = _flatten(self.scored(truth_fast=True, truth_verified=True))
+        wrong = _flatten(self.scored(truth_fast=False, truth_verified=False))
+        self.assertEqual(right["S1/truth"], 1.0)
+        regressions = {item["name"] for item in compare_baseline(wrong, {"values": right})["regressions"]}
+        self.assertIn("S1/truth", regressions)
+        self.assertIn("S3/truth", regressions)
+        self.assertNotIn("S1/none", regressions)
+        self.assertEqual(compare_baseline(right, {"values": right})["regressions"], [])
 
 
 class LabelCheckTests(unittest.TestCase):
