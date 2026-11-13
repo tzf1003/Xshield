@@ -448,13 +448,31 @@ pub fn contradicts(
     map: &ObjectMap,
     thresholds: Thresholds,
 ) -> bool {
+    contradicting_kind(confirmed, evidence, map, thresholds).is_some()
+}
+
+/// The other kind that [`contradicts`] finds, with its share of the votes in thousandths. When several
+/// other kinds hold the share, the one with the most votes. `None` when none does, or when the evidence is
+/// short of the thresholds. The learning task names this kind in the note of an automatic pause.
+#[must_use]
+pub fn contradicting_kind<'a>(
+    confirmed: &str,
+    evidence: &'a Evidence,
+    map: &'a ObjectMap,
+    thresholds: Thresholds,
+) -> Option<(&'a str, u32)> {
     let votes = evidence.votes();
     if votes < thresholds.votes || evidence.sessions() < thresholds.sessions {
-        return false;
+        return None;
     }
-    evidence.kinds(map).into_iter().any(|(kind, count)| {
-        kind != confirmed && meets_share(count, votes, thresholds.share_per_mille)
-    })
+    evidence
+        .kinds(map)
+        .into_iter()
+        .filter(|(kind, count)| {
+            *kind != confirmed && meets_share(*count, votes, thresholds.share_per_mille)
+        })
+        .max_by_key(|(_, count)| *count)
+        .map(|(kind, count)| (kind, share_of(count, votes)))
 }
 
 /// The share of votes, in thousandths, whose response position the map gives

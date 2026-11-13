@@ -9,6 +9,7 @@
   },
   "agent_configured": false,
   "classes": [],
+  "identified": false,
   "slots": [],
   "events": [],
   "features": {

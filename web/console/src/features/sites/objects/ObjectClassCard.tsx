@@ -13,12 +13,14 @@ type Props = {
   /** The positions of the class that the filters let through. */
   rows: readonly ObjectSlotRow[];
   classes: readonly ObjectClass[];
+  /** Whether the site declares a user identity. */
+  identified: boolean;
   selected: string | null;
   now: number;
   onOpen: (id: string) => void;
 };
 
-export function ObjectClassCard({ cls, rows, classes, selected, now, onOpen }: Props) {
+export function ObjectClassCard({ cls, rows, classes, identified, selected, now, onOpen }: Props) {
   const unavailable = OBJECT_TEXT.classCard.unavailable;
   return (
     <Card
@@ -80,7 +82,14 @@ export function ObjectClassCard({ cls, rows, classes, selected, now, onOpen }: P
       {rows.length === 0 ? (
         <Empty title={OBJECT_TEXT.none} />
       ) : (
-        <SlotTable rows={rows} classes={classes} selected={selected} now={now} onOpen={onOpen} />
+        <SlotTable
+          rows={rows}
+          classes={classes}
+          identified={identified}
+          selected={selected}
+          now={now}
+          onOpen={onOpen}
+        />
       )}
     </Card>
   );
