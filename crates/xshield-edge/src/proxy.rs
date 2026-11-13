@@ -17,7 +17,7 @@ use xshield_core::context::{
 use xshield_judge::context::Digest16;
 use xshield_judge::engine::{Judge, Observation, RequestFacts, refused_row};
 use xshield_judge::jev::JevPort;
-use xshield_judge::values::RESPONSE_PARSE_MAX;
+use xshield_judge::values::{RESPONSE_PARSE_MAX, is_json_media, media_kind};
 
 use crate::sink::DecisionSink;
 use crate::sites::{EdgeSite, SiteTable};
@@ -189,8 +189,8 @@ fn issued_credential(site: &SiteSpec, response: &ResponseHeader) -> Option<Strin
 }
 
 fn observable_type(content_type: &str) -> bool {
-    let lower = content_type.to_ascii_lowercase();
-    lower.contains("json") || lower.starts_with("text/html")
+    let kind = media_kind(content_type);
+    is_json_media(&kind) || kind.starts_with("text/html")
 }
 
 /// The reason an upstream failure is logged under (docs/07 section 7.4.3).

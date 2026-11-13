@@ -1269,10 +1269,10 @@ fn lenient_text(bytes: &[u8]) -> String {
 
 /// JSON or HTML by content type; anything else is not read.
 fn response_kind(content_type: Option<&str>) -> Option<Observed> {
-    let lower = content_type?.to_ascii_lowercase();
-    if lower.contains("json") {
+    let kind = crate::values::media_kind(content_type?);
+    if crate::values::is_json_media(&kind) {
         Some(Observed::Json)
-    } else if lower.starts_with("text/html") {
+    } else if kind.starts_with("text/html") {
         Some(Observed::Html)
     } else {
         None
@@ -1728,6 +1728,26 @@ mod tests {
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
         judge.observe(&site, &list_response("alice", 0));
+        let verdict = judge
+            .judge(&site, &get("/api/patients/7", None, Some("alice"), 1_000))
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn objects_shown_by_a_json_suffix_response_are_allowed_without_jev() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &Observation {
+                content_type: Some("application/hal+json"),
+                ..list_response("alice", 0)
+            },
+        );
         let verdict = judge
             .judge(&site, &get("/api/patients/7", None, Some("alice"), 1_000))
             .await;
