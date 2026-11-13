@@ -407,8 +407,9 @@ mod tests {
     // The database tests need a reachable PostgreSQL instance and run when
     // `XSHIELD_TEST_DATABASE_URL` is set (scripts/test_postgres.sh does that).
 
-    /// A retention run drops every partition that ended before its cutoff, whichever
-    /// test made it, so the tests that run one take turns.
+    /// A retention run drops every partition that ended before its cutoff, and a
+    /// creation attaches one, whichever test made it, so the tests that run either take
+    /// turns.
     static RETENTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn connect_test_pool() -> PgPool {
@@ -419,6 +420,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn ensure_partition_creates_the_day_and_is_idempotent() {
+        let _turn = RETENTION.lock().await;
         let pool = connect_test_pool().await;
         let day = NaiveDate::from_ymd_opt(2099, 6, 1).expect("date");
         ensure_partition(&pool, day).await.expect("first call");
@@ -620,6 +622,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn a_partition_pass_covers_the_window_and_a_five_day_old_record_writes() {
+        let _turn = RETENTION.lock().await;
         let pool = connect_test_pool().await;
         // A fixed clock: the window runs from 2026-10-25 12:00 to 2026-11-08 12:00 UTC.
         let now: i64 = 1_793_491_200_000 + 12 * 3_600_000;
