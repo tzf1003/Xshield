@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { RequestId, SourceSummary, Trace } from "../../api/types.ts";
+import { splitBadge, splitNote } from "../../lib/align.ts";
 import { classMismatch } from "../../lib/api-name.ts";
 import { fmtInt } from "../../lib/format.ts";
 import { VALUE_KIND_LABEL } from "../../lib/vocab.ts";
@@ -15,6 +16,7 @@ import {
   type SentRow,
   type SessionView,
   REDACTED,
+  isReadable,
   needsEvidence,
   newestFirst,
   readingOf,
@@ -137,7 +139,9 @@ function ValueCard({
   highlighted: boolean;
 }) {
   const [open, setOpen] = useState(needsEvidence(row));
-  const reading = readingOf({ kind: row.kind, seen: row.seen, verified: row.verified });
+  const reading = isReadable(row)
+    ? readingOf({ kind: row.kind, seen: row.seen, verified: row.verified })
+    : null;
   const redacted = row.value === REDACTED;
   const classes = ["rd-vcard"];
   if (needsEvidence(row)) classes.push("rd-attn");
@@ -159,6 +163,7 @@ function ValueCard({
           <CutName atLen={row.atLen} />
         </span>
         <span className="small dim">{VALUE_KIND_LABEL[row.kind]}</span>
+        {row.split === null ? null : <span className="small dim">{splitBadge(row.split)}</span>}
         {row.object === null ? null : <ClassTag object={row.object} from={row.objectFrom} />}
         <button
           type="button"
@@ -175,9 +180,12 @@ function ValueCard({
           <div className="rd-val mono">
             <ValueText value={row.value} len={row.len} clipped={row.clipped} query={query} />
           </div>
-          <div className="small">
-            <HintMark reading={reading} />
-          </div>
+          {row.split === null ? null : <div className="small dim">{splitNote(row.split)}</div>}
+          {reading === null ? null : (
+            <div className="small">
+              <HintMark reading={reading} />
+            </div>
+          )}
           {clash === undefined ? null : (
             <div className="small hint-warn">
               {`值只以 ${clash.object ?? ""} 出现过，现在用作 ${row.object ?? ""}`}
@@ -214,7 +222,7 @@ function ValueCard({
           <span className="mono rd-clip">
             <ValueText value={row.value} len={row.len} clipped={row.clipped} query={query} />
           </span>{" "}
-          <HintMark reading={reading} />
+          {reading === null ? null : <HintMark reading={reading} />}
         </div>
       )}
     </article>

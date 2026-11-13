@@ -25,10 +25,13 @@ import type {
 } from "../../api/types.ts";
 import {
   type AlignedValue,
+  type SplitInfo,
   alignRecent,
   alignValues,
   sameName,
   seenAsAligned,
+  splitOf,
+  stateEntries,
 } from "../../lib/align.ts";
 import {
   apiFromWords,
@@ -136,23 +139,27 @@ export type Alignment = { aligned: true; sent: AlignedValue[] } | { aligned: fal
  */
 export function alignState(state: JevState, trace: Trace): Alignment {
   const sent = alignValues(trace.values ?? []);
-  const theirs = state.request.values;
-  if (sent.length !== theirs.length) return { aligned: false };
+  const entries = stateEntries(state.request.values);
+  if (entries === null || sent.length !== entries.length) return { aligned: false };
   const trimmed = trace.trimmed === true;
   const same = sent.every((item, index) => {
-    const stateValue = theirs[index];
-    return (
-      stateValue !== undefined &&
-      sameName(stateValue.at, item.value.at) &&
-      seenAsAligned(stateValue.seen_as, item.value.sources, trimmed)
-    );
+    const theirs = entries[index];
+    if (theirs === undefined || !sameName(theirs.first.at, item.value.at)) return false;
+    // A value cut into pieces carries no seen_as to compare, so only its place is checked.
+    return theirs.pieces > 1 || seenAsAligned(theirs.first.seen_as, item.value.sources, trimmed);
   });
   if (!same) return { aligned: false };
   const recentCount = trace.session?.recent?.length ?? 0;
   const entryCount = trace.session?.entries_passed?.length ?? 0;
   if (state.recent.length > recentCount) return { aligned: false };
   if (state.session.entries_passed.length > entryCount) return { aligned: false };
-  return { aligned: true, sent };
+  return {
+    aligned: true,
+    sent: sent.map((item, index) => {
+      const pieces = entries[index]?.pieces ?? 1;
+      return { ...item, split: pieces > 1 ? { pieces, piece: null } : null };
+    }),
+  };
 }
 
 /** One value the way Jev received it: from the trace when aligned, from the state otherwise. */
@@ -178,9 +185,16 @@ export type SentRow = {
   object: string | null;
   /** Where the class came from; null when the origin is not known (a state-only row). */
   objectFrom: "map" | "name" | null;
+  /** Set when the value went to Jev in pieces; a state-only row is one of those pieces. */
+  split: SplitInfo | null;
 };
 
-function rowFromTrace(jevIndex: number, traceIndex: number, value: TraceValue): SentRow {
+function rowFromTrace(
+  jevIndex: number,
+  traceIndex: number,
+  value: TraceValue,
+  split: SplitInfo | null,
+): SentRow {
   return {
     jevIndex,
     traceIndex,
@@ -192,10 +206,12 @@ function rowFromTrace(jevIndex: number, traceIndex: number, value: TraceValue): 
     verified: value.verified,
     len: value.len ?? null,
     clipped: value.clipped === true,
-    sources: value.sources,
+    // A split value's sources are not compared, so none are shown (docs/07 7.5.2).
+    sources: split === null ? value.sources : [],
     seenAs: [],
     object: value.object ?? null,
     objectFrom: value.object === undefined ? null : value.object_from === "map" ? "map" : "name",
+    split,
   };
 }
 
@@ -209,7 +225,9 @@ export function sentRows(
   alignment: Alignment | null,
 ): SentRow[] {
   if (alignment?.aligned) {
-    return alignment.sent.map((item) => rowFromTrace(item.jevIndex, item.traceIndex, item.value));
+    return alignment.sent.map((item) =>
+      rowFromTrace(item.jevIndex, item.traceIndex, item.value, item.split),
+    );
   }
   if (state !== null) {
     return state.request.values.map((item, jevIndex) => ({
@@ -227,10 +245,11 @@ export function sentRows(
       seenAs: item.seen_as,
       object: item.object ?? null,
       objectFrom: null,
+      split: splitOf(item),
     }));
   }
   return alignValues(trace.values ?? []).map((item) =>
-    rowFromTrace(item.jevIndex, item.traceIndex, item.value),
+    rowFromTrace(item.jevIndex, item.traceIndex, item.value, item.split),
   );
 }
 
@@ -342,9 +361,22 @@ export function readingOf(value: {
   return { mark: "✕", tone: "bad", text: "从未见过" };
 }
 
+/**
+ * Whether the gateway's flags stand for the row: a piece shown from the state alone has none, so it gets
+ * no reading and no evidence check of its own (docs/07 7.5.2).
+ */
+export function isReadable(row: { split: SplitInfo | null; traceIndex: number | null }): boolean {
+  return row.split === null || row.traceIndex !== null;
+}
+
 /** A value that still needs evidence: a reference that Jev has to judge (its card opens by default). */
-export function needsEvidence(row: { kind: ValueKind; verified: boolean }): boolean {
-  return !row.verified && row.kind === "reference";
+export function needsEvidence(row: {
+  kind: ValueKind;
+  verified: boolean;
+  split: SplitInfo | null;
+  traceIndex: number | null;
+}): boolean {
+  return isReadable(row) && !row.verified && row.kind === "reference";
 }
 
 export type SecretMatch = { word: string; builtin: boolean };

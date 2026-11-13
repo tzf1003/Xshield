@@ -411,6 +411,8 @@ export interface JevStateValue {
   value: string;
   seen_as: string[];
   verified?: boolean;
+  /** `k/n` when this is piece k of n of a value the judge cut into pieces (docs/02 2.2). Pieces carry no `seen_as`. */
+  part?: string;
 }
 
 export interface JevState {
