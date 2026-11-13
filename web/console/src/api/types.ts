@@ -351,8 +351,21 @@ export interface Trace {
   timing?: TraceTiming;
   response?: TraceResponse;
   upstream_error?: UpstreamError | null;
+  function?: TraceFunction;
   /** The trace was cut to its 16 KiB limit. */
   trimmed?: boolean;
+}
+
+/** The function a request reaches, when the site's function table decides it (trace.function, 7.4.3). */
+export interface TraceFunction {
+  /** Transport method, a space, and the route template, with session credentials redacted. */
+  key: string;
+  /** The administrator entry the request reached: a key of the site's function table. */
+  entry?: string;
+  tier?: "admin";
+  attempt?: "over_privilege";
+  /** False when the table does not list the function and the site asks about unknown functions. */
+  known?: boolean;
 }
 
 // ------------------------------------------------------------------ Jev exchange (7.5.1)
@@ -369,8 +382,14 @@ export interface JevRecord {
   route: JevRoute;
   /** Timeout this call actually used (site setting or deployment default). */
   timeout_ms: number;
-  /** Trim level 0 to 4 (7.5.3). */
+  /** Trim level 0 to 4 (7.5.3); with several batches, the level of the batch shown. */
   trim: number;
+  /** How many calls the state was cut into; present only when there were several (7.5.1). */
+  batches?: number;
+  /** The batch this record shows, from 1; present only together with `batches`. */
+  batch?: number;
+  /** Values and pieces not sent because the batches allowed no more (docs/02 2.4); present only when some. */
+  left_out?: number;
   request_bytes: number | null;
   http_status: number | null;
   /** Raw provider response, at most 8 KiB; null on timeout and connection failure. */
@@ -706,6 +725,8 @@ export interface ObjectsSpec {
   slots?: ObjectSlotEntry[];
   /** The function table: the interfaces the administrator confirmed, each with its source and optional admin tier. */
   functions?: ObjectFunctionEntry[];
+  /** Send the functions the table does not list to the judge (docs/07 7.9.18). Needs a table that is not empty. */
+  ask_unknown_functions?: boolean;
 }
 
 export interface SiteSpec {

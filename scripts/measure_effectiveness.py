@@ -4,8 +4,10 @@
 Usage:
   python3 scripts/measure_effectiveness.py score --observations FILE --decisions FILE [--truth FILE]
                                                  [--learned FILE] [--baseline FILE] [--out DIR]
-  python3 scripts/measure_effectiveness.py [lab] [--mode quick|full] ...   (not built yet)
-  python3 scripts/measure_effectiveness.py site ...                        (not built yet)
+  python3 scripts/measure_effectiveness.py [lab] [--mode quick] [--jev ideal|live] ...   (full mode: not built yet)
+  python3 scripts/measure_effectiveness.py site (--decisions FILE | --control URL --site NAME)
+                                                 --suite-results DIR_OR_ZIP [--truth FILE] [--objects FILE]
+                                                 [--out DIR]
 
 Exit status: 0 when every gate passes, 1 when a gate fails, 2 for a usage or environment error.
 """

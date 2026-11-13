@@ -14,22 +14,28 @@ Script:
   "reference") that the session was never shown, except for the input the
   entry itself needs (the share code under /share/, the login form). Otherwise
   ALLOW;
+- access is also DENY when the request carries a function attempt
+  (`function.attempt` is over_privilege), and when its function is unknown
+  (`function.known` is false) and its path holds a word of OPS_WORDS. An
+  unknown function on an ordinary path is judged on its values as above;
 - attack is ATTACK when a value or the path carries injection, path traversal
   or command execution text, and BENIGN otherwise.
 
 Every judgement body is kept in `bodies`, so the lab can check what Jev was shown.
 
 Ideal model (`FakeJev(attack_texts=...)`, the measurement's reference, see
-tests/security-lab/corpus): the access rules are the same, but attack is ATTACK
-exactly when one of the given texts lies wholly inside the path or inside one value,
-once both sides are normalized by `normalize`. Each judgement's `state` is kept in
-`states`, and `carries` tells whether a text reached Jev. Without `attack_texts` the
+tests/security-lab/corpus): the access rules are the same, except that a value which
+carries `object` counts as shown only by a sighting of that kind (see `_shown`). Attack
+is ATTACK exactly when one of the given texts lies wholly inside the path or inside one
+value, once both sides are normalized by `normalize`. Each judgement's `state` is kept
+in `states`, and `carries` tells whether a text reached Jev. Without `attack_texts` the
 marker rules above apply, unchanged.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 import unicodedata
 from collections.abc import Iterable
@@ -42,6 +48,12 @@ ATTACK_OPTIONS = ("BENIGN", "ATTACK", "UNKNOWN")
 ATTACK_MARKERS = ("union select", "or 1=1", "../", "; cat ", "<script>")
 ENTRY_INPUT_PATHS = ("/login",)
 ENTRY_INPUT_PREFIXES = ("/share/",)
+SHOWN_KIND = re.compile(r" \[([^\]]*)\]")  # the kind in brackets after `field @ request`, see _shown_kind
+
+# Words of administrator, operations and hidden-interface paths. An unknown function whose path holds one of
+# them is answered DENY: this is the fake's copy of the instruction paragraph about unknown functions (docs/02 2.2).
+OPS_WORDS = ("admin", "metrics", "actuator", "server-status", "debug", "swagger", "console", "phpinfo",
+             "ftp", "backup", "internal")
 
 
 def _probabilities(options: tuple[str, ...], choice: str) -> dict[str, float]:
@@ -106,6 +118,31 @@ def _carried(forms: tuple[str, ...], items: Iterable[str]) -> bool:
     return any(form in text for form in forms for text in texts)
 
 
+def _shown_kind(entry: str) -> str | None:
+    """The kind in the brackets of a seen_as entry (`field @ request [kind] (tier ...)`), None without them.
+
+    The field is cut off first, because a list field has brackets of its own (`patients[].id`).
+    """
+    _field, _sep, rest = str(entry).partition(" @ ")
+    found = SHOWN_KIND.search(rest)
+    return found.group(1) if found else None
+
+
+def _shown(value: dict, *, ideal: bool) -> bool:
+    """Whether the origin showed this value to the session, as the access rule reads it.
+
+    The marker rules take any entry in `seen_as`. The ideal model also reads the kind in an entry's brackets,
+    the kind of the position that showed it: a value that carries `object` was not shown by an entry of
+    another kind (state.rs instructs so). An entry without brackets still counts, and so does a verified value.
+    """
+    if value.get("verified"):
+        return True
+    seen = value.get("seen_as") or []
+    if not ideal or "object" not in value:
+        return bool(seen)
+    return any(_shown_kind(entry) in (None, value["object"]) for entry in seen)
+
+
 def judge(document: dict, attack_forms: tuple[str, ...] | None = None) -> dict:
     """The answers the script gives for one judgement document.
 
@@ -122,11 +159,16 @@ def judge(document: dict, attack_forms: tuple[str, ...] | None = None) -> dict:
     # An attempt is refused whatever else the request says: the origin showed the
     # value only to the public, and the position takes no public sighting.
     attempt = any(value.get("attempt") == "over_privilege" for value in values)
+    ideal = attack_forms is not None
     unseen = any(
-        selects_object(value) and not value.get("verified") and not value.get("seen_as")
-        for value in values
+        selects_object(value) and not _shown(value, ideal=ideal) for value in values
     ) and not entry_input
-    access = "DENY" if attempt or unseen else "ALLOW"
+    function = request.get("function") or {}
+    # A function attempt is refused whatever else the request says. An unknown function is refused only
+    # where its path names administration or operations; elsewhere it is judged on its values alone.
+    unlisted = function.get("known") is False and any(word in path.lower() for word in OPS_WORDS)
+    attempted_function = function.get("attempt") == "over_privilege"
+    access = "DENY" if attempt or unseen or attempted_function or unlisted else "ALLOW"
     if attack_forms is None:
         text = " ".join([path, *(str(value.get("value", "")) for value in values)]).lower()
         attack = "ATTACK" if any(marker in text for marker in ATTACK_MARKERS) else "BENIGN"

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { JevRecord, Trace, TraceValue } from "../src/api/types.ts";
-import { alignRecent, alignValues, trimNote, valueHint } from "../src/lib/align.ts";
+import {
+  alignRecent,
+  alignValues,
+  batchNote,
+  leftOutNote,
+  trimNote,
+  valueHint,
+} from "../src/lib/align.ts";
 import { explainRecord } from "../src/lib/explain.ts";
 
 const ID = "req_01a1973f5b2a7c41a0d3e7f6b1c2d3e4";
@@ -204,7 +211,16 @@ test("the state's recent list is the tail of the trace's list", () => {
 test("trim levels say what was dropped", () => {
   assert.equal(trimNote(0), null);
   assert.equal(trimNote(1), "为满足 8 KiB 上限，最近访问从 10 条减到 3 条");
-  assert.match(trimNote(4) ?? "", /128/);
+  assert.match(trimNote(4) ?? "", /入口列表被去掉，路径截到 256 字符/);
+});
+
+test("a request cut into batches or with values left out says so", () => {
+  assert.equal(batchNote(undefined, undefined), null);
+  assert.equal(batchNote(1, 1), null);
+  assert.match(batchNote(3, 2) ?? "", /^第 2 批，共 3 批/);
+  assert.equal(leftOutNote(undefined), null);
+  assert.equal(leftOutNote(0), null);
+  assert.match(leftOutNote(5) ?? "", /^攻击判定不完整：有 5 个值或片段没有送判/);
 });
 
 test("the reading of a value follows the verified and seen flags", () => {

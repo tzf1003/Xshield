@@ -10,6 +10,7 @@ use xshield_core::context::{DecisionRecord, JevRecord, trace::Trace};
 use crate::auth::SessionStateBody;
 use crate::insights::{EvidenceBody, InsightsBody};
 use crate::jev::{JevStatsBody, JevStatusBody, PromptBody};
+use crate::object_functions::FunctionsBody;
 use crate::preview::PreviewBody;
 use crate::requests::{CountsBody, LookupBody, RequestDetailBody, RequestRow, RequestsPageBody};
 use crate::sessions::{SessionDetailBody, SessionsBody};
@@ -37,6 +38,7 @@ const SITE_EMR: &str = include_str!("../../../web/console/tests/fixtures/site-em
 const VERSIONS_EMR: &str = include_str!("../../../web/console/tests/fixtures/versions-emr.json");
 const INSIGHTS: &str = include_str!("../../../web/console/tests/fixtures/insights.json");
 const EVIDENCE: &str = include_str!("../../../web/console/tests/fixtures/evidence.json");
+const FUNCTIONS: &str = include_str!("../../../web/console/tests/fixtures/functions.json");
 const PREVIEW: &str = include_str!("../../../web/console/tests/fixtures/preview.json");
 const SESSION_TIMELINE: &str =
     include_str!("../../../web/console/tests/fixtures/session-timeline.json");
@@ -353,6 +355,26 @@ fn evidence_round_trips_through_the_evidence_type() {
     quiet["jev"]["p95_ms"] = Value::Null;
     quiet["jev"]["p99_ms"] = Value::Null;
     assert_round_trips::<EvidenceBody>(&quiet, exactly);
+}
+
+#[test]
+fn functions_round_trip_through_the_functions_type() {
+    assert_round_trips::<FunctionsBody>(&fixture(FUNCTIONS), exactly);
+
+    // The other two statuses: a window over the key limit has no candidates and reads the
+    // table's evidence as none, and a site with learning off shows what the store holds.
+    let mut over_limit = fixture(FUNCTIONS);
+    over_limit["status"] = json!("over_limit");
+    over_limit["candidates"] = json!([]);
+    over_limit["functions"][1]["ordinary_units"] = json!(0);
+    over_limit["functions"][1]["admin_units"] = json!(0);
+    over_limit["functions"][1]["refused_units"] = json!(0);
+    over_limit["functions"][1]["last_seen"] = Value::Null;
+    assert_round_trips::<FunctionsBody>(&over_limit, exactly);
+
+    let mut learning_off = fixture(FUNCTIONS);
+    learning_off["status"] = json!("learning_off");
+    assert_round_trips::<FunctionsBody>(&learning_off, exactly);
 }
 
 #[test]

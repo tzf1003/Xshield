@@ -215,6 +215,73 @@ class IdealModelTest(unittest.TestCase):
                 attack_forms_of(texts)
 
 
+class KindTest(unittest.TestCase):
+    """The ideal model reads the kind in the brackets of a sighting; the marker rules take any sighting."""
+    forms = attack_forms_of(["' OR 1=1--"])
+
+    def patient(self, *seen_as: str, **extra: object) -> dict:
+        return document("/api/patients/PT-7002", [value("path[2]", "PT-7002", kind="reference", object="patient",
+                                                        seen_as=list(seen_as), **extra)])
+
+    def test_a_value_shown_only_as_another_kind_is_refused(self) -> None:
+        shown = self.patient("id @ GET /api/visits/{id} [visit] (tier self, reliability high)")
+        self.assertEqual(choices(shown, self.forms), ("DENY", "BENIGN"))
+
+    def test_without_attack_texts_the_same_state_is_allowed_as_before(self) -> None:
+        shown = self.patient("id @ GET /api/visits/{id} [visit] (tier self, reliability high)")
+        self.assertEqual(choices(shown), ("ALLOW", "BENIGN"))
+
+    def test_a_value_shown_as_the_same_kind_is_allowed(self) -> None:
+        shown = self.patient("id @ GET /api/search [patient] (tier public, reliability high)")
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+    def test_an_entry_without_brackets_still_counts(self) -> None:
+        self.assertEqual(choices(self.patient("id @ GET /api/search"), self.forms), ("ALLOW", "BENIGN"))
+
+    def test_one_sighting_of_the_same_kind_is_enough(self) -> None:
+        shown = self.patient("id @ GET /api/visits/{id} [visit]", "patients[].id @ GET /api/search [patient]")
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+    def test_brackets_in_a_list_field_do_not_hide_the_kind(self) -> None:
+        shown = self.patient("patients[].id @ GET /api/search [patient] (tier public, reliability high)")
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+    def test_a_value_without_an_object_is_judged_as_before(self) -> None:
+        shown = document("/api/patients/PT-7002", [value("path[2]", "PT-7002", kind="reference",
+                                                       seen_as=["id @ GET /api/visits/{id} [visit]"])])
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+    def test_a_verified_value_is_shown_whatever_its_kind(self) -> None:
+        shown = self.patient("id @ GET /api/visits/{id} [visit]", verified=True)
+        self.assertEqual(choices(shown, self.forms), ("ALLOW", "BENIGN"))
+
+
+class FunctionTest(unittest.TestCase):
+    """The function rules (docs/02 2.2): an attempt is refused, and an unknown function is refused on an operations path."""
+
+    def with_function(self, path: str, function: dict, method: str = "GET") -> dict:
+        document_ = document(path, [], method=method)
+        document_["state"]["request"]["function"] = function
+        return document_
+
+    def test_an_attempt_is_refused_whatever_else_the_request_says(self) -> None:
+        attempt = self.with_function("/api/admin/export", {"tier": "admin", "attempt": "over_privilege"}, "POST")
+        self.assertEqual(choices(attempt), ("DENY", "BENIGN"))
+
+    def test_an_unknown_function_on_an_operations_path_is_refused(self) -> None:
+        for path in ("/metrics", "/actuator/health", "/server-status", "/api/Backup/list", "/Admin/users"):
+            with self.subTest(path=path):
+                self.assertEqual(choices(self.with_function(path, {"known": False})), ("DENY", "BENIGN"))
+
+    def test_an_unknown_function_on_an_ordinary_path_is_judged_on_its_values(self) -> None:
+        self.assertEqual(choices(self.with_function("/api/comments", {"known": False})), ("ALLOW", "BENIGN"))
+
+    def test_without_a_function_the_answer_is_the_same_as_before(self) -> None:
+        plain = document("/api/admin/search", [])
+        self.assertEqual(choices(plain), ("ALLOW", "BENIGN"))
+        self.assertNotIn("function", plain["state"]["request"])
+
+
 class ServedTest(unittest.TestCase):
     def serve(self, attack_texts: list[str] | None = None) -> FakeJev:
         jev = FakeJev(attack_texts)

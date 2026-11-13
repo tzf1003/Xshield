@@ -738,6 +738,56 @@ pub async fn path_groups(
     Ok((groups, complete))
 }
 
+/// One group of requests the gateway allowed without calling Jev, by method and logical path, as
+/// [`function_traffic`] groups them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionTraffic {
+    /// HTTP method.
+    pub method: String,
+    /// The logical path, or the path when the request has none (`COALESCE(logical_path, path)`).
+    pub path: String,
+    /// Requests in the group.
+    pub count: i64,
+    /// One request id from the group, as an example.
+    pub sample: String,
+}
+
+/// Groups the requests of `scope` that the gateway allowed as `fast_allow` or `cached_allow`, that is
+/// without a Jev call, by method and logical path, largest group first. Returns the groups and whether
+/// they are all of the window. The control plane counts them against the function table (docs/07 section
+/// 7.9.20).
+///
+/// # Errors
+/// Returns [`sqlx::Error`] when the query fails.
+pub async fn function_traffic(
+    pool: &PgPool,
+    scope: &Scope,
+) -> Result<(Vec<FunctionTraffic>, bool), sqlx::Error> {
+    let mut query = QueryBuilder::<Postgres>::new(
+        "SELECT method, COALESCE(logical_path, path) AS path, count(*)::bigint AS n,
+            max(request_id) AS sample
+         FROM decision_log",
+    );
+    push_scope(&mut query, scope);
+    query.push(" AND decision_path IN ('fast_allow', 'cached_allow')");
+    query
+        .push(" GROUP BY method, COALESCE(logical_path, path) ORDER BY n DESC, method, path LIMIT ")
+        .push_bind(GROUP_LIMIT + 1);
+    let rows = query.build().fetch_all(pool).await?;
+    let limit = usize::try_from(GROUP_LIMIT).unwrap_or(usize::MAX);
+    let complete = rows.len() <= limit;
+    let mut groups = Vec::with_capacity(rows.len().min(limit));
+    for row in rows.iter().take(limit) {
+        groups.push(FunctionTraffic {
+            method: row.try_get("method")?,
+            path: row.try_get("path")?,
+            count: row.try_get("n")?,
+            sample: row.try_get("sample")?,
+        });
+    }
+    Ok((groups, complete))
+}
+
 /// Per-minute Jev call counts against a per-session or per-address limit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MinutePeaks {
@@ -1334,5 +1384,87 @@ mod tests {
         // Slice 9 holds two calls, of 190 ms and 2000 ms: 190 + 0.95 * (2000 - 190).
         let ninth = trend.jev_p95_ms[9].expect("calls in slice 9");
         assert!((ninth - 1909.5).abs() < 1e-6, "{ninth}");
+    }
+
+    /// Writes one decision row of `traffic-test` with `method`, `path`, the logical path `logical`, and the
+    /// deciding step `decision_path`, at `at_millis`.
+    async fn insert_traffic(
+        pool: &PgPool,
+        at_millis: i64,
+        (method, path, logical): (&str, &str, Option<&str>),
+        decision_path: &str,
+    ) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, method, path,
+                logical_path, decision_path, outcome, trace)
+             VALUES ($1, $2, 'traffic-test', 'edge-test', 'host', 'client', $3, $4, $5, $6, 'allowed',
+                '{}'::jsonb)",
+        )
+        .bind(at_millis)
+        .bind(format!("traffic-test-{id}"))
+        .bind(method)
+        .bind(path)
+        .bind(logical)
+        .bind(decision_path)
+        .execute(pool)
+        .await
+        .expect("insert");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn function_traffic_groups_fast_and_cached_allows_by_logical_path() {
+        let pool = connect_test_pool().await;
+        let day = NaiveDate::from_ymd_opt(2096, 7, 1).expect("date");
+        ensure_partition(&pool, day).await.expect("partition");
+        sqlx::query("DELETE FROM decision_log WHERE site = 'traffic-test'")
+            .execute(&pool)
+            .await
+            .expect("clear the test site");
+        let (day_start, _) = day_bounds_millis(day).expect("bounds");
+        let since = day_start + 1_000;
+        let scope = Scope {
+            site: Some("traffic-test".to_owned()),
+            since_millis: since,
+            until_millis: since + 3_600_000,
+        };
+        // Two allows of one logical route, under different paths.
+        insert_traffic(
+            &pool,
+            since + 1,
+            ("GET", "/api/reports/1", Some("/api/reports/{id}")),
+            "fast_allow",
+        )
+        .await;
+        insert_traffic(
+            &pool,
+            since + 2,
+            ("GET", "/api/reports/2", Some("/api/reports/{id}")),
+            "cached_allow",
+        )
+        .await;
+        // An allow with no logical path groups by its path.
+        insert_traffic(&pool, since + 3, ("GET", "/api/other", None), "fast_allow").await;
+        // A request that called Jev, or a refusal, is not a traffic row of the function table.
+        insert_traffic(&pool, since + 4, ("GET", "/api/other", None), "jev_allow").await;
+        insert_traffic(&pool, since + 5, ("GET", "/api/other", None), "jev_deny").await;
+        // Outside the window.
+        insert_traffic(&pool, since - 1, ("GET", "/api/other", None), "fast_allow").await;
+
+        let (groups, complete) = function_traffic(&pool, &scope)
+            .await
+            .expect("group the traffic");
+        assert!(complete);
+        let shape: Vec<(&str, &str, i64)> = groups
+            .iter()
+            .map(|group| (group.method.as_str(), group.path.as_str(), group.count))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![("GET", "/api/reports/{id}", 2), ("GET", "/api/other", 1),]
+        );
+        assert!(groups[0].sample.starts_with("traffic-test-"));
     }
 }

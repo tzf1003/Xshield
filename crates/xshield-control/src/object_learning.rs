@@ -13,14 +13,15 @@
 //! proposal needs and how many questions the agent may ask, with its `objects.learning`
 //! settings.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use xshield_core::context::learning::{
-    DecisionFacts, Evidence, FUNCTION_KEYS_MAX, KEEP_RETIRED_DAYS, RETIRE_DAYS, Thresholds,
-    WINDOW_DAYS, contradicts, day_of, judge_accepts_public, judge_function, judge_tier, kind_share,
-    merge_functions, observe, observe_functions, observe_tiers, propose, response_stats,
+    DecisionFacts, Evidence, FUNCTION_KEYS_MAX, FunctionEvidence, KEEP_RETIRED_DAYS, RETIRE_DAYS,
+    Thresholds, WINDOW_DAYS, contradicts, day_of, judge_accepts_public, judge_function, judge_tier,
+    kind_share, merge_functions, observe, observe_functions, observe_tiers, propose,
+    response_stats,
 };
 use xshield_core::context::objects::KEY_MAX;
 use xshield_core::context::position::PositionState;
@@ -606,7 +607,7 @@ async fn judge_accepts(
 
 /// Whether the site declares a user identity the responses show, so its response units are users
 /// and not sessions. A paused entry shows none, as the judge reads it.
-fn identified_by(map: &ObjectMap) -> bool {
+pub(crate) fn identified_by(map: &ObjectMap) -> bool {
     map.slots()
         .iter()
         .any(|slot| !slot.paused && slot.identity == Some(IdentityRole::User))
@@ -677,6 +678,49 @@ async fn judge_tiers(
     Ok(())
 }
 
+/// The function evidence of one window of a site, as the learning pass and the function list (docs/07 section
+/// 7.9.20) both read it, so that the two see the same merged keys.
+pub(crate) struct FunctionWindow {
+    /// The merged function key to its evidence.
+    pub(crate) evidence: BTreeMap<String, FunctionEvidence>,
+    /// The site's ordinary units over the window (`site_ordinary_units`).
+    pub(crate) ordinary_units: u32,
+    /// Each function key with evidence in the window to the key its evidence counts under: itself, or the
+    /// merged key `merge_functions` gives it. A key with no evidence is not here.
+    pub(crate) mapping: BTreeMap<String, String>,
+}
+
+/// The function evidence of the window that starts at `oldest_day`, merged as the learning pass merges it.
+/// `None` when more function keys have evidence than `keys_max`: such a window is not merged, and the caller
+/// decides what that means. Reads only; the configuration is the one `record` holds.
+pub(crate) async fn function_window(
+    pool: &PgPool,
+    record: &SiteRecord,
+    oldest_day: u64,
+    keys_max: usize,
+) -> Result<Option<FunctionWindow>, store::LearningStoreError> {
+    let site = record.spec.name();
+    let thresholds = thresholds_of(record.spec.objects().learning());
+    let (uses, more) = function_store::function_keys(pool, site, oldest_day, keys_max).await?;
+    if more {
+        return Ok(None);
+    }
+    let named_under: Vec<String> = record
+        .spec
+        .routes()
+        .iter()
+        .map(|route| route.path().stem().trim_end_matches('/').to_owned())
+        .collect();
+    let mapping = merge_functions(&uses, thresholds, &named_under);
+    let evidence = function_store::function_evidence(pool, site, oldest_day, &mapping).await?;
+    let ordinary_units = function_store::site_ordinary_units(pool, site, oldest_day).await?;
+    Ok(Some(FunctionWindow {
+        evidence,
+        ordinary_units,
+        mapping,
+    }))
+}
+
 /// Judges which functions only administrators use, from the function evidence of the window, and proposes
 /// each as an administrator function (docs/07 section 7.9.19). Functions the pass merges (`merge_functions`)
 /// are judged under their merged key. A proposal waits for an administrator, as a tier proposal does. A
@@ -705,22 +749,17 @@ async fn judge_functions(
     let map = record.spec.objects();
     let thresholds = thresholds_of(map.learning());
     let identified = identified_by(map);
-    let (uses, more) = function_store::function_keys(pool, site, oldest_day, keys_max).await?;
-    if more {
+    let Some(window) = function_window(pool, &record, oldest_day, keys_max).await? else {
         eprintln!(
             "xshield-control: function judgement skipped for site {site}, more than {keys_max} function keys have evidence"
         );
         return Ok(());
-    }
-    let named_under: Vec<String> = record
-        .spec
-        .routes()
-        .iter()
-        .map(|route| route.path().stem().trim_end_matches('/').to_owned())
-        .collect();
-    let mapping = merge_functions(&uses, thresholds, &named_under);
-    let evidence = function_store::function_evidence(pool, site, oldest_day, &mapping).await?;
-    let ordinary_units = function_store::site_ordinary_units(pool, site, oldest_day).await?;
+    };
+    let FunctionWindow {
+        evidence,
+        ordinary_units,
+        ..
+    } = window;
     let mut judged = Vec::new();
     for (function, evidence) in &evidence {
         // A key longer than a position key is one the configuration cannot hold, so it is not proposed.

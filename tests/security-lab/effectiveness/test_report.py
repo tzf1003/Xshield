@@ -36,8 +36,8 @@ class ReportTests(unittest.TestCase):
     def test_a_skipped_learning_section_is_stated_in_the_conclusion_and_section_eight(self):
         result = fixture_result("missing-and-skip")
         text = render_markdown(result, META)
-        self.assertIn("学习段未执行", conclusion(result, META))
-        self.assertIn("学习段未执行：未提供 truth.json、learned.json", text)
+        self.assertIn("学习段 SKIP", conclusion(result, META))
+        self.assertIn("学习段：SKIP（未提供 truth.json、learned.json", text)
         self.assertIn("- 学习段：未提供 truth.json、learned.json", text)
 
     def test_the_conclusion_names_the_failed_gate(self):
