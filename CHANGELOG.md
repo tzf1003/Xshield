@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 控制台两项小修复（[plans/](plans/README.md)）：快速规则对话框保存后每秒查询站点，网关加载新版本后停止，最长 30 秒（[docs/07](docs/07-console-architecture.md) 7.10.4），到时提示“网关 30 秒内没有加载，请到站点页查看状态”，此前一直每秒查询、永远显示“等待网关加载…”；登录后的跳转地址 `next` 含反斜杠或控制字符时不采用（浏览器把 `/\host` 读成 `//host`）。
 - improve 待办清单的两项小修复（[plans/](plans/README.md)）：Jev 调用限流表到达 5 万个键的上限后，窗口仍在进行时不再继续加入新键（此前清理后照样插入，表无限增长，且每次插入都全表扫描），新键的这次调用按 `JEV_CALL_LIMIT` 处理，已有键不受影响；CSV 导出对以制表符或回车开头的单元格同样前置 `'`（[docs/07](docs/07-console-architecture.md) 7.9.9）。
 - 会话凭证脱敏补全（[docs/02](docs/02-jev.md) 2.4）：凭证取自 `Authorization` 头时按去掉 `Bearer` 等认证方案后的令牌比对，此前只比对整个头值，令牌单独出现在查询、请求体或路径里时会原样发给 Jev 并写入判定日志。路径中含凭证的一段现在在发给 Jev 的 `path`、`recent` 和判定日志的 `path`、`logical_path` 里写成 `<redacted>`，百分号编码的写法同样识别；`seen_as` 与判定记录里引用早先请求的位置在发出和写入前整体再检查一遍。请求体无法检查（413）的拒绝记录也按会话凭证脱敏。
 - 新增参考部署 `docker-compose.yml`（[docs/04](docs/04-deployment-testing.md) 4.1.1）：PostgreSQL、控制台和网关三个服务，设置来自 `.env`（样例见 `.env.example`）。控制台只监听本机 8081，网关监听 8080。
