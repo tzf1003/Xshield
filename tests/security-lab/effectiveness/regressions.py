@@ -4,7 +4,8 @@ A case runs on one site: the truth site for most findings, the site with a per-s
 observation-mode site for P1-5. Its status is fixed here: must when the gateway passes the case on main, known_gap
 when it fails and the review lists the finding. A known_gap case that passes is an unexpected pass, and the pipeline
 fails until the same change turns the case into must (plan 4.5, risk 4 of plan 12). The statuses below were taken
-from a run of this file on main; the pull request lists them with the decision path of each case.
+from runs on main at b48c711 (WAF batch 2, PR #209) and from the batch 8 run on top of it; the pull request lists
+them with the decision path of each case and says which run each change follows.
 
 P2-6 (eviction) is not here: it needs a list of about two thousand distinct values, and the clinic origin answers
 at most seven items with about sixty patients in all, so the case cannot be built on this origin.
@@ -299,11 +300,11 @@ def other_address_unaffected(p: Prober) -> None:
 CASES: tuple[Case, ...] = (
     Case("p0-1-pad-200", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, pad_200,
          note="injection after 200 query values"),
-    Case("p0-1-multipart", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, multipart,
+    Case("p0-1-multipart", "P0-1", "must", "block", "attack", SITE_TRUTH, multipart,
          note="injection in multipart/form-data after 600 bytes of filler"),
     Case("p0-1-text-plain", "P0-1", "must", "block", "attack", SITE_TRUTH, text_plain,
          note="JSON sent as text/plain"),
-    Case("p0-1-long-value", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, long_value,
+    Case("p0-1-long-value", "P0-1", "must", "block", "attack", SITE_TRUTH, long_value,
          note="injection after 600 characters of one value"),
     Case("p0-1-big-upload", "P0-1", "known_gap", "allow", None, SITE_TRUTH, big_upload,
          note="benign upload over 48 KiB"),
@@ -329,7 +330,7 @@ CASES: tuple[Case, ...] = (
          note="a new session gets 304 and then opens the patient"),
     Case("p1-5-observe-learns-would-block", "P1-5", "known_gap", "block", "access", SITE_OBSERVE,
          observe_learns_would_block, note="a visit id from a would-block answer, in observation mode"),
-    Case("p1-9-big-form", "P1-9", "known_gap", "allow", None, SITE_TRUTH, big_form,
+    Case("p1-9-big-form", "P1-9", "must", "allow", None, SITE_TRUTH, big_form,
          note="benign form with 120 fields"),
     Case("p2-1-mass-assignment", "P2-1", "known_gap", "block", "access", SITE_TRUTH, mass_assignment,
          note="role and isAdmin in a profile body"),

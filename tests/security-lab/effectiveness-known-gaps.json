@@ -1,0 +1,207 @@
+{
+  "entries": [
+    {
+      "id": "wrong-l0-prescriptions-id",
+      "kind": "wrong",
+      "metric": "L0",
+      "key": "GET /api/patients/{id} prescriptions[].id",
+      "learned": "patient",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "冷启动起名丢了数组名，处方号被起成患者（真值是处方）"
+    },
+    {
+      "id": "wrong-l0-visits-id",
+      "kind": "wrong",
+      "metric": "L0",
+      "key": "GET /api/patients/{id} visits[].id",
+      "learned": "patient",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "冷启动起名丢了数组名，就诊号被起成患者（真值是就诊）"
+    },
+    {
+      "id": "wrong-l0-admin-search-q",
+      "kind": "wrong",
+      "metric": "L0",
+      "key": "GET /api/admin/search query.q",
+      "learned": "admin",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "搜索词不是对象，短键 q 也被起了名（取了路由词）"
+    },
+    {
+      "id": "wrong-l0-admin-search-results-id",
+      "kind": "wrong",
+      "metric": "L0",
+      "key": "GET /api/admin/search results[].id",
+      "learned": "admin",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "容器词 results 下的 id 取了路由词 admin（真值是患者）"
+    },
+    {
+      "id": "wrong-l0-admin-export-patients-id",
+      "kind": "wrong",
+      "metric": "L0",
+      "key": "GET /api/admin/export patients[].id",
+      "learned": "export",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "起名取了接口动词 export（真值是患者）"
+    },
+    {
+      "id": "wrong-l1-patient-split",
+      "kind": "wrong",
+      "metric": "L1",
+      "key": "GET /api/patients/{id} path[2]",
+      "learned": "patients",
+      "ref": "学习质量设计稿 2.2",
+      "lq": "LQ-1",
+      "note": "自动拆分把读详情的请求位置拆进了类别 patients（真值是患者）"
+    },
+    {
+      "id": "wrong-l1-admin-search-q",
+      "kind": "wrong",
+      "metric": "L1",
+      "key": "GET /api/admin/search query.q",
+      "learned": "admin",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "同 L0 的冷启动候选，学习轮次把它当成了请求位置的类别"
+    },
+    {
+      "id": "unmodeled-share-path",
+      "kind": "unmodeled",
+      "pattern": "GET /share/… path[1]",
+      "learned": "share",
+      "ref": "学习质量设计稿 2.4",
+      "lq": "LQ-2",
+      "note": "分享码路径段是字面量，不该作候选（LQ-2 第 6 条）"
+    },
+    {
+      "id": "unmodeled-share-patient-id",
+      "kind": "unmodeled",
+      "pattern": "GET /share/… patient.id",
+      "learned": "patient",
+      "ref": "学习质量设计稿 2.4",
+      "lq": "LQ-6",
+      "note": "分享码下的响应位置没有模板化；LQ-1、LQ-2 之后仍在，等 LQ-6"
+    },
+    {
+      "id": "miss-visits-path-suspended",
+      "kind": "miss",
+      "key": "GET /api/visits/{id} path[2]",
+      "learned": "",
+      "ref": "学习质量设计稿 2.3",
+      "lq": "LQ-2",
+      "note": "被自动暂停：与被起错名的 prescriptions[].id 相矛盾，起名修好后不再矛盾"
+    },
+    {
+      "id": "miss-prescriptions-path-suspended",
+      "kind": "miss",
+      "key": "GET /api/prescriptions/{id} path[2]",
+      "learned": "",
+      "ref": "学习质量设计稿 2.3",
+      "lq": "LQ-2",
+      "note": "被自动暂停：处方详情收到的值多来自被起错名的 visits 或 prescriptions 位置，起名修好后不再矛盾"
+    },
+    {
+      "id": "miss-admin-export-patients",
+      "kind": "miss",
+      "key": "GET /api/admin/export patients[].id",
+      "learned": "",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "类别被起成 export，之后又被拒绝记录挡住"
+    },
+    {
+      "id": "miss-search-results-rejected",
+      "kind": "miss",
+      "key": "GET /api/search results[].id",
+      "learned": "",
+      "ref": "学习质量设计稿 2.5",
+      "lq": "LQ-4a",
+      "note": "公共档的响应位置没有类别提议，被拒绝记录挡住；这是“搜到别人的患者后删除”的防护缺口"
+    },
+    {
+      "id": "miss-notes-public-source",
+      "kind": "miss",
+      "key": "POST /api/patients/{id}/notes path[2]",
+      "learned": "",
+      "ref": "学习质量设计稿 2.6",
+      "lq": "LQ-4b",
+      "note": "接受公共来源没有提议：判断只能到 medium，到不了 high"
+    },
+    {
+      "id": "fail-benign-open-created-101",
+      "kind": "failure",
+      "case": "train/101/0/open-created",
+      "config": "learned",
+      "learned": "",
+      "ref": "学习质量设计稿 2.2",
+      "lq": "LQ-1",
+      "note": "良性训练流程（打开刚新建的患者）被学到的配置拦下，拆分给出了拒绝的依据"
+    },
+    {
+      "id": "fail-benign-open-created-102",
+      "kind": "failure",
+      "case": "train/102/0/open-created",
+      "config": "learned",
+      "learned": "",
+      "ref": "学习质量设计稿 2.2",
+      "lq": "LQ-1",
+      "note": "同上（第二位医生）"
+    },
+    {
+      "id": "fail-benign-admin-delete-adm1",
+      "kind": "failure",
+      "case": "train/ADM-1/1/admin-delete",
+      "config": "learned",
+      "learned": "",
+      "ref": "学习质量设计稿 2.2",
+      "lq": "LQ-1",
+      "note": "良性训练流程（管理员删除）被学到的配置拦下，拆分给出了拒绝的依据"
+    },
+    {
+      "id": "fail-benign-admin-delete-adm2",
+      "kind": "failure",
+      "case": "train/ADM-2/1/admin-delete",
+      "config": "learned",
+      "learned": "",
+      "ref": "学习质量设计稿 2.2",
+      "lq": "LQ-1",
+      "note": "同上（第二位管理员）"
+    },
+    {
+      "id": "fail-public-source-delete",
+      "kind": "failure",
+      "case": "idor_public_source/delete",
+      "config": "learned",
+      "learned": "",
+      "ref": "学习质量设计稿 2.5",
+      "lq": "LQ-4a",
+      "note": "搜到别人的患者后删除：搜索结果的响应位置没有类别，判定只能放行，应该拦"
+    },
+    {
+      "id": "fail-public-source-update",
+      "kind": "failure",
+      "case": "idor_public_source/update",
+      "config": "learned",
+      "learned": "",
+      "ref": "学习质量设计稿 2.5",
+      "lq": "LQ-4a",
+      "note": "搜到别人的患者后修改：同上"
+    },
+    {
+      "id": "fail-admin-tier-public-source",
+      "kind": "failure",
+      "case": "admin_tier/public-source",
+      "config": "learned",
+      "learned": "",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "管理档的位置被起成 admin 和 export，管理档不成立，判定放行，应该拦"
+    }
+  ]
+}
