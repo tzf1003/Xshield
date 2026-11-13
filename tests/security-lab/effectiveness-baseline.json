@@ -2,19 +2,19 @@
   "groups": {
     "quick": {
       "seed": 20261113,
-      "commit": "d2aa569a",
+      "commit": "00786a59",
       "values": {
-        "S1": 0.9625,
+        "S1": 0.9638157894736842,
         "S1/none": 0.9625176803394625,
-        "S1/learned": 0.9245283018867925,
+        "S1/learned": 0.9622641509433962,
         "S1/truth": 1.0,
         "S3": 0.6881676253081348,
         "S3/none": 0.7607632093933464,
         "S3/learned": 0.30256410256410254,
         "S3/truth": 0.3128205128205128,
-        "P1": 0.9922879177377892,
+        "P1": 1.0,
         "P1/admin_tier/none": 1.0,
-        "P1/admin_tier/learned": 0.5,
+        "P1/admin_tier/learned": 1.0,
         "P1/admin_tier/truth": 1.0,
         "P1/function_level/truth": 1.0,
         "P1/idor_cross_class/learned": 1.0,
@@ -25,7 +25,7 @@
         "P1/idor_param/none": 1.0,
         "P1/idor_param/learned": 1.0,
         "P1/idor_param/truth": 1.0,
-        "P1/idor_public_source/learned": 0.0,
+        "P1/idor_public_source/learned": 1.0,
         "P1/idor_public_source/truth": 1.0,
         "P1/idor_read/none": 1.0,
         "P1/idor_read/learned": 1.0,
@@ -136,6 +136,7 @@
         "P3/idor_param/none": 1.0,
         "P3/idor_param/learned": 1.0,
         "P3/idor_param/truth": 1.0,
+        "P3/idor_public_source/learned": 1.0,
         "P3/idor_public_source/truth": 1.0,
         "P3/idor_read/none": 1.0,
         "P3/idor_read/learned": 1.0,
@@ -176,9 +177,9 @@
         "L1.accuracy": 1.0,
         "L1.coverage": 0.7,
         "L2.accuracy": 1.0,
-        "L2.coverage": 0.4375,
+        "L2.coverage": 0.5,
         "L3.accuracy": 1.0,
-        "L3.coverage": 0.6
+        "L3.coverage": 0.7
       }
     }
   }

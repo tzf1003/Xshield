@@ -17,54 +17,6 @@
       "ref": "学习质量设计稿 2.1",
       "lq": null,
       "note": "训练流量里值来自这个位置的使用只有 2 次、2 个会话（这条路由共 14 次请求，其中 12 次被源站 403、不产生值），低于学习门槛（20 票、5 个会话），规则按设计不提议（学习输出里为 pending）"
-    },
-    {
-      "id": "miss-search-results-public",
-      "kind": "miss",
-      "key": "GET /api/search results[].id",
-      "learned": "",
-      "ref": "学习质量设计稿 2.5",
-      "lq": "LQ-4a",
-      "note": "公共档的响应位置没有类别提议（学习输出里为 pending）。训练段里这条路由的请求都放行、没有拒绝记录，所以不是被拒绝记录挡住；这是 LQ-4a 要修的缺口。"
-    },
-    {
-      "id": "miss-notes-public-source",
-      "kind": "miss",
-      "key": "POST /api/patients/{id}/notes path[2]",
-      "learned": "",
-      "ref": "学习质量设计稿 2.6",
-      "lq": "LQ-4b",
-      "note": "接受公共来源没有提议：判断只能到 medium，到不了 high"
-    },
-    {
-      "id": "fail-public-source-delete",
-      "kind": "failure",
-      "case": "idor_public_source/delete",
-      "config": "learned",
-      "learned": "",
-      "ref": "学习质量设计稿 2.5、2.6",
-      "lq": "LQ-4b",
-      "note": "搜到别人的患者后删除：搜索结果的响应位置没有类别，判定只能放行，应该拦（依赖 LQ-4a，由 LQ-4b 修好）"
-    },
-    {
-      "id": "fail-public-source-update",
-      "kind": "failure",
-      "case": "idor_public_source/update",
-      "config": "learned",
-      "learned": "",
-      "ref": "学习质量设计稿 2.5、2.6",
-      "lq": "LQ-4b",
-      "note": "搜到别人的患者后修改：同上"
-    },
-    {
-      "id": "fail-admin-tier-public-source",
-      "kind": "failure",
-      "case": "admin_tier/public-source",
-      "config": "learned",
-      "learned": "",
-      "ref": "学习质量设计稿 2.6",
-      "lq": "LQ-4b",
-      "note": "管理档的位置判定放行，应该拦；起名修好（LQ-2）之后仍在：接受公共来源只到 medium，到不了 high（由 LQ-4b 修好）"
     }
   ]
 }
