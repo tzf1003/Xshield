@@ -76,18 +76,6 @@ const CALL_LIMIT_MAX: i64 = 600;
 const HISTOGRAM_BUCKETS: usize = 300;
 const HISTOGRAM_BUCKET_MS: i64 = 100;
 
-/// The words the judge always redacts. A copy: the judge's list is private.
-const BUILT_IN_SECRET_WORDS: [&str; 9] = [
-    "password",
-    "passwd",
-    "pwd",
-    "secret",
-    "token",
-    "otp",
-    "credential",
-    "authorization",
-    "cvv",
-];
 /// Sensitive personal data a site may add to `secret_fields` (section 7.9.11).
 const SENSITIVE_WORDS: [&str; 9] = [
     "ssn",
@@ -175,7 +163,7 @@ pub(crate) fn site_not_found() -> ApiError {
 #[must_use]
 pub(crate) fn redacts(spec: &SiteSpec, field: &str) -> bool {
     let lower = field.to_ascii_lowercase();
-    BUILT_IN_SECRET_WORDS
+    xshield_judge::state::SECRET_WORDS
         .iter()
         .any(|word| lower.contains(*word))
         || spec

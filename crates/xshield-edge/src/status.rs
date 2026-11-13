@@ -17,8 +17,8 @@ use xshield_judge::context::{
 use xshield_judge::engine::{ADDRESS_CALLS_PER_MINUTE, Judge, SESSION_CALLS_PER_MINUTE};
 use xshield_judge::jev::JevPort;
 use xshield_judge::slot::Source;
-use xshield_judge::state::{Prompt, STATE_BYTES_MAX};
-use xshield_judge::values::REQUEST_VALUES_MAX;
+use xshield_judge::state::{Prompt, SECRET_WORDS, STATE_BYTES_MAX};
+use xshield_judge::values::{REQUEST_VALUES_MAX, RESPONSE_PARSE_MAX};
 
 use crate::jev_settings::{JevLoader, JevReport};
 use crate::proxy::REQUEST_BODY_MAX;
@@ -27,22 +27,6 @@ use crate::sites::{SiteStatus, SiteTable};
 
 /// How often the heartbeat is written, besides each site change.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-
-/// The largest origin response the gateway reads for learning (docs/07 section 7.9.8).
-const RESPONSE_PARSE_MAX: u64 = 1_048_576;
-
-/// The built-in secret words of the judge, sorted (docs/07 section 7.9.8).
-const SECRET_FIELDS: [&str; 9] = [
-    "authorization",
-    "credential",
-    "cvv",
-    "otp",
-    "passwd",
-    "password",
-    "pwd",
-    "secret",
-    "token",
-];
 
 /// The gateway's name: the `HOSTNAME` variable, or `edge` when it is not set.
 #[must_use]
@@ -237,7 +221,7 @@ fn params(default_timeout: Duration) -> serde_json::Value {
             "session_calls_per_minute": SESSION_CALLS_PER_MINUTE,
             "address_calls_per_minute": ADDRESS_CALLS_PER_MINUTE,
             "allow_cache_minutes": CACHE_MINUTES,
-            "secret_fields": SECRET_FIELDS,
+            "secret_fields": SECRET_WORDS,
             "synonyms": [["payment", "card"]],
         },
         "fixed": {

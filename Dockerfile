@@ -1,15 +1,15 @@
-# Container images for the two deployable roles (docs/19): edge and control.
+# Container images for the two deployable roles (docs/04 section 4.1): edge and control.
 #
 #   docker build --target edge    -t xshield-edge .
 #   docker build --target control -t xshield-control .
 #
-# Base images are pinned by digest (docs/19: no floating tags as a release input);
+# Base images are pinned by digest (no floating tags as a release input);
 # the Rust version matches rust-toolchain.toml. Bump both together, and the digests
 # with them (`curl -sI` the registry manifest, or `docker buildx imagetools inspect`).
 #
 # The images contain only the release binaries and the libraries they link; they run
 # as an unprivileged user, take every setting from XSHIELD_* environment variables and
-# mounted files (docs/19), and carry no configuration, key, or certificate. The control
+# mounted files (docs/03 section 3.3), and carry no configuration, key, or certificate. The control
 # binary embeds the console (web/console/dist, docs/07 section 7.2.1), so the console is
 # built in its own stage and handed to the Rust build before it compiles.
 

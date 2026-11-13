@@ -35,8 +35,9 @@ Start the local development stack. The default starts:
 
 Create sites in the console; xshield-edge reads them from PostgreSQL.
 Docker Desktop (or a compatible Docker daemon) is required for PostgreSQL.
-xshield-edge refuses to start without a Jev key: set AI_GATEWAY_API_KEY, or set
-XSHIELD_JEV_ROUTE=direct and XSHIELD_JEV_API_KEY. The development administrator
+Jev needs a key: set AI_GATEWAY_API_KEY (or XSHIELD_JEV_ROUTE=direct and
+XSHIELD_JEV_API_KEY), or save one on the console's model page after the stack is
+up. Until then judgements report JEV_NOT_CONFIGURED. The development administrator
 password is xshield-dev-password. The stack uses development-only credentials
 and data volumes; they are never used by production configuration.
 
@@ -119,11 +120,11 @@ else
     case "${XSHIELD_JEV_ROUTE:-gateway}" in
         gateway)
             [[ -n "${AI_GATEWAY_API_KEY:-}" ]] ||
-                die "AI_GATEWAY_API_KEY is required: xshield-edge does not start without a Jev key (or set XSHIELD_JEV_ROUTE=direct and XSHIELD_JEV_API_KEY)"
+                printf '%s\n' 'dev.sh: no AI_GATEWAY_API_KEY is set; judgements report JEV_NOT_CONFIGURED until a Jev key is saved on the console model page' >&2
             ;;
         direct)
             [[ -n "${XSHIELD_JEV_API_KEY:-}" ]] ||
-                die "XSHIELD_JEV_API_KEY is required when XSHIELD_JEV_ROUTE=direct"
+                printf '%s\n' 'dev.sh: XSHIELD_JEV_ROUTE=direct without XSHIELD_JEV_API_KEY; judgements report JEV_NOT_CONFIGURED until a Jev key is saved on the console model page' >&2
             ;;
         *)
             die "XSHIELD_JEV_ROUTE must be gateway or direct"

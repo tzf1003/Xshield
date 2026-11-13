@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 /// Everything the edge needs from its environment, except the Jev client
-/// (built by `xshield_judge::jev::JevClient::from_environment`).
+/// (see `xshield_judge::jev::environment_settings`).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Settings {
     /// TCP ports to listen on (all interfaces).

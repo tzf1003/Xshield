@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail when production code reads an XSHIELD_* environment variable no document mentions.
 
-Operators configure the control plane, edge and worker only through environment
+Operators configure the control plane and the edge only through environment
 variables, so a variable that exists in code but not in the docs is invisible to
 them (a secret nobody knows to rotate, a switch nobody can find). This is a text
 level guard: it finds quoted names in non-test
@@ -56,7 +56,7 @@ def main() -> int:
         print("environment variables read by code but not documented:")
         for name in missing:
             print(f"  {name}  ({code[name].relative_to(ROOT)})")
-        print("Document each in docs/03 3.3 (v4 variables) or the docs/05 5.3 table (v3 variables pending removal).")
+        print("Document each in docs/03 section 3.3.")
         return 1
     print(f"ok: {len(code)} environment variables read by code are all documented")
     return 0

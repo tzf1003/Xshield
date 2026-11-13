@@ -283,20 +283,10 @@ fn runtime_params(reported: Option<&Value>) -> ParamsBody {
 /// The field names a site treats as secrets when its report names none.
 #[must_use]
 fn default_secret_fields() -> Vec<String> {
-    [
-        "authorization",
-        "credential",
-        "cvv",
-        "otp",
-        "passwd",
-        "password",
-        "pwd",
-        "secret",
-        "token",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
+    xshield_judge::state::SECRET_WORDS
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// One key of a reported object, read as `T`. A key the report does not carry, a null,

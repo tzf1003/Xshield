@@ -8,7 +8,7 @@ Xshield 部署在源站前面，记住每个登录会话正常走过的路（从
 
 2026-11-01 设计重置为 v4：只保留"会话上下文 + Jev 判定"这一条主线，单管理员、配置最少，大量删减 v3 的审批、资格账本、探针、证据链和校准体系。
 
-**目前只有文档是 v4。** `crates/`、`web/console/`、`migrations/` 等代码仍是 v3 实现，改造清单见 [05 删减清单](docs/05-v3-removal.md)。v3 的文档、测试结果和 CI 状态记录在提交 `ad524d4` 及 [CHANGELOG](CHANGELOG.md) 中。
+代码已按 v4 实现：网关（`xshield-edge` + `xshield-judge`）、控制面（`xshield-control`）、控制台（`web/console`）和 `migrations/` 都是 v4。v3 机制的去留和尚未删完的残留模块见 [05 删减清单](docs/05-v3-removal.md)。v3 的文档、测试结果和 CI 状态记录在提交 `ad524d4` 及 [CHANGELOG](CHANGELOG.md) 中。
 
 ## 文档
 
@@ -27,12 +27,12 @@ Xshield 部署在源站前面，记住每个登录会话正常走过的路（从
 
 `crates/`（Rust：`xshield-edge` 数据面、`xshield-judge` 模型判定、`xshield-control` 控制面、`xshield-core` 领域逻辑，其余 crate 按 05 删除）、`web/console`（控制台）、`migrations/`（PostgreSQL 迁移）、`scripts/`（验证与回归脚本）、`tests/`（靶场与集成回归）、`docs/`（v4 设计文档）、`design/`（控制台可点击原型，不参与构建）。
 
-## 运行与验证（当前 v3 代码）
+## 运行与验证
 
 ```bash
 python3 -m pip install -r scripts/requirements.txt
 python3 scripts/validate_library.py     # Schema、样例与文档链接
-scripts/verify_all.sh                    # fmt、clippy、测试、PostgreSQL、探针单测与控制台
+scripts/verify_all.sh                    # fmt、clippy、测试、PostgreSQL 与控制台
 ./dev.sh                                 # 本地开发栈
 ```
 

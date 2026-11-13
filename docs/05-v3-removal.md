@@ -1,6 +1,6 @@
 # 05 从 v3 到 v4 的删减清单
 
-本次只重写了设计文档；`crates/`、`migrations/`、`web/console/` 等代码仍是 v3 实现。本章列出代码改造要删什么、留什么、补什么，作为后续改造的任务清单。旧文档可在提交 `ad524d4` 中查看（`git show ad524d4:docs/<文件名>`），代码注释里引用的 `docs/NN` 编号指的都是这些旧文档。
+v4 的判定路径、控制面、控制台和迁移已经按本组文档实现。本章记录 v3 的每项机制、模块和环境变量在 v4 里的去留；标为“删除”的条目大多已经删除，仍留在仓库里的主要是 `crates/xshield-core` 中不再被其他 crate 引用的 v3 模块及其测试。旧文档可在提交 `ad524d4` 中查看（`git show ad524d4:docs/<文件名>`），代码注释里引用的 `docs/08` 及以后的编号指的都是这些旧文档。
 
 ## 5.1 机制去留
 
@@ -46,11 +46,13 @@
 
 ## 5.3 环境变量去留
 
-v3 代码读取下列 109 个变量。CI 的 `scripts/check_env_docs.py` 要求代码读取的每个变量都在文档里出现，这张表在代码改造期间同时满足这项检查；变量随代码删除后，从表中移除。
+v3 代码读取 109 个变量，下面是它们在 v4 里的去留。v4 代码实际读取的变量以 [03.3](03-admin-config-audit.md#33-部署级环境变量) 为准，CI 的 `scripts/check_env_docs.py` 要求代码读取的每个变量都在文档里出现。
 
 **保留（必需）**：`XSHIELD_DATABASE_URL`、`XSHIELD_EDGE_LISTEN_PORTS`、`XSHIELD_CONTROL_LISTEN`。
 
-**保留（可选部署项）**：`XSHIELD_JEV_ROUTE`、`XSHIELD_JEV_API_KEY`、`XSHIELD_EDGE_TLS_CERT_PATH`、`XSHIELD_EDGE_TLS_KEY_PATH`、`XSHIELD_CONTROL_OPS_LISTEN`、`XSHIELD_CONTROL_CONSOLE_ORIGIN`、`XSHIELD_ALLOWED_UPSTREAM_CIDRS`、`XSHIELD_ALLOW_LOOPBACK_UPSTREAM`；`XSHIELD_EDGE_SITES_FILE`（仅开发，新增）。
+**保留（可选部署项）**：`XSHIELD_JEV_ROUTE`、`XSHIELD_JEV_API_KEY`、`XSHIELD_EDGE_TLS_CERT_PATH`、`XSHIELD_EDGE_TLS_KEY_PATH`、`XSHIELD_CONTROL_CONSOLE_ORIGIN`；`XSHIELD_EDGE_SITES_FILE`（仅开发，新增）。
+
+**原计划保留、v4 代码没有实现**：`XSHIELD_CONTROL_OPS_LISTEN`、`XSHIELD_ALLOWED_UPSTREAM_CIDRS`、`XSHIELD_ALLOW_LOOPBACK_UPSTREAM`。v4 代码不读取这三个变量，设置了也没有效果；源站地址由管理员在站点配置里填写，网关不再按网段限制。
 
 **被替换**：
 
