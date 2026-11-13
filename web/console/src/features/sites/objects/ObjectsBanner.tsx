@@ -3,7 +3,7 @@
 // and have 知道了 (known), which marks their batch handled. A pause has no 知道了: each paused position is handled by
 // its own action, since a pause changes what the judge does.
 
-import { useAckEvent } from "../../../api/queries.ts";
+import { useAckEvents } from "../../../api/queries.ts";
 import type { ObjectEvent } from "../../../api/types.ts";
 import { useSetSearch } from "../../../app/scope.ts";
 import { hm } from "../../../features/system/clock.ts";
@@ -27,7 +27,7 @@ function clockOf(at: string): string {
 
 export function ObjectsBanner({ site, events }: Props) {
   const setSearch = useSetSearch();
-  const ack = useAckEvent();
+  const ack = useAckEvents();
   const groups = bannerGroups(events.filter((event) => event.status === "open"));
   if (groups.paused.length === 0 && groups.anomaly.length === 0 && groups.tightened.length === 0) {
     return null;
@@ -89,9 +89,7 @@ export function ObjectsBanner({ site, events }: Props) {
             type="button"
             className="linkbtn"
             disabled={ack.isPending}
-            onClick={() => {
-              for (const event of group.events) ack.mutate({ name: site, id: event.id });
-            }}
+            onClick={() => ack.mutate({ name: site, ids: group.events.map((event) => event.id) })}
           >
             {OBJECT_TEXT.events.actions.knowIt}
           </button>
