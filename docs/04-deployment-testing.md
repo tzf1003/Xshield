@@ -2,9 +2,29 @@
 
 ## 4.1 部署形态
 
-首版参考部署只有一种：单机 Docker Compose，包含网关、控制台和 PostgreSQL 三个服务。仓库里目前还没有这份 Compose 文件（`docker-compose.dev.yml` 只启动开发用的 PostgreSQL），这是 [05.2](05-v3-removal.md#52-代码模块去留) 记录的已知缺口；两个角色的镜像由 `Dockerfile` 构建。源站不需要接入 SDK，也不需要注入脚本。
+首版参考部署只有一种：单机 Docker Compose，包含网关、控制台和 PostgreSQL 三个服务。它就是仓库根目录的 `docker-compose.yml`，两个角色的镜像由 `Dockerfile` 构建（`docker-compose.dev.yml` 是另一份，只启动开发用的 PostgreSQL）。源站不需要接入 SDK，也不需要注入脚本。
 
 多实例部署需要先把会话上下文换成共享存储（见 [01.2](01-request-flow.md#12-会话与上下文)），在那之前不提供 Helm、systemd 等其他参考部署。v3 的 `deploy/helm`、`deploy/systemd`、`deploy/prometheus` 已删除。
+
+### 4.1.1 启动参考部署
+
+在仓库根目录：
+
+```sh
+cp .env.example .env
+openssl rand -hex 24      # 填入 XSHIELD_POSTGRES_PASSWORD
+openssl rand -hex 32      # 填入 XSHIELD_CONTEXT_KEY_HEX
+docker compose build xshield-control
+printf '%s\n' '管理员口令' | docker compose run --rm --no-deps -T xshield-control hash-password
+                          # 输出填入 XSHIELD_ADMIN_PASSWORD_HASH，保留单引号（值里有 $）
+docker compose up -d --build
+```
+
+- 控制台只监听本机的 `127.0.0.1:8081`。管理员 Cookie 带 `Secure`，所以在本机用 `http://localhost:8081` 打开，或经 SSH 隧道，或在前面放一个 HTTPS 反向代理（[07.2.3](07-console-architecture.md#723-部署)）。
+- 网关监听所有网卡的 `8080`（明文）。要让网关自己终结 TLS，在 `docker-compose.yml` 的 `xshield-edge` 里挂载证书和私钥并设置 `XSHIELD_EDGE_TLS_CERT_PATH`、`XSHIELD_EDGE_TLS_KEY_PATH`（[03.3](03-admin-config-audit.md#33-部署级环境变量)）。
+- Jev 密钥可以写在 `.env` 的 `AI_GATEWAY_API_KEY`（取消该行注释后填写），也可以启动后在控制台“系统”页的“模型”标签里保存；控制台保存的密钥优先。两处都没有时判定记为 `JEV_NOT_CONFIGURED`。
+- 网关在表还没建好时会退出，由 Compose 重启，直到控制台执行完迁移。
+- 数据在卷 `xshield_postgres-data` 里；`docker compose down` 保留它，加 `-v` 才删除。
 
 ## 4.2 上线步骤
 
