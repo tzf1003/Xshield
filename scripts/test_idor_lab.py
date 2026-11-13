@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tests/security-lab"))
 
 from fake_jev import FakeJev  # noqa: E402
-from idor_origin import PASSWORD, EmrOrigin  # noqa: E402
+from idor_origin import PASSWORD, EmrOrigin, new_long_token  # noqa: E402
 
 TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
 EDGE = TARGET / ("debug/xshield-edge.exe" if os.name == "nt" else "debug/xshield-edge")
@@ -145,6 +145,10 @@ def site_specs(origin_port: int) -> list[dict]:
         site("limited", "limit.lab", advanced={"session_calls_per_minute": 2}),
         site("identity", "identity.lab", objects=IDENTITY_OBJECTS),
         site("admin", "admin.lab", objects=ADMIN_OBJECTS),
+        # A JSON credential site: the token login returns a long session token in its body, and the
+        # session carries it as a bearer token in the Authorization header (docs/01 section 1.7).
+        site("token", "token.lab", session={"header": "Authorization"},
+             entries=[*ENTRIES, "/api/token-login"]),
     ]
     # Every lab login comes from the same loopback address, and the address budget counts all of
     # them, so a long run would exhaust it and turn later logins into JEV_CALL_LIMIT. The lab tests
@@ -241,10 +245,13 @@ class Lab:
         self.scenario = ""
 
     def send(self, host: str, method: str, target: str, *, cookie: str | None = None,
-             form: dict[str, str] | None = None, json_body: dict | None = None) -> Sent:
+             form: dict[str, str] | None = None, json_body: dict | None = None,
+             authorization: str | None = None) -> Sent:
         headers = {"Host": host}
         if cookie:
             headers["Cookie"] = cookie
+        if authorization:
+            headers["Authorization"] = authorization
         body = b""
         if json_body is not None:
             body = json.dumps(json_body, ensure_ascii=False).encode()
@@ -271,11 +278,17 @@ class Lab:
         with self.origin.lock:
             return list(self.origin.served)
 
-    def origin_direct(self, check: str, method: str, target: str, cookie: str) -> None:
+    def origin_direct(self, check: str, method: str, target: str, cookie: str = "",
+                      authorization: str = "") -> None:
         """Asks the origin without the edge, to show the object is reachable there."""
+        headers = {"Content-Length": "0"}
+        if cookie:
+            headers["Cookie"] = cookie
+        if authorization:
+            headers["Authorization"] = authorization
         connection = http.client.HTTPConnection("127.0.0.1", self.origin.port, timeout=10)
         try:
-            connection.request(method, target, headers={"Cookie": cookie, "Content-Length": "0"})
+            connection.request(method, target, headers=headers)
             status = connection.getresponse().status
         finally:
             connection.close()
@@ -655,6 +668,42 @@ def c5(lab: Lab) -> None:
     lab.expect("third call is over the session limit", lab.send(
         "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"}),
         Expect(403, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+
+
+@scenario("G1", "JSON 凭证站点：登录响应里的长令牌绑定会话，入口放行；登录响应和列表都没给过的病人交 Jev 拦截")
+def g1(lab: Lab) -> None:
+    login = lab.expect("token login is judged and forwarded", lab.send(
+        "token.lab", "POST", "/api/token-login", json_body=login_form("doctor_a")),
+        Expect(200, "jev_allow", "allowed", True))
+    token = login.reply.json().get("authentication", {}).get("token", "")
+    lab.check("the token is longer than a value is kept", len(token) > 700, f"length {len(token)}")
+    bearer = f"Bearer {token}"
+    listed = lab.expect("list my patients with the token", lab.send(
+        "token.lab", "GET", "/api/patients", authorization=bearer),
+        Expect(200, "fast_allow", "allowed", True))
+    session = ((listed.record or {}).get("trace") or {}).get("session") or {}
+    lab.check("the session is bound to that login", session.get("login_request_id") == login.reply.request_id,
+              f"login_request_id {session.get('login_request_id')}, want {login.reply.request_id}")
+    lab.check("the binding left no reason for being unbound", session.get("login_unbound") is None,
+              f"login_unbound {session.get('login_unbound')}")
+    lab.expect("open patient D, which neither the login nor the list showed", lab.send(
+        "token.lab", "GET", "/api/patients/PT-7004", authorization=bearer),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.origin_direct("G1 patient D", "GET", "/api/patients/PT-7004", authorization=bearer)
+
+
+@scenario("G2", "JSON 凭证站点：源站没发过的长令牌访问入口，判定记录写 login_unmatched")
+def g2(lab: Lab) -> None:
+    unknown = new_long_token()
+    sent = lab.expect("an entry with a token the origin never issued", lab.send(
+        "token.lab", "GET", "/api/patients", authorization=f"Bearer {unknown}"),
+        Expect(401, "fast_allow", "allowed", True))
+    session = ((sent.record or {}).get("trace") or {}).get("session") or {}
+    lab.check("no held login carries it, and the record says so",
+              session.get("login_unbound") == "login_unmatched",
+              f"login_unbound {session.get('login_unbound')}")
+    lab.check("no login is bound to the session", session.get("login_request_id") is None,
+              f"login_request_id {session.get('login_request_id')}")
 
 
 @scenario("W1", "声明了身份位置的站点：判定记录带会话的用户标签；换账号标签不同；未声明的站点不写身份")

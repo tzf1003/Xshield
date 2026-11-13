@@ -38,14 +38,21 @@ COMMENTS = {
 }
 
 
+def new_long_token() -> str:
+    """A random token of the length a JWT has: about 760 characters, so over the 128 the edge keeps
+    as a value (docs/01 section 1.7). Its header is the usual one, and the rest is random."""
+    return ("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9."
+            + secrets.token_urlsafe(270) + "." + secrets.token_urlsafe(270))
+
+
 class EmrOrigin:
     """An origin on a loopback port. `served` lists every request it handled."""
 
     def __init__(self) -> None:
         self.lock = Lock()
         self.patients = {key: dict(value) for key, value in PATIENTS.items()}
-        self.sessions: dict[str, str] = {}  # SID cookie value -> doctor ID
-        self.roles: dict[str, str] = {}  # SID cookie value -> role, for administrators only
+        self.sessions: dict[str, str] = {}  # session token (SID cookie or bearer) -> doctor ID
+        self.roles: dict[str, str] = {}  # session token -> role, for administrators only
         self.shares: dict[str, str] = {}  # share code -> patient ID
         self.next_patient = 7005
         # (method, request target, X-Xshield-Request-Id as received or None)
@@ -60,6 +67,12 @@ class EmrOrigin:
     def stop(self) -> None:
         self.server.shutdown()
         self.server.server_close()
+
+    def issue_token(self, doctor: str) -> str:
+        """Issues a long bearer token for `doctor` and remembers it, as the token login does."""
+        token = new_long_token()
+        self.sessions[token] = doctor
+        return token
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -98,14 +111,23 @@ class _Handler(BaseHTTPRequestHandler):
                 return value
         return None
 
+    def _session_token(self) -> str | None:
+        """The session token: the SID cookie's value, or the token of an `Authorization: Bearer`
+        header for a site whose session is carried there."""
+        cookie = self._sid()
+        if cookie is not None:
+            return cookie
+        scheme, _, token = (self.headers.get("Authorization") or "").partition(" ")
+        return token if scheme == "Bearer" and token else None
+
     def _caller(self) -> str | None:
-        """The doctor behind the SID cookie, or None when the session is unknown."""
-        token = self._sid()
+        """The doctor behind the session token, or None when the session is unknown."""
+        token = self._session_token()
         return None if token is None else self.origin.sessions.get(token)
 
     def _role(self) -> str | None:
-        """The role behind the SID cookie, when it is an administrator's."""
-        token = self._sid()
+        """The role behind the session token, when it is an administrator's."""
+        token = self._session_token()
         return None if token is None else self.origin.roles.get(token)
 
     def _route(self, method: str, body: bytes) -> tuple[int, object, dict[str, str]]:
@@ -124,6 +146,16 @@ class _Handler(BaseHTTPRequestHandler):
             if user in ADMINS:
                 origin.roles[token] = "admin"
             return 302, None, {"Location": "/api/home", "Set-Cookie": f"SID={token}; Path=/; HttpOnly"}
+        if method == "POST" and url.path == "/api/token-login":
+            # A login whose session token is returned in the JSON body and sent back as a bearer
+            # token (docs/01 section 1.7, the JSON credential sites). Doctors only.
+            credentials = _json(body)
+            user = credentials.get("username")
+            if user not in DOCTORS or credentials.get("password") != PASSWORD:
+                return 401, {"error": "invalid_credentials"}, {}
+            doctor = DOCTORS[user]
+            token = origin.issue_token(doctor)
+            return 200, {"authentication": {"token": token, "doctor": doctor}}, {}
         doctor = self._caller()
         if doctor is None:
             return 401, {"error": "login_required"}, {}
