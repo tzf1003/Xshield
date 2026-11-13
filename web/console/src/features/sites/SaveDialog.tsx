@@ -8,13 +8,12 @@ import { ApiError } from "../../api/client.ts";
 import { usePreview, useSaveSite, useSite, useValidate, useVersions } from "../../api/queries.ts";
 import type { SiteDetail, SiteSpec } from "../../api/types.ts";
 import { canonical, semanticChanges, yamlDiff } from "../../lib/diff.ts";
-import { errorText } from "../../lib/vocab.ts";
 import { type FieldIssue, validateSpec } from "../../lib/site-validate.ts";
 import { ErrorBar, Loading } from "../../ui/Page.tsx";
 import { DiffView } from "./DiffView.tsx";
 import { hasNewFastAllow, ImpactView } from "./ImpactPreview.tsx";
 import { type Choices, rebaseSpec, sameJson, valueText } from "./spec-model.ts";
-import { serverProblem } from "./site-messages.ts";
+import { requestProblem, serverProblem } from "./site-messages.ts";
 
 type Props = {
   site: SiteDetail;
@@ -82,7 +81,9 @@ export function SaveDialog({
       ? validate.data
       : undefined;
   const remoteProblem =
-    remote && !remote.valid ? serverProblem(remote.error, remote.field, working) : null;
+    remote && !remote.valid
+      ? serverProblem(remote.error, remote.field, working, remote.reason)
+      : null;
   const changes = semanticChanges(current, working);
   const unchanged = canonical(current) === canonical(working);
   const unresolved =
@@ -316,7 +317,7 @@ export function SaveDialog({
 
         {saveError ? (
           <div className="errbar" role="alert">
-            {errorText(saveError instanceof ApiError ? saveError.code : undefined)}
+            {requestProblem(saveError, working)}
           </div>
         ) : null}
 

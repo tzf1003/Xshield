@@ -42,6 +42,14 @@ def slot_site(**fields: object):
     return mutate
 
 
+def functions_site(**fields: object):
+    """A mutation that gives the emr sample one function entry carrying the given fields."""
+    def mutate(site: dict) -> None:
+        entry = {'key': 'GET /api/patients/{id}', 'source': 'admin', **fields}
+        site.update(objects={'functions': [entry]})
+    return mutate
+
+
 # Each mutation of the emr sample must be refused by the site configuration schema.
 SITE_NEGATIVES = [
     ('unknown_key', lambda site: site.update(owner='admin')),
@@ -67,6 +75,12 @@ SITE_NEGATIVES = [
     ('undeclared_identity', slot_site(identity='tenant')),
     ('paused_not_boolean', slot_site(tier='public', reliability='high', paused='yes')),
     ('accepts_public_not_boolean', slot_site(accepts_public='no', reliability='high')),
+    ('function_tier_not_admin', functions_site(tier='self')),
+    ('function_reliability_without_tier', functions_site(reliability='high')),
+    ('function_unknown_reliability', functions_site(tier='admin', reliability='certain')),
+    ('function_key_method_not_upper', functions_site(key='get /api/patients/{id}')),
+    ('function_key_without_slash', functions_site(key='GET api/patients')),
+    ('function_carries_paused', functions_site(paused=True)),
 ]
 
 checks: list[dict[str, object]] = []
@@ -156,6 +170,12 @@ def check_sites(schema: dict) -> list[str]:
         ],
     }
     check('site:judgements_accepted', valid(schema, judged), errors(schema, judged))
+    functions = copy.deepcopy(emr)
+    functions['objects'] = {'functions': [
+        {'key': 'POST /api/admin/export', 'source': 'rule', 'tier': 'admin', 'reliability': 'high'},
+        {'key': 'GET /api/search', 'source': 'agent'},
+    ]}
+    check('site:functions_accepted', valid(schema, functions), errors(schema, functions))
     for label, mutate in SITE_NEGATIVES:
         site = copy.deepcopy(emr)
         mutate(site)

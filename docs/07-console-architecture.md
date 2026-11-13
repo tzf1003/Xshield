@@ -861,7 +861,7 @@ CREATE TABLE jev_prompts (
 - `name` 与路径参数不一致：400 `SITE_NAME_MISMATCH`。
 - `hosts` 中有其他站点已占用的主机名：409 `SITE_HOST_TAKEN`，`field` 指出哪一项。现状是网关按站点名顺序先到先得、落选站点只写 stderr，控制面在保存时就拒绝。
 - 请求体最大 64 KiB；`note` 最长 500 字符。
-- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复）、`key_invalid`（位置格式不对或过长）、`too_many`（超过 64 个类别或 2,048 个位置）、`class_id_invalid`（类别 id 格式不对）、`judgement_conflict`（一个条目同时带 `tier` 和 `accepts_public`）、`reliability_without_judgement`（`reliability` 没有 `tier` 或 `accepts_public` 与之同在）；其余对象表错误只带 `field`。
+- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复；功能的键忽略模板大小写后重复）、`key_invalid`（位置或功能的键格式不对或过长）、`too_many`（超过 64 个类别、2,048 个位置或 2,048 条功能）、`class_id_invalid`（类别 id 格式不对）、`judgement_conflict`（一个条目同时带 `tier` 和 `accepts_public`）、`reliability_without_judgement`（`reliability` 没有 `tier` 或 `accepts_public` 与之同在；功能条目的 `reliability` 没有 `tier` 同在也是它）、`function_tier_unsupported`（功能的 `tier` 不是 `admin`，见 7.9.18）；其余对象表错误只带 `field`。
 
 ### 7.9.13 状态灯与配置生效
 
@@ -1032,6 +1032,52 @@ CREATE TABLE jev_prompts (
 - 告警说的是“同一个响应里同时有这两类内容”，不判断敏感属性属于哪一个对象。字段遮挡和拦截要等有数据再定，因为改响应体比拦请求风险大。
 - 请求里自己发出的值（回声）不排除。
 - 控制台的请求详情在学习步骤里显示“疑似属性越权，仅告警未拦截”，只列出类别，不显示值。
+
+### 7.9.18 功能表
+
+功能表是站点配置 `objects` 下的 `functions` 列表（[03.2](03-admin-config-audit.md#32-站点配置)）。对象表的位置说的是“某个接口里的某个值是哪一类对象”，装不下“这个接口本身归谁用”，所以功能单独成表。本节定义格式、校验和查找规则。本版只读入、校验和保存，网关的判定还不使用它，判定结果与没有功能表时相同；判定的启用、学习基线和确认写入见后续改动。
+
+格式：
+
+```yaml
+objects:
+  functions:
+    - key: POST /api/admin/export
+      source: rule
+      tier: admin
+      reliability: high
+    - key: "GET /api/patients/{id}"
+      source: admin
+```
+
+| 字段 | 必填 | 取值 |
+|---|---|---|
+| `key` | 是 | `方法 路由模板`，中间一个空格 |
+| `source` | 是 | `admin`、`rule`、`agent`，与位置条目相同 |
+| `tier` | 否 | 只接受 `admin`。省略表示对所有会话开放，条目只说明“站点有这个功能” |
+| `reliability` | 否 | `low`、`medium`、`high`，只能与 `tier` 同在。省略按 `low` 算 |
+
+功能条目没有 `paused`。目前没有对功能的自动暂停：想停用一个管理功能，删掉 `tier` 即可，条目仍是已知功能。有了自动暂停的需求再加。`functions` 省略或为空时不写出这个键，现有站点的配置逐字不变。最多 2,048 条，与位置相同。
+
+**键的校验**。拒绝时 `reason` 为 `key_invalid`，位置是 `objects.functions[n]`。键必须是判定能产生的拼写，全部满足才接受：
+
+1. 恰好两段，用一个空格分开；整个键不超过 256 字节。
+2. 方法是 3 到 7 个大写 ASCII 字母，且不是 `HEAD` 或 `OPTIONS`。这两个方法在查找时另有规则，写成条目永远匹配不上。
+3. 模板以 `/` 开头，不含 `?`、`#`、控制字符和 `;`，并且是规范拼写（与位置键相同，见 [7.4.7](#747-档位在判定中的使用)）。
+4. 模板中纯数字或 UUID 的段必须写成 `{id}`。
+5. 含 `{` 或 `}` 的段只能恰好是 `{id}`。写成 `{userId}` 的会被拒绝，免得管理员以为它是占位符。
+
+其他校验：超过 2,048 条为 `too_many`；忽略模板字母大小写后两条键相同为 `duplicate_key`（位置是后一条）；`tier` 为 `self`、`org`、`public` 等非 `admin` 的档位为 `function_tier_unsupported`；有 `reliability` 没有 `tier` 为 `reliability_without_judgement`。`tier` 写成完全不认识的字样（如 `everyone`）时，与位置条目相同，整个 `objects` 段按段解析失败处理。条目里有不认识的字段（如 `paused`）时也是段解析失败。错误信息不回显配置值。
+
+**查找**。`ObjectMap` 的三个方法（`function_of`、`admin_only`、`knows_function`）接收方法和请求的路由模板，即 `position_template(逻辑路径)` 的结果（判定里对应 `route_template`），方法内部不再规范化：
+
+- **段的比较**。条目模板和请求模板按 `/` 分段，段数必须相同。条目的 `{id}` 段覆盖请求的任意一个非空段。其他段先去掉请求段的第一个 `;` 及之后的部分，再与条目段做忽略 ASCII 大小写的比较；去掉之后为空的段不匹配任何字面段。逐字相等（或忽略大小写相等）的段数记为字面段数。位置条目的比较（`template_covers`）不改。
+- **为什么忽略大小写和 `;` 参数**。源站如果不分大小写（IIS、部分框架）或会剥掉 `;` 参数（Java 系），`/API/Admin/export` 与 `/api/admin;x/export` 到的是同一个功能，条目必须照样管住。源站如果区分，这些写法本来就是 404，多管一下没有代价。
+- **`function_of`**。在方法相同、覆盖请求的条目中取第一名：字面段数多的优先；一样多时，档位为 `admin` 且可靠性为 `high` 的优先，取更严的；再一样时，书写顺序靠前的优先。
+- **`HEAD` 和 `OPTIONS`**。`HEAD` 按 `GET` 查。`OPTIONS` 是预检，不带凭证，不参与功能查找：`function_of` 返回空，`admin_only` 为假。`knows_function` 对 `OPTIONS` 的判断是：任何方法下该路由已知即为真。
+- **`admin_only`**。`function_of` 的结果是 `admin` 档且可靠性为 `high`。可靠性不是 `high` 的条目不收紧，与位置条目的规矩相同。
+- **`knows_function`**。功能表有条目覆盖请求，或者对象表里有位置（暂停与否都算）的方法与请求方法相同（`HEAD` 按 `GET`）且模板覆盖请求，即为已知。位置声明过的接口，它的功能自动算已知，不必在功能表里重复登记。
+- **性能**。校验时把键按方法和段数分组，并把模板预先切分成段（每个请求只切分一次）。查找只看同方法、同段数的组，不扫全表，也不对每个键重新切分。对象表追加位置时同步更新这个索引。
 
 ## 7.10 控制台前端架构
 

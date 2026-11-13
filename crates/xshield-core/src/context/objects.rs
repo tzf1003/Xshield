@@ -12,18 +12,21 @@
 //! (`objects.learning`) are configuration, so a change to them is a new
 //! configuration version, but they never change the map by themselves.
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use super::config::ConfigError;
 use super::learning::{SESSIONS_MIN, VOTES_MIN};
-use crate::path_template::canonical_path;
+use crate::path_template::{canonical_path, position_template};
 
 /// Most object kinds one site declares.
 pub const CLASSES_MAX: usize = 64;
 /// Most confirmed positions one site holds.
 pub const SLOTS_MAX: usize = 2_048;
+/// Most functions one site declares (docs/07 section 7.9.18).
+pub const FUNCTIONS_MAX: usize = 2_048;
 /// Largest uses or sessions a site may require before the rules propose a kind.
 pub const THRESHOLD_MAX: u32 = 10_000;
 /// Largest number of questions a site may allow the learning agent each day.
@@ -147,6 +150,24 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// One function of the site, such as `POST /api/admin/export` (docs/07 section 7.9.18). An entry
+/// without a `tier` says only that the site has the function. A `tier` of `admin`, with `reliability`
+/// `high`, says that only administrator sessions use it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObjectFunction {
+    /// The method and the route template, separated by one space: `GET /api/patients/{id}`.
+    pub key: String,
+    /// Where the entry came from.
+    pub source: SlotSource,
+    /// Whose function it is. Only `admin` is accepted; the map refuses any other tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    /// How sure the learning is of the `tier`. Only written with a `tier`; absent counts as low.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliability: Option<Reliability>,
+}
+
 /// The learning settings of a site (`objects.learning`, console design 3.5). A key
 /// that is absent means its default. Settings that all hold their defaults are not
 /// written back, so a configuration that does not change them keeps no `learning`
@@ -238,6 +259,9 @@ pub struct ObjectMapDto {
     /// Confirmed positions, at most [`SLOTS_MAX`].
     #[serde(default)]
     pub slots: Vec<ObjectSlot>,
+    /// Functions of the site, at most [`FUNCTIONS_MAX`]. Absent or empty is not written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub functions: Vec<ObjectFunction>,
     /// Learning settings, at `objects.learning`. Absent or default settings are not written.
     #[serde(default, skip_serializing_if = "LearningSettings::is_default")]
     pub learning: LearningSettings,
@@ -249,11 +273,16 @@ pub struct ObjectMapDto {
 pub struct ObjectMap {
     classes: Vec<ObjectClass>,
     slots: Vec<ObjectSlot>,
+    /// The functions, in the order they were written.
+    functions: Vec<ObjectFunction>,
     /// The learning settings. The default when the site sets none.
     learning: LearningSettings,
     /// Position key to its place in `slots`, built once when the map is validated.
     #[serde(skip)]
     index: BTreeMap<String, usize>,
+    /// The templates of the functions and of the positions, grouped for the lookups.
+    #[serde(skip)]
+    shapes: Shapes,
 }
 
 impl ObjectMap {
@@ -261,7 +290,10 @@ impl ObjectMap {
     /// (the common case before learning).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.classes.is_empty() && self.slots.is_empty() && self.learning.is_default()
+        self.classes.is_empty()
+            && self.slots.is_empty()
+            && self.functions.is_empty()
+            && self.learning.is_default()
     }
 
     /// The learning settings; the defaults when the site sets none.
@@ -338,7 +370,9 @@ impl ObjectMap {
                 slot.paused = false;
             }
         } else {
-            self.index.insert(key.to_owned(), self.slots.len());
+            let place = self.slots.len();
+            self.index.insert(key.to_owned(), place);
+            self.shapes.add_position(place, key);
             self.slots.push(ObjectSlot {
                 key: key.to_owned(),
                 class: class.to_owned(),
@@ -473,6 +507,60 @@ impl ObjectMap {
             .map(|(_, key)| key)
     }
 
+    /// The functions, in the order they were written.
+    #[must_use]
+    pub fn functions(&self) -> &[ObjectFunction] {
+        &self.functions
+    }
+
+    /// The function that governs a request: `method`, and the route `template` the judge keys it
+    /// by (docs/07 section 7.9.18). `HEAD` is looked up as `GET`. `OPTIONS` is a preflight, which
+    /// carries no credential, so it names no function. Among the functions whose template covers
+    /// `template`, the one with the most literal segments wins; then the stricter one, which is an
+    /// `admin` tier with `high` reliability; then the one written first.
+    #[must_use]
+    pub fn function_of(&self, method: &str, template: &str) -> Option<&ObjectFunction> {
+        if method == "OPTIONS" {
+            return None;
+        }
+        let request: Vec<&str> = template.split('/').collect();
+        self.shapes
+            .functions
+            .get(head_as_get(method))?
+            .get(&request.len())?
+            .iter()
+            .filter_map(|declared| {
+                let literal = covers(&declared.segments, &request)?;
+                let function = self.functions.get(declared.place)?;
+                let rank = (literal, admin_and_high(function), Reverse(declared.place));
+                Some((rank, function))
+            })
+            .max_by_key(|(rank, _)| *rank)
+            .map(|(_, function)| function)
+    }
+
+    /// Whether the function that governs a request is an administrator's that the map is sure of:
+    /// `tier` `admin` with `reliability` `high`. A less sure entry tightens nothing.
+    #[must_use]
+    pub fn admin_only(&self, method: &str, template: &str) -> bool {
+        self.function_of(method, template)
+            .is_some_and(admin_and_high)
+    }
+
+    /// Whether the site knows the function of a request (docs/07 section 7.9.18). It does when a
+    /// function covers the request, or when a declared position lies on the same route: the position
+    /// already says that the route exists. A preflight is known when its route is known for any method.
+    #[must_use]
+    pub fn knows_function(&self, method: &str, template: &str) -> bool {
+        let request: Vec<&str> = template.split('/').collect();
+        if method == "OPTIONS" {
+            return covers_any_method(&self.shapes.functions, &request)
+                || covers_any_method(&self.shapes.positions, &request);
+        }
+        self.function_of(method, template).is_some()
+            || covers_for_method(&self.shapes.positions, head_as_get(method), &request)
+    }
+
     /// The entry of a position when it is not paused.
     fn live(&self, key: &str) -> Option<&ObjectSlot> {
         self.slot(key).filter(|slot| !slot.paused)
@@ -506,6 +594,8 @@ impl ObjectsIssue {
             ObjectsPlace::Class(index) => format!("objects.classes[{index}]"),
             ObjectsPlace::Slots => "objects.slots".to_owned(),
             ObjectsPlace::Slot(index) => format!("objects.slots[{index}]"),
+            ObjectsPlace::Functions => "objects.functions".to_owned(),
+            ObjectsPlace::Function(index) => format!("objects.functions[{index}]"),
         }
     }
 }
@@ -525,6 +615,10 @@ pub enum ObjectsPlace {
     Slots,
     /// One confirmed position, `objects.slots[n]`.
     Slot(usize),
+    /// The list of functions, `objects.functions`.
+    Functions,
+    /// One function, `objects.functions[n]`.
+    Function(usize),
 }
 
 /// The reasons an object map entry is refused, as their stable codes name them.
@@ -545,6 +639,8 @@ pub enum ObjectsReason {
     JudgementConflict,
     /// A `reliability` with neither a `tier` nor `accepts_public` to qualify.
     ReliabilityWithoutJudgement,
+    /// A function's `tier` is something other than `admin`. A function is an administrator's, or open to all.
+    FunctionTierUnsupported,
 }
 
 impl ObjectsReason {
@@ -559,6 +655,7 @@ impl ObjectsReason {
             Self::ClassIdInvalid => "class_id_invalid",
             Self::JudgementConflict => "judgement_conflict",
             Self::ReliabilityWithoutJudgement => "reliability_without_judgement",
+            Self::FunctionTierUnsupported => "function_tier_unsupported",
         }
     }
 }
@@ -576,6 +673,12 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
         }
         if dto.slots.len() > SLOTS_MAX {
             return Err(refused(ObjectsPlace::Slots, Some(ObjectsReason::TooMany)));
+        }
+        if dto.functions.len() > FUNCTIONS_MAX {
+            return Err(refused(
+                ObjectsPlace::Functions,
+                Some(ObjectsReason::TooMany),
+            ));
         }
         if !valid_learning(&dto.learning) {
             return Err(refused(ObjectsPlace::Learning, None));
@@ -597,6 +700,7 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
             }
         }
         let mut index = BTreeMap::new();
+        let mut shapes = Shapes::default();
         for (at, slot) in dto.slots.iter().enumerate() {
             let place = ObjectsPlace::Slot(at);
             if !valid_key(&slot.key) {
@@ -617,12 +721,16 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
             if index.insert(slot.key.clone(), at).is_some() {
                 return Err(refused(place, Some(ObjectsReason::DuplicateKey)));
             }
+            shapes.add_position(at, &slot.key);
         }
+        check_functions(&dto.functions, &mut shapes)?;
         Ok(Self {
             classes: dto.classes,
             slots: dto.slots,
+            functions: dto.functions,
             learning: dto.learning,
             index,
+            shapes,
         })
     }
 }
@@ -632,6 +740,7 @@ impl From<ObjectMap> for ObjectMapDto {
         Self {
             classes: map.classes,
             slots: map.slots,
+            functions: map.functions,
             learning: map.learning,
         }
     }
@@ -698,6 +807,168 @@ fn template_covers(declared: &str, template: &str) -> Option<usize> {
         }
     }
     Some(literal)
+}
+
+/// The method a lookup reads a request by: `HEAD` is a `GET` without its body.
+fn head_as_get(method: &str) -> &str {
+    if method == "HEAD" { "GET" } else { method }
+}
+
+/// Whether a function is an administrator's, and the map is sure of it.
+fn admin_and_high(function: &ObjectFunction) -> bool {
+    function.tier == Some(Tier::Admin) && function.reliability == Some(Reliability::High)
+}
+
+/// The declared templates of one list, by method and then by number of segments.
+type Groups = BTreeMap<String, BTreeMap<usize, Vec<Declared>>>;
+
+/// One declared route template, split into its segments, and the place of its entry in its list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Declared {
+    place: usize,
+    segments: Vec<String>,
+}
+
+/// The route templates of the functions and of the positions, grouped by method and by number of
+/// segments, and split once when the map is built. A lookup reads only the group of its own method
+/// and length (docs/07 section 7.9.18).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Shapes {
+    functions: Groups,
+    positions: Groups,
+}
+
+impl Shapes {
+    fn add_function(&mut self, place: usize, key: &str) {
+        add_template(&mut self.functions, place, key);
+    }
+
+    fn add_position(&mut self, place: usize, key: &str) {
+        add_template(&mut self.positions, place, key);
+    }
+}
+
+/// Adds the template of `key`, either `METHOD /template` or `METHOD /template location`, to its
+/// group. A key without a template is not added: no request could be looked up to it.
+fn add_template(groups: &mut Groups, place: usize, key: &str) {
+    let mut parts = key.split(' ');
+    let (Some(method), Some(template)) = (parts.next(), parts.next()) else {
+        return;
+    };
+    let segments: Vec<String> = template.split('/').map(str::to_owned).collect();
+    groups
+        .entry(method.to_owned())
+        .or_default()
+        .entry(segments.len())
+        .or_default()
+        .push(Declared { place, segments });
+}
+
+/// Whether a template of any method in `groups` covers the request template.
+fn covers_any_method(groups: &Groups, request: &[&str]) -> bool {
+    groups.values().any(|by_count| covers_in(by_count, request))
+}
+
+/// Whether a template of `method` in `groups` covers the request template.
+fn covers_for_method(groups: &Groups, method: &str, request: &[&str]) -> bool {
+    groups
+        .get(method)
+        .is_some_and(|by_count| covers_in(by_count, request))
+}
+
+/// Whether one of the templates with as many segments as the request covers it.
+fn covers_in(by_count: &BTreeMap<usize, Vec<Declared>>, request: &[&str]) -> bool {
+    by_count.get(&request.len()).is_some_and(|group| {
+        group
+            .iter()
+            .any(|declared| covers(&declared.segments, request).is_some())
+    })
+}
+
+/// Whether a function template covers a request template, and how many of its segments agree
+/// literally (docs/07 section 7.9.18). An `{id}` segment of the template covers any non-empty
+/// segment of the request. Any other segment agrees with the request segment once the request's
+/// `;` parameters are removed, ignoring ASCII case; a segment that is empty after that agrees with
+/// no literal segment. The comparison is blind to case and to `;` parameters on purpose: an origin
+/// that ignores either serves the same function under those spellings.
+fn covers(declared: &[String], request: &[&str]) -> Option<usize> {
+    if declared.len() != request.len() {
+        return None;
+    }
+    let mut literal = 0;
+    for (name, actual) in declared.iter().zip(request) {
+        if name == "{id}" {
+            if actual.is_empty() {
+                return None;
+            }
+        } else {
+            // The empty segment before the first `/` is empty to begin with, and agrees with the
+            // empty segment of the template. A segment that is empty only once its `;` parameters
+            // are removed agrees with no literal segment.
+            let bare = actual.split_once(';').map_or(*actual, |(bare, _)| bare);
+            let agrees = if actual.is_empty() {
+                name.is_empty()
+            } else {
+                !bare.is_empty() && bare.eq_ignore_ascii_case(name)
+            };
+            if !agrees {
+                return None;
+            }
+            literal += 1;
+        }
+    }
+    Some(literal)
+}
+
+/// `METHOD /template` for a function key (docs/07 section 7.9.18): two parts split by one space, a
+/// method of 3 to 7 upper-case ASCII letters other than `HEAD` and `OPTIONS`, and a template in the
+/// spelling the judge keys positions by. A segment that carries a brace is `{id}` and nothing else,
+/// and no segment carries a `;`: a lookup removes those from the request, so such a segment could
+/// never match.
+fn valid_function_key(key: &str) -> bool {
+    let mut parts = key.split(' ');
+    let (Some(method), Some(template), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    key.len() <= KEY_MAX
+        && (3..=7).contains(&method.len())
+        && method.bytes().all(|byte| byte.is_ascii_uppercase())
+        && !matches!(method, "HEAD" | "OPTIONS")
+        && template.starts_with('/')
+        && !template.contains(['?', '#', ';'])
+        && !template.bytes().any(|byte| byte.is_ascii_control())
+        && canonical_path(template).as_deref() == Some(template)
+        && position_template(template) == template
+        && template
+            .split('/')
+            .all(|segment| !segment.contains(['{', '}']) || segment == "{id}")
+}
+
+/// Checks the functions of a map in the order they were written, and adds each to the shapes the
+/// lookups read. A refusal names the function that is wrong.
+fn check_functions(functions: &[ObjectFunction], shapes: &mut Shapes) -> Result<(), ConfigError> {
+    let mut keys = BTreeSet::new();
+    for (at, function) in functions.iter().enumerate() {
+        let place = ObjectsPlace::Function(at);
+        if !valid_function_key(&function.key) {
+            return Err(refused(place, Some(ObjectsReason::KeyInvalid)));
+        }
+        if function.tier.is_some_and(|tier| tier != Tier::Admin) {
+            return Err(refused(place, Some(ObjectsReason::FunctionTierUnsupported)));
+        }
+        if function.reliability.is_some() && function.tier.is_none() {
+            return Err(refused(
+                place,
+                Some(ObjectsReason::ReliabilityWithoutJudgement),
+            ));
+        }
+        // Two keys that differ only in the case of the template are one route to a lookup.
+        if !keys.insert(function.key.to_ascii_lowercase()) {
+            return Err(refused(place, Some(ObjectsReason::DuplicateKey)));
+        }
+        shapes.add_function(at, &function.key);
+    }
+    Ok(())
 }
 
 /// `METHOD /template location`: an upper-case method, a path template that starts with `/`,
@@ -921,6 +1192,362 @@ mod judgement_tests {
                 .is_none(),
             "an undeclared key takes nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod function_tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    /// The map a section makes. The section must be valid.
+    fn map_of(section: &Value) -> ObjectMap {
+        let dto: ObjectMapDto =
+            serde_json::from_value(section.clone()).expect("the section parses");
+        ObjectMap::try_from(dto).expect("the map is valid")
+    }
+
+    /// The refusal a section gets. The section must name one part.
+    fn refusal(section: &Value) -> ObjectsIssue {
+        let dto: ObjectMapDto =
+            serde_json::from_value(section.clone()).expect("the section parses");
+        match ObjectMap::try_from(dto) {
+            Err(ConfigError::Objects(issue)) => issue,
+            other => panic!("expected an objects refusal, got {other:?}"),
+        }
+    }
+
+    /// A section that holds the given functions.
+    fn with(functions: Vec<Value>) -> Value {
+        let mut section = json!({});
+        section["functions"] = Value::Array(functions);
+        section
+    }
+
+    /// A function with only a key and a source: a function the site has, open to every session.
+    fn open(key: &str) -> Value {
+        json!({ "key": key, "source": "admin" })
+    }
+
+    /// A function that only administrators use, with the given reliability.
+    fn admin(key: &str, reliability: &str) -> Value {
+        json!({ "key": key, "source": "rule", "tier": "admin", "reliability": reliability })
+    }
+
+    fn key_of(map: &ObjectMap, method: &str, template: &str) -> Option<String> {
+        map.function_of(method, template)
+            .map(|function| function.key.clone())
+    }
+
+    #[test]
+    fn functions_are_read_and_written_and_absent_when_empty() {
+        let section = json!({
+            "classes": [{"id": "doctor", "name": "医生"}],
+            "slots": [{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"}],
+            "functions": [
+                {"key": "POST /api/admin/export", "source": "rule", "tier": "admin", "reliability": "high"},
+                {"key": "GET /api/patients/{id}", "source": "admin"}
+            ]
+        });
+        let loaded = map_of(&section);
+        assert_eq!(loaded.functions().len(), 2);
+        assert_eq!(loaded.functions()[0].key, "POST /api/admin/export");
+        assert_eq!(loaded.functions()[0].source, SlotSource::Rule);
+        assert_eq!(loaded.functions()[0].tier, Some(Tier::Admin));
+        assert_eq!(loaded.functions()[0].reliability, Some(Reliability::High));
+        assert_eq!(loaded.functions()[1].tier, None);
+        assert_eq!(loaded.functions()[1].reliability, None);
+        // The written form holds the entries as they were read, and reads back the same.
+        let written = serde_json::to_value(&loaded).expect("the map writes");
+        assert_eq!(written["functions"], section["functions"]);
+        let back: ObjectMap = serde_json::from_value(written).expect("the written map reads");
+        assert_eq!(back, loaded);
+        // Without functions the key is not written at all.
+        let plain = map_of(&json!({"slots": []}));
+        assert!(plain.functions().is_empty());
+        assert!(plain.is_empty());
+        let with_slot = map_of(&json!({
+            "classes": [{"id": "doctor", "name": "医生"}],
+            "slots": [{"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"}]
+        }));
+        let text = serde_json::to_string(&with_slot).expect("the map writes");
+        assert!(!text.contains("functions"), "{text}");
+    }
+
+    #[test]
+    fn a_function_key_is_a_method_and_a_canonical_template() {
+        let refused_keys = [
+            "GET /api/x extra".to_owned(),
+            "get /api/x".to_owned(),
+            "HEAD /x".to_owned(),
+            "OPTIONS /x".to_owned(),
+            "GET api/x".to_owned(),
+            "GET /api/x?y=1".to_owned(),
+            "GET /a//b".to_owned(),
+            "GET /a/b/".to_owned(),
+            "GET /api/users/7".to_owned(),
+            "GET /api/users/{userId}".to_owned(),
+            "GET /api/a;x/b".to_owned(),
+            format!("GET /{}", "a".repeat(KEY_MAX)),
+        ];
+        for key in &refused_keys {
+            assert_eq!(
+                refusal(&with(vec![open(key)])),
+                ObjectsIssue {
+                    place: ObjectsPlace::Function(0),
+                    reason: Some(ObjectsReason::KeyInvalid),
+                },
+                "{key}"
+            );
+        }
+        for key in [
+            "GET /",
+            "GET /api/patients/{id}",
+            "POST /api/admin/export",
+            "GET /api/Users",
+        ] {
+            assert_eq!(map_of(&with(vec![open(key)])).functions().len(), 1, "{key}");
+        }
+    }
+
+    #[test]
+    fn a_function_tier_is_admin_only() {
+        for tier in ["self", "org", "public"] {
+            let section = with(vec![
+                json!({"key": "GET /api/a", "source": "admin", "tier": tier}),
+            ]);
+            assert_eq!(
+                refusal(&section),
+                ObjectsIssue {
+                    place: ObjectsPlace::Function(0),
+                    reason: Some(ObjectsReason::FunctionTierUnsupported),
+                },
+                "{tier}"
+            );
+        }
+        assert_eq!(
+            ObjectsReason::FunctionTierUnsupported.code(),
+            "function_tier_unsupported"
+        );
+        let admin_tier = map_of(&with(vec![
+            json!({"key": "GET /api/a", "source": "admin", "tier": "admin"}),
+        ]));
+        assert_eq!(admin_tier.functions()[0].tier, Some(Tier::Admin));
+    }
+
+    #[test]
+    fn a_function_reliability_needs_a_tier() {
+        let section = with(vec![
+            json!({"key": "GET /api/a", "source": "admin", "reliability": "high"}),
+        ]);
+        assert_eq!(
+            refusal(&section),
+            ObjectsIssue {
+                place: ObjectsPlace::Function(0),
+                reason: Some(ObjectsReason::ReliabilityWithoutJudgement),
+            }
+        );
+    }
+
+    #[test]
+    fn function_keys_repeat_when_they_differ_only_by_case() {
+        assert_eq!(
+            refusal(&with(vec![open("GET /api/Users"), open("GET /api/users")])),
+            ObjectsIssue {
+                place: ObjectsPlace::Function(1),
+                reason: Some(ObjectsReason::DuplicateKey),
+            }
+        );
+        // Another method, or a template that differs in more than case, is another key.
+        let distinct = with(vec![
+            open("GET /api/users"),
+            open("POST /api/users"),
+            open("GET /api/user"),
+        ]);
+        assert_eq!(map_of(&distinct).functions().len(), 3);
+    }
+
+    #[test]
+    fn more_functions_than_the_limit_are_refused() {
+        let keyed = |count: usize| -> Vec<Value> {
+            (0..count)
+                .map(|index| open(&format!("GET /api/item{index}")))
+                .collect()
+        };
+        assert_eq!(
+            map_of(&with(keyed(FUNCTIONS_MAX))).functions().len(),
+            FUNCTIONS_MAX
+        );
+        assert_eq!(
+            refusal(&with(keyed(FUNCTIONS_MAX + 1))),
+            ObjectsIssue {
+                place: ObjectsPlace::Functions,
+                reason: Some(ObjectsReason::TooMany),
+            }
+        );
+    }
+
+    #[test]
+    fn an_exact_function_is_found() {
+        let loaded = map_of(&with(vec![admin("POST /api/admin/export", "high")]));
+        let found = loaded
+            .function_of("POST", "/api/admin/export")
+            .expect("the function is found");
+        assert_eq!(found.key, "POST /api/admin/export");
+        assert!(loaded.function_of("POST", "/api/admin/exports").is_none());
+        assert!(loaded.function_of("GET", "/api/admin/export").is_none());
+    }
+
+    #[test]
+    fn an_id_segment_covers_any_segment() {
+        let loaded = map_of(&with(vec![open("GET /api/patients/{id}")]));
+        for template in [
+            "/api/patients/{id}",
+            "/api/patients/PT-7004",
+            "/api/patients/7;x=1",
+        ] {
+            assert!(loaded.function_of("GET", template).is_some(), "{template}");
+        }
+        for template in ["/api/patients", "/api/patients/7/notes"] {
+            assert!(loaded.function_of("GET", template).is_none(), "{template}");
+        }
+    }
+
+    #[test]
+    fn the_most_literal_function_wins_and_then_the_stricter() {
+        let reports = map_of(&with(vec![
+            open("GET /api/reports/{id}"),
+            admin("GET /api/reports/monthly", "high"),
+        ]));
+        assert_eq!(
+            key_of(&reports, "GET", "/api/reports/monthly").as_deref(),
+            Some("GET /api/reports/monthly")
+        );
+        assert_eq!(
+            key_of(&reports, "GET", "/api/reports/weekly").as_deref(),
+            Some("GET /api/reports/{id}")
+        );
+        // Equally literal: the stricter one wins, whichever of the two is written first.
+        let stricter_last = map_of(&with(vec![
+            open("GET /a/{id}/c"),
+            admin("GET /a/b/{id}", "high"),
+        ]));
+        let stricter_first = map_of(&with(vec![
+            admin("GET /a/b/{id}", "high"),
+            open("GET /a/{id}/c"),
+        ]));
+        assert_eq!(
+            key_of(&stricter_last, "GET", "/a/b/c").as_deref(),
+            Some("GET /a/b/{id}")
+        );
+        assert_eq!(
+            key_of(&stricter_first, "GET", "/a/b/c").as_deref(),
+            Some("GET /a/b/{id}")
+        );
+        // Equally literal and equally strict: the one written first wins.
+        let first = map_of(&with(vec![open("GET /x/{id}"), open("GET /{id}/y")]));
+        let second = map_of(&with(vec![open("GET /{id}/y"), open("GET /x/{id}")]));
+        assert_eq!(
+            key_of(&first, "GET", "/x/y").as_deref(),
+            Some("GET /x/{id}")
+        );
+        assert_eq!(
+            key_of(&second, "GET", "/x/y").as_deref(),
+            Some("GET /{id}/y")
+        );
+    }
+
+    #[test]
+    fn a_function_is_found_whatever_the_case_and_matrix_parameters() {
+        let loaded = map_of(&with(vec![admin("DELETE /api/admin/users/{id}", "high")]));
+        assert!(loaded.admin_only("DELETE", "/API/Admin/Users/{id}"));
+        assert!(loaded.admin_only("DELETE", "/api/admin;x=1/users/{id}"));
+        assert!(!loaded.admin_only("DELETE", "/api/admin/users"));
+    }
+
+    #[test]
+    fn head_is_looked_up_as_get_and_options_as_any_method() {
+        let loaded = map_of(&with(vec![
+            admin("GET /api/a", "high"),
+            open("POST /api/b"),
+        ]));
+        assert!(loaded.admin_only("HEAD", "/api/a"));
+        assert!(loaded.function_of("OPTIONS", "/api/a").is_none());
+        assert!(!loaded.admin_only("OPTIONS", "/api/a"));
+        assert!(loaded.knows_function("OPTIONS", "/api/b"));
+        assert!(!loaded.knows_function("OPTIONS", "/api/c"));
+        assert!(!loaded.knows_function("GET", "/api/b"));
+    }
+
+    #[test]
+    fn only_a_high_admin_tier_is_admin_only() {
+        let loaded = map_of(&with(vec![
+            json!({"key": "GET /m/a", "source": "admin", "tier": "admin", "reliability": "medium"}),
+            json!({"key": "GET /m/b", "source": "admin", "tier": "admin"}),
+            open("GET /m/c"),
+            admin("GET /m/d", "high"),
+        ]));
+        assert!(!loaded.admin_only("GET", "/m/a"));
+        assert!(!loaded.admin_only("GET", "/m/b"));
+        assert!(!loaded.admin_only("GET", "/m/c"));
+        assert!(loaded.admin_only("GET", "/m/d"));
+    }
+
+    #[test]
+    fn a_declared_position_makes_its_function_known() {
+        let loaded = map_of(&json!({
+            "classes": [{"id": "patient", "name": "患者"}],
+            "slots": [
+                {"key": "GET /api/patients [].id", "class": "patient", "source": "admin"},
+                {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "source": "admin", "paused": true}
+            ]
+        }));
+        assert!(loaded.functions().is_empty());
+        assert!(loaded.knows_function("GET", "/api/patients"));
+        assert!(loaded.knows_function("DELETE", "/api/patients/PT-7"));
+        assert!(!loaded.knows_function("POST", "/api/patients"));
+        assert!(loaded.knows_function("OPTIONS", "/api/patients"));
+    }
+
+    #[test]
+    fn editing_positions_keeps_the_functions() {
+        let loaded = map_of(&json!({
+            "classes": [{"id": "patient", "name": "患者"}],
+            "slots": [
+                {"key": "GET /api/patients [].id", "class": "patient", "source": "admin", "tier": "self"},
+                {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "source": "admin"}
+            ],
+            "functions": [
+                {"key": "POST /api/admin/export", "source": "rule", "tier": "admin", "reliability": "high"},
+                {"key": "GET /api/patients/{id}", "source": "admin"}
+            ]
+        }));
+        let before = loaded.functions().to_vec();
+        let edited = loaded
+            .with_paused(&["GET /api/patients [].id".to_owned()])
+            .with_entry("GET /api/new [].id", "patient", SlotSource::Agent)
+            .with_tier("GET /api/patients [].id", Tier::Public, Reliability::Medium)
+            .expect("a declared response entry takes the tier")
+            .with_accepts_public(
+                "DELETE /api/patients/{id} path[2]",
+                false,
+                Reliability::High,
+            )
+            .expect("a declared request entry takes the judgement");
+        assert_eq!(edited.functions(), before.as_slice());
+        assert!(edited.admin_only("POST", "/api/admin/export"));
+        // A position an edit appends is found by the lookups too.
+        assert!(edited.knows_function("GET", "/api/new"));
+        assert!(!edited.knows_function("PUT", "/api/new"));
+    }
+
+    #[test]
+    fn a_function_entry_takes_only_the_fields_it_names() {
+        let extra = with(vec![
+            json!({"key": "GET /api/a", "source": "admin", "paused": true}),
+        ]);
+        assert!(serde_json::from_value::<ObjectMapDto>(extra).is_err());
     }
 }
 
