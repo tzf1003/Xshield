@@ -908,3 +908,90 @@ def compare_baseline(values: dict[str, float], baseline: dict[str, Any] | None) 
     absent = sorted(name for name, value in reference.items() if value is not None and name not in values)
     return {"compared": True, "regressions": regressions, "improvements": improvements,
             "reference": compared, "absent": absent}
+
+
+# ---------------------------------------------------------------- confidence threshold scan (plan 3.4)
+
+# 0.50 to 0.90 in steps of 0.05, built from whole hundredths so that 0.60 is the float a probability of 0.6 equals.
+CONFIDENCE_THRESHOLDS = tuple(hundredths / 100 for hundredths in range(50, 91, 5))
+
+
+def allow_confidence(record: dict[str, Any]) -> float | None:
+    """The confidence the edge logs as a decision's jev_confidence (xshield-edge sink.rs): the highest probability of
+    the access question, the highest of the attack question, and the smaller of those two. For an allow whose answers
+    are the most likely ones this is min(P(ALLOW), P(BENIGN)). None when a question has no probabilities."""
+    jev = record.get("jev") or {}
+    access = jev.get("access") or {}
+    attack = jev.get("attack") or {}
+    values = [*access.values(), *attack.values()]
+    if not access or not attack or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+        return None
+    return min(float(max(access.values())), float(max(attack.values())))
+
+
+def confidence_scan(observations: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The real model's allows judged again at each threshold, with no traffic (plan 3.4).
+
+    A threshold T keeps an allow whose confidence is at least T: exactly T is still an allow, as WAF batch 7 has it.
+    An allow below T becomes an unanswered judgement, which a site with on_jev_unavailable deny refuses. Only the
+    jev_allow records change, and the cached_allow records that reuse one (trace.cache_source). fast_allow and every
+    refusal stay as they are. A regression case with status known_gap is left out, as score() leaves it out of every
+    metric but P7. The count is first order: a request that changes can leave later requests with fewer values to
+    see, and that effect is not counted.
+
+    Returns None when no record holds an allow with its probabilities, which is how a run with the ideal model is told
+    apart: its probabilities are fixed, so the scan is not printed for it.
+    """
+    records = {record["request_id"]: record for record in decisions}
+    confidence: dict[str, float] = {}
+    for request_id, record in records.items():
+        if record["decision_path"] == "jev_allow":
+            value = allow_confidence(record)
+            if value is not None:
+                confidence[request_id] = value
+    if not confidence:
+        return None
+
+    def confidence_of(record: dict[str, Any]) -> float | None:
+        """The confidence the decision rests on, or None when the decision is not an allow of the model."""
+        if record["decision_path"] == "jev_allow":
+            return confidence.get(record["request_id"])
+        if record["decision_path"] == "cached_allow":
+            return confidence.get((record.get("trace") or {}).get("cache_source"))
+        return None
+
+    benign_values: list[float] = []
+    probe_values: list[float] = []
+    benign_total = 0
+    for row in observations:
+        record = records.get(row["request_id"])
+        if record is None or _known_gap(row):
+            continue
+        value = confidence_of(record)
+        if row["expect"] == "allow":
+            benign_total += 1
+            if value is not None:
+                benign_values.append(value)
+        elif value is not None:
+            probe_values.append(value)
+    unresolved = sum(
+        1 for record in decisions
+        if record["decision_path"] == "cached_allow"
+        and (record.get("trace") or {}).get("cache_source") not in confidence
+    )
+    return {
+        "thresholds": [
+            {
+                "threshold": threshold,
+                "benign_blocks": sum(value < threshold for value in benign_values),
+                "leaks_closed": sum(value < threshold for value in probe_values),
+                "unanswered": sum(value < threshold for value in confidence.values()),
+            }
+            for threshold in CONFIDENCE_THRESHOLDS
+        ],
+        "benign_total": benign_total,
+        "probe_allows": len(probe_values),
+        "allows": len(confidence),
+        "calls": sum(_jev_calls(record) for record in decisions),
+        "cache_unresolved": unresolved,
+    }
