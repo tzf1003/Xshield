@@ -4,7 +4,7 @@
 Usage:
   python3 scripts/measure_effectiveness.py score --observations FILE --decisions FILE [--truth FILE]
                                                  [--learned FILE] [--baseline FILE] [--out DIR]
-  python3 scripts/measure_effectiveness.py [lab] [--mode quick] [--jev ideal|live] ...   (full mode: not built yet)
+  python3 scripts/measure_effectiveness.py [lab] [--mode quick|full] [--jev ideal|live] ...   (full: ideal model, PostgreSQL)
   python3 scripts/measure_effectiveness.py site (--decisions FILE | --control URL --site NAME)
                                                  --suite-results DIR_OR_ZIP [--truth FILE] [--objects FILE]
                                                  [--out DIR]
