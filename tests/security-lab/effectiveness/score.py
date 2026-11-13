@@ -38,6 +38,9 @@ FAST_PATHS = frozenset({"fast_allow", "cached_allow"})
 # a session never reached a decision; jev_unavailable is unjudged and counts in P4 instead.
 JUDGED_PATHS = frozenset({"fast_allow", "cached_allow", "jev_allow", "jev_deny"})
 HIT_OUTCOMES = frozenset({"blocked", "would_block"})
+# The rows of the full mode's observation-mode batch (plan 3.3, P6). They are scored by P6 alone: a would-block answer
+# in observation mode is not a block, so they stay out of every other metric.
+CONSISTENCY_GROUP = "consistency"
 # Positions whose proposals count for learning: a retired, suspended or ambiguous position is not one.
 ACTIVE_STATES = frozenset({"proposed", "confirmed"})
 LOWER_IS_BETTER = frozenset({"P2", "P4", "P5"})
@@ -92,6 +95,7 @@ def score(
     the learning did not learn reads these. None means every record in `decisions` (the score command)."""
     records = {record["request_id"]: record for record in decisions}
     pairs: list[Pair] = []
+    observed: list[Pair] = []  # the consistency rows (P6), kept apart from everything else
     missing: list[dict[str, Any]] = []
     for row in observations:
         record = records.get(row["request_id"])
@@ -99,7 +103,8 @@ def score(
             missing.append(row)
             continue
         suspicious, bypass = _label_flags(row, record, records, probe_values_from_record)
-        pairs.append(Pair(row, record, suspicious, bypass))
+        pair = Pair(row, record, suspicious, bypass)
+        (observed if row["group"] == CONSISTENCY_GROUP else pairs).append(pair)
 
     active = [pair for pair in pairs if not _known_gap(pair.row)]
     caps = _capabilities(truth, learned)
@@ -108,6 +113,7 @@ def score(
     metrics: dict[str, Any] = {}
     metrics.update(_session_metrics(active))
     metrics.update(_defense_metrics(defend, active, pairs, caps))
+    metrics["P6"] = _consistency(observed, pairs)
     failures, known_gaps = _failures(pairs, missing, caps, exclude_suspicious)
     learning_decisions = decisions if training is None else training  # the learning saw the training segment only
     learning, skip_reason = _learning(truth, learned, learning_decisions, gap_entries, failures, check_gaps)
@@ -149,7 +155,8 @@ def score(
     skipped: list[dict[str, str]] = []
     if skip_reason is not None:
         skipped.append({"section": "学习段", "why": skip_reason})
-    skipped.append({"section": "P6、L4、L5", "why": "完整模式专用，score 子命令不计算"})
+    # The lab computes L4 and L5 in its full mode (full.py); this function only scores the files it is given.
+    skipped.append({"section": "L4、L5", "why": "完整模式专用，由 lab 计算；score 子命令不计算"})
 
     return {
         "metrics": metrics,
@@ -167,6 +174,7 @@ def score(
             "scored": len(active),
             "missing": len(missing),
             "known_gap_cases": sum(_known_gap(pair.row) for pair in pairs),
+            "consistency": len(observed),
         },
         "needs": _needs(pairs, caps),
         "skipped": skipped,
@@ -482,6 +490,22 @@ def _defense_metrics(defend: list[Pair], active: list[Pair], pairs: list[Pair],
         "P5": {"value": leaked if served else None, "num": leaked, "den": len(served)},
         "P7": {**_metric(must_pass, len(must)), "known_gap": len(gaps), "unexpected_pass": unexpected},
     }
+
+
+def _consistency(observed: list[Pair], pairs: list[Pair]) -> dict[str, Any]:
+    """P6 (plan 3.3, report only): the requests whose observation-mode answer is would_block and the requests whose
+    enforcement-mode answer is blocked, compared as sets. The count is the symmetric difference. A consistency row
+    names the enforcement site it is compared with (`counterpart`), and the case and run must match too."""
+    enforced = {(pair.row["site"], pair.row["case"], pair.row["run"]): pair for pair in pairs}
+    compared = differing = 0
+    for pair in observed:
+        other = enforced.get((pair.row.get("counterpart"), pair.row["case"], pair.row["run"]))
+        if other is None:
+            continue
+        compared += 1
+        if (pair.rec["outcome"] == "would_block") != (other.rec["outcome"] == "blocked"):
+            differing += 1
+    return {"value": differing if compared else None, "num": differing, "den": compared}
 
 
 # ---------------------------------------------------------------- failures and label checks
@@ -858,7 +882,30 @@ def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
         "stability": {"value": stable, "rounds": len(rounds)},
         "unmodeled": unmodeled_metric,
     }
-    return {"metrics": metrics, "gates": gates, "rows": rows, "known": applied}, None
+    # Per layer, the keys the layer got right or wrong, and the keys it could learn (the truth's learnable positions),
+    # before any known-gap entry is applied. The convergence and anti-pollution measures (full.py) compare these.
+    learnable_request = sorted(key for key, item in request.items() if item["learnable"])
+    learnable_response = sorted(key for key, item in response.items() if item["learnable"])
+    keys = {
+        "L0": {"right": sorted(c["key"] for c in right0), "wrong": sorted(c["key"] for c in wrong0),
+               "learnable": sorted(set(learnable_request) | set(learnable_response))},
+        "L1": {"right": sorted(right1), "wrong": sorted(key for key, _ in wrong1), "learnable": learnable_request},
+        "L2": {"right": sorted(right2), "wrong": sorted(key for key, _ in wrong2),
+               "learnable": sorted(key for key in tiered if response[key]["learnable"])},
+        "L3": {"right": sorted(right3), "wrong": sorted(key for key, _ in wrong3), "learnable": learnable_request},
+    }
+    return {"metrics": metrics, "gates": gates, "rows": rows, "known": applied, "keys": keys}, None
+
+
+def learning_metrics(truth: dict[str, Any], learned: dict[str, Any],
+                     decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    """L0 to L3 of one learning run with no known-gap entry applied, for the convergence and anti-pollution measures
+    (plan 3.2, batch 7). Returns the layers' metrics and their keys (see `_learning`)."""
+    found, reason = _learning(truth, learned, decisions, (), (), False)
+    if found is None:
+        raise ValueError(reason or "the learning metrics need the truth and the learned file")
+    return {"metrics": {layer: found["metrics"][layer] for layer in ("L0", "L1", "L2", "L3")},
+            "keys": found["keys"]}
 
 
 def _candidate_class(candidate_of: Mapping[tuple[str, str], dict[str, Any]], key: str) -> str | None:

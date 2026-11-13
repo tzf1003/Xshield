@@ -32,7 +32,7 @@ EXPECTED_CASES = (
     "p1-5-observe-learns-would-block", "p1-9-big-form", "p1-9-big-form-on-object",
     "p2-1-mass-assignment", "p2-3-header-injection", "p2-5-prompt-injection",
     "p3-method-override",
-    "b11-session-total-cap", "b11-other-address-unaffected",
+    "b11-session-total-cap", "b11-other-address-unaffected", "b11-session-eviction",
 )
 
 
@@ -56,7 +56,7 @@ class RegressionTableTests(unittest.TestCase):
         self.assertEqual(sorted(names), sorted(EXPECTED_CASES))
 
     def test_every_case_has_a_valid_status_expectation_site_and_reason(self):
-        sites = {lab.SITE_NONE, lab.SITE_TRUTH, lab.SITE_LIMIT, lab.SITE_OBSERVE}
+        sites = {lab.SITE_NONE, lab.SITE_TRUTH, lab.SITE_LIMIT, lab.SITE_OBSERVE, lab.SITE_EVICT}
         for case in regressions.CASES:
             with self.subTest(case=case.name):
                 self.assertIn(case.status, {"must", "known_gap"})

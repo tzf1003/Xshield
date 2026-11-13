@@ -87,15 +87,23 @@ class CommandTests(unittest.TestCase):
         status, _, _ = run_cli(*score_args("all-correct", self.out / "i", "--baseline", str(better)))
         self.assertEqual(status, 0)
 
-    def test_the_lab_refuses_the_modes_that_are_not_built_and_prints_nothing_to_stdout(self):
-        for args, text in ((["lab", "--mode", "full"], "批次 7"),
-                           (["lab", "--keep"], "批次 5"),
-                           (["lab", "--update-baseline", "--only", "idor_read"], "--only")):
+    def test_the_lab_refuses_what_is_not_allowed_and_prints_nothing_to_stdout(self):
+        for args, text in ((["lab", "--keep"], "批次 5"),
+                           (["lab", "--update-baseline", "--only", "idor_read"], "--only"),
+                           (["lab", "--mode", "full", "--jev", "live"], "只用理想模型")):
             with self.subTest(args=args):
                 status, out, err = run_cli(*args)
                 self.assertEqual(status, 2)
                 self.assertIn(text, err)
                 self.assertEqual(out, "")
+
+    def test_full_mode_without_postgresql_is_an_error_before_anything_is_written(self):
+        with mock.patch("effectiveness.lab._database_problem", return_value="找不到 createdb"):
+            status, out, err = run_cli("lab", "--mode", "full", "--out", str(self.out / "full"))
+        self.assertEqual(status, 2)
+        self.assertIn("PostgreSQL", err)
+        self.assertEqual(out, "")
+        self.assertFalse((self.out / "full").exists())
 
     def test_live_without_its_settings_is_an_error_and_never_falls_back(self):
         with mock.patch.dict(os.environ):
