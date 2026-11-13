@@ -135,7 +135,10 @@ class _Driver:
 
     def step(self, session: _Session, name: str, method: str, target: str, *, expect: tuple[int, ...] = (200,),
              refs: tuple[tuple[str, str], ...] = (), form: dict[str, str] | None = None,
-             json_body: dict[str, Any] | None = None) -> labkit.Sent:
+             json_body: dict[str, Any] | None = None, category: str | None = None, verdict: str = "allow",
+             reason: str | None = None, requires: tuple[str, ...] = ()) -> labkit.Sent:
+        # verdict, reason, category and requires say what the row expects (plan 9.1). The defaults make an
+        # allowed request of the benign group; a row that expects a block names the capability it needs.
         # The state is read before the request is sent: what the origin had shown this session by then.
         states = [(cls, value, self.origin.reference_state(session.token, cls, value)) for cls, value in refs]
         options: dict[str, Any] = {}
@@ -147,9 +150,9 @@ class _Driver:
             options["json_body"] = json_body
         sent = self.send(self.host, method, target, source=session.source, **options)
         self.rows.append({
-            "case": f"train/{session.label}/{name}", "group": "train",
-            "category": f"train_{name.replace('-', '_')}",
-            "expect": "allow", "reason": None, "status": "must", "ref": None,
+            "case": f"train/{session.label}/{name}", "group": "train" if verdict == "allow" else "attack",
+            "category": category or f"train_{name.replace('-', '_')}",
+            "expect": verdict, "reason": reason if verdict == "block" else None, "status": "must", "ref": None,
             "config": self.config, "site": f"clinic-{self.config}", "mode": self.mode, "run": 1,
             "request_id": sent.reply.request_id or "",
             "setup_request_ids": [session.login_request] if session.login_request else [],
@@ -157,7 +160,7 @@ class _Driver:
             "origin_served": sent.served,
             "refs": [{"value": value, "class": cls, "shown": state["shown"], "echoed": state["echoed"]}
                      for cls, value, state in states],
-            "requires": [], "note": name, "session": session.label, "request": f"{method} {target}",
+            "requires": list(requires), "note": name, "session": session.label, "request": f"{method} {target}",
         })
         return sent
 
@@ -193,10 +196,14 @@ class _Driver:
                     found.append(item["id"])
         others = [pid for pid in dict.fromkeys(found) if self.origin.owner_of("patient", pid) != doctor_id]
         if login_no == 0:
-            # Each ordinary doctor asks the administrator search once; the origin refuses every one.
+            # Each ordinary doctor asks the administrator search once; the origin refuses every one. The doctor
+            # is an over-privilege attempt, so the row expects a block, which only a function table gives (plan
+            # 4.5, the functions item). Only a 403 the origin itself answered is evidence of a refusal.
             refused = self.step(session, "admin-search-refused", "GET",
-                                f"/api/admin/search?q={quote(chosen[0], safe='')}", expect=(403,))
-            if refused.reply.status == 403:
+                                f"/api/admin/search?q={quote(chosen[0], safe='')}", expect=(403,),
+                                category="function_level", verdict="block", reason="access",
+                                requires=("functions",))
+            if refused.served and refused.reply.status == 403:
                 self.evidence.refused_units.add(doctor_id)
         if others:
             target = rng.choice(others)
