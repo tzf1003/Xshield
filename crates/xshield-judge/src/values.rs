@@ -383,12 +383,15 @@ fn whole_body(out: &mut ExtractedRequest, body: &[u8]) {
 }
 
 /// Whether a body with no type has the shape of a form (docs/01 section 1.3): once its blanks at the
-/// ends are trimmed it is not empty, it holds no whitespace or control character, and every
-/// `&`-separated segment holds an `=`.
+/// ends are trimmed it is not empty, it holds no whitespace, control character or `;`, and every
+/// `&`-separated segment holds an `=`. A `;` may split fields at the origin too, so such a body is
+/// kept as one text.
 fn form_shaped(body: &[u8]) -> bool {
     let text = String::from_utf8_lossy(body.trim_ascii());
     !text.is_empty()
-        && !text.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !text
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == ';')
         && text.split('&').all(|segment| segment.contains('='))
 }
 
@@ -1441,6 +1444,8 @@ mod tests {
             "a=1\nb=2",
             "a=1&&b=2",
             "a=1&",
+            // A `;` may split fields at the origin, so this is not a form either.
+            "note=x;patient_id=8",
         ] {
             let request = extract_request("/", None, None, text.as_bytes());
             assert!(request.truncated, "{text:?}");
