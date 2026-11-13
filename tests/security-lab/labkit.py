@@ -10,14 +10,16 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Condition, Lock, Thread
 from typing import IO, Any
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +27,8 @@ TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
 EDGE = TARGET / ("debug/xshield-edge.exe" if os.name == "nt" else "debug/xshield-edge")
 # A lab-only key for the context hashes; nothing outside a lab run uses it.
 CONTEXT_KEY_HEX = "5b" * 32
+# The key the lab gives the scripted Jev. A live run passes the real key instead (effectiveness/lab.py).
+LAB_JEV_KEY = "lab-only-key"
 _source_notice_printed = False
 
 
@@ -125,27 +129,32 @@ class Edge:
     scorer reads decisions.jsonl exactly as the edge printed it (docs/07 section 7.4).
     """
 
-    def __init__(self, sites_file: Path, jev_url: str, port: int, records_file: Path | None = None) -> None:
+    def __init__(self, sites_file: Path, jev_url: str, port: int, records_file: Path | None = None, *,
+                 jev_key: str = LAB_JEV_KEY) -> None:
         env = {key: value for key, value in os.environ.items() if not key.startswith("XSHIELD_")}
         env.update({
             "XSHIELD_EDGE_LISTEN_PORTS": str(port),
             "XSHIELD_EDGE_SITES_FILE": str(sites_file),
             "XSHIELD_CONTEXT_KEY_HEX": CONTEXT_KEY_HEX,
             "XSHIELD_JEV_ROUTE": "direct",
-            "XSHIELD_JEV_API_KEY": "lab-only-key",
+            "XSHIELD_JEV_API_KEY": jev_key,
             "XSHIELD_JEV_ENDPOINT": jev_url,
         })
         self.port = port
         self.lock = Lock()
         self.records: list[dict] = []
+        self._by_id: dict[str, dict] = {}  # the first record of each request id, for record_for
+        self._arrived = Condition(self.lock)  # notified for each record, so record_for does not poll
         self.stderr: list[str] = []
-        self._sink: IO[str] | None = records_file.open("w", encoding="utf-8") if records_file else None
         self.process = subprocess.Popen(
             [str(EDGE)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
+        # Opened once the process runs, so a start that fails leaves no file open. The reader writes to it.
+        self._sink: IO[str] | None = records_file.open("w", encoding="utf-8") if records_file else None
         self._stdout_reader = Thread(target=self._read_stdout, daemon=True)
         self._stdout_reader.start()
-        Thread(target=self._read_stderr, daemon=True).start()
+        self._stderr_reader = Thread(target=self._read_stderr, daemon=True)
+        self._stderr_reader.start()
         try:
             self._wait_listening()
         except Exception:
@@ -160,8 +169,12 @@ class Edge:
                 continue
             with self.lock:
                 self.records.append(record)
+                request_id = record.get("request_id")
+                if request_id is not None:
+                    self._by_id.setdefault(request_id, record)
                 if self._sink is not None:
                     self._sink.write(line if line.endswith("\n") else line + "\n")
+                self._arrived.notify_all()
 
     def _read_stderr(self) -> None:
         for line in self.process.stderr:
@@ -178,31 +191,71 @@ class Edge:
                 return
             except OSError:
                 time.sleep(0.05)
-        raise RuntimeError("xshield-edge did not start:\n" + "\n".join(self.stderr_tail()))
+        if self.process.poll() is None:
+            self.process.kill()  # the deadline passed: stop it, so that its stderr is complete below
+        self.process.wait(timeout=5)
+        self._stderr_reader.join(timeout=5)  # the reader ends with the stream, so every line is in
+        raise RuntimeError("xshield-edge did not start:\n" + "\n".join(self.stderr_all()))
 
     def record_for(self, request_id: str) -> dict | None:
+        """The decision record of a request. The record is written just after the response, so this waits for
+        the reader's notice (up to 5 seconds) instead of polling."""
         deadline = time.monotonic() + 5
-        while True:
-            with self.lock:
-                for record in self.records:
-                    if record.get("request_id") == request_id:
-                        return record
-            if time.monotonic() > deadline:
-                return None
-            time.sleep(0.002)  # the record is written just after the response, a few milliseconds later
+        with self._arrived:
+            while (record := self._by_id.get(request_id)) is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._arrived.wait(remaining)
+            return record
 
     def stderr_tail(self, lines: int = 40) -> list[str]:
         with self.lock:
             return self.stderr[-lines:]
 
+    def stderr_all(self) -> list[str]:
+        with self.lock:
+            return list(self.stderr)
+
     def stop(self) -> None:
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
+        """Stops the edge, reaps it and releases its pipes. The edge exits at once on SIGINT, its fast shutdown;
+        SIGTERM and SIGQUIT wait out a grace period, so they are not used. An edge that ignores SIGINT is killed."""
+        if self.process.poll() is None:
+            if os.name == "nt":
+                self.process.terminate()
+            else:
+                self.process.send_signal(signal.SIGINT)
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()  # reaped, so no process is left behind
         self._stdout_reader.join(timeout=5)  # the last records are written before the file closes
+        self._stderr_reader.join(timeout=5)
+        for pipe, reader in ((self.process.stdout, self._stdout_reader), (self.process.stderr, self._stderr_reader)):
+            if pipe is not None and not reader.is_alive():
+                pipe.close()
         with self.lock:
             if self._sink is not None:
                 self._sink.close()
                 self._sink = None
+
+
+def start_edge(sites_file: Path, jev_url: str, records_file: Path | None = None, *,
+               jev_key: str = LAB_JEV_KEY) -> Edge:
+    """Starts the edge on a free port. A start that fails is retried once on another port.
+
+    A port taken between the probe and the bind is the usual cause, so the retry picks a new one. When
+    the second attempt fails too, the error carries the complete stderr of both attempts.
+    """
+    failures: list[str] = []
+    for attempt in (1, 2):
+        try:
+            return Edge(sites_file, jev_url, free_port(), records_file, jev_key=jev_key)
+        except RuntimeError as error:
+            failures.append(f"attempt {attempt}: {error}")
+            if attempt == 1:
+                # The first attempt's own message goes out with the note, so its cause is not lost on a retry.
+                print(f"note: xshield-edge did not start, retrying once on another port. First attempt:\n{error}",
+                      file=sys.stderr, flush=True)
+    raise RuntimeError("xshield-edge did not start after 2 attempts\n" + "\n".join(failures))

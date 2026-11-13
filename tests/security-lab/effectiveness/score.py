@@ -11,8 +11,10 @@ Population rules, applied throughout:
   to must, it counts in every metric.
 - An observation without a decision record is "记录缺失". It is left out of every metric
   and fails the missing-record gate.
-- A case whose requires names a capability its configuration lacks is "需要档位". It is
-  left out of P1 to P3 and P7 and counted per configuration.
+- A case whose requires names a capability its configuration lacks (tiers: "需要档位";
+  functions: "需要功能表") is left out of P1 to P3 and P7 and counted per configuration and
+  capability. A known gap that lacks one is still listed, so the gap does not vanish.
+- S1, S3 and S4 measure the benign requests: rows whose expectation is allow.
 - The label checks of section 4.6 move a probe out of P1 to P3 only when the caller asks
   (exclude_suspicious). The site runner does; the lab keeps every probe.
 - A probe is a case with expect "block". Degradation cases (reason "limit", or a category
@@ -85,7 +87,7 @@ def score(
         pairs.append(Pair(row, record, suspicious, bypass))
 
     active = [pair for pair in pairs if not _known_gap(pair.row)]
-    caps = _tier_capabilities(truth, learned)
+    caps = _capabilities(truth, learned)
     defend = [pair for pair in active if _defends(pair, caps, exclude_suspicious)]
 
     metrics: dict[str, Any] = {}
@@ -146,7 +148,7 @@ def score(
             "missing": len(missing),
             "known_gap_cases": sum(_known_gap(pair.row) for pair in pairs),
         },
-        "needs_tiers": _needs_tiers_by_config(pairs, caps),
+        "needs": _needs(pairs, caps),
         "skipped": skipped,
         "passed": all(gate["ok"] is not False for gate in gates),
     }
@@ -171,30 +173,44 @@ def _degraded(row: dict[str, Any]) -> bool:
     return row["reason"] == "limit" or row["category"].startswith("degrade")
 
 
-def _needs_tiers(row: dict[str, Any], caps: dict[str, bool]) -> bool:
-    return "tiers" in row["requires"] and not caps.get(row["config"], False)
+def _missing(row: dict[str, Any], caps: dict[str, dict[str, bool]]) -> list[str]:
+    """The capabilities the row requires and its configuration lacks. A row with none of them is scored."""
+    have = caps.get(row["config"], {})
+    return [name for name in row["requires"] if not have.get(name, False)]
 
 
 def _label_excluded(pair: Pair, exclude_suspicious: bool) -> bool:
     return exclude_suspicious and pair.row["group"] != "regression" and (pair.suspicious or pair.bypass)
 
 
-def _defends(pair: Pair, caps: dict[str, bool], exclude_suspicious: bool) -> bool:
-    return not _needs_tiers(pair.row, caps) and not _label_excluded(pair, exclude_suspicious)
+def _defends(pair: Pair, caps: dict[str, dict[str, bool]], exclude_suspicious: bool) -> bool:
+    return not _missing(pair.row, caps) and not _label_excluded(pair, exclude_suspicious)
 
 
-def _tier_capabilities(truth: dict[str, Any] | None, learned: dict[str, Any] | None) -> dict[str, bool]:
-    """Whether each configuration declares tiers. "none" never does."""
-    caps = {"none": False}
+def _capabilities(truth: dict[str, Any] | None, learned: dict[str, Any] | None) -> dict[str, dict[str, bool]]:
+    """What each configuration declares (plan 9.3): tiers, a function table, and the classes of its object map.
+    "none" declares none of them: its map holds only the identity positions, and no class to compare with."""
+    caps = {"none": {"tiers": False, "functions": False, "classes": False}}
     if truth is not None:
-        caps["truth"] = any(bool(position.get("tier")) for position in truth["response_positions"])
+        caps["truth"] = {
+            "tiers": any(bool(position.get("tier")) for position in truth["response_positions"]),
+            "functions": bool(truth.get("functions")),
+            "classes": bool(truth.get("classes")),
+        }
     if learned is not None:
+        objects = (learned.get("final_spec") or {}).get("objects") or {}
         # The learned configuration declares tiers when its slots, or its active positions, carry one.
-        slots = ((learned.get("final_spec") or {}).get("objects") or {}).get("slots") or []
+        slots = objects.get("slots") or []
         rounds = learned.get("rounds") or []
         positions = rounds[-1]["positions"] if rounds else []
-        caps["learned"] = any(bool(slot.get("tier")) for slot in slots) or any(
-            bool(position.get("tier")) and position["state"] in ACTIVE_STATES for position in positions)
+        # The identity positions name the classes every site has; a class listed beyond them was learned.
+        identity = {slot.get("class") for slot in slots if slot.get("identity")}
+        caps["learned"] = {
+            "tiers": any(bool(slot.get("tier")) for slot in slots) or any(
+                bool(position.get("tier")) and position["state"] in ACTIVE_STATES for position in positions),
+            "functions": bool(objects.get("functions")),
+            "classes": any(entry.get("id") not in identity for entry in objects.get("classes") or []),
+        }
     return caps
 
 
@@ -342,14 +358,36 @@ def _sorted_configs(cells: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------- session values (S1 to S4)
 
 
+class _Cells:
+    """Hits over a denominator, in total and for each configuration. The total can hide a configuration that
+    fails (plan 12a: 96.4% without an object map and 7.2% with one give 52% together), so S1, S3 and S4 keep both."""
+
+    def __init__(self) -> None:
+        self.cells: dict[str, list[int]] = {}
+
+    def add(self, config: str, hit: int, den: int = 1) -> None:
+        cell = self.cells.setdefault(config, [0, 0])
+        cell[0] += hit
+        cell[1] += den
+
+    def render(self) -> dict[str, Any]:
+        num = sum(cell[0] for cell in self.cells.values())
+        den = sum(cell[1] for cell in self.cells.values())
+        return {**_metric(num, den),
+                "by_config": {config: _metric(*cell) for config, cell in _sorted_configs(self.cells).items()}}
+
+
 def _session_metrics(active: list[Pair]) -> dict[str, Any]:
-    benign = [pair for pair in active if pair.row["group"] in BENIGN_GROUPS]
-    s1_num = s1_den = 0
+    benign = [pair for pair in active if pair.row["group"] in BENIGN_GROUPS and pair.row["expect"] == "allow"]
+    s1, s3, s4 = _Cells(), _Cells(), _Cells()
     for pair in benign:
+        config = pair.row["config"]
         for ref in pair.row["refs"]:
             if ref["shown"] and not ref["echoed"]:
-                s1_den += 1
-                s1_num += _verified(pair.rec, ref["value"])
+                s1.add(config, int(_verified(pair.rec, ref["value"])))
+        if pair.rec["decision_path"] in JUDGED_PATHS:
+            s3.add(config, int(pair.rec["decision_path"] in FAST_PATHS))
+            s4.add(config, _jev_calls(pair.rec))
     # S2 checks every reference that was not an echo. An echo is a value the session sent first.
     s2_num = s2_den = 0
     for pair in active:
@@ -359,14 +397,11 @@ def _session_metrics(active: list[Pair]) -> dict[str, Any]:
             s2_den += 1
             if not ref["shown"] and _verified(pair.rec, ref["value"]):
                 s2_num += 1
-    judged = [pair for pair in benign if pair.rec["decision_path"] in JUDGED_PATHS]
-    fast = sum(pair.rec["decision_path"] in FAST_PATHS for pair in judged)
-    calls = sum(_jev_calls(pair.rec) for pair in judged)
     return {
-        "S1": _metric(s1_num, s1_den),
+        "S1": s1.render(),
         "S2": {"value": s2_num, "num": s2_num, "den": s2_den},
-        "S3": _metric(fast, len(judged)),
-        "S4": _metric(calls, len(judged)),
+        "S3": s3.render(),
+        "S4": s4.render(),
     }
 
 
@@ -374,7 +409,7 @@ def _session_metrics(active: list[Pair]) -> dict[str, Any]:
 
 
 def _defense_metrics(defend: list[Pair], active: list[Pair], pairs: list[Pair],
-                     caps: dict[str, bool]) -> dict[str, Any]:
+                     caps: dict[str, dict[str, bool]]) -> dict[str, Any]:
     p1, p2, p3 = _Tally(), _Tally(), _Tally()
     for pair in defend:
         row, rec = pair.row, pair.rec
@@ -395,9 +430,9 @@ def _defense_metrics(defend: list[Pair], active: list[Pair], pairs: list[Pair],
 
     regressions = [pair for pair in pairs if pair.row["group"] == "regression"]
     must = [pair for pair in regressions
-            if pair.row["status"] == "must" and not _needs_tiers(pair.row, caps)]
+            if pair.row["status"] == "must" and not _missing(pair.row, caps)]
     gaps = [pair for pair in regressions
-            if pair.row["status"] == "known_gap" and not _needs_tiers(pair.row, caps)]
+            if pair.row["status"] == "known_gap" and not _missing(pair.row, caps)]
     must_pass = sum(not _problems(pair.row, pair.rec) for pair in must)
     unexpected = sum(not _problems(pair.row, pair.rec) for pair in gaps)
     return {
@@ -433,28 +468,30 @@ def _failure(pair: Pair, problems: list[str]) -> dict[str, Any]:
     }
 
 
-def _failures(pairs: list[Pair], missing: list[dict[str, Any]], caps: dict[str, bool],
+def _failures(pairs: list[Pair], missing: list[dict[str, Any]], caps: dict[str, dict[str, bool]],
               exclude_suspicious: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     failures: list[dict[str, Any]] = []
     known_gaps: list[dict[str, Any]] = []
     for pair in pairs:
         row = pair.row
-        if _needs_tiers(row, caps):
-            continue
+        lacks = _missing(row, caps)
         problems = _problems(row, pair.rec)
         if _known_gap(row):
+            # Listed whatever the configuration: a gap that is not scored here is still a gap (plan 9.3).
+            unexpected = not lacks and not problems
             known_gaps.append({
                 "case": row["case"],
                 "ref": row["ref"],
                 "note": row["note"],
                 "category": row["category"],
                 "config": row["config"],
-                "unexpected_pass": not problems,
+                "lacks": lacks,
+                "unexpected_pass": unexpected,
             })
-            if not problems:
+            if unexpected:
                 failures.append(_failure(pair, ["意外通过：已知缺口的用例通过了，请把状态改为 must"]))
             continue
-        if _label_excluded(pair, exclude_suspicious):
+        if lacks or _label_excluded(pair, exclude_suspicious):
             continue
         if problems:
             failures.append(_failure(pair, problems))
@@ -484,9 +521,23 @@ def _label_summary(pairs: list[Pair], exclude_suspicious: bool) -> dict[str, Any
     }
 
 
-def _needs_tiers_by_config(pairs: list[Pair], caps: dict[str, bool]) -> dict[str, int]:
-    counts: Counter[str] = Counter(pair.row["config"] for pair in pairs if _needs_tiers(pair.row, caps))
-    return {config: counts[config] for config in sorted(counts, key=_config_position)}
+def _needs(pairs: list[Pair], caps: dict[str, dict[str, bool]]) -> dict[str, dict[str, Any]]:
+    """Rows left out for a missing capability (plan 9.3): by capability and configuration, with the names of
+    the regression cases among them, so the report can list them."""
+    counts: dict[str, Counter[str]] = {}
+    cases: dict[str, set[str]] = {}
+    for pair in pairs:
+        for name in _missing(pair.row, caps):
+            counts.setdefault(name, Counter())[pair.row["config"]] += 1
+            if pair.row["group"] == "regression":
+                cases.setdefault(name, set()).add(pair.row["case"])
+    return {
+        name: {
+            "counts": {config: counts[name][config] for config in sorted(counts[name], key=_config_position)},
+            "cases": sorted(cases.get(name, set())),
+        }
+        for name in sorted(counts)
+    }
 
 
 def _config_position(config: str) -> tuple[int, str]:
@@ -790,9 +841,11 @@ def _learning_rows(request: dict[str, Any], response: dict[str, Any], non_object
 def _flatten(metrics: dict[str, Any]) -> dict[str, float]:
     """The numbers the baseline compares, by name. A name is a metric, or metric/category/config."""
     flat: dict[str, float | None] = {}
-    if metrics.get("S1"):
-        flat["S1"] = metrics["S1"]["value"]
-        flat["S3"] = metrics["S3"]["value"]
+    for name in ("S1", "S3"):
+        if metrics.get(name):
+            flat[name] = metrics[name]["value"]
+            for config, cell in metrics[name]["by_config"].items():
+                flat[f"{name}/{config}"] = cell["value"]
     for name in ("P1", "P2", "P3"):
         if metrics.get(name):
             flat[name] = metrics[name]["value"]
