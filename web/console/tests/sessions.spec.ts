@@ -65,9 +65,12 @@ test("a session opens its timeline, with the gap between requests named", async 
 
   await expect(page).toHaveURL(new RegExp(`/sessions/${SESSION}$`));
   await expect(page.getByRole("heading", { name: "会话时间线" })).toBeVisible();
-  await expect(timelineRows(page)).toHaveCount(16);
-  await expect(page.getByText("请求 16 · Jev 调用 1 · 本应拦截 1")).toBeVisible();
+  await expect(timelineRows(page)).toHaveCount(17);
+  await expect(page.getByText("请求 17 · Jev 调用 1 · 本应拦截 2")).toBeVisible();
   await expect(page.getByText("⋯ 15 分钟无请求")).toBeVisible();
+  // The refused response taught nothing (new format); the record written before the change did.
+  await expect(page.getByText("▲ 本应拦截，未学习")).toHaveCount(1);
+  await expect(page.getByText("▲ 本应拦截学习")).toHaveCount(1);
 
   await page.keyboard.press("j");
   await expect(timelineRows(page).first()).toBeFocused();
@@ -97,7 +100,7 @@ test("a quiet time that a window of lost records covers names the window, and th
     },
   );
   await page.goto(`/sessions/${SESSION}`);
-  await expect(timelineRows(page)).toHaveCount(15);
+  await expect(timelineRows(page)).toHaveCount(16);
 
   const gaps = page.locator(".sx-timeline .tl-gap");
   await expect(gaps).toHaveCount(3);
@@ -114,7 +117,7 @@ test("只看 narrows the timeline to the chosen requests, asking the server each
   await useFixtures(page);
   await serveTimelineOnly(page);
   await page.goto(`/sessions/${SESSION}`);
-  await expect(timelineRows(page)).toHaveCount(16);
+  await expect(timelineRows(page)).toHaveCount(17);
 
   const only = page.getByRole("combobox", { name: "只看" });
   await only.selectOption("jev");
@@ -124,11 +127,11 @@ test("只看 narrows the timeline to the chosen requests, asking the server each
 
   await only.selectOption("blocks");
   await expect(page).toHaveURL(/only=blocks/);
-  await expect(timelineRows(page)).toHaveCount(2);
+  await expect(timelineRows(page)).toHaveCount(3);
 
   await only.selectOption("judged");
   await expect(page).not.toHaveURL(/only=/);
-  await expect(timelineRows(page)).toHaveCount(16);
+  await expect(timelineRows(page)).toHaveCount(17);
 });
 
 test("at scrolls to and highlights the named request, and says when it is not in the session", async ({
@@ -162,7 +165,8 @@ test("the first row of the timeline is the login that issued the session, marked
   await page.goto(`/sessions/${SESSION}`);
 
   const rows = timelineRows(page);
-  await expect(rows).toHaveCount(17);
+  // The login comes first, then the session's seventeen requests.
+  await expect(rows).toHaveCount(18);
   await expect(rows.first()).toContainText("/rest/user/login");
   await expect(rows.first()).toContainText("◆ 签发本会话 · 上下文：地址");
 });
@@ -180,7 +184,7 @@ for (const theme of ["light", "dark"] satisfies Theme[]) {
     await useFixtures(page);
     await setTheme(page, theme);
     await page.goto(`/sessions/${SESSION}?at=${IDS.basket}`);
-    await expect(timelineRows(page)).toHaveCount(16);
+    await expect(timelineRows(page)).toHaveCount(17);
     await expectNoAxeViolations(page);
   });
 }

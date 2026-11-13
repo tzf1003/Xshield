@@ -34,7 +34,6 @@ test("the overview of an observing site shows its readiness checklist", async ({
   const readiness = page.getByRole("list", { name: "就绪检查" });
   await expect(readiness).toContainText("已观察 6 天 4 小时");
   await expect(readiness).toContainText("本应拦截 14 条：Jev 拒绝 11 · 无会话 3");
-  await expect(readiness).toContainText("由本应拦截请求学到的值被后续请求引用 5 次");
   await expect(readiness).toContainText("Jev 不可用时：拒绝");
 
   // Only the row of blocked-to-be requests opens them one by one (docs/06 line 627).

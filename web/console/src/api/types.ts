@@ -67,7 +67,8 @@ export type ResponseSkip =
   | "compressed"
   | "too_large"
   | "head"
-  | "not_forwarded";
+  | "not_forwarded"
+  | "would_block";
 
 // ------------------------------------------------------------------ request list (7.9.3)
 
@@ -290,7 +291,11 @@ export interface TraceResponse {
   issued_session: string | null;
   /** The response made the session pass an entry for the first time. */
   entry_passed: boolean;
-  /** The request was "would block" but forwarded, and its response was still learned (7.4.6). */
+  /**
+   * The request would be refused in enforce mode but was forwarded in observe mode. Its response is not
+   * read and teaches nothing (observed "skipped", docs/07 7.4.6). Records written before that change
+   * were read and did teach the session.
+   */
   after_would_block: boolean;
   /**
    * Response structure (field paths and types, never values). Present only when the route's
@@ -543,7 +548,7 @@ export interface SessionListResponse {
 }
 
 export interface TimelineRow extends RequestRow {
-  /** New values the response taught the session (`trace.response.new_values`). */
+  /** New values the response taught the session (`trace.response.new_values`); null when the response was not read. */
   learned: number | null;
   entry_passed: boolean;
   issued_session: string | null;
@@ -1003,8 +1008,6 @@ export interface Readiness {
   jev_health: JevHealth;
   jev_p95_ms: number | null;
   jev_timeout_ratio: number | null;
-  /** Requests that cited a value learned from a "would block" response (7.4.6). */
-  after_would_block_refs: number;
   /** Requests whose values were attempts to act on another user's object (7.4.7). */
   attempts: number;
   /** The function table's part, when the table guards something (docs/07 7.9.11); null otherwise. */

@@ -11,7 +11,6 @@ const plain: Readiness = {
   jev_health: "ok",
   jev_p95_ms: 760,
   jev_timeout_ratio: 0,
-  after_would_block_refs: 0,
   attempts: 0,
   functions: null,
   on_jev_unavailable: "deny",

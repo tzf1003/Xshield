@@ -609,12 +609,22 @@ export function exposureNote(exposure: ResponseExposure | null | undefined): str
 }
 
 /** The attention line of the learning step: what the response did beyond teaching the session. */
-function learningAttention(response: TraceResponse): string | null {
+export function learningAttention(response: TraceResponse): string | null {
   const notes = [
-    response.after_would_block ? "本应拦截请求的响应也进入了上下文" : null,
+    response.after_would_block ? wouldBlockNote(response) : null,
     exposureNote(response.exposure),
   ].filter((note): note is string => note !== null);
   return notes.length > 0 ? notes.join("；") : null;
+}
+
+/**
+ * A response to a request that observe mode would have refused. Records written before observe mode
+ * stopped learning from those responses (docs/07 section 7.4.6) were read and kept, so they say so.
+ */
+function wouldBlockNote(response: TraceResponse): string {
+  return response.observed === "skipped"
+    ? "本应拦截请求的响应没有进入上下文"
+    : "本应拦截请求的响应也进入了上下文（旧版本的记录）";
 }
 
 function learningStep(summary: RequestRow, trace: Trace): PipelineStep | null {

@@ -150,6 +150,7 @@ export const SKIP_LABEL: Record<ResponseSkip, string> = {
   too_large: "超过 1 MiB",
   head: "HEAD 请求",
   not_forwarded: "请求没有转发",
+  would_block: "本应拦截，未学习",
 };
 
 export const UPSTREAM_LABEL: Record<UpstreamError, string> = {
