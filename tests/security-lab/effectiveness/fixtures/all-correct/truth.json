@@ -1,0 +1,65 @@
+{
+  "site": "clinic",
+  "seed": 20261113,
+  "classes": [
+    "patient",
+    "doctor"
+  ],
+  "identity": [
+    {
+      "key": "GET /api/home doctor.id",
+      "identity": "user"
+    }
+  ],
+  "request_positions": [
+    {
+      "key": "DELETE /api/patients/{id} path[2]",
+      "class": "patient",
+      "accepts_public": false,
+      "learnable": true
+    },
+    {
+      "key": "POST /api/patients/{id}/notes path[2]",
+      "class": "patient",
+      "accepts_public": true,
+      "learnable": true
+    },
+    {
+      "key": "GET /api/patients/{id} path[2]",
+      "class": "patient",
+      "accepts_public": false,
+      "learnable": true
+    },
+    {
+      "key": "GET /api/records/{id} path[2]",
+      "class": "patient",
+      "accepts_public": false,
+      "learnable": false,
+      "why": "慢速 id，没有声明就没有位置"
+    }
+  ],
+  "response_positions": [
+    {
+      "key": "GET /api/search results[].id",
+      "class": "patient",
+      "tier": "public",
+      "learnable": true
+    },
+    {
+      "key": "GET /api/patients patients[].id",
+      "class": "patient",
+      "tier": "self",
+      "learnable": true
+    },
+    {
+      "key": "GET /api/comments comments[].author.id",
+      "class": "doctor",
+      "tier": "org",
+      "learnable": true
+    }
+  ],
+  "non_objects": [
+    "GET /api/patients patients[].age",
+    "GET /api/search page"
+  ]
+}
