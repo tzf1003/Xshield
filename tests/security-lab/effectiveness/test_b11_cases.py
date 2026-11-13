@@ -4,6 +4,7 @@ are checked by the lab run itself."""
 
 from __future__ import annotations
 
+import itertools
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -16,8 +17,13 @@ def _source(index: int, *, net: int = 1) -> str:
     return f"127.0.{net}.{index}"
 
 
-def _reply(status: int) -> SimpleNamespace:
-    return SimpleNamespace(reply=SimpleNamespace(status=status, request_id=None), served=True)
+def _reply(status: int, headers: tuple[tuple[str, str], ...] = ()) -> SimpleNamespace:
+    return SimpleNamespace(reply=SimpleNamespace(status=status, request_id=None, headers=headers), served=True)
+
+
+def _issued(counter: itertools.count) -> tuple[tuple[str, str], ...]:
+    """The Set-Cookie an origin answers a login with: a credential it has issued, a new one each time."""
+    return (("Set-Cookie", f"SID=issued-{next(counter):024d}; Path=/; HttpOnly"),)
 
 
 def _prober(jev: object | None = None) -> probes.Prober:
@@ -32,7 +38,7 @@ class _ModelCalls:
         self.states: list[str] = []
 
 
-class ForgedSessionsCaseTests(unittest.TestCase):
+class SessionTotalCapCaseTests(unittest.TestCase):
     def setUp(self) -> None:
         patcher = mock.patch.object(regressions.labkit, "loopback_source", side_effect=_source)
         self.addCleanup(patcher.stop)
@@ -51,8 +57,11 @@ class ForgedSessionsCaseTests(unittest.TestCase):
 
     def test_the_setup_spends_twenty_calls_then_the_eleventh_injection_is_refused_at_the_limit(self):
         model = _ModelCalls()
+        issued = itertools.count(1)
 
         def respond(target, options):
+            if target == "/login":
+                return _reply(200, _issued(issued))
             if options.get("scored"):
                 return _reply(429)
             if "/api/search" in target:
@@ -62,43 +71,50 @@ class ForgedSessionsCaseTests(unittest.TestCase):
 
         p = _prober(model)
         sent = self.stub(p, respond)
-        regressions.forged_sessions_total_cap(p)
+        regressions.session_total_cap(p)
 
         logins = [session for session, target, _ in sent if target == "/login"]
-        self.assertEqual(len(logins), regressions.FORGED_SESSIONS)
+        self.assertEqual(len(logins), regressions.SESSIONS)
         self.assertEqual({session.source for session in logins}, {"127.0.2.1"})
-        self.assertEqual(len({session.token for session in logins}), regressions.FORGED_SESSIONS)
+        self.assertEqual(len({session.token for session in logins}), regressions.SESSIONS)
         setup = [target for _, target, options in sent if "/api/search" in target and not options.get("scored")]
-        self.assertEqual(len(setup), 2 * (regressions.FORGED_SESSIONS - 1))
-        self.assertEqual(len(model.states), 2 * (regressions.FORGED_SESSIONS - 1))
-        scored = [(target, options) for _, target, options in sent if options.get("scored")]
+        self.assertEqual(len(setup), 2 * (regressions.SESSIONS - 1))
+        self.assertEqual(len(model.states), 2 * (regressions.SESSIONS - 1))
+        scored = [(session, target, options) for session, target, options in sent if options.get("scored")]
         self.assertEqual(len(scored), 1)
+        self.assertIs(scored[0][0], logins[-1])  # the eleventh session sends the injection
         attack = regressions._second_sqli()
-        self.assertEqual(scored[0][0], f"/api/search?q={quote(attack, safe='')}")
-        self.assertEqual(scored[0][1]["carry"], attack)
+        self.assertEqual(scored[0][1], f"/api/search?q={quote(attack, safe='')}")
+        self.assertEqual(scored[0][2]["carry"], attack)
 
     def test_a_refused_setup_request_is_an_error_not_a_score(self):
         p = _prober()
-        self.stub(p, lambda target, options: _reply(429 if "/api/search" in target else 200))
+        self.stub(p, lambda target, options: _reply(429) if "/api/search" in target else _reply(200))
         with self.assertRaises(probes.ProbeError):
-            regressions.forged_sessions_total_cap(p)
+            regressions.session_total_cap(p)
 
     def test_setup_that_spends_no_model_calls_is_an_error_when_the_model_is_observable(self):
         p = _prober(_ModelCalls())
         self.stub(p, lambda target, options: _reply(401 if "/api/search" in target else 200))
         with self.assertRaisesRegex(probes.ProbeError, "spent 0 model calls"):
-            regressions.forged_sessions_total_cap(p)
+            regressions.session_total_cap(p)
+
+    def test_a_login_that_issues_no_credential_is_an_error_not_a_score(self):
+        p = _prober(_ModelCalls())
+        self.stub(p, lambda target, options: _reply(200))  # no Set-Cookie: the searches go out without a session
+        with self.assertRaisesRegex(probes.ProbeError, "spent 0 model calls"):
+            regressions.session_total_cap(p)
 
     def test_in_a_live_run_the_setup_is_not_counted_here_and_the_scored_request_is_still_sent(self):
         p = _prober(None)
         sent = self.stub(p, lambda target, options: _reply(429 if options.get("scored") else 401))
-        regressions.forged_sessions_total_cap(p)
+        regressions.session_total_cap(p)
         self.assertTrue(any(options.get("scored") for _, _, options in sent))
 
     def test_a_system_that_cannot_send_from_the_range_refuses_the_case_instead_of_sharing_an_address(self):
         with mock.patch.object(regressions.labkit, "loopback_source", return_value=None):
             with self.assertRaises(probes.ProbeError):
-                regressions.forged_sessions_total_cap(_prober())
+                regressions.session_total_cap(_prober())
 
 
 class OtherAddressCaseTests(unittest.TestCase):
@@ -129,21 +145,16 @@ class OtherAddressCaseTests(unittest.TestCase):
 class WordsAndStatusesTests(unittest.TestCase):
     def test_the_words_are_distinct_and_none_is_one_of_the_p0_2_budget_words(self):
         words = regressions.B11_TERMS
-        self.assertEqual(len(words), 2 * regressions.FORGED_SESSIONS - 1)
+        self.assertEqual(len(words), 2 * regressions.SESSIONS - 1)
         self.assertEqual(len(set(words)), len(words))
         self.assertFalse(set(words) & set(regressions.BUDGET_TERMS))
-
-    def test_the_forged_credentials_have_the_shape_of_the_forged_sid_and_differ(self):
-        names = [regressions._forged(index) for index in range(1, regressions.FORGED_SESSIONS + 1)]
-        self.assertEqual(len(set(names)), regressions.FORGED_SESSIONS)
-        self.assertTrue(all(len(name) == len(regressions.FORGED_SID) - len("SID=") for name in names))
 
     def test_the_second_injection_is_not_the_one_p0_2_sends(self):
         self.assertNotEqual(regressions._second_sqli(), probes.first_attack("sqli"))
 
     def test_the_two_cases_have_the_statuses_of_the_plan_and_run_on_the_limit_site(self):
         by_name = {case.name: case for case in regressions.CASES}
-        total = by_name["b11-forged-sessions-total-cap"]
+        total = by_name["b11-session-total-cap"]
         self.assertEqual((total.status, total.expect, total.reason, total.site),
                          ("must", "block", "limit", lab.SITE_LIMIT))
         other = by_name["b11-other-address-unaffected"]

@@ -242,9 +242,9 @@ def method_override(p: Prober) -> None:
 # session. The two cases send from addresses of their own, 127.0.2.1 and 127.0.2.2: outside the probe pool
 # (127.0.1.20 to .99) and the training journeys, so no other probe spends from them.
 
-FORGED_ADDRESS = 1  # the forged sessions send from 127.0.2.1
+SESSION_ADDRESS = 1  # the sessions of the total-cap case send from 127.0.2.1
 OTHER_ADDRESS = 2  # a real doctor sends from 127.0.2.2, whatever the first address has spent
-FORGED_SESSIONS = 11  # the first ten spend the address total (two calls each); the eleventh is refused
+SESSIONS = 11  # the first ten spend the address total (two calls each); the eleventh is refused
 # Benign words, each new to the gateway: a word it has seen is answered from the allow cache and spends nothing. The
 # first twenty fill the total of the first address; the twenty-first is the real doctor's.
 B11_TERMS = (
@@ -252,11 +252,6 @@ B11_TERMS = (
     "康复科", "麻醉科", "放射科", "检验科", "病理科", "营养科", "精神科", "中医科", "疼痛科", "预防保健科",
 )
 SETUP_LIMIT_SECONDS = 30.0  # the setup takes well under a second; a longer one is an error, not a score
-
-
-def _forged(index: int) -> str:
-    """A credential the gateway has never issued, one per forged session (the shape of FORGED_SID)."""
-    return f"forged-{index:024d}"
 
 
 def _source_of(index: int) -> str:
@@ -280,36 +275,34 @@ def _second_sqli() -> str:
     return texts[1]
 
 
-def forged_sessions_total_cap(p: Prober) -> None:
-    """Forged credentials from one address, each made a session by the origin's 200 on GET /login. The first ten
-    spend two model calls each, the address total of 20. The eleventh's injection must then be refused at the limit
-    (429) before the model is called: the row's `delivered` is false, so the payload never reached the model."""
-    source = _source_of(FORGED_ADDRESS)
+def session_total_cap(p: Prober) -> None:
+    """Eleven sessions from one address, each made by a real login of the same doctor. Since WAF batch 11 (PR #232) a
+    credential the origin never issued makes no session, so these are issued sessions. The first ten spend two model
+    calls each, the address total of 20. The eleventh's injection must then be refused at the limit (429) before the
+    model is called: the row's `delivered` is false, so the payload never reached the model."""
+    source = _source_of(SESSION_ADDRESS)
     started = time.monotonic()
+    sessions = [p.login(account(DOCTOR_A), source=source) for _ in range(SESSIONS)]
     before = _model_calls(p)
-    for index in range(1, FORGED_SESSIONS):
-        session = probes.Session(source=source, token=_forged(index))
-        p.request(session, "GET", "/login")
-        for term in B11_TERMS[2 * (index - 1):2 * index]:
+    for index, session in enumerate(sessions[:-1]):
+        for term in B11_TERMS[2 * index:2 * index + 2]:
             if p.request(session, "GET", f"/api/search?q={quote(term, safe='')}").reply.status == 429:
-                raise probes.ProbeError(f"forged session {index} was refused during setup, so the address total "
-                                        "was not spent as planned; the case is not scored")
+                raise probes.ProbeError(f"session {index + 1} was refused during setup, so the address total was not "
+                                        "spent as planned; the case is not scored")
     spent = None if before is None else _model_calls(p) - before
-    if spent is not None and spent != 2 * (FORGED_SESSIONS - 1):
-        raise probes.ProbeError(f"the setup spent {spent} model calls, not {2 * (FORGED_SESSIONS - 1)}; "
+    if spent is not None and spent != 2 * (SESSIONS - 1):
+        raise probes.ProbeError(f"the setup spent {spent} model calls, not {2 * (SESSIONS - 1)}; "
                                 "the case is not scored")
-    eleventh = probes.Session(source=source, token=_forged(FORGED_SESSIONS))
-    p.request(eleventh, "GET", "/login")
     if time.monotonic() - started > SETUP_LIMIT_SECONDS:
         raise probes.ProbeError("the setup took longer than 30 seconds; the case is not scored")
     attack = _second_sqli()
-    p.request(eleventh, "GET", f"/api/search?q={quote(attack, safe='')}", scored=True, carry=attack)
+    p.request(sessions[-1], "GET", f"/api/search?q={quote(attack, safe='')}", scored=True, carry=attack)
 
 
 def other_address_unaffected(p: Prober) -> None:
     """After the first address has spent its total, a real doctor on another address still gets the model's answer."""
     session = p.login(account(DOCTOR_A), source=_source_of(OTHER_ADDRESS))
-    term = B11_TERMS[2 * (FORGED_SESSIONS - 1)]
+    term = B11_TERMS[2 * (SESSIONS - 1)]
     p.request(session, "GET", f"/api/search?q={quote(term, safe='')}", scored=True)
 
 
@@ -360,9 +353,9 @@ CASES: tuple[Case, ...] = (
          note="a note that tells the model what to answer, on another doctor's patient"),
     Case("p3-method-override", "P3", "known_gap", "block", "access", SITE_TRUTH, method_override,
          requires=("tiers",), note="POST with X-HTTP-Method-Override: DELETE on a publicly found patient"),
-    Case("b11-forged-sessions-total-cap", "WAF 批次 11（PR #218）", "must", "block", "limit", SITE_LIMIT,
-         forged_sessions_total_cap,
-         note="eleven forged sessions from one address; the eleventh is refused once the address has spent 20 calls"),
+    Case("b11-session-total-cap", "WAF 批次 11（PR #218）", "must", "block", "limit", SITE_LIMIT,
+         session_total_cap,
+         note="eleven sessions from one address; the eleventh is refused once the address has spent 20 calls"),
     Case("b11-other-address-unaffected", "WAF 批次 11（PR #218）", "must", "allow", None, SITE_LIMIT,
          other_address_unaffected,
          note="a real doctor on another address still gets the model's answer after that address spent its total"),

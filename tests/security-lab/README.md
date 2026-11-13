@@ -160,7 +160,7 @@ python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   
 - 已知缺口：判定器还不读功能表，所以 `clinic-truth` 也显示“需要功能表”的有 `p0-3-function-level`、医生的 `GET /api/admin/search`（旅程）。功能级判定合入后，补上 `clinic-truth` 的功能表并把 `p0-3-function-level` 改为 `must`。
 - 退出码：门槛全部通过为 0，有门槛失败为 1，用法或环境错误为 2。基线文件缺失也以 1 退出，报告里写明原因。
 - 学习的已知缺口清单（`effectiveness-known-gaps.json`）登记学习质量的已知问题，规则见 `docs/04` 4.6。报告的“学习的已知缺口清单”一节列出每一条和它本次的出现次数。
-- 伪造凭证的两条回归用例（WAF 批次 11，PR #218）：`b11-forged-sessions-total-cap` 是 `known_gap`，#218 合入后改为 `must`；`b11-other-address-unaffected` 是 `must`。它们分别从 `127.0.2.1` 和 `127.0.2.2` 发请求。Linux 上 127/8 都是回环地址，可以直接绑定；macOS 要先给 lo0 加上这两个别名，否则这两条用例报错、不计分。伪造凭证的会话从源站对 `GET /login` 的 200 开始，源站对任何凭证的 `GET /login` 都答登录页。
+- 同一地址会话额度的两条回归用例（WAF 批次 11，PR #218）：`b11-session-total-cap` 用同一医生账号从 `127.0.2.1` 真实登录 11 次，前 10 个会话各花两次模型调用，第 11 个会话的注入被 limit 拒绝。它不用伪造凭证：#232 之后源站没有签发过的凭证不建会话。`b11-other-address-unaffected` 是 `must`，从 `127.0.2.2` 发请求。Linux 上 127/8 都是回环地址，可以直接绑定；macOS 要先给 lo0 加上这两个别名，否则这两条用例报错、不计分。
 
 ## 边界
 
