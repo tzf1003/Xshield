@@ -5,7 +5,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
 import { FIXTURE_NOW_MS, mockApi, servedRequests } from "./helpers/mock-api.ts";
 import { requestList } from "./helpers/fixtures.ts";
-import { IDS, useFixtures } from "./helpers/trace.ts";
+import { IDS, openRowMenu, useFixtures } from "./helpers/trace.ts";
 
 function listRows(page: Page): Locator {
   return page.getByRole("table", { name: "请求列表" }).locator("tbody tr");
@@ -287,7 +287,7 @@ test("只看这个路径 names the logical path, which the path condition then m
 }) => {
   await useFixtures(page);
   await page.goto("/requests");
-  await page.getByRole("button", { name: `操作：${NAMED}` }).click();
+  await openRowMenu(page, NAMED);
   await page.getByRole("menuitem", { name: "只看这个路径" }).click();
   await expect(conditionBox(page)).toHaveValue("path:/api/home/dashboard.HomeService/getStats");
   await expect(listRows(page)).toHaveCount(1);
@@ -323,4 +323,20 @@ test("the rows stay on screen while a preset window that has moved with the cloc
     .poll(() => servedRequests(page).filter((call) => call.path === "/api/requests").length)
     .toBeGreaterThan(first);
   await expect(listRows(page)).toHaveCount(41);
+});
+
+test("a click or double click on the row menu outside its items does not act on the row", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto("/requests");
+  await openRowMenu(page, NAMED);
+
+  // The menu is a portal, and React bubbles its events up to the row. A press that is released off an item
+  // reaches the menu itself, which must not select the row or open its record.
+  await page.getByRole("menu").dispatchEvent("click");
+  await page.getByRole("menu").dispatchEvent("dblclick");
+
+  await expect(page).not.toHaveURL(/peek=|\/requests\/req_/);
+  await expect(page.getByRole("menu")).toBeVisible();
 });

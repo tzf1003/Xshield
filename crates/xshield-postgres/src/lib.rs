@@ -15,6 +15,7 @@ pub mod jev_prompt_store;
 pub mod key_seal;
 pub mod model_config_store;
 pub mod object_agent_store;
+pub mod object_function_store;
 pub mod object_judgement_store;
 pub mod object_learning_store;
 pub mod object_tier_judgement_store;

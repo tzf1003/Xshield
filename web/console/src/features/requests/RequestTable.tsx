@@ -4,7 +4,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Dropdown } from "antd";
-import { type RefObject, useRef } from "react";
+import { type MouseEvent as ReactMouseEvent, type RefObject, useRef } from "react";
 import { api } from "../../api/client.ts";
 import { keys } from "../../api/queries.ts";
 import type { ApiInfo, RequestRow } from "../../api/types.ts";
@@ -144,9 +144,11 @@ export function RequestTable({
                 aria-selected={selected}
                 className={isFresh ? "row-click fresh" : "row-click"}
                 onClick={(event) => {
-                  if (!isControlTarget(event.target)) onSelect(row.request_id);
+                  if (insideRow(event) && !isControlTarget(event.target)) onSelect(row.request_id);
                 }}
-                onDoubleClick={() => onOpen(row.request_id)}
+                onDoubleClick={(event) => {
+                  if (insideRow(event)) onOpen(row.request_id);
+                }}
                 onMouseEnter={() => prefetch(row.request_id)}
                 onMouseLeave={cancelPrefetch}
               >
@@ -300,6 +302,15 @@ function RuleName({ api }: { api: ApiInfo | null }) {
 /** A click on a link, a button or a menu item inside a row acts on that control, not on the row. */
 function isControlTarget(target: EventTarget): boolean {
   return target instanceof Element && target.closest("a, button, [role='menuitem']") !== null;
+}
+
+/**
+ * The row menu is a portal, and React bubbles its events up through the row. Only an event whose target is in
+ * the row's own cells may act on the row: a click on the menu itself (its padding, or a press on one item and
+ * a release on another) must not open the preview or the record behind it.
+ */
+function insideRow(event: ReactMouseEvent<HTMLElement>): boolean {
+  return event.target instanceof Node && event.currentTarget.contains(event.target);
 }
 
 function RowMenu({ row, actions }: { row: RequestRow; actions: RowAction[] }) {
