@@ -224,3 +224,5 @@ v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回�
 另外两条只记录的请求：被认作管理员的会话请求功能表里没有的 `GET /api/admin/reports` 和 `GET /api/admin/users/export`，三遍都被拦（DENY 0.99 和 1.00）。这说明打开“未知功能交 Jev”之后，管理员用到没有进功能表的管理接口也会被拦，打开之前要先把这些接口加进功能表。
 
 样本很小，只说明这组请求上的表现，不构成准确率。
+
+合入 PR 209 之后提示词变为 `jq_d5df87392a92b44d`，2026-11-13 在合并后的代码上又跑了一遍（74 次调用，耗时 179 到 370 毫秒）：69 条必须符合预期的请求全部符合。`DELETE /api/patients`（DENY 0.64）和 `POST /api/permissions/grant`（0.62）仍离平局较近；普通接口里 DENY 最高的仍是 `GET /api/wards/occupancy`（0.29）。6 条已知做不到的结果与前三遍在同一范围：`GET /trace` 这一遍被拦（DENY 0.53），`GET /api/accounts/all` 放行（0.44），商店 `/redirect?to=` 放行（ATTACK 0.37），`GET /api/config/ui` 仍被误拦（0.92），其余两条放行。
