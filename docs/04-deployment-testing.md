@@ -2,9 +2,9 @@
 
 ## 4.1 部署形态
 
-首版参考部署只有一种：单机 Docker Compose，包含网关、控制台和 PostgreSQL 三个服务。源站不需要接入 SDK，也不需要注入脚本。
+首版参考部署只有一种：单机 Docker Compose，包含网关、控制台和 PostgreSQL 三个服务。仓库里目前还没有这份 Compose 文件（`docker-compose.dev.yml` 只启动开发用的 PostgreSQL），这是 [05.2](05-v3-removal.md#52-代码模块去留) 记录的已知缺口；两个角色的镜像由 `Dockerfile` 构建。源站不需要接入 SDK，也不需要注入脚本。
 
-多实例部署需要先把会话上下文换成共享存储（见 [01.2](01-request-flow.md#12-会话与上下文)），在那之前不提供 Helm、systemd 等其他参考部署。v3 的 `deploy/helm`、`deploy/systemd`、`deploy/prometheus` 在代码改造时删除。
+多实例部署需要先把会话上下文换成共享存储（见 [01.2](01-request-flow.md#12-会话与上下文)），在那之前不提供 Helm、systemd 等其他参考部署。v3 的 `deploy/helm`、`deploy/systemd`、`deploy/prometheus` 已删除。
 
 ## 4.2 上线步骤
 
@@ -92,7 +92,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
   `crates/xshield-judge/tests/live_jev.rs` 是这组真实调用的测试（默认忽略）：`XSHIELD_JEV_ROUTE=direct XSHIELD_JEV_API_KEY=... cargo test -p xshield-judge --test live_jev -- --ignored --nocapture`，每个场景打印一行判定、概率和耗时。
 - **代码质量**：沿用 `cargo fmt`、`cargo clippy`、`cargo test` 和 `scripts/verify_all.sh`。
 
-v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回归在代码改造时随对应功能一起删除。
+v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回归已随对应功能一起删除。
 
 ## 4.5 首次真实 Jev 调用记录
 

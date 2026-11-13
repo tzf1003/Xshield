@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Local verification gates from docs/17 section 17.10, one log file per step.
+# Local verification gates (docs/04 section 4.4), one log file per step.
 #
 #   scripts/verify_all.sh [rust] [console]    (no argument: both groups)
 #
 # Groups
-#   rust     fmt, audit-event coverage, environment-variable and secret guards,
+#   rust     fmt, environment-variable and secret guards,
 #            dependency policy (cargo-deny), library
 #            validation, clippy, tests,
 #            doc tests, PostgreSQL integration suite
@@ -25,8 +25,8 @@
 #   PGHOST/PGPORT/PGUSER/PGPASSWORD   server for the PostgreSQL steps.
 #
 # A step whose tool is missing is reported as SKIP, never as success. The exit
-# status is non-zero when any step failed. Docker and Keycloak
-# regressions are not part of this script (see docs/20).
+# status is non-zero when any step failed. The acceptance lab
+# (scripts/test_idor_lab.py) and the container image builds run in CI only.
 set -u
 
 # The real-binary scripts assert with `[[ ]]`, which `set -e` ignores in bash 3.2

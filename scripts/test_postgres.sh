@@ -28,10 +28,8 @@ migrate() {
 migrate "$test_database"
 migrate "$control_database"
 
-# v4 keeps only site_spec_store and decision_log_store (docs/05-v3-removal.md
-# section 5.2); both of their database-gated tests live as `#[cfg(test)]`
-# modules inside src/, so `--tests` here covers library unit tests, not a
-# `tests/` integration suite (that directory is now empty).
+# The PostgreSQL crate's database-gated tests are `#[ignore]`d `#[cfg(test)]`
+# modules inside src/, so `--lib -- --ignored` runs exactly them.
 database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-postgres --lib -- --ignored
