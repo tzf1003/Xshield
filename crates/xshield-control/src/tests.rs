@@ -5,12 +5,16 @@
 //! it is used. The tests that need PostgreSQL are `#[ignore]`d and run with
 //! `XSHIELD_DATABASE_URL=... cargo test -p xshield-control -- --ignored`.
 
-use std::sync::Arc;
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 use axum::{
     Router,
     body::{Body, to_bytes},
-    http::{HeaderMap, Request, StatusCode, header},
+    extract::ConnectInfo,
+    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     response::Response,
 };
 use serde_json::{Value, json};
@@ -18,7 +22,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use tower::ServiceExt;
 
 use crate::{
-    BODY_LIMIT_BYTES, ControlState, auth::SESSION_COOKIE, hash_password, router,
+    BODY_LIMIT_BYTES, ControlState, TrustedProxies, auth::SESSION_COOKIE, hash_password, router,
     static_files::ConsoleFile,
 };
 
@@ -48,12 +52,52 @@ fn lazy_pool() -> PgPool {
 
 fn state_with_console(console: &'static [ConsoleFile]) -> Arc<ControlState> {
     let hash = hash_password(TEST_PASSWORD).expect("hash_password");
-    ControlState::with_console(lazy_pool(), hash, None, false, None, console)
-        .expect("valid admin password hash")
+    ControlState::with_console(
+        lazy_pool(),
+        hash,
+        None,
+        false,
+        None,
+        TrustedProxies::default(),
+        console,
+    )
+    .expect("valid admin password hash")
 }
 
 fn test_state() -> Arc<ControlState> {
     state_with_console(TEST_CONSOLE)
+}
+
+/// A state whose sign-ins may come through the reverse proxies listed in `proxies`.
+fn state_behind_proxies(proxies: &str) -> Arc<ControlState> {
+    let hash = hash_password(TEST_PASSWORD).expect("hash_password");
+    ControlState::with_console(
+        lazy_pool(),
+        hash,
+        None,
+        false,
+        None,
+        TrustedProxies::parse(proxies).expect("valid proxy list"),
+        TEST_CONSOLE,
+    )
+    .expect("valid admin password hash")
+}
+
+/// Signs in with `password` over a connection from `peer`, carrying `X-Forwarded-For:
+/// forwarded` when given, and returns the status.
+async fn sign_in(app: &Router, peer: &str, forwarded: Option<&str>, password: &str) -> StatusCode {
+    let peer: IpAddr = peer.parse().expect("peer address");
+    let mut request = json_request("POST", "/api/login", None, &json!({ "password": password }));
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::new(peer, 40_000)));
+    if let Some(forwarded) = forwarded {
+        request.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_str(forwarded).expect("ascii header value"),
+        );
+    }
+    send(app, request).await.status()
 }
 
 fn session_cookie(state: &ControlState) -> String {
@@ -153,8 +197,16 @@ async fn login_sets_a_host_prefixed_session_cookie() {
 #[tokio::test]
 async fn over_plain_http_the_session_cookie_is_unprefixed_and_not_secure() {
     let hash = hash_password(TEST_PASSWORD).expect("hash_password");
-    let state = ControlState::with_console(lazy_pool(), hash, None, true, None, TEST_CONSOLE)
-        .expect("valid admin password hash");
+    let state = ControlState::with_console(
+        lazy_pool(),
+        hash,
+        None,
+        true,
+        None,
+        TrustedProxies::default(),
+        TEST_CONSOLE,
+    )
+    .expect("valid admin password hash");
     let app = router(state);
     let response = send(
         &app,
@@ -182,6 +234,35 @@ async fn over_plain_http_the_session_cookie_is_unprefixed_and_not_secure() {
     let host_prefixed = format!("{SESSION_COOKIE}={token}");
     let refused = send(&app, get("/api/session", Some(&host_prefixed))).await;
     assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn behind_a_trusted_proxy_each_client_is_limited_and_the_administrator_is_not_locked_out() {
+    let app = router(state_behind_proxies("10.0.0.1"));
+    for _ in 0..10 {
+        let status = sign_in(&app, "10.0.0.1", Some("198.51.100.7"), "wrong").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // The client that failed ten times is locked out, whatever the password.
+    let locked = sign_in(&app, "10.0.0.1", Some("198.51.100.7"), TEST_PASSWORD).await;
+    assert_eq!(locked, StatusCode::TOO_MANY_REQUESTS);
+    // Another client behind the same proxy signs in: the lock is not shared through the proxy.
+    let other = sign_in(&app, "10.0.0.1", Some("198.51.100.8"), TEST_PASSWORD).await;
+    assert_eq!(other, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_forwarded_address_from_a_peer_that_is_not_a_trusted_proxy_is_ignored() {
+    let app = router(state_behind_proxies("10.0.0.1"));
+    // The client claims a new address on every attempt; each attempt still counts
+    // against the connection it came from.
+    for attempt in 1..=10 {
+        let claimed = format!("198.51.100.{attempt}");
+        let status = sign_in(&app, "203.0.113.9", Some(&claimed), "wrong").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let locked = sign_in(&app, "203.0.113.9", Some("198.51.100.99"), TEST_PASSWORD).await;
+    assert_eq!(locked, StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
@@ -431,7 +512,8 @@ async fn connect_live_state() -> Arc<ControlState> {
         .await
         .expect("connect to XSHIELD_DATABASE_URL");
     let hash = hash_password(TEST_PASSWORD).expect("hash_password");
-    ControlState::new(pool, hash, None, false, None).expect("valid admin password hash")
+    ControlState::new(pool, hash, None, false, None, TrustedProxies::default())
+        .expect("valid admin password hash")
 }
 
 #[tokio::test]

@@ -28,6 +28,7 @@ mod object_learning;
 mod object_map;
 mod params;
 mod preview;
+mod proxies;
 mod requests;
 mod sessions;
 mod sites;
@@ -66,6 +67,7 @@ use crate::error::ApiError;
 pub use auth::{hash_password, is_password_hash};
 pub use maintenance::run as run_maintenance;
 pub use migrations::{MIGRATOR, run as run_migrations};
+pub use proxies::TrustedProxies;
 
 /// The largest body an ordinary API request may send: 64 KiB (section 7.9.12).
 pub const BODY_LIMIT_BYTES: usize = 64 * 1024;
@@ -85,6 +87,8 @@ pub struct ControlState {
     pub(crate) plain_http: bool,
     pub(crate) console: &'static [static_files::ConsoleFile],
     pub(crate) login_limiter: auth::LoginLimiter,
+    /// The reverse proxies whose `X-Forwarded-For` names the client of a sign-in.
+    pub(crate) trusted_proxies: TrustedProxies,
     /// The last pending-suggestion count per site, with the time it was counted.
     pub(crate) suggestion_counts: Mutex<BTreeMap<String, (i64, i64)>>,
     /// Seals and opens the model keys; `None` when the deployment sets no context secret.
@@ -96,7 +100,8 @@ pub struct ControlState {
 impl ControlState {
     /// Builds control-plane state from a database pool, the operator-configured
     /// `XSHIELD_ADMIN_PASSWORD_HASH` value, the optional CORS origin, and whether
-    /// the console is served over plain HTTP (`XSHIELD_CONTROL_PLAIN_HTTP`). The
+    /// the console is served over plain HTTP (`XSHIELD_CONTROL_PLAIN_HTTP`), and
+    /// the reverse proxies in front of it (`XSHIELD_CONTROL_TRUSTED_PROXIES`). The
     /// console served is the one embedded at build time.
     ///
     /// # Errors
@@ -109,6 +114,7 @@ impl ControlState {
         console_origin: Option<String>,
         plain_http: bool,
         key_sealer: Option<KeySealer>,
+        trusted_proxies: TrustedProxies,
     ) -> Result<Arc<Self>, StartupError> {
         Self::with_console(
             pool,
@@ -116,6 +122,7 @@ impl ControlState {
             console_origin,
             plain_http,
             key_sealer,
+            trusted_proxies,
             static_files::EMBEDDED_CONSOLE,
         )
     }
@@ -128,6 +135,7 @@ impl ControlState {
         console_origin: Option<String>,
         plain_http: bool,
         key_sealer: Option<KeySealer>,
+        trusted_proxies: TrustedProxies,
         console: &'static [static_files::ConsoleFile],
     ) -> Result<Arc<Self>, StartupError> {
         if !auth::is_password_hash(&admin_password_hash) {
@@ -143,6 +151,7 @@ impl ControlState {
             plain_http,
             console,
             login_limiter: auth::LoginLimiter::default(),
+            trusted_proxies,
             suggestion_counts: Mutex::new(BTreeMap::new()),
             key_sealer,
             model_test_at: Mutex::new(BTreeMap::new()),

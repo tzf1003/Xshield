@@ -5,6 +5,8 @@
 //! from that hash, so a restart keeps every session that has not expired and
 //! changing the password ends them all. Failed sign-ins are counted per client
 //! address; ten failures in ten minutes lock that address out for the window.
+//! The client address is the peer of the connection, or the one a reverse proxy
+//! listed in `XSHIELD_CONTROL_TRUSTED_PROXIES` reports in `X-Forwarded-For`.
 
 use std::{
     collections::HashMap,
@@ -331,10 +333,16 @@ impl LoginLimiter {
     }
 }
 
-fn client_address(connect: Option<&ConnectInfo<SocketAddr>>) -> IpAddr {
-    connect.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |ConnectInfo(address)| {
-        address.ip()
-    })
+/// The address a sign-in is counted under: the peer of the connection, or what a
+/// trusted proxy reports in `X-Forwarded-For` (see `TrustedProxies`).
+fn client_address(state: &ControlState, parts: &Parts) -> IpAddr {
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |ConnectInfo(address)| {
+            address.ip()
+        });
+    state.trusted_proxies.client_address(peer, &parts.headers)
 }
 
 // --- Handlers ---
@@ -368,7 +376,7 @@ pub async fn login(
     parts: Parts,
     body: Bytes,
 ) -> ApiResult<Response> {
-    let address = client_address(parts.extensions.get::<ConnectInfo<SocketAddr>>());
+    let address = client_address(&state, &parts);
     if !state.login_limiter.allows(address, Instant::now()) {
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
