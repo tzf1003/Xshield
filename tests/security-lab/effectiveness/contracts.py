@@ -50,6 +50,10 @@ def _is_str(value: Any) -> bool:
     return isinstance(value, str)
 
 
+def _is_str_or_none(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -209,7 +213,7 @@ KNOWN_GAP_BASE: Fields = {
     "id": (_is_str, "字符串"),
     "kind": (_one_of(KNOWN_GAP_KINDS), "wrong、unmodeled、miss 或 failure"),
     "ref": (_is_str, "字符串"),
-    "lq": (_is_str, "字符串"),
+    "lq": (_is_str_or_none, "字符串（修法批次 LQ-1 到 LQ-7），长期条目为 null"),
 }
 KNOWN_GAP_BY_KIND: dict[str, Fields] = {
     "wrong": {"metric": (_one_of(frozenset({"L0", "L1", "L2", "L3"})), "L0、L1、L2 或 L3"),

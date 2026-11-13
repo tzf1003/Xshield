@@ -104,7 +104,9 @@ class ApplyTests(unittest.TestCase):
         entries = contracts.load_known_gaps(LIST)
         self.assertEqual(len({item["id"] for item in entries}), len(entries))
         self.assertTrue(all(item["kind"] in known_gaps.KINDS for item in entries))
-        self.assertTrue(all(item["lq"].startswith("LQ-") for item in entries))
+        self.assertTrue(all(item["lq"] is None or item["lq"].startswith("LQ-") for item in entries))
+        # A long-term entry has no batch that fixes it, so its note says why.
+        self.assertTrue(all(item["note"].strip() for item in entries if item["lq"] is None))
 
 
 class ContractTests(unittest.TestCase):

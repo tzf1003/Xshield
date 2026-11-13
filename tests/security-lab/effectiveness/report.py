@@ -315,7 +315,7 @@ def _known_lines(known: dict[str, Any] | None) -> list[str]:
         _entry_target(entry),
         entry.get("learned") or "—",
         entry["ref"],
-        entry["lq"],
+        "长期" if entry["lq"] is None else entry["lq"],
         f"仍出现 {entry['matched']} 处" if entry["matched"] else "已不再出现：删除这一条",
     ] for entry in known["entries"]]
     lines = ["", "### 学习的已知缺口清单", ""]

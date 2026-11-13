@@ -112,8 +112,8 @@
       "key": "GET /api/admin/export patients[].id",
       "learned": "",
       "ref": "学习质量设计稿 2.1",
-      "lq": "LQ-2",
-      "note": "类别被起成 export，之后又被拒绝记录挡住"
+      "lq": null,
+      "note": "训练流量里使用次数低于学习门槛，规则按设计不提议"
     },
     {
       "id": "miss-search-results-rejected",
