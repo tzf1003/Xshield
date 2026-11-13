@@ -44,7 +44,7 @@
 - `multipart/*`，只要带 `boundary`（`multipart/form-data`、`multipart/mixed`、`multipart/related` 等）：按 `boundary` 切成部分，每个部分这样读：
   - 取 `Content-Disposition` 里的非空 `name`。有几个不同的名字（参数重复，或有多个 `Content-Disposition` 头）时，内容在每个名字下各送一次，位置、键各用各的，因为解析器有的取第一个，有的取最后一个。没有非空的 `name` 时，或有一个 `name` 为空时，内容还在 `body` 下读一次，没有键。
   - 文本部分的内容和表单字段一样处理，位置 `body.<name>`，键是 `name`；部分自己的类型是 JSON 且能解析时，按 JSON 展开到 `body.<name>` 之下。
-  - 文本部分带 `Content-Transfer-Encoding: base64` 或 `quoted-printable`（不分大小写）时，原文照常送判；解码成功且与原文不同时，解码后的内容在同一位置、同一键下再送一次。base64 忽略空白，含其他字符即解码失败；quoted-printable 里的 `=` 之后既不是两位十六进制数也不是换行，即解码失败。
+  - 文本部分带 `Content-Transfer-Encoding: base64` 或 `quoted-printable`（不分大小写）时，原文照常送判；解码后的内容非空且与原文不同时，在同一位置、同一键下再送一次。解码按宽松的方式做，不会失败：base64 丢掉字母表以外的字符（空白也丢），遇到第一个 `=` 停止，完整的四字符组和末尾两三个字符的残段都解码，单个残留字符忽略；quoted-printable 里 `=` 加两位十六进制数是它代表的字节，`=` 后接换行是软换行，其他的 `=` 原样保留。多送一个解码值只多一次判定。
   - 带非空 `filename` 或 `filename*` 的是文件部分：只把文件名作为值放在 `body.<name>#filename`，不带键，**内容不拆值、不判定**。`filename` 为空（或 `filename*` 解码后为空）的不是文件部分，是文本部分。
   - 没有边界、没有部分，按**整段**。
 - 没有 `Content-Type`，且不是 JSON，形状是表单的，按表单读：每个字段一个值，位置 `body.<字段名>`，`truncated` 为假。形状的判据：去掉首尾空白后非空，不含任何空白字符、控制字符和 `;`，按 `&` 切开后每一段都含 `=`。其余的按**整段**。

@@ -648,8 +648,7 @@ fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
     read_text(out, content, is_json, &places);
     // Content that decodes to something else is read decoded too (docs/01 section 1.3).
     for encoding in &encodings {
-        let decoded = transfer_decoded(encoding, content);
-        if let Some(decoded) = decoded.filter(|decoded| decoded != content) {
+        if let Some(decoded) = transfer_decoded(encoding, content) {
             read_text(out, &decoded, is_json, &places);
         }
     }
@@ -681,46 +680,45 @@ fn read_text(
 }
 
 /// The content decoded by a transfer encoding that is base64 or quoted-printable, the encoding given
-/// in lower case. `None` for any other encoding, and when the content does not decode.
+/// in lower case. `None` for any other encoding, and when the decoding adds no reading: it is empty,
+/// or it is the content as it was sent.
 fn transfer_decoded(encoding: &str, content: &[u8]) -> Option<Vec<u8>> {
-    match encoding {
+    let decoded = match encoding {
         "base64" => base64_decoded(content),
         "quoted-printable" => quoted_printable_decoded(content),
-        _ => None,
-    }
+        _ => return None,
+    };
+    (!decoded.is_empty() && decoded != content).then_some(decoded)
 }
 
-/// The bytes of a base64 text (RFC 4648, the standard alphabet). Blanks are skipped, `=` pads the
-/// end and only `=` or blanks may follow it, and any other character is not base64. So is a count
-/// of symbols that leaves one symbol over. Written here, not taken from a crate, and it never panics.
-fn base64_decoded(text: &[u8]) -> Option<Vec<u8>> {
+/// The bytes of a base64 text, read leniently as origins read it (docs/01 section 1.3): every character
+/// outside the standard alphabet is dropped, blanks included, and the text stops at the first `=`. The
+/// full groups decode, and so does a tail of two or three symbols; a single dangling symbol is
+/// ignored. It never fails and never panics.
+fn base64_decoded(text: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     // The bits not yet written out are the `spare` low bits of `bits`.
     let mut bits: u32 = 0;
     let mut spare: u32 = 0;
-    let mut symbols = 0_usize;
-    let mut padded = false;
     for &byte in text {
-        if byte.is_ascii_whitespace() {
-            continue;
-        }
         if byte == b'=' {
-            padded = true;
+            break;
+        }
+        let Some(value) = base64_value(byte) else {
             continue;
-        }
-        if padded {
-            return None;
-        }
-        bits = (bits << 6) | u32::from(base64_value(byte)?);
+        };
+        bits = (bits << 6) | u32::from(value);
         spare += 6;
-        symbols += 1;
         if spare >= 8 {
             spare -= 8;
-            out.push(u8::try_from(bits >> spare).ok()?);
+            // `bits` holds at most `spare + 8` significant bits, so the shift leaves one byte.
+            if let Ok(byte) = u8::try_from(bits >> spare) {
+                out.push(byte);
+            }
             bits &= (1 << spare) - 1;
         }
     }
-    (symbols % 4 != 1).then_some(out)
+    out
 }
 
 /// The value of one base64 symbol of the standard alphabet.
@@ -735,32 +733,35 @@ fn base64_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// The bytes of a quoted-printable text (RFC 2045): `=` with two hex digits, in either case, is the
-/// byte they name, and `=` at the end of a line is a soft line break. Any other `=` is not
-/// quoted-printable, so `None`.
-fn quoted_printable_decoded(text: &[u8]) -> Option<Vec<u8>> {
+/// The bytes of a quoted-printable text, read leniently (docs/01 section 1.3): `=` with two hex digits,
+/// in either case, is the byte they name, and `=` at the end of a line is a soft line break. Any other
+/// `=` stands for itself, so the decoding never fails.
+fn quoted_printable_decoded(text: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     let mut rest = text;
     while let Some((&byte, tail)) = rest.split_first() {
         if byte != b'=' {
             out.push(byte);
             rest = tail;
-        } else if let Some(decoded) = quoted_pair(tail) {
+        } else if let Some((decoded, after)) = quoted_pair(tail) {
             out.push(decoded);
-            rest = tail.get(2..)?;
+            rest = after;
+        } else if let Some(after) = soft_break(tail) {
+            rest = after;
         } else {
-            rest = soft_break(tail)?;
+            out.push(byte);
+            rest = tail;
         }
     }
-    Some(out)
+    out
 }
 
-/// The byte that the two hex digits at the start of `tail` name.
-fn quoted_pair(tail: &[u8]) -> Option<u8> {
-    let [high, low, ..] = tail else {
+/// The byte that the two hex digits at the start of `tail` name, and the text after them.
+fn quoted_pair(tail: &[u8]) -> Option<(u8, &[u8])> {
+    let [high, low, after @ ..] = tail else {
         return None;
     };
-    Some((hex_digit(*high)? << 4) | hex_digit(*low)?)
+    Some(((hex_digit(*high)? << 4) | hex_digit(*low)?, after))
 }
 
 /// What follows a `=` that is not a hex pair, when it is a line break: the text after the break.
@@ -1697,10 +1698,26 @@ mod tests {
             located(&request),
             [("body.note", "=27 OR 1=3D1--"), ("body.note", "' OR 1=1--")]
         );
-        // A `'` is not base64, so the decoding fails and only the text as sent is read.
+        // A literal `=` stands for itself, so the escape before it still decodes.
+        let request = read("quoted-printable", "=27 OR 1=1--");
+        assert_eq!(
+            located(&request),
+            [("body.note", "=27 OR 1=1--"), ("body.note", "' OR 1=1--")]
+        );
+        // A `'` is outside the base64 alphabet and is dropped, as an origin drops it, so the
+        // decoded text is read as well as the text as sent.
         let request = read("base64", "JyBPUi'AxPTEtLQ==");
-        assert_eq!(located(&request), [("body.note", "JyBPUi'AxPTEtLQ==")]);
-        // Blanks are skipped in base64, so a line break in the middle does not stop the decoding.
+        assert_eq!(
+            located(&request),
+            [
+                ("body.note", "JyBPUi'AxPTEtLQ=="),
+                ("body.note", "' OR 1=1--")
+            ]
+        );
+        // Nothing decodes from `'''`, so the text as sent is the only reading.
+        let request = read("base64", "'''");
+        assert_eq!(located(&request), [("body.note", "'''")]);
+        // Blanks are dropped in base64, so a line break in the middle does not stop the decoding.
         let request = read("Base64", "JyBPUi\r\nAxPTEtLQ==");
         assert_eq!(
             located(&request),
