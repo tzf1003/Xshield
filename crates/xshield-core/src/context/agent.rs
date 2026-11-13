@@ -509,6 +509,8 @@ mod tests {
                 session: format!("s{}", index % sessions),
                 day: u64::from(index),
                 from: vec![from.to_owned()],
+                user: None,
+                admin: false,
             });
         }
         evidence
@@ -523,6 +525,8 @@ mod tests {
             session: "s9".to_owned(),
             day: 30,
             from: vec![DOCS.to_owned()],
+            user: None,
+            admin: false,
         });
         let question = question(slot, &evidence, &map()).expect("a question");
         assert_eq!(question.slot.route, "/doctor/{id}");
@@ -572,6 +576,8 @@ mod tests {
             session: "s0".to_owned(),
             day: 1,
             from: Vec::new(),
+            user: None,
+            admin: false,
         });
         assert_eq!(question("GET /x path[1]", &evidence, &map()), None);
         // A refusal alone carries no flow either.
