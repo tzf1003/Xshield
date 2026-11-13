@@ -261,7 +261,7 @@ CASES: tuple[Case, ...] = (
          note="CORS preflight without a credential"),
     Case("p1-4-conditional-304", "P1-4", "known_gap", "allow", None, SITE_TRUTH, conditional_304,
          note="a new session gets 304 and then opens the patient"),
-    Case("p1-5-observe-learns-would-block", "P1-5", "known_gap", "block", "access", SITE_OBSERVE,
+    Case("p1-5-observe-learns-would-block", "P1-5", "must", "block", "access", SITE_OBSERVE,
          observe_learns_would_block, note="a visit id from a would-block answer, in observation mode"),
     Case("p1-9-big-form", "P1-9", "known_gap", "allow", None, SITE_TRUTH, big_form,
          note="benign form with 120 fields"),

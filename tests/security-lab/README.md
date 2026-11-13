@@ -42,6 +42,7 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |
 | C4 | 登录请求 | Jev 收到的是 `<redacted>`，判定日志里也没有口令 | `jev_allow` |
 | C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拒绝并回 429（`{"error":"rate_limited"}`），`JEV_CALL_LIMIT`；不论 `on_jev_unavailable` | `jev_unavailable` |
+| C9 | 同一来源地址的 11 个会话（站点设为每会话 2 次，合计上限 20 次） | 前 10 个会话各调用 2 次放行；第 11 个会话一次都没用过，也拒绝并回 429（`rate_limited`），Jev 没有被调用；另一个地址的会话不受影响 | `jev_unavailable` |
 | G1 | JSON 凭证站点（凭证为 `Authorization` 头）：登录响应里 700 多字符的令牌绑定会话；登录响应和列表都没给过的患者 D | 登录放行；列表的判定记录带该次登录的 `login_request_id`，没有 `login_unbound`；患者 D 拦截，源站未收到请求 | `jev_allow`，`fast_allow`，`jev_deny` |
 | G2 | 同一站点：源站没发过的 700 多字符令牌访问入口 | 放行到源站（源站答 401），记录的 `login_unbound` 为 `login_unmatched` | `fast_allow` |
 | W1 | 声明了 `GET /api/home doctor.id` 为用户身份的站点：医生 A、B 各自登录后，判定记录的 `trace.session.identity.user` 是各自的键控哈希标签，换账号不同，同一账号相同；没有声明身份的站点不写 `identity` | 放行，身份标签按上述规则 | `fast_allow` |
@@ -60,6 +61,8 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | F11 | 不带凭证的 `DELETE /api/patients`（入口路径，基线里没有这个方法） | 交 Jev：`state.entry.matched` 为真，`function` 为 `{"known":false}`；Jev 放行，源站答 401 | `jev_allow` |
 | F12 | 没有功能表的站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 都快速放行（源站分别答 200、404），不新增 Jev 调用，判定记录没有 `trace.function`。与 F5、F9 对照 | `fast_allow`，`fast_allow` |
 | F13 | 观察模式的功能表站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 两个都转发（源站收到），记为本应拦截 | `jev_deny`（`would_block`） |
+
+C5、C9 从回环的 127.0.0.2 至 127.0.0.4 发请求，使它们各有自己的来源地址（会话合计的 Jev 额度按来源地址算，见 [docs/02 §2.5](../../docs/02-jev.md)）。Linux 的回环整段 127.0.0.0/8 都可用；macOS 需要先给 `lo0` 加别名（`sudo ifconfig lo0 alias 127.0.0.2` 等），否则这两个场景连不上。
 
 ### A9 至 A11 说明：搜索结果与档位
 
