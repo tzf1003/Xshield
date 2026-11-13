@@ -389,8 +389,11 @@ fn function_view(
     }
     let attempt = admin_entry.is_some() && !admin;
     // Unknown is judged on the transport method and the first template only: the table was learned from
-    // the traffic's methods and paths, not from the overrides or the decoded slashes.
-    let unknown = objects.asks_unknown_functions()
+    // the traffic's methods and paths, not from the overrides or the decoded slashes. An administrator's
+    // session is not asked about an unknown function: the table does not list every administrator
+    // interface, so such a request is judged by its values alone (docs/07 section 7.9.18).
+    let unknown = !admin
+        && objects.asks_unknown_functions()
         && (!is_templatable(logical) || !objects.knows_function(&method, first));
     let redacted = redacted_path(logical, secret);
     let key = cut(
@@ -8140,6 +8143,95 @@ mod tests {
             .await;
         assert_eq!(plain.record.decision_path, DecisionPath::JevAllow);
         assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_route_word_under_an_id_function_is_asked_as_unknown() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"enforce","objects":{"ask_unknown_functions":true,"functions":[{"key":"GET /api/patients/{id}","source":"rule"}]}"#,
+        );
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+        );
+        let numbered = judge
+            .judge(
+                &site,
+                &call_as("GET", "/api/patients/7005", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(numbered.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        // A route word is no value: the `{id}` entry does not cover it, so Jev is asked with the
+        // function unknown and refuses it.
+        let route_word = judge
+            .judge(
+                &site,
+                &call_as("GET", "/api/patients/export-all", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(route_word.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(function_shown(&fake, 0), json!({"known": false}));
+    }
+
+    #[tokio::test]
+    async fn an_administrator_session_is_not_asked_about_an_unknown_function() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(true);
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        let reports = judge
+            .judge(&site, &call_as("GET", "/api/admin/reports", "root", 1_000))
+            .await;
+        assert_eq!(reports.record.decision_path, DecisionPath::FastAllow);
+        assert!(reports.record.trace.function.is_none());
+        assert_eq!(fake.calls(), 0);
+        // The same request from an ordinary session is asked, with the function unknown.
+        let doctor = judge
+            .judge(
+                &site,
+                &call_as("GET", "/api/admin/reports", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(function_shown(&fake, 0), json!({"known": false}));
+        assert_eq!(
+            doctor.record.trace.function.and_then(|trace| trace.known),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_administrator_override_to_an_unlisted_method_is_not_unknown() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(true);
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        let overrides = ["PUT".to_owned()];
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method_overrides: &overrides,
+                    ..call_as("GET", "/api/admin/reports", "root", 1_000)
+                },
+            )
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert!(verdict.record.trace.function.is_none());
+        assert_eq!(fake.calls(), 0);
     }
 
     #[tokio::test]

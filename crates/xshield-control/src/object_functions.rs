@@ -1220,6 +1220,26 @@ mod tests {
     }
 
     #[test]
+    fn a_route_word_under_an_id_entry_is_a_sensitive_candidate() {
+        let spec = site(
+            &["/login"],
+            &json!({"functions": [{"key": "GET /api/patients/{id}", "source": "admin"}]}),
+        );
+        let window = evidence_window(&[
+            ("GET /api/patients/7005", 5, 0, 0),
+            ("GET /api/patients/export-all", 5, 0, 0),
+        ]);
+        let candidates = candidate_keys(spec.objects(), Some(&window));
+        assert_eq!(
+            candidates,
+            BTreeSet::from(["GET /api/patients/export-all".to_owned()])
+        );
+        let rows = candidate_rows(&spec, Some(&window), &candidates, &BTreeMap::new(), 5);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].sensitive);
+    }
+
+    #[test]
     fn a_candidate_is_suggested_at_the_threshold_and_flagged_when_sensitive() {
         let spec = site(&["/login"], &json!({}));
         let window = evidence_window(&[

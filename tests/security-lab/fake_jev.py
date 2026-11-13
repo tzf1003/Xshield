@@ -58,8 +58,10 @@ ASCII_DIGITS = re.compile(r"[0-9]+")  # a path segment that is an id on a route,
 
 # Words of administrator, operations and hidden-interface paths. An unknown function whose path holds one of
 # them is answered DENY: this is the fake's copy of the instruction paragraph about unknown functions (docs/02 2.2).
+# `export-all` is the bulk export that paragraph names (批量导出); an export of one record, such as `export-pdf`,
+# is an ordinary path and is judged on its values.
 OPS_WORDS = ("admin", "metrics", "actuator", "server-status", "debug", "swagger", "console", "phpinfo",
-             "ftp", "backup", "internal")
+             "ftp", "backup", "internal", "export-all")
 
 
 def _probabilities(options: tuple[str, ...], choice: str) -> dict[str, float]:
