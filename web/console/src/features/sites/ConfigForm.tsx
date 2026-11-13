@@ -410,11 +410,13 @@ function ModeGroup({
         help={
           spec.on_jev_unavailable === "allow"
             ? undefined
-            : "Jev 超时、出错或达到调用上限时，请求按拒绝处理（推荐）。"
+            : "Jev 超时、出错或答不上来时，请求按拒绝处理（推荐）。调用次数达到上限的请求始终拒绝（429）。"
         }
         warnings={
           spec.on_jev_unavailable === "allow"
-            ? ["Jev 不可用时请求不经判定直接放行，记录标为“未经判定”。"]
+            ? [
+                "Jev 不可用时请求不经判定直接放行，记录标为“未经判定”。调用次数达到上限的请求仍然拒绝（429）。",
+              ]
             : []
         }
       >

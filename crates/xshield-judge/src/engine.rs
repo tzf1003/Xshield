@@ -27,7 +27,8 @@ use crate::slots::{
     route_template, tier_name,
 };
 use crate::state::{
-    Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
+    Answers, JudgeError, Prompt, StateInput, StateValue, build_state, conclude, parse_response,
+    request_body,
 };
 use crate::tiers;
 use crate::trace::{Place, entry_trace, recent_trace, redacted_path, redacted_query, value_entry};
@@ -79,7 +80,7 @@ pub struct RequestFacts<'a> {
 pub struct Judgement {
     /// Forward to the origin.
     pub forward: bool,
-    /// Status to answer with when not forwarding (401 or 403).
+    /// Status to answer with when not forwarding: 401, 403, or 429 when the call budget is spent.
     pub refuse_status: u16,
     /// The row that describes the request (docs/07 section 7.4.1). Every
     /// request gets one, bypassed paths included. The gateway completes the
@@ -207,6 +208,9 @@ enum Verdict {
     Safe(DecisionPath),
     Unsafe(DecisionPath),
     Unjudged(DecisionPath),
+    /// The session's or address's Jev calls for this minute are used up. No call is made, and the
+    /// request is refused with 429 whatever `on_jev_unavailable` says (docs/02 section 2.5).
+    CallLimited,
 }
 
 /// The session context a Jev state and its trace are built from, copied out of
@@ -258,6 +262,8 @@ struct Turn<'a> {
     resolved: &'a Resolved,
     entry: bool,
     session_id: Option<Digest16>,
+    /// The context of the client address on this site, for a request without a credential.
+    address: Digest16,
     /// What the request is judged against while its credential has no session.
     unconfirmed: &'a SessionContext,
     extracted: &'a ExtractedRequest,
@@ -301,6 +307,32 @@ impl<J: JevPort> Judge<J> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The key of the context a credential's session keeps on `site`. Each site learns its own
+    /// context, so the same credential on another site starts from nothing (docs/01 section 1.2).
+    fn session_key(&self, site: &str, credential: &str) -> Digest16 {
+        self.key
+            .mac("site-session", format!("{site}\0{credential}").as_bytes())
+    }
+
+    /// The key of the context a client address keeps on `site`, for the requests that carry no
+    /// credential (docs/01 section 1.2).
+    fn address_key(&self, site: &str, client: &str) -> Digest16 {
+        self.key
+            .mac("site-address", format!("{site}\0{client}").as_bytes())
+    }
+
+    /// The key a Jev call is counted against: the credential's while its session is live, and the
+    /// client address's otherwise. These budgets are shared by all sites (docs/02 section 2.5).
+    fn budget_key(&self, request: &RequestFacts<'_>, session_live: bool) -> Digest16 {
+        match request
+            .credential
+            .filter(|credential| session_live && !credential.is_empty())
+        {
+            Some(credential) => self.key.mac("session", credential.as_bytes()),
+            None => self.key.mac("address", request.client.as_bytes()),
+        }
+    }
+
     /// Decides one request (docs/01 section 1.4 steps 1 to 7) and returns the
     /// row that describes the decision.
     // The steps for one request stay in one function, in the order they happen, as observe() does.
@@ -331,7 +363,8 @@ impl<J: JevPort> Judge<J> {
         let session_id = request
             .credential
             .filter(|credential| !credential.is_empty())
-            .map(|credential| self.key.mac("session", credential.as_bytes()));
+            .map(|credential| self.session_key(site.name(), credential));
+        let address = self.address_key(site.name(), request.client);
         // A credential that no session holds yet starts its session from the JSON login response
         // that issued it, when one is held (docs/01 section 1.7). Only an entry starts it: after a
         // login the first request lands on an entry. This runs before anything reads the session,
@@ -375,6 +408,7 @@ impl<J: JevPort> Judge<J> {
             resolved,
             entry: entry.is_some(),
             session_id,
+            address,
             unconfirmed: &unconfirmed,
             extracted: &extracted,
             cache_key: &cache_key,
@@ -402,9 +436,7 @@ impl<J: JevPort> Judge<J> {
             match self.token_digests(request) {
                 Some(digests) => sent.extend(digests),
                 None => self.stop_learning(
-                    session_id.or_else(|| {
-                        entry.map(|_| self.key.mac("address", request.client.as_bytes()))
-                    }),
+                    session_id.or_else(|| entry.map(|_| address)),
                     request.now_ms,
                 ),
             }
@@ -414,10 +446,10 @@ impl<J: JevPort> Judge<J> {
         record.jev = jev;
         if outcome == Outcome::Blocked {
             record.trace.refused = Some(
-                if refuse_status == 401 {
-                    "unauthenticated"
-                } else {
-                    "forbidden"
+                match refuse_status {
+                    401 => "unauthenticated",
+                    429 => "rate_limited",
+                    _ => "forbidden",
                 }
                 .to_owned(),
             );
@@ -455,16 +487,18 @@ impl<J: JevPort> Judge<J> {
         if turn.session_id.is_none() && !turn.entry {
             return Plan::Done(Verdict::Unsafe(DecisionPath::NoSession));
         }
-        let address = self.key.mac("address", request.client.as_bytes());
         let mut inner = self.lock();
         // A credential without a session is judged against the empty view, and a Jev call for it
         // is counted against the client address like a request without a credential.
         let (session, limit_key): (&SessionContext, Digest16) = match turn.session_id {
             Some(id) => match inner.store.existing(id, request.now_ms) {
-                Some(session) => (session, id),
-                None => (turn.unconfirmed, address),
+                Some(session) => (session, self.budget_key(request, true)),
+                None => (turn.unconfirmed, self.budget_key(request, false)),
             },
-            None => (inner.store.session(address, request.now_ms), address),
+            None => (
+                inner.store.session(turn.address, request.now_ms),
+                self.budget_key(request, false),
+            ),
         };
         let PlannedValues {
             values,
@@ -654,7 +688,12 @@ impl<J: JevPort> Judge<J> {
         };
         let snapshot = match self.admit(request, turn.session_id, limit_key, tuning) {
             Ok(snapshot) => snapshot,
-            Err(code) => return unjudged(row, code),
+            // The budget is spent: no call is made, and the request is refused with 429 whatever
+            // the site allows (docs/02 section 2.5).
+            Err(code) => {
+                row.failure = Some(code.to_owned());
+                return (Verdict::CallLimited, row);
+            }
         };
         if let Some(session) = trace.session.as_mut() {
             session.entries_passed = Some(snapshot.entries.iter().map(entry_trace).collect());
@@ -679,6 +718,12 @@ impl<J: JevPort> Judge<J> {
         };
         let (state, trim) = match build_state(&input) {
             Ok(built) => built,
+            // A state that does not fit even trimmed is refused with 403 whatever the site allows.
+            // No call is made, and `on_jev_unavailable` does not apply (docs/02 section 2.4).
+            Err(error @ JudgeError::StateTooLarge) => {
+                row.failure = Some(error.to_string());
+                return (Verdict::Unsafe(DecisionPath::JevUnavailable), row);
+            }
             Err(error) => return unjudged(row, &error.to_string()),
         };
         let body = request_body(&self.jev.model(), &state, &self.prompt);
@@ -716,28 +761,37 @@ impl<J: JevPort> Judge<J> {
         row.conclusion = Some(conclusion);
         let verdict = match conclusion {
             Conclusion::Allow => {
-                if tuning.cache_ms > 0 && !turn.resolved.is_unknown() && !turn.extracted.truncated {
-                    // A credential without a session has nowhere to keep the allow.
-                    let mut inner = self.lock();
-                    let session = match turn.session_id {
-                        Some(id) => inner.store.existing(id, request.now_ms),
-                        None => Some(inner.store.session(limit_key, request.now_ms)),
-                    };
-                    if let Some(session) = session {
-                        session.cache_allow(
-                            *turn.cache_key,
-                            request.now_ms,
-                            tuning.cache_ms,
-                            request_number(request.request_id),
-                        );
-                    }
-                }
+                self.remember_allow(turn);
                 Verdict::Safe(DecisionPath::JevAllow)
             }
             Conclusion::Deny => Verdict::Unsafe(DecisionPath::JevDeny),
             Conclusion::Unknown => return unjudged(row, "JEV_UNKNOWN"),
         };
         (verdict, row)
+    }
+
+    /// Keeps Jev's allow for the cache window under the session that asked (docs/01 section 1.4
+    /// step 5). A request with unread values or an unknown interface is never cached.
+    fn remember_allow(&self, turn: &Turn<'_>) {
+        let request = turn.request;
+        let tuning = turn.tuning;
+        if tuning.cache_ms == 0 || turn.resolved.is_unknown() || turn.extracted.truncated {
+            return;
+        }
+        // A credential without a session has nowhere to keep the allow.
+        let mut inner = self.lock();
+        let session = match turn.session_id {
+            Some(id) => inner.store.existing(id, request.now_ms),
+            None => Some(inner.store.session(turn.address, request.now_ms)),
+        };
+        if let Some(session) = session {
+            session.cache_allow(
+                *turn.cache_key,
+                request.now_ms,
+                tuning.cache_ms,
+                request_number(request.request_id),
+            );
+        }
     }
 
     /// Spends one Jev call from the limiter and copies the session context the
@@ -846,7 +900,7 @@ impl<J: JevPort> Judge<J> {
             .issued_credential
             .filter(|credential| !credential.is_empty());
         summary.issued_session =
-            issued.map(|credential| label(&self.key.mac("session", credential.as_bytes())));
+            issued.map(|credential| label(&self.session_key(site.name(), credential)));
         if logical.is_some_and(|path| site.is_bypass(path)) {
             summary.skip = Some(Skip::Bypass);
             return summary;
@@ -865,7 +919,7 @@ impl<J: JevPort> Judge<J> {
                 .mac("value", credential_token(site, credential).as_bytes());
             self.lock().store.start_session(
                 site.name(),
-                self.key.mac("session", credential.as_bytes()),
+                self.session_key(site.name(), credential),
                 token,
                 observation.now_ms,
             );
@@ -873,7 +927,7 @@ impl<J: JevPort> Judge<J> {
         // The origin answered the request, so an echo of what it sent teaches
         // nothing, whatever the status: a refused request's values can still come
         // back in a later response, such as a list of recent attempts.
-        let inherited = self.note_request_sent(observation, issued.is_some());
+        let inherited = self.note_request_sent(site.name(), observation, issued.is_some());
         let issuing_redirect = (300..400).contains(&observation.status) && issued.is_some();
         if !success {
             summary.skip = Some(Skip::Status);
@@ -973,7 +1027,7 @@ impl<J: JevPort> Judge<J> {
             let added = inner
                 .store
                 .session(
-                    self.key.mac("address", observation.client.as_bytes()),
+                    self.address_key(site.name(), observation.client),
                     observation.now_ms,
                 )
                 .remember(&self.key, &source, &values);
@@ -981,7 +1035,7 @@ impl<J: JevPort> Judge<J> {
         }
         for credential in [seeded, issued].into_iter().flatten() {
             let session = inner.store.session(
-                self.key.mac("session", credential.as_bytes()),
+                self.session_key(site.name(), credential),
                 observation.now_ms,
             );
             if issued == Some(credential) {
@@ -1087,12 +1141,12 @@ impl<J: JevPort> Judge<J> {
         Some(digests.into_iter().collect())
     }
 
-    /// Records the values the request sent in the session it was judged in: its
-    /// credential, or the client address when it had none. When the response
-    /// issues a credential, returns what the request's session sent, for the new
-    /// session to inherit.
+    /// Records the values the request sent in the context it was judged in on `site`: the session
+    /// of its credential, or the address's context when it had none. When the response issues a
+    /// credential, returns what that context sent, for the new session to inherit.
     fn note_request_sent(
         &self,
+        site: &str,
         observation: &Observation<'_>,
         issuing: bool,
     ) -> Option<SentRecord> {
@@ -1100,8 +1154,8 @@ impl<J: JevPort> Judge<J> {
             .credential
             .filter(|credential| !credential.is_empty())
         {
-            Some(credential) => self.key.mac("session", credential.as_bytes()),
-            None => self.key.mac("address", observation.client.as_bytes()),
+            Some(credential) => self.session_key(site, credential),
+            None => self.address_key(site, observation.client),
         };
         let mut inner = self.lock();
         let inherited = issuing.then(|| inner.store.sent_record(&request_context));
@@ -1482,6 +1536,8 @@ fn apply_policy(site: &SiteSpec, verdict: Verdict) -> (DecisionPath, Outcome, bo
         Verdict::Safe(path) => (path, Outcome::Allowed, true, 0),
         Verdict::Unsafe(DecisionPath::NoSession) => refuse(DecisionPath::NoSession, 401),
         Verdict::Unsafe(path) => refuse(path, 403),
+        // A spent call budget is refused with 429 whatever `on_jev_unavailable` says (docs/02 section 2.5).
+        Verdict::CallLimited => refuse(DecisionPath::JevUnavailable, 429),
         Verdict::Unjudged(path) => match site.on_jev_unavailable() {
             OnJevUnavailable::Allow => (path, Outcome::Unjudged, true, 0),
             OnJevUnavailable::Deny => refuse(path, 403),
@@ -2969,6 +3025,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_repeated_body_key_judges_each_of_its_values() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(&site, &list_response("alice", 0));
+        // The origin may read the first `patient` and the gateway the last. The last one was
+        // shown to this session, the first one never was: the first still goes to Jev.
+        let first_unseen = RequestFacts {
+            route: None,
+            request_headers: &[],
+            method: "POST",
+            content_type: Some("application/json"),
+            body: br#"{"patient":"42","patient":"7"}"#,
+            ..get("/api/orders", None, Some("alice"), 1_000)
+        };
+        let verdict = judge.judge(&site, &first_unseen).await;
+        assert!(!verdict.forward);
+        assert_eq!(fake.calls(), 1);
+        assert!(fake.sent.lock().unwrap()[0].contains(r#""value":"42""#));
+        // The other order: the first one was shown, the last one never was.
+        let last_unseen = RequestFacts {
+            body: br#"{"patient":"7","patient":"42"}"#,
+            ..first_unseen
+        };
+        let verdict = judge.judge(&site, &last_unseen).await;
+        assert!(!verdict.forward);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_session_learned_on_one_site_does_not_serve_another() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let emr = site(r#","mode":"enforce""#);
+        let clinic = other_site();
+        judge.observe(&emr, &list_response("alice", 0));
+        let known = judge
+            .judge(&emr, &get("/api/patients/7", None, Some("alice"), 1_000))
+            .await;
+        assert_eq!(known.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        // The same credential has no session on the other site, so its id is unseen there.
+        let unseen = judge
+            .judge(&clinic, &get("/api/patients/7", None, Some("alice"), 1_000))
+            .await;
+        assert!(!unseen.forward);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_address_context_learned_on_one_site_is_not_used_on_another() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let emr = site(r#","mode":"enforce""#);
+        let clinic = other_site();
+        // A sign-up page of the first site shows a new id to this client, which has no credential.
+        judge.observe(
+            &emr,
+            &Observation {
+                route: None,
+                request_id: RID,
+                unread: None,
+                would_block: false,
+                credential: None,
+                client: "10.0.0.9",
+                ..list_response("unused", 0)
+            },
+        );
+        let sign_up = get("/api/patients", Some("id=7"), None, 1_000);
+        let shown = judge.judge(&emr, &sign_up).await;
+        assert!(shown.forward);
+        assert_eq!(shown.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        // The other site showed this client nothing.
+        let other = judge.judge(&clinic, &sign_up).await;
+        assert!(!other.forward);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
     async fn an_entry_request_is_judged_against_what_its_address_was_shown() {
         let fake = FakeJev::new();
         fake.answer("DENY", "BENIGN");
@@ -3007,7 +3146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn c5_calls_beyond_the_session_limit_follow_the_unavailable_policy() {
+    async fn c5_calls_beyond_the_session_limit_are_refused_with_429() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
@@ -3031,6 +3170,8 @@ mod tests {
             )
             .await;
         assert!(!over.forward);
+        assert_eq!(over.refuse_status, 429);
+        assert_eq!(over.record.trace.refused.as_deref(), Some("rate_limited"));
         assert_eq!(
             over.record.jev.unwrap().failure.as_deref(),
             Some("JEV_CALL_LIMIT")
@@ -3043,6 +3184,131 @@ mod tests {
             )
             .await;
         assert!(later.forward);
+    }
+
+    #[tokio::test]
+    async fn a_spent_call_limit_is_refused_with_429_whatever_the_site_allows() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer("DENY", "ATTACK");
+        let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
+        confirm(&judge, &lenient, "mallory");
+        for index in 0..SESSION_CALLS_PER_MINUTE {
+            let query = format!("q=junk{index}%27");
+            let _ = judge
+                .judge(
+                    &lenient,
+                    &get("/api/records", Some(&query), Some("mallory"), 1_000),
+                )
+                .await;
+        }
+        assert_eq!(fake.calls(), SESSION_CALLS_PER_MINUTE as usize);
+        let over = judge
+            .judge(
+                &lenient,
+                &get(
+                    "/api/patients/8",
+                    Some("q=%27%20OR%201%3D1--"),
+                    Some("mallory"),
+                    1_500,
+                ),
+            )
+            .await;
+        assert!(!over.forward);
+        assert_eq!(over.refuse_status, 429);
+        assert_eq!(over.record.outcome, Outcome::Blocked);
+        assert_eq!(over.record.decision_path, DecisionPath::JevUnavailable);
+        assert_eq!(over.record.trace.refused.as_deref(), Some("rate_limited"));
+        assert_eq!(
+            over.record
+                .jev
+                .as_ref()
+                .and_then(|jev| jev.failure.as_deref()),
+            Some("JEV_CALL_LIMIT")
+        );
+        assert_eq!(fake.calls(), SESSION_CALLS_PER_MINUTE as usize);
+    }
+
+    #[tokio::test]
+    async fn a_spent_call_limit_is_only_a_would_block_in_observe_mode() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let observing = site(r#","on_jev_unavailable":"allow""#);
+        confirm(&judge, &observing, "mallory");
+        for index in 0..SESSION_CALLS_PER_MINUTE {
+            let query = format!("q=junk{index}x");
+            let _ = judge
+                .judge(
+                    &observing,
+                    &get("/api/records", Some(&query), Some("mallory"), 1_000),
+                )
+                .await;
+        }
+        let over = judge
+            .judge(
+                &observing,
+                &get("/api/records", Some("q=over1x"), Some("mallory"), 1_500),
+            )
+            .await;
+        assert!(over.forward);
+        assert_eq!(over.record.outcome, Outcome::WouldBlock);
+        assert_eq!(over.record.decision_path, DecisionPath::JevUnavailable);
+        assert!(over.record.trace.refused.is_none());
+        assert_eq!(
+            over.record
+                .jev
+                .as_ref()
+                .and_then(|jev| jev.failure.as_deref()),
+            Some("JEV_CALL_LIMIT")
+        );
+        assert_eq!(fake.calls(), SESSION_CALLS_PER_MINUTE as usize);
+    }
+
+    /// A survey whose answers alone need more than the 8 KiB a `state` may hold.
+    fn oversized_survey() -> String {
+        let answers: Vec<String> = (0..120)
+            .map(|index| {
+                format!(
+                    "\"answer_{index}\":\"This is a perfectly ordinary sentence number {index} typed by a user.\""
+                )
+            })
+            .collect();
+        format!("{{{},\"done\":\"1\"}}", answers.join(","))
+    }
+
+    #[tokio::test]
+    async fn a_state_that_cannot_fit_is_refused_with_403_whatever_the_site_allows() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let body = oversized_survey();
+        let survey = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get("/api/survey", None, Some("alice"), 1_000)
+        };
+        let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
+        let verdict = judge.judge(&lenient, &survey).await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 403);
+        assert_eq!(verdict.record.outcome, Outcome::Blocked);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevUnavailable);
+        assert_eq!(
+            verdict
+                .record
+                .jev
+                .as_ref()
+                .and_then(|jev| jev.failure.as_deref()),
+            Some("JEV_STATE_TOO_LARGE")
+        );
+        assert_eq!(fake.calls(), 0);
+        // Observe mode forwards the same request and notes that it would have been refused.
+        let watched = judge
+            .judge(&site(r#","on_jev_unavailable":"allow""#), &survey)
+            .await;
+        assert!(watched.forward);
+        assert_eq!(watched.record.outcome, Outcome::WouldBlock);
+        assert_eq!(fake.calls(), 0);
     }
 
     #[tokio::test]
@@ -3593,6 +3859,8 @@ mod tests {
             )
             .await;
         assert!(!over.forward);
+        assert_eq!(over.refuse_status, 429);
+        assert_eq!(over.record.trace.refused.as_deref(), Some("rate_limited"));
         assert_eq!(
             over.record.jev.unwrap().failure.as_deref(),
             Some("JEV_CALL_LIMIT")
@@ -3653,6 +3921,8 @@ mod tests {
             )
             .await;
         assert!(!over.forward);
+        assert_eq!(over.refuse_status, 429);
+        assert_eq!(over.record.trace.refused.as_deref(), Some("rate_limited"));
         assert_eq!(
             over.record.jev.unwrap().failure.as_deref(),
             Some("JEV_CALL_LIMIT")
@@ -3670,6 +3940,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_credential_without_a_session_hits_the_default_address_limit() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // No credential here has a session, so all thirty calls draw on the address's default budget.
+        for index in 0..30 {
+            let credential = format!("made-up-{index}");
+            let verdict = judge
+                .judge(
+                    &site,
+                    &get(
+                        "/api/search",
+                        Some("q=word1x"),
+                        Some(&credential),
+                        1_000 + index,
+                    ),
+                )
+                .await;
+            assert!(
+                verdict.forward,
+                "request {index} should be judged and allowed"
+            );
+        }
+        assert_eq!(fake.calls(), 30);
+        let over = judge
+            .judge(
+                &site,
+                &get("/api/search", Some("q=word1x"), Some("made-up-30"), 2_000),
+            )
+            .await;
+        assert!(!over.forward);
+        assert_eq!(over.refuse_status, 429);
+        assert_eq!(over.record.outcome, Outcome::Blocked);
+        assert_eq!(over.record.decision_path, DecisionPath::JevUnavailable);
+        assert_eq!(over.record.trace.refused.as_deref(), Some("rate_limited"));
+        assert_eq!(
+            over.record.jev.unwrap().failure.as_deref(),
+            Some("JEV_CALL_LIMIT")
+        );
+        assert_eq!(fake.calls(), 30);
+    }
+
+    #[tokio::test]
     async fn a_site_address_limit_replaces_the_default() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
@@ -3683,6 +3996,8 @@ mod tests {
             .judge(&site, &get("/login", Some("name=second1"), None, 1_000))
             .await;
         assert!(!second.forward);
+        assert_eq!(second.refuse_status, 429);
+        assert_eq!(second.record.trace.refused.as_deref(), Some("rate_limited"));
         assert_eq!(
             second.record.jev.unwrap().failure.as_deref(),
             Some("JEV_CALL_LIMIT")

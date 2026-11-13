@@ -12,7 +12,7 @@
       "playwright.config.ts",
       "tsconfig.json",
       "biome.json",
-      "!tests/fixtures/**"
+      "!tests/fixtures"
     ]
   },
   "formatter": {

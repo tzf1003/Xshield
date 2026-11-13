@@ -50,6 +50,7 @@ export type ValueKind = "reference" | "route" | "input";
 export type RefusedReason =
   | "unauthenticated"
   | "forbidden"
+  | "rate_limited"
   | "body_not_inspectable"
   | "unknown_site";
 
@@ -667,6 +668,20 @@ export interface ObjectSlotEntry {
   reliability?: ObjectReliability;
 }
 
+/**
+ * A function of the function table (`objects.functions`): an interface the administrator confirmed. `tier` is `admin`
+ * only: a function with no tier is open to every session. The gateway checks the key's spelling; the console checks its shape.
+ */
+export interface ObjectFunctionEntry {
+  /** `METHOD /route-template`, one space between, e.g. `POST /api/admin/export`. */
+  key: string;
+  source: ObjectSource;
+  /** Only `admin`: the function is for administrator sessions. */
+  tier?: "admin";
+  /** How sure the rules are of the tier. Needs a tier. */
+  reliability?: ObjectReliability;
+}
+
 /** The identity a response position states about the session (`identity`, docs/07 7.9.15). */
 export type ObjectIdentity = "user" | "org" | "role";
 
@@ -684,6 +699,8 @@ export interface ObjectsSpec {
   learning?: LearningSettings;
   classes?: ObjectClassEntry[];
   slots?: ObjectSlotEntry[];
+  /** The function table: the interfaces the administrator confirmed, each with its source and optional admin tier. */
+  functions?: ObjectFunctionEntry[];
 }
 
 export interface SiteSpec {
@@ -786,7 +803,9 @@ export interface SiteRollbackBody {
   note?: string;
 }
 
-export type ValidateResult = { valid: true } | { valid: false; error: string; field?: string };
+export type ValidateResult =
+  | { valid: true }
+  | { valid: false; error: string; field?: string; reason?: string };
 
 // ------------------------------------------------------------------ impact preview (7.9.10)
 

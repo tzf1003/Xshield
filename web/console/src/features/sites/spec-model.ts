@@ -468,13 +468,21 @@ export function rebaseSpec(
     (item) => item.key,
     mergeSlot,
   );
+  // The function table is a list too: the draft adds to it and removes from it, keyed by the function's key.
+  const functions = mergeList(
+    base.objects?.functions ?? [],
+    mine.objects?.functions ?? [],
+    latest.objects?.functions ?? [],
+    (item) => item.key,
+  );
   const objects: ObjectsSpec | undefined =
-    learning === undefined && classes.length === 0 && slots.length === 0
+    learning === undefined && classes.length === 0 && slots.length === 0 && functions.length === 0
       ? undefined
       : {
           ...(learning === undefined ? {} : { learning }),
           ...(classes.length === 0 ? {} : { classes }),
           ...(slots.length === 0 ? {} : { slots }),
+          ...(functions.length === 0 ? {} : { functions }),
         };
   const spec: SiteSpec = {
     name: latest.name,

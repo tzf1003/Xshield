@@ -6,8 +6,11 @@
 
 use std::collections::BTreeSet;
 
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use xshield_core::context::{SHAPE_FIELDS_MAX, ShapeField};
+use xshield_core::hex::hex_digit;
 use xshield_core::kind::kind_words;
 
 // The field and location rules are shared with the control plane's impact preview,
@@ -217,7 +220,9 @@ pub fn percent_decode(text: &str, plus: bool) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'%' if index + 2 < bytes.len() => {
-                if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                if let (Some(high), Some(low)) =
+                    (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+                {
                     out.push(high * 16 + low);
                     index += 3;
                 } else {
@@ -262,15 +267,6 @@ pub fn json_unescape(text: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-fn hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn push(out: &mut ExtractedRequest, at: String, key: Option<String>, value: String) {
@@ -343,12 +339,10 @@ pub fn extract_request(
                 pairs(&mut out, "body", &String::from_utf8_lossy(body));
                 true
             }
-            kind if is_json_media(kind) => {
-                serde_json::from_slice::<Value>(body).is_ok_and(|json| {
-                    walk_request(&mut out, &json, "body", None, 0);
-                    true
-                })
-            }
+            kind if is_json_media(kind) => serde_json::from_slice::<Json>(body).is_ok_and(|json| {
+                walk_request(&mut out, &json, "body", None, 0);
+                true
+            }),
             _ => false,
         };
     if !parsed {
@@ -421,9 +415,80 @@ fn member_key(parent: Option<&str>, name: &str) -> String {
     }
 }
 
+/// A request body as a tree that keeps every member of an object. `serde_json::Value` keeps only
+/// the last of several members with one name, but an origin may read the first one: each
+/// occurrence of a repeated key is a value of its own (docs/01 section 1.3).
+enum Json {
+    Object(Vec<(String, Json)>),
+    Array(Vec<Json>),
+    Text(String),
+    Number(serde_json::Number),
+    /// `true`, `false` and `null` carry nothing to judge.
+    Other,
+}
+
+impl<'de> Deserialize<'de> for Json {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(JsonVisitor)
+    }
+}
+
+struct JsonVisitor;
+
+impl<'de> Visitor<'de> for JsonVisitor {
+    type Value = Json;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Json, E> {
+        Ok(Json::Other)
+    }
+
+    fn visit_i64<E>(self, number: i64) -> Result<Json, E> {
+        Ok(Json::Number(number.into()))
+    }
+
+    fn visit_u64<E>(self, number: u64) -> Result<Json, E> {
+        Ok(Json::Number(number.into()))
+    }
+
+    fn visit_f64<E>(self, number: f64) -> Result<Json, E> {
+        Ok(serde_json::Number::from_f64(number).map_or(Json::Other, Json::Number))
+    }
+
+    fn visit_str<E>(self, text: &str) -> Result<Json, E> {
+        Ok(Json::Text(text.to_owned()))
+    }
+
+    fn visit_unit<E>(self) -> Result<Json, E> {
+        Ok(Json::Other)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Json, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element::<Json>()? {
+            items.push(item);
+        }
+        Ok(Json::Array(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Json, A::Error> {
+        let mut members = Vec::new();
+        while let Some((name, value)) = map.next_entry::<String, Json>()? {
+            members.push((name, value));
+        }
+        // Sorted by name, as the map of `serde_json::Value` iterates, so the values keep the order
+        // they always had. A stable sort keeps members that repeat a name in document order.
+        members.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(Json::Object(members))
+    }
+}
+
 fn walk_request(
     out: &mut ExtractedRequest,
-    json: &Value,
+    json: &Json,
     at: &str,
     key: Option<&str>,
     depth: usize,
@@ -433,26 +498,26 @@ fn walk_request(
         return;
     }
     match json {
-        Value::Object(map) => {
-            for (name, inner) in map {
+        Json::Object(members) => {
+            for (name, inner) in members {
                 push_unusual_key(out, &format!("{at}.{name}"), name);
                 let named = member_key(key, name);
                 walk_request(out, inner, &format!("{at}.{name}"), Some(&named), depth + 1);
             }
         }
-        Value::Array(items) => {
+        Json::Array(items) => {
             for inner in items {
                 walk_request(out, inner, &format!("{at}[]"), key, depth + 1);
             }
         }
-        Value::String(text) => push(out, at.to_owned(), key.map(str::to_owned), text.clone()),
-        Value::Number(number) => push(
+        Json::Text(text) => push(out, at.to_owned(), key.map(str::to_owned), text.clone()),
+        Json::Number(number) => push(
             out,
             at.to_owned(),
             key.map(str::to_owned),
             number.to_string(),
         ),
-        Value::Bool(_) | Value::Null => {}
+        Json::Other => {}
     }
 }
 
@@ -792,6 +857,33 @@ mod tests {
         assert!(got.contains(&("body.patient.tags[]", "a", true)));
         assert!(got.contains(&("body.note", "x' OR 1=1", false)));
         assert!(!request.truncated);
+    }
+
+    #[test]
+    fn every_value_of_a_repeated_json_key_is_a_request_value() {
+        let body = br#"{"patient":"PT-1","patient":"PT-2","nested":{"id":3,"id":4}}"#;
+        let request = extract_request("/", None, Some("application/json"), body);
+        // Members come out sorted by name, as before; the repeats keep their document order.
+        assert_eq!(
+            values(&request),
+            [
+                ("body.nested.id", "3", false),
+                ("body.nested.id", "4", false),
+                ("body.patient", "PT-1", false),
+                ("body.patient", "PT-2", false),
+            ]
+        );
+        assert!(!request.truncated);
+    }
+
+    #[test]
+    fn a_repeated_key_keeps_an_object_and_a_scalar_both() {
+        let body = br#"{"doc":{"id":"A"},"doc":"B"}"#;
+        let request = extract_request("/", None, Some("application/json"), body);
+        let got = values(&request);
+        assert_eq!(got.len(), 2);
+        assert!(got.contains(&("body.doc.id", "A", false)));
+        assert!(got.contains(&("body.doc", "B", false)));
     }
 
     #[test]
