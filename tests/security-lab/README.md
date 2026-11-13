@@ -42,6 +42,7 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |
 | C4 | 登录请求 | Jev 收到的是 `<redacted>`，判定日志里也没有口令 | `jev_allow` |
 | C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拒绝并回 429（`{"error":"rate_limited"}`），`JEV_CALL_LIMIT`；不论 `on_jev_unavailable` | `jev_unavailable` |
+| C9 | 同一来源地址的 11 个会话（站点设为每会话 2 次，合计上限 20 次） | 前 10 个会话各调用 2 次放行；第 11 个会话一次都没用过，也拒绝并回 429（`rate_limited`），Jev 没有被调用；另一个地址的会话不受影响 | `jev_unavailable` |
 | G1 | JSON 凭证站点（凭证为 `Authorization` 头）：登录响应里 700 多字符的令牌绑定会话；登录响应和列表都没给过的患者 D | 登录放行；列表的判定记录带该次登录的 `login_request_id`，没有 `login_unbound`；患者 D 拦截，源站未收到请求 | `jev_allow`，`fast_allow`，`jev_deny` |
 | G2 | 同一站点：源站没发过的 700 多字符令牌访问入口 | 放行到源站（源站答 401），记录的 `login_unbound` 为 `login_unmatched` | `fast_allow` |
 | W1 | 声明了 `GET /api/home doctor.id` 为用户身份的站点：医生 A、B 各自登录后，判定记录的 `trace.session.identity.user` 是各自的键控哈希标签，换账号不同，同一账号相同；没有声明身份的站点不写 `identity` | 放行，身份标签按上述规则 | `fast_allow` |
@@ -60,6 +61,10 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | F11 | 不带凭证的 `DELETE /api/patients`（入口路径，基线里没有这个方法） | 交 Jev：`state.entry.matched` 为真，`function` 为 `{"known":false}`；Jev 放行，源站答 401 | `jev_allow` |
 | F12 | 没有功能表的站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 都快速放行（源站分别答 200、404），不新增 Jev 调用，判定记录没有 `trace.function`。与 F5、F9 对照 | `fast_allow`，`fast_allow` |
 | F13 | 观察模式的功能表站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 两个都转发（源站收到），记为本应拦截 | `jev_deny`（`would_block`） |
+| F14 | 基线站点的医生 A `GET /api/patients/export-all`（功能表里的 `GET /api/patients/{id}` 不覆盖路由词） | 交 Jev：`state.request.function` 为 `{"known":false}`，Jev 判 DENY（假 Jev 的 `export-all` 规则），拦截，源站不收到请求 | `jev_deny` |
+| F15 | 基线站点（有角色身份位置，开关为真）的管理员 `admin_root` 访问首页后 `GET /metrics` | 放行，源站答 404，不新增 Jev 调用，判定记录没有 `trace.function`（管理员会话不被问未知功能） | `fast_allow` |
+
+C5、C9 从回环的 127.0.0.2 至 127.0.0.4 发请求，使它们各有自己的来源地址（会话合计的 Jev 额度按来源地址算，见 [docs/02 §2.5](../../docs/02-jev.md)）。Linux 的回环整段 127.0.0.0/8 都可用；macOS 需要先给 `lo0` 加别名（`sudo ifconfig lo0 alias 127.0.0.2` 等），否则这两个场景连不上。
 
 ### A9 至 A11 说明：搜索结果与档位
 
@@ -131,10 +136,12 @@ python3 scripts/measure_effectiveness.py                                        
 python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   # 只跑这些类别，不与基线比较
 ```
 
-- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）在有 PostgreSQL 时运行：它从训练段的判定学到对象表，作为 `clinic-learned` 站点进入防护段（只跑旅程和探针，回归用例仍只在各自的站点上跑）；没有运行时报告写明 SKIP 的原因。完整模式（批次 7）和 `--jev record|replay`（批次 9）以退出码 2 拒绝。
+- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）在有 PostgreSQL 时运行：它从训练段的判定学到对象表，作为 `clinic-learned` 站点进入防护段（只跑旅程和探针，回归用例仍只在各自的站点上跑）；没有运行时报告写明 SKIP 的原因。完整模式（批次 7）以退出码 2 拒绝。
 - 防护段在 `clinic-none`、`clinic-truth`、带每会话 Jev 额度的 `clinic-truth-limit` 和观察模式的 `clinic-truth-observe` 上运行：攻击探针（`corpus/attacks.jsonl`）、良性文本（`corpus/benign.jsonl`）、良性旅程，以及 `effectiveness/regressions.py` 里方案 4.5 的回归用例。载荷含路径分隔符、放不进一个路径段的，不送到“路径段”注入点，报告里分别计数。
 - 理想模型是 `fake_jev.py` 传入攻击文本时的判定：攻击只看文本是否完整出现在路径或某个值里（两边先规范化）；访问规则与脚本相同，但值带 `object` 时，`seen_as` 里括号中类别不同的展示不算数。不传攻击文本时，判定与之前相同。
 - `--jev live` 改用真实 Jev，需要环境变量 `XSHIELD_JEV_ENDPOINT` 和 `XSHIELD_JEV_API_KEY`，缺一即以退出码 2 退出。密钥只从环境变量读取，不写入报告和日志。页码当处方号这条探针只在这个模式下发送，理想模型比较不了没有类别的位置。
+- `--jev record` 把判定转发到真实 Jev，需要同样的两个环境变量，缺一即退出码 2。每次应答按请求摘要写入输出目录的 `jev-recording.jsonl`。转发失败或应答含密钥的那次记为失败；录制不完整时以退出码 2 结束。`--jev replay` 不联网、不需要密钥，只从 `effectiveness/recordings/quick.jsonl` 答复；摘要不在录制里的调用收到 UNKNOWN，计入“回放未命中率”。录制文件不存在时以退出码 2 退出。步骤和格式见 `effectiveness/recordings/README.md`。
+- 真实模式（`live`、`record`、`replay`）和 `site` 模式的报告另有“置信度门槛扫描（3.4）”一节：同一批判定记录在 0.50 到 0.90 的门槛下重算，只给一阶估计，不重新发流量。
 - 用例可以带能力要求（`requires`）：`tiers`（档位）、`functions`（功能表）、`classes`（对象表）。配置缺少所需能力时，用例显示为“需要…”，不计分。`none` 没有对象表，需要对象表的用例只在 `clinic-truth` 上计分。
 - 已知缺口：判定器还不读功能表，所以 `clinic-truth` 也显示“需要功能表”的有 `p0-3-function-level`、医生的 `GET /api/admin/search`（旅程）。功能级判定合入后，补上 `clinic-truth` 的功能表并把 `p0-3-function-level` 改为 `must`。
 - 退出码：门槛全部通过为 0，有门槛失败为 1，用法或环境错误为 2。

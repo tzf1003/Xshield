@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::ConfigError;
 use super::learning::{SESSIONS_MIN, VOTES_MIN};
-use crate::path_template::{canonical_path, position_template};
+use crate::path_template::{canonical_path, is_plain_word, position_template};
 
 /// Most object kinds one site declares.
 pub const CLASSES_MAX: usize = 64;
@@ -542,8 +542,9 @@ impl ObjectMap {
     /// The function that governs a request: `method`, and the route `template` the judge keys it
     /// by (docs/07 section 7.9.18). `HEAD` is looked up as `GET`. `OPTIONS` is a preflight, which
     /// carries no credential, so it names no function. Among the functions whose template covers
-    /// `template`, the one with the most literal segments wins; then the stricter one, which is an
-    /// `admin` tier with `high` reliability; then the one written first.
+    /// `template`, the one with the most literal segments wins; then the one with more `{id}`
+    /// segments, which is the narrower placeholder; then the stricter one, which is an `admin` tier
+    /// with `high` reliability; then the one written first.
     #[must_use]
     pub fn function_of(&self, method: &str, template: &str) -> Option<&ObjectFunction> {
         if method == "OPTIONS" {
@@ -556,9 +557,14 @@ impl ObjectMap {
             .get(&request.len())?
             .iter()
             .filter_map(|declared| {
-                let literal = covers(&declared.segments, &request)?;
+                let (literal, ids) = covers(&declared.segments, &request)?;
                 let function = self.functions.get(declared.place)?;
-                let rank = (literal, admin_and_high(function), Reverse(declared.place));
+                let rank = (
+                    literal,
+                    ids,
+                    admin_and_high(function),
+                    Reverse(declared.place),
+                );
                 Some((rank, function))
             })
             .max_by_key(|(rank, _)| *rank)
@@ -811,19 +817,19 @@ pub const ADMIN_ROLE: &str = "admin";
 /// Whether a response with this tier, and how sure the map is of it, proves a right to the object
 /// it shows, at a request position that is `closed` to public sources or not, for a session that
 /// is `admin` or not (docs/07 section 7.4.7). A response the map does not classify proves it, as
-/// every response did before tiers, and so does an org response. A public response the map is sure
-/// of proves it unless the position is closed; a public response the map is not sure of proves it,
-/// as before tiers. A self response never proves on its own: a learned self label only keeps a value
-/// from being tightened. An administrator's listing proves a value to an administrator session, as
-/// an ordinary response does, and to no other session: a role is not a reason to allow, so an
-/// object an administrator never saw is still blocked.
+/// every response did before tiers, and so do an own (`self`) response, which shows the session its
+/// own record, and an org response. A public response the map is sure of proves it unless the
+/// position is closed; a public response the map is not sure of proves it, as before tiers. An
+/// administrator's listing proves a value to an administrator session, as an ordinary response does,
+/// and to no other session: a role is not a reason to allow, so an object an administrator never saw
+/// is still blocked. A self label also keeps a value from being an attempt; that is judged in the
+/// judge's `tiers` module, not here.
 #[must_use]
 pub fn tier_proves(tier: Option<(Tier, Reliability)>, closed: bool, admin: bool) -> bool {
     match tier {
-        Some((Tier::Own, _)) => false,
         Some((Tier::Admin, _)) => admin,
         Some((Tier::Public, Reliability::High)) => !closed,
-        None | Some((Tier::Org | Tier::Public, _)) => true,
+        None | Some((Tier::Own | Tier::Org | Tier::Public, _)) => true,
     }
 }
 
@@ -886,7 +892,15 @@ impl Shapes {
     }
 
     fn add_position(&mut self, place: usize, key: &str) {
-        add_template(&mut self.positions, place, key);
+        // Placement reads a position by `{id}` alone (`template_covers`). A `{name}` in a position
+        // covers no route here, as it never did before the placeholder existed.
+        let names_a_segment = key
+            .split(' ')
+            .nth(1)
+            .is_some_and(|template| template.split('/').any(|segment| segment == "{name}"));
+        if !names_a_segment {
+            add_template(&mut self.positions, place, key);
+        }
     }
 }
 
@@ -927,46 +941,59 @@ fn covers_in(by_count: &BTreeMap<usize, Vec<Declared>>, request: &[&str]) -> boo
     })
 }
 
-/// Whether a function template covers a request template, and how many of its segments agree
-/// literally (docs/07 section 7.9.18). An `{id}` segment of the template covers any non-empty
-/// segment of the request. Any other segment agrees with the request segment once the request's
-/// `;` parameters are removed, ignoring ASCII case; a segment that is empty after that agrees with
-/// no literal segment. The comparison is blind to case and to `;` parameters on purpose: an origin
-/// that ignores either serves the same function under those spellings.
-fn covers(declared: &[String], request: &[&str]) -> Option<usize> {
+/// Whether a function template covers a request template, and how (docs/07 section 7.9.18): the
+/// number of segments that agree literally, and the number of `{id}` segments. A request segment
+/// loses its `;` parameters first. A `{name}` segment of the template covers any segment that is not
+/// empty without them. An `{id}` segment covers a value only: a segment that is empty without them,
+/// or a route word (`is_plain_word`), is not covered, and neither is the request's own `{name}`
+/// placeholder. A request's own `{id}` is covered by both. Any other segment agrees with the request
+/// segment without its `;` parameters, ignoring ASCII case; a segment that is empty after that agrees
+/// with no literal segment. The comparison is blind to case and to `;` parameters on purpose: an
+/// origin that ignores either serves the same function under those spellings.
+fn covers(declared: &[String], request: &[&str]) -> Option<(usize, usize)> {
     if declared.len() != request.len() {
         return None;
     }
     let mut literal = 0;
+    let mut ids = 0;
     for (name, actual) in declared.iter().zip(request) {
-        if name == "{id}" {
-            if actual.is_empty() {
-                return None;
+        let bare = actual.split_once(';').map_or(*actual, |(bare, _)| bare);
+        match name.as_str() {
+            "{id}" => {
+                if bare.is_empty() || bare == "{name}" || is_plain_word(bare) {
+                    return None;
+                }
+                ids += 1;
             }
-        } else {
-            // The empty segment before the first `/` is empty to begin with, and agrees with the
-            // empty segment of the template. A segment that is empty only once its `;` parameters
-            // are removed agrees with no literal segment.
-            let bare = actual.split_once(';').map_or(*actual, |(bare, _)| bare);
-            let agrees = if actual.is_empty() {
-                name.is_empty()
-            } else {
-                !bare.is_empty() && bare.eq_ignore_ascii_case(name)
-            };
-            if !agrees {
-                return None;
+            "{name}" => {
+                if bare.is_empty() {
+                    return None;
+                }
             }
-            literal += 1;
+            _ => {
+                // The empty segment before the first `/` is empty to begin with, and agrees with the
+                // empty segment of the template. A segment that is empty only once its `;` parameters
+                // are removed agrees with no literal segment.
+                let agrees = if actual.is_empty() {
+                    name.is_empty()
+                } else {
+                    !bare.is_empty() && bare.eq_ignore_ascii_case(name)
+                };
+                if !agrees {
+                    return None;
+                }
+                literal += 1;
+            }
         }
     }
-    Some(literal)
+    Some((literal, ids))
 }
 
 /// `METHOD /template` for a function key (docs/07 section 7.9.18): two parts split by one space, a
 /// method of 3 to 7 upper-case ASCII letters other than `HEAD` and `OPTIONS`, and a template in the
-/// spelling the judge keys positions by. A segment that carries a brace is `{id}` and nothing else,
-/// and no segment carries a `;`: a lookup removes those from the request, so such a segment could
-/// never match.
+/// spelling the judge keys positions by. A segment that carries a brace is `{id}` or `{name}` and
+/// nothing else, and no segment carries a `;`: a lookup removes those from the request, so such a
+/// segment could never match.
 fn valid_function_key(key: &str) -> bool {
     let mut parts = key.split(' ');
     let (Some(method), Some(template), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -983,7 +1010,7 @@ fn valid_function_key(key: &str) -> bool {
         && position_template(template) == template
         && template
             .split('/')
-            .all(|segment| !segment.contains(['{', '}']) || segment == "{id}")
+            .all(|segment| !segment.contains(['{', '}']) || matches!(segment, "{id}" | "{name}"))
 }
 
 /// Checks the functions of a map in the order they were written, and adds each to the shapes the
@@ -1457,9 +1484,139 @@ mod function_tests {
     }
 
     #[test]
+    fn an_id_segment_does_not_cover_a_route_word() {
+        let loaded = map_of(&with(vec![open("GET /api/patients/{id}")]));
+        for template in [
+            "/api/patients/7005",
+            "/api/patients/PT-7004",
+            "/api/patients/9c858f3e-5b61-4d1a-8c7e-6b1c9d9f2a3b",
+        ] {
+            assert!(loaded.function_of("GET", template).is_some(), "{template}");
+        }
+        for template in [
+            "/api/patients/export-all",
+            "/api/patients/export-all;1",
+            "/api/patients/;x",
+            "/api/patients/alice",
+        ] {
+            assert!(loaded.function_of("GET", template).is_none(), "{template}");
+        }
+    }
+
+    #[test]
+    fn an_id_segment_ignores_digits_in_matrix_parameters() {
+        let loaded = map_of(&with(vec![open("GET /api/patients/{id}")]));
+        for template in ["/api/patients/export-all;1", "/api/patients/export-all;v=2"] {
+            assert!(loaded.function_of("GET", template).is_none(), "{template}");
+        }
+        assert!(loaded.function_of("GET", "/api/patients/7;v=2").is_some());
+    }
+
+    #[test]
+    fn a_name_segment_covers_any_segment() {
+        let loaded = map_of(&with(vec![open("GET /users/{name}")]));
+        for template in [
+            "/users/alice",
+            "/users/7005",
+            "/users/PT-7004",
+            "/users/{id}",
+            "/users/{name}",
+        ] {
+            assert!(loaded.function_of("GET", template).is_some(), "{template}");
+        }
+        assert!(loaded.function_of("GET", "/users/;x").is_none());
+    }
+
+    #[test]
+    fn an_id_entry_does_not_know_a_name_key() {
+        let ids = map_of(&with(vec![open("GET /users/{id}")]));
+        assert!(!ids.knows_function("GET", "/users/{name}"));
+        assert!(ids.knows_function("GET", "/users/{id}"));
+        let names = map_of(&with(vec![open("GET /users/{name}")]));
+        assert!(names.knows_function("GET", "/users/{id}"));
+    }
+
+    #[test]
+    fn the_narrower_placeholder_wins() {
+        // The open `{id}` entry takes a number and the stricter `{name}` entry takes a word, whichever
+        // of the two is written first.
+        for entries in [
+            vec![open("GET /a/{id}"), admin("GET /a/{name}", "high")],
+            vec![admin("GET /a/{name}", "high"), open("GET /a/{id}")],
+        ] {
+            let loaded = map_of(&with(entries));
+            assert_eq!(
+                key_of(&loaded, "GET", "/a/123").as_deref(),
+                Some("GET /a/{id}")
+            );
+            assert_eq!(
+                key_of(&loaded, "GET", "/a/alice").as_deref(),
+                Some("GET /a/{name}")
+            );
+        }
+    }
+
+    #[test]
+    fn an_administrator_function_with_an_id_does_not_claim_a_route_word() {
+        let loaded = map_of(&with(vec![admin("PUT /api/users/{id}", "high")]));
+        assert!(!loaded.admin_only("PUT", "/api/users/me"));
+        assert!(loaded.admin_only("PUT", "/api/users/7005"));
+    }
+
+    #[test]
+    fn a_position_does_not_make_a_route_word_known() {
+        let loaded = map_of(&json!({
+            "classes": [{"id": "patient", "name": "患者"}],
+            "slots": [
+                {"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin"}
+            ]
+        }));
+        assert!(!loaded.knows_function("GET", "/api/patients/export-all"));
+        assert!(loaded.knows_function("GET", "/api/patients/7005"));
+    }
+
+    #[test]
+    fn a_name_in_a_position_covers_no_route() {
+        let loaded = map_of(&json!({
+            "classes": [{"id": "patient", "name": "患者"}],
+            "slots": [
+                {"key": "GET /api/patients/{name} path[2]", "class": "patient", "source": "admin"}
+            ]
+        }));
+        assert!(!loaded.knows_function("GET", "/api/patients/alice"));
+        assert!(!loaded.knows_function("GET", "/api/patients/7005"));
+    }
+
+    #[test]
+    fn a_function_key_takes_both_placeholders() {
+        assert_eq!(
+            map_of(&with(vec![open("GET /users/{name}")]))
+                .functions()
+                .len(),
+            1
+        );
+        assert_eq!(
+            map_of(&with(vec![open("GET /users/{id}")]))
+                .functions()
+                .len(),
+            1
+        );
+        for key in ["GET /users/{userId}", "GET /users/{NAME}"] {
+            assert_eq!(
+                refusal(&with(vec![open(key)])),
+                ObjectsIssue {
+                    place: ObjectsPlace::Function(0),
+                    reason: Some(ObjectsReason::KeyInvalid),
+                },
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
     fn the_most_literal_function_wins_and_then_the_stricter() {
         let reports = map_of(&with(vec![
-            open("GET /api/reports/{id}"),
+            open("GET /api/reports/{name}"),
             admin("GET /api/reports/monthly", "high"),
         ]));
         assert_eq!(
@@ -1468,35 +1625,35 @@ mod function_tests {
         );
         assert_eq!(
             key_of(&reports, "GET", "/api/reports/weekly").as_deref(),
-            Some("GET /api/reports/{id}")
+            Some("GET /api/reports/{name}")
         );
         // Equally literal: the stricter one wins, whichever of the two is written first.
         let stricter_last = map_of(&with(vec![
-            open("GET /a/{id}/c"),
-            admin("GET /a/b/{id}", "high"),
+            open("GET /a/{name}/c"),
+            admin("GET /a/b/{name}", "high"),
         ]));
         let stricter_first = map_of(&with(vec![
-            admin("GET /a/b/{id}", "high"),
-            open("GET /a/{id}/c"),
+            admin("GET /a/b/{name}", "high"),
+            open("GET /a/{name}/c"),
         ]));
         assert_eq!(
             key_of(&stricter_last, "GET", "/a/b/c").as_deref(),
-            Some("GET /a/b/{id}")
+            Some("GET /a/b/{name}")
         );
         assert_eq!(
             key_of(&stricter_first, "GET", "/a/b/c").as_deref(),
-            Some("GET /a/b/{id}")
+            Some("GET /a/b/{name}")
         );
         // Equally literal and equally strict: the one written first wins.
-        let first = map_of(&with(vec![open("GET /x/{id}"), open("GET /{id}/y")]));
-        let second = map_of(&with(vec![open("GET /{id}/y"), open("GET /x/{id}")]));
+        let first = map_of(&with(vec![open("GET /x/{name}"), open("GET /{name}/y")]));
+        let second = map_of(&with(vec![open("GET /{name}/y"), open("GET /x/{name}")]));
         assert_eq!(
             key_of(&first, "GET", "/x/y").as_deref(),
-            Some("GET /x/{id}")
+            Some("GET /x/{name}")
         );
         assert_eq!(
             key_of(&second, "GET", "/x/y").as_deref(),
-            Some("GET /{id}/y")
+            Some("GET /{name}/y")
         );
     }
 
@@ -2113,6 +2270,41 @@ mod tests {
             Some(ROLE_MAX)
         );
         assert_eq!(role_label(&"a".repeat(ROLE_MAX + 1)), None);
+    }
+
+    #[test]
+    fn a_response_proves_by_its_tier_as_section_7_4_7_says() {
+        for closed in [false, true] {
+            for admin in [false, true] {
+                // Own and org responses, and one the map does not classify, prove whatever the
+                // reliability, the position and the session: a self response shows the session
+                // its own record, so it is no less a sighting than an untiered one.
+                for reliability in [Reliability::Low, Reliability::Medium, Reliability::High] {
+                    assert!(tier_proves(Some((Tier::Own, reliability)), closed, admin));
+                    assert!(tier_proves(Some((Tier::Org, reliability)), closed, admin));
+                }
+                assert!(tier_proves(None, closed, admin));
+                // A public response proves unless the position is closed and the map is sure of it.
+                for reliability in [Reliability::Low, Reliability::Medium] {
+                    assert!(tier_proves(
+                        Some((Tier::Public, reliability)),
+                        closed,
+                        admin
+                    ));
+                }
+                assert_eq!(
+                    tier_proves(Some((Tier::Public, Reliability::High)), closed, admin),
+                    !closed
+                );
+                // An administrator's listing proves to an administrator session only.
+                for reliability in [Reliability::Low, Reliability::Medium, Reliability::High] {
+                    assert_eq!(
+                        tier_proves(Some((Tier::Admin, reliability)), closed, admin),
+                        admin
+                    );
+                }
+            }
+        }
     }
 
     /// Lower-case letters for a number, so that kind ids stay distinct.

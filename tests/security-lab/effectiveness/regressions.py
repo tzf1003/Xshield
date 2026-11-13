@@ -135,6 +135,11 @@ def function_level_metrics(p: Prober) -> None:
     p.request(session, "GET", "/metrics", scored=True)
 
 
+def function_route_word(p: Prober) -> None:
+    session = p.login(account(DOCTOR_A))
+    p.request(session, "GET", "/api/patients/export-all", scored=True)
+
+
 # P1: sessions that refresh, search, revalidate, and observation mode.
 
 def rotation(p: Prober) -> None:
@@ -186,6 +191,17 @@ def big_form(p: Prober) -> None:
     session = p.login(account(DOCTOR_A))
     fields = {f"field{index:03d}": "正常的值" for index in range(120)}
     p.request(session, "POST", "/api/forms/intake", form=fields, scored=True)
+
+
+def big_form_on_object(p: Prober) -> None:
+    # A note of two batches or more on the session's own patient, whose id is in the path (plan 3.5): every
+    # batch must carry the id, or the batch after the first is judged as naming an id it was never shown.
+    session = p.login(account(DOCTOR_A))
+    own = first_patient(p.site.origin, DOCTOR_A)
+    p.request(session, "GET", "/api/patients")  # the list shows the patient to its own doctor
+    note = {f"field{index:02d}": "正常的文字" * 84 for index in range(24)}  # 420 characters each
+    note["remark"] = "正常的文字" * 300  # 1,500 characters
+    p.request(session, "POST", f"/api/patients/{own}/notes", scored=True, refs=[("patient", own)], json_body=note)
 
 
 # P2 and P3: a body that sets a role, a header carrying a payload, a note that tells the model what to answer,
@@ -242,6 +258,8 @@ CASES: tuple[Case, ...] = (
          requires=("functions",), note="doctor's real session on /api/admin/export"),
     Case("p0-3-function-level-metrics", "P0-3", "must", "block", "access", SITE_TRUTH, function_level_metrics,
          requires=("functions",), note="doctor's real session on /metrics"),
+    Case("p0-3-function-route-word", "P0-3", "must", "block", "access", SITE_TRUTH, function_route_word,
+         requires=("functions",), note="doctor's real session on /api/patients/export-all: a route word under {id}"),
     Case("p1-1-rotation", "P1-1", "known_gap", "allow", None, SITE_TRUTH, rotation,
          note="the credential is refreshed between the list and the open"),
     Case("p1-2-search-id-then-open", "P1-2", "known_gap", "allow", None, SITE_TRUTH, search_id_then_open,
@@ -250,10 +268,12 @@ CASES: tuple[Case, ...] = (
          note="CORS preflight without a credential"),
     Case("p1-4-conditional-304", "P1-4", "known_gap", "allow", None, SITE_TRUTH, conditional_304,
          note="a new session gets 304 and then opens the patient"),
-    Case("p1-5-observe-learns-would-block", "P1-5", "known_gap", "block", "access", SITE_OBSERVE,
+    Case("p1-5-observe-learns-would-block", "P1-5", "must", "block", "access", SITE_OBSERVE,
          observe_learns_would_block, note="a visit id from a would-block answer, in observation mode"),
     Case("p1-9-big-form", "P1-9", "known_gap", "allow", None, SITE_TRUTH, big_form,
          note="benign form with 120 fields"),
+    Case("p1-9-big-form-on-object", "P1-9", "must", "allow", None, SITE_TRUTH, big_form_on_object,
+         note="benign note of two batches on the session's own patient, id in the path"),
     Case("p2-1-mass-assignment", "P2-1", "known_gap", "block", "access", SITE_TRUTH, mass_assignment,
          note="role and isAdmin in a profile body"),
     Case("p2-3-header-injection", "P2-3", "known_gap", "block", "attack", SITE_TRUTH, header_injection,
