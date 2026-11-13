@@ -10,6 +10,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { api } from "./client.ts";
+import { sendAll } from "../lib/settle.ts";
 import type {
   AgentModelValues,
   JevModelValues,
@@ -503,6 +504,21 @@ export function useAckEvent() {
   return useMutation({
     mutationFn: (args: { name: string; id: string }) => api.ackEvent(args.name, args.id),
     // Settled, not only succeeded: a refused event (409) is read again too, so the list shows why it was refused.
+    onSettled: (_result, _error, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-events", args.name] });
+      void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
+    },
+  });
+}
+
+/** Marks a batch of events handled in one mutation. Every event is sent even when one is refused; the first refusal is
+ *  what the mutation reports, and the lists are read again once for the whole batch, not once per event. */
+export function useAckEvents() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; ids: readonly string[] }) =>
+      sendAll(args.ids, (id) => api.ackEvent(args.name, id)),
     onSettled: (_result, _error, args) => {
       void client.invalidateQueries({ queryKey: ["objects", args.name] });
       void client.invalidateQueries({ queryKey: ["object-events", args.name] });

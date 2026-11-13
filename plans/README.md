@@ -39,7 +39,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | JSON request bodies with duplicate keys: the gateway judges the last one, an origin may use the first. | security | S | LOW | `crates/xshield-judge/src/values.rs:336`, cf. `crates/xshield-core/src/context/route.rs:623` |
 | Session and address contexts are not keyed by site, unlike held logins and shapes. | security | S | LOW | `engine.rs:325,439,912` |
 | The requests and Jev lists reset to a skeleton every 30 s because the preset window moves with the clock and is part of the query key. | bug | S–M | MED | `web/console/src/app/scope.ts:18-24`, `src/api/queries.ts:114-121`, `src/features/requests/RequestsPage.tsx:116-120,458` |
-| Bulk acknowledge fires N mutations on one observer; earlier failures are lost and each fires three invalidations. | bug | S | LOW | `web/console/src/features/sites/objects/ObjectsBanner.tsx:91-93` |
 | Routes and `yaml` are imported eagerly although docs/07 §7.10.1/§7.10.7 require lazy loading; the request list is not virtualised although the doc says it is. | perf / docs | M | LOW–MED | `web/console/src/app/router.tsx:20-29`, `src/lib/yaml.ts:4`, `src/features/requests/RequestTable.tsx:137` |
 | No unit tests for `keepScope`, `search-schema.ts` validators and `planList`, which docs/07 §7.10.8 lists as required. | tests | M | LOW | `web/console/src/app/scope.ts`, `src/app/search-schema.ts`, `src/features/requests/query.ts` |
 | The object list issues one evidence query per suspended row and one full-spec query per automatic version. | perf | S | LOW | `crates/xshield-control/src/object_map.rs:548,1264,1533` |
@@ -50,7 +49,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | Acceptance scenarios C6–C8 are documented as run by CI but are not in the lab script. | tests | M | LOW | `docs/04-deployment-testing.md:75-77,89`, `scripts/test_idor_lab.py` |
 | Actions are referenced by mutable tag or branch, including in the job that pushes and signs images. | dx / security | S | LOW | `.github/workflows/ci.yml:84,130`, `release-images.yml:62-82` |
 | CI `validate` has no timeout and no cargo cache; the Dockerfile copies the whole tree before the cargo build. | dx | S–M | LOW–MED | `.github/workflows/ci.yml:50-110`, `Dockerfile:28-31` |
-| `cryptography` is pinned in `scripts/requirements.txt` but imported by no script. | deps | S | LOW | `scripts/requirements.txt:3` |
 | One global mutex serialises every site's judge and observe calls, with HMAC work inside it. | perf | M | LOW | `engine.rs:442-450,852-929` |
 | Per-address login limiting treats every IPv6 address separately and there is no global cap on concurrent password checks. | security | S | LOW | `crates/xshield-control/src/auth.rs:285,371` |
 
