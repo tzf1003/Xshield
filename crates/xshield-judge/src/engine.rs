@@ -1266,11 +1266,11 @@ impl<J: JevPort> Judge<J> {
         }
     }
 
-    /// Stops the session that `context` names from learning from responses.
+    /// Stops the session that `context` names from learning from responses. A credential with no
+    /// session yet keeps the stop for the session it starts, so judging a request creates none.
     fn stop_learning(&self, context: Option<Digest16>, now_ms: u64) {
         if let Some(context) = context {
-            let mut inner = self.lock();
-            inner.store.session(context, now_ms).stop_learning();
+            self.lock().store.stop_learning(context, now_ms);
         }
     }
 
@@ -1310,24 +1310,30 @@ impl<J: JevPort> Judge<J> {
     }
 
     /// Records the values the request sent in the context it was judged in on `site`: the session
-    /// of its credential, or the address's context when it had none. When the response issues a
-    /// credential, returns what that context sent, for the new session to inherit.
+    /// of its credential, or the address's context when it had none. A credential's values wait for
+    /// its session, which only an answer that accepts the credential starts (see `observe`), so a
+    /// refused request starts no session. When the response issues a credential, returns what that
+    /// context sent, for the new session to inherit.
     fn note_request_sent(
         &self,
         site: &str,
         observation: &Observation<'_>,
         issuing: bool,
     ) -> Option<SentRecord> {
-        let request_context = match observation
+        let credential = observation
             .credential
-            .filter(|credential| !credential.is_empty())
-        {
+            .filter(|credential| !credential.is_empty());
+        let request_context = match credential {
             Some(credential) => self.session_key(site, credential),
             None => self.address_key(site, observation.client),
         };
         let mut inner = self.lock();
         let inherited = issuing.then(|| inner.store.sent_record(&request_context));
-        if !observation.sent.is_empty() {
+        if credential.is_some() {
+            inner
+                .store
+                .note_sent(request_context, observation.now_ms, observation.sent);
+        } else if !observation.sent.is_empty() {
             inner
                 .store
                 .session(request_context, observation.now_ms)
@@ -4295,6 +4301,103 @@ mod tests {
         // The origin answers one of them: that one has a session from then on.
         confirm(&judge, &site, "made-up-7");
         assert_eq!(judge.lock().store.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_forged_credential_the_origin_refuses_starts_no_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce","advanced":{"address_calls_per_minute":1}"#);
+        // The request carries a made-up credential and a value the origin has not shown. Jev
+        // allows it, it is forwarded, and the origin refuses it with 401.
+        let forged = judge
+            .judge(
+                &site,
+                &get(
+                    "/api/search",
+                    Some("q=hello%20world"),
+                    Some("forged-credential-1"),
+                    1_000,
+                ),
+            )
+            .await;
+        assert!(forged.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                path: "/api/search",
+                status: 401,
+                content_type: None,
+                body: b"",
+                now_ms: 1_001,
+                sent: &forged.sent,
+                echo: &forged.echo,
+                ..list_response("forged-credential-1", 0)
+            },
+        );
+        assert_eq!(
+            judge.session_count(),
+            0,
+            "a refused credential gets no session"
+        );
+        // With no session the next request still draws on its address's one call, which is spent.
+        let again = judge
+            .judge(
+                &site,
+                &get(
+                    "/api/search",
+                    Some("q=hello%20world"),
+                    Some("forged-credential-1"),
+                    2_000,
+                ),
+            )
+            .await;
+        assert!(!again.forward);
+        assert_eq!(again.refuse_status, 429);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_forged_credential_whose_long_request_the_origin_refuses_starts_no_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // More distinct tokens than a session may hold, so the request's values cannot all be
+        // recorded and the session it would start stops learning.
+        let body = (0..=SENT_MAX)
+            .map(|index| format!("t{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let upload = RequestFacts {
+            route: None,
+            request_headers: &[],
+            method: "POST",
+            content_type: Some("text/plain"),
+            body: body.as_bytes(),
+            ..get("/api/import", None, Some("forged-credential-2"), 1_000)
+        };
+        let forged = judge.judge(&site, &upload).await;
+        assert!(forged.forward);
+        assert_eq!(
+            judge.session_count(),
+            0,
+            "judging a forwarded request starts no session"
+        );
+        judge.observe(
+            &site,
+            &Observation {
+                method: "POST",
+                path: "/api/import",
+                status: 401,
+                content_type: None,
+                body: b"",
+                now_ms: 1_001,
+                sent: &forged.sent,
+                echo: &forged.echo,
+                ..list_response("forged-credential-2", 0)
+            },
+        );
+        assert_eq!(judge.session_count(), 0);
     }
 
     #[tokio::test]
