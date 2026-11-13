@@ -156,7 +156,8 @@ pub async fn read_batch(
     limit: i64,
 ) -> Result<DecisionBatch, LearningStoreError> {
     let rows = sqlx::query(
-        "SELECT id, at_millis, session, status, decision_path, outcome, trace FROM decision_log
+        "SELECT id, at_millis, session, status, decision_path, outcome, trace, method, client,
+                COALESCE(logical_path, path) AS path FROM decision_log
          WHERE site = $1 AND (at_millis, id) > ($2, $3) AND at_millis <= $4
          ORDER BY at_millis, id LIMIT $5",
     )
@@ -191,6 +192,9 @@ fn facts_of(row: &PgRow, at_millis: i64) -> Result<Option<DecisionFacts>, sqlx::
     let path: String = row.try_get("decision_path")?;
     let outcome: String = row.try_get("outcome")?;
     let trace: Value = row.try_get("trace")?;
+    let method: String = row.try_get("method")?;
+    let request_path: String = row.try_get("path")?;
+    let client: String = row.try_get("client")?;
     let (Ok(at_millis), Ok(decision_path), Ok(outcome), Ok(trace)) = (
         u64::try_from(at_millis),
         serde_json::from_value::<DecisionPath>(Value::String(path)),
@@ -206,6 +210,9 @@ fn facts_of(row: &PgRow, at_millis: i64) -> Result<Option<DecisionFacts>, sqlx::
         decision_path,
         outcome,
         trace,
+        method,
+        path: request_path,
+        client,
     }))
 }
 
@@ -239,7 +246,8 @@ pub async fn recent_facts(
     limit: i64,
 ) -> Result<Vec<DecisionFacts>, LearningStoreError> {
     let rows = sqlx::query(
-        "SELECT id, at_millis, session, status, decision_path, outcome, trace FROM decision_log
+        "SELECT id, at_millis, session, status, decision_path, outcome, trace, method, client,
+                COALESCE(logical_path, path) AS path FROM decision_log
          WHERE site = $1 AND at_millis >= $2
          ORDER BY at_millis DESC, id DESC LIMIT $3",
     )

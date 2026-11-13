@@ -107,7 +107,8 @@ pub async fn withdraw(
 }
 
 /// Forgets the proposals of the site's `generation` whose position is not in `slots`: the response
-/// positions the configuration no longer declares for tier learning. Returns the rows forgotten.
+/// positions the configuration no longer declares for tier learning. Returns the rows forgotten. A function
+/// proposal (docs/07 section 7.9.19) is no position, so it is kept: see [`retain_functions`].
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -118,11 +119,38 @@ pub async fn retain(
     slots: &[String],
 ) -> Result<u64, LearningStoreError> {
     let result = sqlx::query(
-        "DELETE FROM object_tier_judgements WHERE site = $1 AND NOT (slot = ANY($2::text[]))
+        "DELETE FROM object_tier_judgements WHERE site = $1 AND slot LIKE '% % %'
+           AND NOT (slot = ANY($2::text[]))
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $3 FOR SHARE)",
     )
     .bind(site)
     .bind(slots.to_vec())
+    .bind(generation)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Withdraws the function proposals of the site's `generation` whose function is not in `judged`: the
+/// functions this pass did not propose. A dismissed proposal stays, as [`withdraw`] keeps it. Returns the rows
+/// withdrawn. A function key has one space and a position key two, so the rows of the two kinds tell apart by
+/// the spaces in their key (docs/07 section 7.9.19).
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn retain_functions(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    judged: &[String],
+) -> Result<u64, LearningStoreError> {
+    let result = sqlx::query(
+        "DELETE FROM object_tier_judgements WHERE site = $1 AND slot NOT LIKE '% % %'
+           AND NOT (slot = ANY($2::text[])) AND NOT dismissed
+           AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $3 FOR SHARE)",
+    )
+    .bind(site)
+    .bind(judged.to_vec())
     .bind(generation)
     .execute(pool)
     .await?;
@@ -479,5 +507,107 @@ mod tests {
         .await
         .expect("a stale write is dropped, not refused");
         assert!(current(&pool, &site).await.is_none());
+    }
+
+    /// Every row of the site, dismissed or not.
+    async fn rows(pool: &PgPool, site: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM object_tier_judgements WHERE site = $1")
+            .bind(site)
+            .fetch_one(pool)
+            .await
+            .expect("count the rows")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn function_and_position_proposals_survive_each_others_passes() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("tier_functions");
+        let generation = with_site(&pool, &site).await;
+        let admin_function = |slot: &str| TierProposal {
+            slot: slot.to_owned(),
+            tier: Tier::Admin,
+            reliability: Reliability::High,
+            units: 2,
+            seen_values: 0,
+            agreement_per_mille: 0,
+            last_day: 3,
+        };
+        put(
+            &pool,
+            &site,
+            generation,
+            &offer(Tier::Public, Reliability::High),
+            1,
+        )
+        .await
+        .expect("put the position proposal");
+        put(
+            &pool,
+            &site,
+            generation,
+            &admin_function("GET /api/patients/{id}"),
+            1,
+        )
+        .await
+        .expect("put the function proposal");
+        put(
+            &pool,
+            &site,
+            generation,
+            &admin_function("GET /api/other"),
+            1,
+        )
+        .await
+        .expect("put the other function proposal");
+        assert!(
+            dismiss(&pool, &site, generation, "GET /api/other", 2)
+                .await
+                .expect("dismiss the other function"),
+            "the other function's proposal is dismissed"
+        );
+
+        // The position pass forgets the position it no longer declares, and no function row.
+        let forgotten = retain(&pool, &site, generation, &[])
+            .await
+            .expect("retain the positions");
+        assert_eq!(forgotten, 1, "only the position row is forgotten");
+        assert_eq!(rows(&pool, &site).await, 2, "both function rows remain");
+
+        // The function pass withdraws the function nobody judged; the dismissed one stays, and a position is
+        // not touched.
+        put(
+            &pool,
+            &site,
+            generation,
+            &offer(Tier::Public, Reliability::High),
+            1,
+        )
+        .await
+        .expect("put the position proposal again");
+        let withdrawn = retain_functions(&pool, &site, generation, &[])
+            .await
+            .expect("retain the functions");
+        assert_eq!(withdrawn, 1, "only the undismissed function is withdrawn");
+        assert_eq!(
+            rows(&pool, &site).await,
+            2,
+            "the dismissed function and the position remain"
+        );
+        assert!(
+            current(&pool, &site).await.is_some(),
+            "the position is untouched"
+        );
+        let listed: Vec<String> = proposals(&pool, &site)
+            .await
+            .expect("list the proposals")
+            .into_iter()
+            .map(|proposal| proposal.slot)
+            .collect();
+        assert_eq!(
+            listed,
+            vec![SLOT.to_owned()],
+            "a dismissed function is not listed"
+        );
     }
 }
