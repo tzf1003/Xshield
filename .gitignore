@@ -16,3 +16,6 @@ __pycache__/
 /fuzz/corpus/
 /fuzz/artifacts/
 /fuzz/coverage/
+
+# Personal Claude Code overrides; the shared configuration is .claude/settings.json.
+/.claude/settings.local.json
