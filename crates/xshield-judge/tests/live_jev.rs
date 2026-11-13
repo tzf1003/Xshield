@@ -856,8 +856,6 @@ enum Status {
     Must,
     /// Known not to match today. It is printed, and it never fails the test.
     KnownGap,
-    /// Only printed: the question is what the model answers.
-    Observe,
 }
 
 impl Case {
@@ -880,13 +878,6 @@ impl Case {
     fn known_gap(self) -> Self {
         Self {
             status: Status::KnownGap,
-            ..self
-        }
-    }
-
-    fn observe(self) -> Self {
-        Self {
-            status: Status::Observe,
             ..self
         }
     }
@@ -943,18 +934,13 @@ fn base_cases() -> Vec<Case> {
             Some(DOCTOR),
             true,
         ),
-        // KnownGap: `{id}` in the table covers this route word, so the function is known and none is sent.
-        // The verdict wanted is still a block. The matching rule changes in a separate plan; after that this
-        // case becomes a Must with an unknown function.
         get(
             "GET /api/patients/export-all",
             "/api/patients/export-all",
             None,
             Some(DOCTOR),
             true,
-        )
-        .known()
-        .known_gap(),
+        ),
         call(
             "DELETE",
             "DELETE /api/patients (bulk)",
@@ -1314,8 +1300,9 @@ fn admin_cases() -> Vec<Case> {
     ]
 }
 
-/// The emr-role requests: the two recorded questions, by an administrator's session. They are only
-/// printed.
+/// The emr-role requests: the two recorded questions, by an administrator's session. An administrator's
+/// session is not asked about an unknown function (docs/07 section 7.9.18), so both are allowed on their
+/// values and carry no function.
 fn role_cases() -> Vec<Case> {
     vec![
         get(
@@ -1323,17 +1310,17 @@ fn role_cases() -> Vec<Case> {
             "/api/admin/reports",
             None,
             Some(ADMIN),
-            true,
+            false,
         )
-        .observe(),
+        .known(),
         get(
             "adminA GET /api/admin/users/export",
             "/api/admin/users/export",
             None,
             Some(ADMIN),
-            true,
+            false,
         )
-        .observe(),
+        .known(),
     ]
 }
 
@@ -1744,7 +1731,7 @@ async fn function_cases_reach_jev_as_intended() {
     let judge = Judge::new(ContextKey::new(vec![8; 32]), Stub);
     establish(&judge, &fixture);
     let judged = judge_table(&judge, &fixture).await;
-    // The plan's shape: 75 requests and 2 recorded ones, 6 known gaps, 4 attempts.
+    // The plan's shape: 75 requests and 2 recorded ones, 5 known gaps, 4 attempts.
     assert_eq!(
         judged.len(),
         77,
@@ -1755,14 +1742,7 @@ async fn function_cases_reach_jev_as_intended() {
             .iter()
             .filter(|(case, _)| case.status == Status::KnownGap)
             .count(),
-        6
-    );
-    assert_eq!(
-        judged
-            .iter()
-            .filter(|(case, _)| case.status == Status::Observe)
-            .count(),
-        2
+        5
     );
     assert_eq!(
         judged
@@ -1783,8 +1763,7 @@ async fn function_cases_reach_jev_as_intended() {
 }
 
 /// The function table against the live model (docs/04 section 4.4). Every `Must` verdict must match its
-/// expectation on each run. A `KnownGap` is printed with the verdict it gets today, and an `Observe` is
-/// only printed.
+/// expectation on each run. A `KnownGap` is printed with the verdict it gets today.
 #[tokio::test]
 #[ignore = "needs XSHIELD_JEV_API_KEY and network access"]
 async fn live_function_table() {
@@ -1810,11 +1789,7 @@ async fn live_function_table() {
             },
         );
         let status = format!("{:?}", case.status);
-        let expected = if case.status == Status::Observe {
-            "-".to_owned()
-        } else {
-            case.expect_block.to_string()
-        };
+        let expected = case.expect_block.to_string();
         println!(
             "{:<42} {:<9} blocked={:<5} expected={:<5} {:?}/{:?}  {}",
             case.name, status, blocked, expected, record.decision_path, record.outcome, detail
