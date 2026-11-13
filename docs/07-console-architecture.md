@@ -303,7 +303,7 @@ GET /api/patients ──响应里出现 id=7──┐
 
 - `state`：`seen_as` 每一项在括号里附上来源位置的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`，没有标档位的来源不带括号。请求值带 `public_access`，形如 `{"accepts": false, "reliability": "high"}`，位置没有 `accepts_public` 时不带。尝试越权的值带 `"attempt": "over_privilege"`（[02 §2.2](02-jev.md#22-调用内容)）。
 - `trace`：`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability`，见 [7.4.3](#743-trace-结构)。
-- 没有标档位的站点：`state` 的数据、`trace` 的新字段与判定都与之前相同。指令文字（`ACCESS_INSTRUCTIONS`）新增了对档位的说明，所以指令版本号 `prompt`（见 [7.5.1](#751-jevrecord-v2)）对所有站点都变了，现在是 `jq_e290fa8a62172221`。
+- 没有标档位的站点：`state` 的数据、`trace` 的新字段与判定都与之前相同。指令文字（`ACCESS_INSTRUCTIONS`）新增了对档位的说明，所以指令版本号 `prompt`（见 [7.5.1](#751-jevrecord-v2)）对所有站点都变了，现在是 `jq_d5df87392a92b44d`（见 [7.5.5](#755-指令版本表)）。
 
 ## 7.5 Jev 调用上下文的保存
 
@@ -315,7 +315,9 @@ GET /api/patients ──响应里出现 id=7──┐
 | `prompt` | 指令版本 ID：`jq_` 加 `questions` JSON 的 SHA-256 前 16 位十六进制；全文在 `jev_prompts` 表（新增）。完整请求体由 `model`、`state`、`questions` 三者拼回，是“还原值”：键的顺序可能与实际发出的不同，字节数以 `request_bytes` 为准 |
 | `model` / `route` | 线上模型名（`typesafe-ai/jev`、`jev-1.13.0` 或 `XSHIELD_JEV_MODEL`）；线路 `gateway` / `direct` / `custom`（新增），没有加载配置时为 `none` |
 | `timeout_ms` | 这次调用实际使用的超时：站点 `advanced.jev_timeout_ms`，没写时取 `XSHIELD_JEV_TIMEOUT_MS`（新增） |
-| `trim` | `state` 裁剪级别 0–4（新增，见 7.5.3） |
+| `trim` | `state` 裁剪级别 0–4（新增，见 7.5.3）。分批时是展示那一批的级别 |
+| `batches` / `batch` | 分批时才有（新增，单批记录不带这两个字段）：`batches` 是 `state` 分成的批数，`batch` 是本记录展示的第几批，从 1 起。其余字段描述 `batch` 那一批：判拒的、失败的或 UNKNOWN 的，取序号最小的一批；全部放行时取把握最小的一批（`min(P(ALLOW), P(BENIGN))` 最小，相同取序号最小）。`millis` 是全部调用的墙上时间，`request_bytes` 是已发出各批之和，`usage` 把各批的数值字段相加、其他字段取展示的那一批 |
+| `left_out` | 分批超过 16 批时才有（新增，`None` 时不写出）：没有送出的值和片段数（[02.4](02-jev.md#24-输入上限与脱敏)）。有值时，结论只依据送出的部分，放行也不写放行缓存 |
 | `request_bytes` | 完整请求体字节数（新增） |
 | `http_status` | 模型服务的 HTTP 状态；超时和连接失败为 null（新增） |
 | `response` | 模型服务原始响应体，按 UTF-8 宽松解码，最多 8 KiB（新增）；超时和连接失败为 null |
@@ -332,7 +334,7 @@ GET /api/patients ──响应里出现 id=7──┐
 `state` 不带请求 ID，也不因控制台改变（Jev 不需要 ID，多写只增加 token）。控制台展示时把 `state` 和 `trace` 对齐：
 
 - `state.request.values` 由非惰性值按提取顺序构成，所以 `state.request.values[i]` 对应 `trace.values` 中第 i 个 `inert == false` 的元素。不用 `at` 对齐，因为数组元素会共享同一个 `at`（`body.ids[]`）。
-- `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`：`seen_as` 是 `sources` 的前缀，裁剪级别 3、4 只发 1 个来源，所以可以更短，不要求等长。
+- `state.request.values[i].seen_as[j]` 对应该值 `sources[j]`：`seen_as` 是 `sources` 的前缀，裁剪级别 3 只发 1 个来源、级别 4 不发来源，所以可以更短，不要求等长。
 - `seen_as[j]` 括号中的档位和可靠性对应 `sources[j].tier` 和 `sources[j].reliability`（[7.4.7](#747-档位在判定中的使用)）。
 - `state.recent` 是最近访问的最后 N 条（N 由裁剪级别决定），对应 `trace.session.recent` 的最后 N 条。
 - `state.session.entries_passed[k]` 对应 `trace.session.entries_passed[k]`。
@@ -341,21 +343,23 @@ GET /api/patients ──响应里出现 id=7──┐
 
 **对不上时不猜**：`align.ts` 先校验非惰性值个数等于 `state.request.values` 长度，且每个下标上的 `at` 相同（两边都截到 256 字节再比，`sameName`，因为追溯里超长的 `at` 已被截断，见 7.4.3）；每个值的 `seen_as` 不比 `sources` 长（`trace.trimmed` 为真时来源可能已被减到 1 个，只比较公共前缀，多出的 `seen_as` 条目没有来源链接），且 `seen_as[j]` 逐字等于 `` `${sources[j].field} @ ${sources[j].request}` ``（网关生成 `seen_as` 的格式，`engine.rs`）——只比个数会放过次序互换，要求等长又会让裁剪过的正常记录失去来源链接；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
 
-实现要求：`build_state` 的输入和输出不变，新增一个单元测试固定一组输入的 `state` 字节（黄金样本），并断言 `state` 不含 `req_`；另一个测试用同一组输入生成 `trace`，断言按上面的规则能对齐，并覆盖脱敏值、被截断的长值、数组元素共享同一个 `at` 三种情形。
+分批的记录（带 `batches`）的 `state` 只含那一批的值，`trace.values` 是整次请求的，两者不一一对应。控制台对这种记录不做对齐，显示“这次请求分成 N 批送判，本批的 state 只含其中一部分值，来源链接不可用”，`state` 原文照常展示。
+
+实现要求：`build_states` 的单批输入和输出与之前一致，新增一个单元测试固定一组输入的 `state` 字节（黄金样本），并断言 `state` 不含 `req_`；另一个测试用同一组输入生成 `trace`，断言按上面的规则能对齐，并覆盖脱敏值、被截断的长值、数组元素共享同一个 `at` 三种情形。
 
 ### 7.5.3 裁剪级别
 
-`build_state` 依次尝试以下组合，取第一个不超过 8 KiB 的（现有代码 `state.rs`）：
+`build_states` 依次尝试级别 0 至 3，取第一个不超过 8 KiB 的：值都放在这一份里，记录的 `trim` 就是这个级别。都放不下时，请求值分批，每批按级别 3 装（[7.5.1](#751-jevrecord-v2) 的 `batches`）。但不含值的空壳（级别 3 的 `state` 去掉所有值）超过 4 KiB 时，所有批都按级别 4 装，让每批能装下的值不至于只有几个。分批最多 16 批（`JEV_BATCHES_MAX`）：先送没核验的非输入值，再送其余整值，最后送其余片段（[02.5](02-jev.md#25-延迟费用与限流)）；没送出的记在 `left_out`。级别 4 只用在空壳过大的分批，或一个值独占一批、按级别 3 仍放不下的情况（现有代码 `state.rs`）：
 
-| `trim` | 最近访问条数 | 每个值的来源数 | 单值最长字符 |
+| `trim` | 最近访问条数 | 每个值的来源数 | 其他 |
 |---|---|---|---|
-| 0 | 10 | 3 | 512 |
-| 1 | 3 | 3 | 512 |
-| 2 | 0 | 3 | 512 |
-| 3 | 0 | 1 | 512 |
-| 4 | 0 | 1 | 128 |
+| 0 | 10 | 3 | |
+| 1 | 3 | 3 | |
+| 2 | 0 | 3 | |
+| 3 | 0 | 1 | 分批时每批用这一级，空壳超过 4 KiB 时改用级别 4 |
+| 4 | 0 | 0 | 去掉 `session.entries_passed`，`path` 截到 256 字符；只用于空壳过大的分批，或一个值独占一批仍放不下 |
 
-`build_state` 改为同时返回级别。控制台在 Jev 视图顶部写明“为满足 8 KiB 上限，最近访问从 10 条减到 3 条”这类说明。
+请求值不再截断，因此没有“单值最长字符”一列：超过 512 个字符的值切成片（[02.2](02-jev.md#22-调用内容)）。`at` 和每条 `seen_as` 超过 256 字符时截到 256 并加 `...`。控制台在 Jev 视图顶部写明“为满足 8 KiB 上限，最近访问从 10 条减到 3 条”这类说明；分批时写明“分 N 批送判”。
 
 ### 7.5.4 失败码
 
@@ -369,7 +373,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 | 按 `on_jev_unavailable` |
 | `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 | 按 `on_jev_unavailable` |
 | `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 | 按 `on_jev_unavailable` |
-| `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
+| `JEV_STATE_TOO_LARGE` | 分批后仍有单个值放不进 8 KiB（级别 4 也放不下），或没核验的非输入值（含片段）在 16 批内装不完。正常不出现。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
 | `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调）。没有发出调用 | 无 | 429（`rate_limited`），不论 `on_jev_unavailable` |
 
 ### 7.5.5 指令版本表
@@ -380,6 +384,7 @@ GET /api/patients ──响应里出现 id=7──┐
 |---|---|
 | `jq_e290fa8a62172221` | 功能表之前的指令：档位说明与尝试越权说明，没有 `state.request.function` 的说明 |
 | `jq_77be488d34440d84` | 功能表。新增 `state.request.function` 的说明（尝试越权答 DENY；未知功能只在路径含管理、运维、调试等词时答 DENY，其余照值判定），以及 DENY 标准里的“请求触及特权或运维功能”。新增的一段逐字与真实模型测试时相同（见 [02 2.2](02-jev.md)），改动须重新测试 |
+| `jq_d5df87392a92b44d` | 功能表之后的指令，加上分批的片段说明：`ACCESS` 增加“同一请求分几份送来，带 `part` 的值只判这一片”的说明，`ATTACK` 增加“片段边缘的载荷也算出现”的说明（见 [02 2.2](02-jev.md)）。这两句尚未用真实模型探测，定稿前须探测 |
 
 所有站点都会换用新 ID，不论它是否有功能表：指令文字对每个请求都一样。
 
@@ -465,7 +470,7 @@ advanced:
 - `RequestFacts` 已有 `request_id`，判定时把它解析为 `u128` 用于写入缓存来源。
 - `Judgement.record` 对绕过路径不再是 `None`，而是简记录；判定记录填写 `trace.values`、`trace.session`、`trace.cache_source`、`trace.entry`、`trace.bypass`。
 - `Observation` 增加 `request_id` 和这次请求的结论；`Judge::observe` 返回 `ObservationSummary`（7.4.3 的 `response` 对象），代理把它写进同一请求的记录。
-- `build_state` 返回 `(String, trim)`；`request_body` 改为使用启动时构建一次的 `questions`，并暴露 `prompt_id()`。
+- `build_states` 返回 `Batched`：`states` 是 `(String, trim)` 的列表，装得下一份时只有一项，超过 8 KiB 时分批（7.5.3），最多 16 批；`left_out` 是没送出的值数；`request_body` 改为使用启动时构建一次的 `questions`，并暴露 `prompt_id()`。
 - 判定层在 `JEV_RESPONSE_INVALID`、`JEV_HTTP_ERROR` 时保存响应体前 8 KiB 和状态码。
 
 ### 7.7.3 代理
