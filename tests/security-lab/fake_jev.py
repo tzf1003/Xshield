@@ -14,6 +14,11 @@ Script:
   "reference") that the session was never shown, except for the input the
   entry itself needs (the share code under /share/, the login form). Otherwise
   ALLOW;
+- access is also DENY when the path holds a segment of ASCII digits that no
+  path value of the request carries (no value at a `path[` position with that
+  text). This is the real model's answer measured on a batch of a request on an
+  id route (designs/waf-batch2-live-probe-result.md, plan 3.5): the batch that
+  does not repeat the id has no evidence for it, whatever the other batches say;
 - access is also DENY when the request carries a function attempt
   (`function.attempt` is over_privilege), and when its function is unknown
   (`function.known` is false) and its path holds a word of OPS_WORDS. An
@@ -49,11 +54,14 @@ ATTACK_MARKERS = ("union select", "or 1=1", "../", "; cat ", "<script>")
 ENTRY_INPUT_PATHS = ("/login",)
 ENTRY_INPUT_PREFIXES = ("/share/",)
 SHOWN_KIND = re.compile(r" \[([^\]]*)\]")  # the kind in brackets after `field @ request`, see _shown_kind
+ASCII_DIGITS = re.compile(r"[0-9]+")  # a path segment that is an id on a route, see unsent_path_id
 
 # Words of administrator, operations and hidden-interface paths. An unknown function whose path holds one of
 # them is answered DENY: this is the fake's copy of the instruction paragraph about unknown functions (docs/02 2.2).
+# `export-all` is the bulk export that paragraph names (批量导出); an export of one record, such as `export-pdf`,
+# is an ordinary path and is judged on its values.
 OPS_WORDS = ("admin", "metrics", "actuator", "server-status", "debug", "swagger", "console", "phpinfo",
-             "ftp", "backup", "internal")
+             "ftp", "backup", "internal", "export-all")
 
 
 def _probabilities(options: tuple[str, ...], choice: str) -> dict[str, float]:
@@ -143,6 +151,24 @@ def _shown(value: dict, *, ideal: bool) -> bool:
     return any(_shown_kind(entry) in (None, value["object"]) for entry in seen)
 
 
+def unsent_path_id(request: dict) -> bool:
+    """Whether the path holds an ASCII-digit segment that no path value of the request carries.
+
+    The real model denies a batch of a request on an id route whose state does not repeat the id's
+    path value, since the id has no evidence in that batch (plan 3.5). The fake does the same.
+    """
+    carried = {
+        str(value.get("value", ""))
+        for value in request.get("values", [])
+        if str(value.get("at", "")).startswith("path[")
+    }
+    return any(
+        ASCII_DIGITS.fullmatch(segment) is not None and segment not in carried
+        for segment in str(request["path"]).split("/")
+        if segment
+    )
+
+
 def judge(document: dict, attack_forms: tuple[str, ...] | None = None) -> dict:
     """The answers the script gives for one judgement document.
 
@@ -168,7 +194,9 @@ def judge(document: dict, attack_forms: tuple[str, ...] | None = None) -> dict:
     # where its path names administration or operations; elsewhere it is judged on its values alone.
     unlisted = function.get("known") is False and any(word in path.lower() for word in OPS_WORDS)
     attempted_function = function.get("attempt") == "over_privilege"
-    access = "DENY" if attempt or unseen or attempted_function or unlisted else "ALLOW"
+    access = (
+        "DENY" if attempt or unseen or attempted_function or unlisted or unsent_path_id(request) else "ALLOW"
+    )
     if attack_forms is None:
         text = " ".join([path, *(str(value.get("value", "")) for value in values)]).lower()
         attack = "ATTACK" if any(marker in text for marker in ATTACK_MARKERS) else "BENIGN"

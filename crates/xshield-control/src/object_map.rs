@@ -28,9 +28,9 @@ use xshield_core::context::position::{EventRefusal, EventState, Handling, Positi
 use xshield_core::{
     context::{
         IdentityRole, ObjectMap, ObjectSlot, Reliability, SiteSpec, SlotSource, Tier,
-        learning::{Evidence, RETIRE_DAYS, WINDOW_DAYS, day_of, observe},
+        learning::{Evidence, RETIRE_DAYS, Vote, WINDOW_DAYS, day_of, observe},
     },
-    kind::{NameReason, NameSource, Rules, request_name, response_name},
+    kind::{NameReason, NameSource, Rules, path_segment, request_name, response_name},
 };
 use xshield_postgres::{
     decision_stats::Scope,
@@ -79,6 +79,10 @@ const BOOTSTRAP_ROWS_MAX: i64 = 5_000;
 const CANDIDATES_MAX: usize = 50;
 /// A kind word this short may be an abbreviation, and its candidate asks for a look.
 const SHORT_WORD: usize = 3;
+/// The note of a candidate whose kind word is short.
+const SHORT_NOTE: &str = "名字较短，可能是缩写，请确认类别";
+/// The note of a candidate whose uses or sessions are short of the site's learning thresholds.
+const THIN_NOTE: &str = "使用次数少，请确认";
 
 /// Where a position sits: a value a request carries, or a response field a value was shown at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1353,19 +1357,20 @@ pub async fn bootstrap(
     let record = site_of(&state, &name).await?;
     let since = now_millis().saturating_sub(BOOTSTRAP_WINDOW_HOURS.saturating_mul(HOUR_MILLIS));
     let records = store::records_since(&state.pool, &name, since).await?;
-    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut votes: Vec<Vote> = Vec::new();
     for fact in store::recent_facts(&state.pool, &name, since, BOOTSTRAP_ROWS_MAX).await? {
-        for vote in observe(&fact).votes {
-            let session = vote.session;
-            for key in std::iter::once(vote.slot).chain(vote.from) {
-                tallies.entry(key).or_default().add(&session);
-            }
+        votes.extend(observe(&fact).votes);
+    }
+    let mut tallies: BTreeMap<String, Tally> = BTreeMap::new();
+    for vote in &votes {
+        for key in std::iter::once(&vote.slot).chain(&vote.from) {
+            tallies.entry(key.clone()).or_default().add(&vote.session);
         }
     }
     Ok(Json(BootstrapBody {
         window_hours: BOOTSTRAP_WINDOW_HOURS,
         records,
-        candidates: candidates_of(&record.spec, &tallies),
+        candidates: candidates_of(&record.spec, &tallies, &votes),
     }))
 }
 
@@ -1383,14 +1388,21 @@ impl Tally {
     }
 }
 
-/// The candidates of the tallies: each position the configuration does not declare and whose name
-/// gives a kind, the most used first, at most [`CANDIDATES_MAX`].
-fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>) -> Vec<Value> {
+/// The candidates of the tallies: each position the configuration does not declare, that is not a
+/// literal path position, and whose name gives a kind, the most used first, at most [`CANDIDATES_MAX`].
+/// The votes check each candidate's kind: `conflict` names the kind the votes give instead, when they
+/// dispute it. A candidate short of the site's learning thresholds, or with a short kind word, carries a note.
+fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>, votes: &[Vote]) -> Vec<Value> {
     let map = spec.objects();
     let rules = Rules::of(spec.advanced());
+    let (min_uses, min_sessions) = (
+        map.learning().thresholds.uses,
+        map.learning().thresholds.sessions,
+    );
+    let by_key = votes_by_key(votes);
     let mut found: Vec<(u32, &str, Value)> = tallies
         .iter()
-        .filter(|(key, _)| map.declared_class_of(key).is_none())
+        .filter(|(key, _)| map.declared_class_of(key).is_none() && !literal_path(key))
         .filter_map(|(key, tally)| {
             let (reason, side) = name_of(key, &rules)?;
             let class = map
@@ -1398,6 +1410,13 @@ fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>) -> Vec<Valu
                 .iter()
                 .find(|class| rules.relates(&reason.word, &class.id));
             let short = class.is_none() && reason.word.len() <= SHORT_WORD;
+            let sessions = u32::try_from(tally.sessions.len()).unwrap_or(u32::MAX);
+            let thin = tally.uses < min_uses || sessions < min_sessions;
+            let notes: Vec<&str> = [short.then_some(SHORT_NOTE), thin.then_some(THIN_NOTE)]
+                .into_iter()
+                .flatten()
+                .collect();
+            let on_key = by_key.get(key.as_str()).map_or(&[][..], Vec::as_slice);
             let value = serde_json::json!({
                 "id": digest_id('c', key),
                 "key": key,
@@ -1411,8 +1430,8 @@ fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>) -> Vec<Valu
                 },
                 "uses": tally.uses,
                 "sessions": tally.sessions.len(),
-                "note": short.then_some("名字较短，可能是缩写，请确认类别"),
-                "conflict": null,
+                "note": (!notes.is_empty()).then(|| notes.join("。")),
+                "conflict": conflict_of(key, &reason.word, on_key, map, &rules),
             });
             Some((tally.uses, key.as_str(), value))
         })
@@ -1423,6 +1442,112 @@ fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>) -> Vec<Valu
         .take(CANDIDATES_MAX)
         .map(|(_, _, value)| value)
         .collect()
+}
+
+/// The votes indexed by each position they name: their request position, and each response position the
+/// value was shown at. A position appears once in a vote, however often the vote names it.
+fn votes_by_key(votes: &[Vote]) -> BTreeMap<&str, Vec<&Vote>> {
+    let mut by_key: BTreeMap<&str, Vec<&Vote>> = BTreeMap::new();
+    for vote in votes {
+        let sources: BTreeSet<&str> = vote.from.iter().map(String::as_str).collect();
+        for key in std::iter::once(vote.slot.as_str()).chain(sources) {
+            by_key.entry(key).or_default().push(vote);
+        }
+    }
+    by_key
+}
+
+/// The kind a candidate's votes dispute: `Some` with the kind the disagreeing side gives most often, when
+/// more than a tenth of the votes that can be compared with the candidate's kind disagree. `kind` is the
+/// candidate's own kind and `votes` the ones that name it.
+///
+/// A request position disagrees with a vote when none of the response positions the value was shown at
+/// gives its kind, and at least one of them gives a kind. A response position disagrees when the request
+/// that used the value gives another kind and no other response position of the vote gives that request's
+/// kind: a number two kinds share (patient 3 and prescription 3 both on the list) is then no dispute.
+fn conflict_of(
+    key: &str,
+    kind: &str,
+    votes: &[&Vote],
+    map: &ObjectMap,
+    rules: &Rules,
+) -> Option<String> {
+    let request = is_request_key(key);
+    let mut comparable = 0_u32;
+    let mut against = 0_u32;
+    let mut others: BTreeMap<String, u32> = BTreeMap::new();
+    for vote in votes {
+        if request {
+            let kinds: BTreeSet<String> = vote
+                .from
+                .iter()
+                .filter_map(|source| checked_kind(source, map, rules))
+                .collect();
+            if kinds.is_empty() {
+                continue;
+            }
+            comparable += 1;
+            if kinds.iter().any(|other| rules.relates(kind, other)) {
+                continue;
+            }
+            against += 1;
+            for other in kinds {
+                *others.entry(other).or_default() += 1;
+            }
+        } else {
+            let Some(asked) = checked_kind(&vote.slot, map, rules) else {
+                continue;
+            };
+            comparable += 1;
+            if rules.relates(kind, &asked) {
+                continue;
+            }
+            let shared = vote.from.iter().any(|source| {
+                source.as_str() != key
+                    && checked_kind(source, map, rules)
+                        .is_some_and(|other| rules.relates(&asked, &other))
+            });
+            if shared {
+                continue;
+            }
+            against += 1;
+            *others.entry(asked).or_default() += 1;
+        }
+    }
+    if against == 0 || against.saturating_mul(10) <= comparable {
+        return None;
+    }
+    others
+        .iter()
+        .max_by(|(left, left_count), (right, right_count)| {
+            left_count.cmp(right_count).then_with(|| right.cmp(left))
+        })
+        .map(|(other, _)| other.clone())
+}
+
+/// The kind a position stands for when votes are checked: its declared kind, else the kind its name
+/// gives. A literal path position stands for none (see [`literal_path`]), so it disputes nothing.
+fn checked_kind(key: &str, map: &ObjectMap, rules: &Rules) -> Option<String> {
+    match map.declared_class_of(key) {
+        Some(class) => Some(class.to_owned()),
+        None if literal_path(key) => None,
+        None => name_word(key, rules),
+    }
+}
+
+/// Whether a path position stands at a literal segment of its route, as `GET /share/SHR-9F2A path[1]`
+/// does. Its value is that one literal, the same for every request that could reach it, so it is no
+/// candidate. A route's placeholder is `{id}`.
+fn literal_path(key: &str) -> bool {
+    let (route, location) = (key.split(' ').nth(1), key.split(' ').nth(2));
+    let (Some(route), Some(index)) = (route, location.and_then(path_segment)) else {
+        return false;
+    };
+    route
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .nth(index)
+        .is_some_and(|segment| !segment.starts_with('{'))
 }
 
 /// The name a position's kind comes from, and the side of the position. `None` when the name gives
@@ -1446,9 +1571,8 @@ fn name_of(key: &str, rules: &Rules) -> Option<(NameReason, &'static str)> {
             Some((reason, Side::Request.as_str()))
         }
         Side::Response => {
-            // A response field of an array is named by the field inside the array.
-            let field = location.rsplit("[].").next().unwrap_or(location);
-            let reason = response_name(field, &format!("{method} {route}"), rules)?;
+            // The array is the field's parent object: `prescriptions[].id` is named as a prescription.
+            let reason = response_name(location, &format!("{method} {route}"), rules)?;
             Some((reason, Side::Response.as_str()))
         }
     }
@@ -2396,12 +2520,13 @@ mod tests {
         };
         let tallies = BTreeMap::from([
             ("GET /doctor/{id} path[1]".to_owned(), tally(&["a", "b"])),
-            ("GET /api/doctors [].id".to_owned(), tally(&["a", "b", "c"])),
+            // Enough uses over enough sessions to clear the default learning thresholds (20 and 5).
+            ("GET /api/doctors [].id".to_owned(), tally_of(20, 5)),
             ("GET /api/docs [].id".to_owned(), tally(&["a"])),
             ("GET /api/notes [].author_id".to_owned(), tally(&["a"])),
             ("GET /api/me [].name".to_owned(), tally(&["a"])),
         ]);
-        let candidates = candidates_of(&spec, &tallies);
+        let candidates = candidates_of(&spec, &tallies, &[]);
         // The declared position and the field that names no kind are left out. The most used
         // comes first.
         assert_eq!(candidates.len(), 3);
@@ -2414,9 +2539,10 @@ mod tests {
         assert_eq!(first["reason"]["word"], "doctor");
         assert_eq!(
             (first["uses"].as_u64(), first["sessions"].as_u64()),
-            (Some(3), Some(3))
+            (Some(20), Some(5))
         );
         assert!(first["note"].is_null());
+        assert!(first["conflict"].is_null());
         assert!(first["id"].as_str().is_some_and(|id| id.starts_with('c')));
         let second = &candidates[1];
         assert_eq!(second["key"], "GET /doctor/{id} path[1]");
@@ -2430,6 +2556,152 @@ mod tests {
             (Some("doc"), true)
         );
         assert!(third["note"].is_string());
+    }
+
+    /// A tally of `uses` uses spread over `sessions` sessions, in turn.
+    fn tally_of(uses: u32, sessions: u32) -> Tally {
+        let mut tally = Tally::default();
+        for index in 0..uses {
+            tally.add(&format!("session-{}", index % sessions));
+        }
+        tally
+    }
+
+    /// `count` votes of their own sessions, each naming `slot` and the response positions `from`.
+    fn votes_of(slot: &str, from: &[&str], count: usize) -> Vec<Vote> {
+        (0..count)
+            .map(|index| Vote {
+                slot: slot.to_owned(),
+                session: format!("session-{index}"),
+                day: 1,
+                from: from.iter().map(|key| (*key).to_owned()).collect(),
+            })
+            .collect()
+    }
+
+    /// The candidate of `key` among the candidates of a window with that tally and those votes.
+    fn candidate_for(spec: &SiteSpec, key: &str, tally: Tally, votes: &[Vote]) -> Value {
+        let tallies = BTreeMap::from([(key.to_owned(), tally)]);
+        candidates_of(spec, &tallies, votes)
+            .into_iter()
+            .find(|candidate| candidate["key"] == key)
+            .expect("the candidate of the key")
+    }
+
+    #[test]
+    fn a_request_candidate_that_its_votes_dispute_names_the_kind_they_give() {
+        const DELETE: &str = "DELETE /api/patients/{id} path[2]";
+        const PRESCRIPTIONS: &str = "GET /api/patients/{id} prescriptions[].id";
+        const PATIENTS: &str = "GET /api/patients patients[].id";
+        let spec = site_with_slots("");
+        // Six of the ten votes that can be compared show the value as a prescription: more than a tenth.
+        let mut votes = votes_of(DELETE, &[PRESCRIPTIONS], 6);
+        votes.extend(votes_of(DELETE, &[PATIENTS], 4));
+        let disputed = candidate_for(&spec, DELETE, tally_of(10, 10), &votes);
+        assert_eq!(disputed["conflict"], "prescription");
+        // One of ten is exactly a tenth, and a tenth is not more than a tenth.
+        let mut one = votes_of(DELETE, &[PRESCRIPTIONS], 1);
+        one.extend(votes_of(DELETE, &[PATIENTS], 9));
+        let tenth = candidate_for(&spec, DELETE, tally_of(10, 10), &one);
+        assert!(tenth["conflict"].is_null());
+        // Two of ten are more than a tenth.
+        let mut two = votes_of(DELETE, &[PRESCRIPTIONS], 2);
+        two.extend(votes_of(DELETE, &[PATIENTS], 8));
+        let beyond = candidate_for(&spec, DELETE, tally_of(10, 10), &two);
+        assert_eq!(beyond["conflict"], "prescription");
+    }
+
+    #[test]
+    fn a_response_candidate_its_request_disputes_names_the_request_kind() {
+        const VISIT_PATIENT: &str = "GET /api/visits/{id} patient_id";
+        const DOCTOR_PATH: &str = "GET /api/doctors/{id} path[2]";
+        let spec = site_with_slots("");
+        // Four uses of the visit's patient id, each made on a doctor's path: the response shows no patient.
+        let votes = votes_of(DOCTOR_PATH, &[VISIT_PATIENT], 4);
+        let disputed = candidate_for(&spec, VISIT_PATIENT, tally_of(20, 5), &votes);
+        assert_eq!(disputed["kind"], "patient");
+        assert_eq!(disputed["conflict"], "doctor");
+    }
+
+    #[test]
+    fn a_number_two_kinds_share_disputes_neither_side() {
+        const DELETE: &str = "DELETE /api/patients/{id} path[2]";
+        const PRESCRIPTIONS: &str = "GET /api/patients/{id} prescriptions[].id";
+        const PATIENTS: &str = "GET /api/patients patients[].id";
+        let spec = site_with_slots("");
+        // The value 3 is patient 3 and prescription 3: each vote shows it at both, so either kind agrees.
+        let votes = votes_of(DELETE, &[PRESCRIPTIONS, PATIENTS], 5);
+        let request = candidate_for(&spec, DELETE, tally_of(5, 5), &votes);
+        assert!(request["conflict"].is_null());
+        let response = candidate_for(&spec, PRESCRIPTIONS, tally_of(5, 5), &votes);
+        assert!(response["conflict"].is_null());
+    }
+
+    #[test]
+    fn a_literal_path_and_a_name_that_names_no_kind_are_no_candidates() {
+        let spec = site_with_slots("");
+        let tallies = BTreeMap::from([
+            ("GET /share/SHR-9F2A path[1]".to_owned(), tally_of(20, 5)),
+            ("GET /share/{id} path[1]".to_owned(), tally_of(20, 5)),
+            ("GET /api/admin/search query.q".to_owned(), tally_of(20, 5)),
+            (
+                "GET /api/admin/search results[].id".to_owned(),
+                tally_of(20, 5),
+            ),
+            (
+                "GET /api/patients/{id} prescriptions[].id".to_owned(),
+                tally_of(20, 5),
+            ),
+        ]);
+        let candidates = candidates_of(&spec, &tallies, &[]);
+        let keys: Vec<&str> = candidates
+            .iter()
+            .filter_map(|candidate| candidate["key"].as_str())
+            .collect();
+        // The literal share code is no candidate, and neither the query term nor a container's id; a
+        // placeholder route is one.
+        assert_eq!(
+            keys,
+            [
+                "GET /api/patients/{id} prescriptions[].id",
+                "GET /share/{id} path[1]"
+            ]
+        );
+        assert_eq!(candidates[0]["kind"], "prescription");
+    }
+
+    #[test]
+    fn a_candidate_short_of_the_learning_thresholds_asks_for_a_look() {
+        let spec = site_with_slots("");
+        let tallies = BTreeMap::from([
+            // Uses are enough over the default thresholds, sessions are not.
+            ("GET /api/doctors [].id".to_owned(), tally_of(25, 2)),
+            // A short kind word, and too few uses: both sentences.
+            ("GET /api/docs [].id".to_owned(), tally_of(3, 3)),
+        ]);
+        let candidates = candidates_of(&spec, &tallies, &[]);
+        let doctors = candidates
+            .iter()
+            .find(|candidate| candidate["key"] == "GET /api/doctors [].id")
+            .expect("the doctors candidate");
+        assert_eq!(doctors["note"], "使用次数少，请确认");
+        let docs = candidates
+            .iter()
+            .find(|candidate| candidate["key"] == "GET /api/docs [].id")
+            .expect("the docs candidate");
+        assert_eq!(
+            docs["note"],
+            "名字较短，可能是缩写，请确认类别。使用次数少，请确认"
+        );
+        // The site's own thresholds replace the defaults.
+        let lowered = SiteSpec::from_json(
+            r#"{"name": "clinic", "hosts": ["clinic.example.com"], "origin": "http://10.0.0.5:8080",
+                "session": {"cookie": "SESSIONID"}, "entries": ["/login"],
+                "objects": {"learning": {"thresholds": {"uses": 2, "sessions": 2}}}}"#,
+        )
+        .expect("test spec");
+        let enough = candidate_for(&lowered, "GET /api/doctors [].id", tally_of(25, 2), &[]);
+        assert!(enough["note"].is_null());
     }
 
     #[test]
@@ -3296,7 +3568,9 @@ mod live_tests {
             ),
             (Some("doctor"), Some("医生"), Some("route_word"))
         );
-        assert!(candidate["note"].is_null());
+        // Three uses by two sessions are short of the default learning thresholds (20 uses, 5
+        // sessions): the candidate stays listed, with a note that asks for a look.
+        assert_eq!(candidate["note"], "使用次数少，请确认");
     }
 
     #[tokio::test]

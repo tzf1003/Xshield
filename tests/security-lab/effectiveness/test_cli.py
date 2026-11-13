@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from effectiveness import jev_relay
 from effectiveness.cli import main
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -84,8 +85,9 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(status, 0)
 
     def test_the_lab_refuses_the_modes_that_are_not_built_and_prints_nothing_to_stdout(self):
-        for args, text in ((["lab", "--mode", "full"], "批次 7"), (["lab", "--jev", "record"], "批次 9"),
-                           (["lab", "--keep"], "批次 5"), (["lab", "--update-baseline", "--only", "idor_read"], "--only")):
+        for args, text in ((["lab", "--mode", "full"], "批次 7"),
+                           (["lab", "--keep"], "批次 5"),
+                           (["lab", "--update-baseline", "--only", "idor_read"], "--only")):
             with self.subTest(args=args):
                 status, out, err = run_cli(*args)
                 self.assertEqual(status, 2)
@@ -101,6 +103,27 @@ class CommandTests(unittest.TestCase):
         self.assertIn("XSHIELD_JEV_ENDPOINT", err)
         self.assertEqual(out, "")
         self.assertFalse((self.out / "live").exists())  # refused before anything is written
+
+    def test_record_without_its_settings_is_an_error_and_never_falls_back(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("XSHIELD_JEV_ENDPOINT", None)
+            os.environ.pop("XSHIELD_JEV_API_KEY", None)
+            status, out, err = run_cli("lab", "--jev", "record", "--out", str(self.out / "record"))
+        self.assertEqual(status, 2)
+        self.assertIn("--jev record", err)
+        self.assertIn("XSHIELD_JEV_API_KEY", err)
+        self.assertEqual(out, "")
+        self.assertFalse((self.out / "record").exists())
+
+    def test_replay_without_a_recording_is_an_error_and_needs_no_settings(self):
+        with mock.patch.object(jev_relay, "DEFAULT_RECORDING", self.out / "missing.jsonl"), mock.patch.dict(os.environ):
+            os.environ.pop("XSHIELD_JEV_ENDPOINT", None)
+            os.environ.pop("XSHIELD_JEV_API_KEY", None)
+            status, out, err = run_cli("lab", "--jev", "replay", "--out", str(self.out / "replay"))
+        self.assertEqual(status, 2)
+        self.assertIn("没有录制文件", err)
+        self.assertEqual(out, "")
+        self.assertFalse((self.out / "replay").exists())  # refused before the output folder is made
 
     def test_site_needs_decisions_or_a_console(self):
         status, _, err = run_cli("site", "--suite-results", "dir")

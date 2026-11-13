@@ -83,6 +83,20 @@ ADMIN_OBJECTS = {
     ],
 }
 
+# The doctor's own patients (docs/07 section 7.4.7). The listing of "my patients" is tier self, so a
+# session's own listing proves each patient in it, as an untiered response would, while the public
+# search still proves no delete. The DELETE position takes no public source, as in EMR_OBJECTS.
+SELF_OBJECTS = {
+    "classes": [{"id": "patient", "name": "患者"}],
+    "slots": [
+        {"key": "GET /api/search results[].id", "class": "patient", "source": "admin",
+         "tier": "public", "reliability": "high"},
+        {"key": "GET /api/patients patients[].id", "class": "patient", "source": "admin",
+         "tier": "self", "reliability": "high"},
+        {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "source": "admin",
+         "accepts_public": False, "reliability": "high"},
+    ],
+}
 # The function table of the functions site (docs/07 section 7.9.18): three administrator-only
 # functions. The medium one tightens nothing (F8).
 ADMIN_FUNCTIONS = [
@@ -145,6 +159,7 @@ def site_specs(origin_port: int) -> list[dict]:
         site("limited", "limit.lab", advanced={"session_calls_per_minute": 2}),
         site("identity", "identity.lab", objects=IDENTITY_OBJECTS),
         site("admin", "admin.lab", objects=ADMIN_OBJECTS),
+        site("self", "self.lab", objects=SELF_OBJECTS),
         site("functions", "functions.lab", objects=FUNCTIONS_OBJECTS),
         site("baseline", "baseline.lab", objects=BASELINE_OBJECTS),
         site("fobserve", "fobserve.lab", mode="observe", objects=FOBSERVE_OBJECTS),
@@ -518,6 +533,45 @@ def b2(lab: Lab) -> None:
         Expect(403, "jev_deny", "blocked", False))
 
 
+def long_note_form() -> dict:
+    """A note of 24 fields of 420 characters and one of 1,500: its state is cut into two batches or more
+    (docs/02 section 2.4), and the request names a patient id in its path."""
+    fields = {f"field{index:02d}": "正常的文字" * 84 for index in range(24)}
+    fields["remark"] = "正常的文字" * 300
+    return fields
+
+
+@scenario("B3", "医生 A 在搜到的自己新建患者上提交两批以上的长备注：放行，每一批都带着路径里的编号")
+def b3(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    patient = lab.expect("doctor A creates a patient", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "分批备注靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    query = "/api/search?q=" + urllib.parse.quote("分批备注靶患者", safe="")
+    found = lab.expect("doctor A searches the patient by name", lab.send(
+        "emr.lab", "GET", query, cookie=cookie), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the search shows the patient to doctor A", patient in shown, f"ids {shown}")
+    noted = lab.expect("doctor A sends the long note on the patient", lab.send(
+        "emr.lab", "POST", f"/api/patients/{patient}/notes", cookie=cookie, json_body=long_note_form()),
+        Expect(201, "jev_allow", "allowed", True))
+    batches = ((noted.record or {}).get("jev") or {}).get("batches") or 0
+    lab.check("the note was judged in at least two batches", batches >= 2, f"batches {batches}")
+
+
+@scenario("B4", "同样的长备注发给医生 B 的患者，医生 A 没见过这个编号：拦截")
+def b4(lab: Lab) -> None:
+    cookie_b = lab.login("emr.lab", "doctor_b")
+    other = lab.expect("doctor B creates a patient", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "他人分批靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_a = lab.login("emr.lab", "doctor_a")
+    lab.expect("doctor A sends the same long note on doctor B's patient", lab.send(
+        "emr.lab", "POST", f"/api/patients/{other}/notes", cookie=cookie_a, json_body=long_note_form()),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.origin_direct("B4 patient of doctor B", "GET", f"/api/patients/{other}", cookie_a)
+
+
 @scenario("C1", "Jev 超时或不可用，on_jev_unavailable=deny：拦截并注明原因")
 def c1(lab: Lab) -> None:
     cookie = lab.login("deny.lab", "doctor_a")
@@ -781,6 +835,91 @@ def w4d(lab: Lab) -> None:
               traced.get("verified") is True and "attempt" not in traced, f"trace value {traced}")
 
 
+@scenario("W4e", "本人档：声明“我的患者”为 self 的站点上，医生 A 打开和删除自己的患者：放行（本人档的展示证明会话见过对象）")
+def w4e(lab: Lab) -> None:
+    # Doctor A creates a patient in one session; a new session then lists her patients. The listing
+    # is tier self, so it proves each patient in it, and opening or deleting one needs no Jev call.
+    cookie_first = lab.login("self.lab", "doctor_a", "W4e doctor A logs in on the self site")
+    own_id = lab.expect("W4e doctor A creates a patient", lab.send(
+        "self.lab", "POST", "/api/patients", cookie=cookie_first, json_body={"name": "本人档自己靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie = lab.login("self.lab", "doctor_a", "W4e doctor A logs in again, with nothing shown yet")
+    listed = lab.expect("W4e doctor A lists her patients", lab.send(
+        "self.lab", "GET", "/api/patients", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    listed_ids = [item.get("id") for item in listed.reply.json().get("patients", [])]
+    lab.check("the own listing shows the new patient", own_id in listed_ids, f"ids {listed_ids}")
+    lab.expect("W4e doctor A opens the patient her listing showed", lab.send(
+        "self.lab", "GET", f"/api/patients/{own_id}", cookie=cookie),
+        Expect(200, "fast_allow", "allowed", True))
+    lab.expect("W4e doctor A deletes the patient her listing showed", lab.send(
+        "self.lab", "DELETE", f"/api/patients/{own_id}", cookie=cookie),
+        Expect(200, "fast_allow", "allowed", True))
+    with lab.origin.lock:
+        gone = own_id not in lab.origin.patients
+    lab.check("the origin deleted the patient", gone, f"{own_id} is still there")
+
+
+@scenario("W4f", "本人档：同一站点上，医生 A 搜到医生 B 的患者后删除：拦截（越权尝试，本人档不放行别人的患者）")
+def w4f(lab: Lab) -> None:
+    cookie_b = lab.login("self.lab", "doctor_b", "W4f doctor B logs in on the self site")
+    shown_id = lab.expect("W4f doctor B creates a patient the search will find", lab.send(
+        "self.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "本人档他人靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_a = lab.login("self.lab", "doctor_a", "W4f doctor A logs in on the self site")
+    query = "/api/search?q=" + urllib.parse.quote("本人档他人靶患者", safe="")
+    found = lab.expect("W4f doctor A searches by name", lab.send(
+        "self.lab", "GET", query, cookie=cookie_a), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the search shows doctor B's patient to doctor A", shown_id in shown, f"ids {shown}")
+    denied = lab.expect("W4f doctor A deletes the patient the search showed", lab.send(
+        "self.lab", "DELETE", f"/api/patients/{shown_id}", cookie=cookie_a),
+        Expect(403, "jev_deny", "blocked", False))
+    traced = traced_value(denied.record, shown_id)
+    lab.check("the trace names the attempt and the search's tier",
+              traced.get("attempt") == "over_privilege"
+              and (traced.get("sources") or [{}])[0].get("tier") == "public",
+              f"trace value {traced}")
+    asked = judged_value(judged_request(lab, "DELETE", f"/api/patients/{shown_id}"), shown_id)
+    lab.check("Jev was shown the value as an attempt, with the search's tier",
+              asked.get("attempt") == "over_privilege"
+              and any("(tier public, reliability high)" in seen for seen in asked.get("seen_as", [])),
+              f"Jev value {asked}")
+    with lab.origin.lock:
+        kept = shown_id in lab.origin.patients
+    lab.check("the origin kept doctor B's patient", kept, f"{shown_id} is gone")
+
+
+@scenario("W4g", "本人档：医生 A 先在搜索里搜到自己的患者（删除被拦），它出现在“我的患者”里之后再删除：放行")
+def w4g(lab: Lab) -> None:
+    cookie_first = lab.login("self.lab", "doctor_a", "W4g doctor A logs in on the self site")
+    own_id = lab.expect("W4g doctor A creates a patient of her own", lab.send(
+        "self.lab", "POST", "/api/patients", cookie=cookie_first, json_body={"name": "本人档先搜后列表靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    # A new session has seen nothing yet: the search is the only response that shows the patient.
+    cookie = lab.login("self.lab", "doctor_a", "W4g doctor A logs in again, with nothing shown yet")
+    query = "/api/search?q=" + urllib.parse.quote("本人档先搜后列表靶患者", safe="")
+    found = lab.expect("W4g doctor A searches for her patient", lab.send(
+        "self.lab", "GET", query, cookie=cookie), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the search shows the patient", own_id in shown, f"ids {shown}")
+    lab.expect("W4g the delete before her listing showed it is an attempt", lab.send(
+        "self.lab", "DELETE", f"/api/patients/{own_id}", cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    listed = lab.expect("W4g doctor A lists her patients", lab.send(
+        "self.lab", "GET", "/api/patients", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    listed_ids = [item.get("id") for item in listed.reply.json().get("patients", [])]
+    lab.check("the own listing shows the patient", own_id in listed_ids, f"ids {listed_ids}")
+    deleted = lab.expect("W4g doctor A deletes the patient after her listing showed it", lab.send(
+        "self.lab", "DELETE", f"/api/patients/{own_id}", cookie=cookie),
+        Expect(200, "fast_allow", "allowed", True))
+    traced = traced_value(deleted.record, own_id)
+    lab.check("the own listing verifies the id, and it is no attempt any more",
+              traced.get("verified") is True and "attempt" not in traced, f"trace value {traced}")
+    with lab.origin.lock:
+        gone = own_id not in lab.origin.patients
+    lab.check("the origin deleted the patient", gone, f"{own_id} is still there")
+
+
 @scenario("W6", "评论作者是另一位医生且资料带手机号、邮箱：记一条属性越权告警，请求照常放行；自己的资料和未声明身份的站点不告警")
 def w6(lab: Lab) -> None:
     def response_of(sent: Sent) -> dict:
@@ -983,12 +1122,40 @@ def f13(lab: Lab) -> None:
         "fobserve.lab", "GET", "/metrics", cookie=cookie), Expect(404, "jev_deny", "would_block", True))
 
 
+@scenario("F14", "基线站点的医生 GET /api/patients/export-all（功能表的 {id} 不覆盖路由词）：交 Jev 判为未知功能，拦截")
+def f14(lab: Lab) -> None:
+    cookie = lab.login("baseline.lab", "doctor_a", "F14 doctor A logs in on the baseline site")
+    denied = lab.expect("F14 doctor A bulk-exports the patients", lab.send(
+        "baseline.lab", "GET", "/api/patients/export-all", cookie=cookie), Expect(403, "jev_deny", "blocked", False))
+    shown = (judged_state(lab, "GET", "/api/patients/export-all").get("request") or {})
+    lab.check("F14 Jev is shown the function as unknown", shown.get("function") == {"known": False},
+              f"function {shown.get('function')}")
+    traced = function_of(denied.record) or {}
+    lab.check("F14 the trace names the route word as unknown and no entry",
+              traced.get("key") == "GET /api/patients/export-all" and traced.get("known") is False
+              and "entry" not in traced, f"trace function {traced}")
+
+
+@scenario("F15", "管理员 admin_root 在基线站点（有角色身份位置，开关为真）读 GET /metrics：不带功能，不交 Jev 判未知功能")
+def f15(lab: Lab) -> None:
+    cookie = lab.login("baseline.lab", "admin_root", "F15 the administrator logs in on the baseline site")
+    lab.expect("F15 the administrator opens the home page", lab.send(
+        "baseline.lab", "GET", "/api/home", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    before = jev_calls(lab)
+    metrics = lab.expect("F15 the administrator reads the metrics", lab.send(
+        "baseline.lab", "GET", "/metrics", cookie=cookie), Expect(404, "fast_allow", "allowed", True))
+    lab.check("F15 Jev is not asked about the unknown function", jev_calls(lab) == before,
+              f"{jev_calls(lab) - before} new calls")
+    lab.check("F15 the record carries no function", function_of(metrics.record) is None,
+              f"trace function {function_of(metrics.record)}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--only", default="", help="comma separated scenario codes, e.g. A2,C4")
     arguments = parser.parse_args()
     wanted = {code.strip().upper() for code in arguments.only.split(",") if code.strip()}
-    selected = [item for item in SCENARIOS if not wanted or item[0] in wanted]
+    selected = [item for item in SCENARIOS if not wanted or item[0].upper() in wanted]
     if not selected:
         print(f"no scenario matches {arguments.only!r}", file=sys.stderr)
         return 2

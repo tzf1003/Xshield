@@ -8,9 +8,9 @@
                              [--truth FILE] [--learned FILE] [--baseline FILE] [--out DIR]
 
 Without a subcommand the command is `lab`. `lab` (effectiveness.lab) runs the training, learning and
-protection segments in quick mode. `--mode full`, `--jev record|replay`, `--keep` and `--update-baseline`
-are not built yet and exit 2. `site` (effectiveness.site) reads the suite output and the decision
-records and sends no traffic.
+protection segments in quick mode. `--jev record` and `--jev replay` (batch 9) use the relay of jev_relay.py.
+`--mode full` and `--keep` are not built yet and exit 2. `site` (effectiveness.site) reads
+the suite output and the decision records and sends no traffic.
 
 Exit status: 0 when every gate passes (a gate with no data does not fail), 1 when a gate
 fails, 2 for a usage or environment error.
