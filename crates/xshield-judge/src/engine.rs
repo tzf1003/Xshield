@@ -4104,6 +4104,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_body_with_no_type_that_is_a_form_sends_its_id_and_the_unseen_id_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The id comes after 600 characters of a value. Read as fields, it is a reference of its own,
+        // not a piece of a long input (docs/01 section 1.3).
+        let body = format!("note={}&patient_id=8", "A".repeat(600));
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: None,
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+        for body in &sent {
+            let prompt: serde_json::Value = serde_json::from_str(body).expect("the prompt is JSON");
+            assert_eq!(prompt["state"]["request"]["truncated"], json!(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_multipart_mixed_body_sends_its_id_and_the_unseen_id_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n{}\r\n\
+             --b\r\nContent-Disposition: form-data; name=\"patient_id\"\r\n\r\n8\r\n--b--\r\n",
+            "A".repeat(600)
+        );
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("multipart/mixed; boundary=b"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+        for body in &sent {
+            let prompt: serde_json::Value = serde_json::from_str(body).expect("the prompt is JSON");
+            assert_eq!(prompt["state"]["request"]["truncated"], json!(false));
+        }
+    }
+
+    #[tokio::test]
     async fn three_hundred_ids_the_session_saw_as_their_own_kind_are_fast_allowed() {
         let fake = FakeJev::new();
         let judge = judge(&fake);

@@ -105,6 +105,11 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | A12 | 医生 A 搜到医生 B 的患者 D（慢速 id `PT-7004`）后按这个 id 删除 | 拦截（尝试越权，交 Jev 判 DENY） |
 | B1 | 搜索框、表单里输入正常中文和英文文本 | 放行 |
 | B2 | 参数里带注入、命令执行、路径穿越类内容 | 拦截 |
+| B10 | 查询串里垫 200 个惰性参数，后面是医生 B 的患者编号 | 拦截（Jev 收到 `query.patient_id` 为引用） |
+| B11 | multipart 表单的字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
+| B12 | 一个值里 600 个字符的填充之后是注入串 | 拦截 |
+| B13 | 120 个字段的正常表单 | 放行到源站 |
+| B14 | 没有 `Content-Type` 的表单，字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
 | C1 | Jev 超时或不可用，`on_jev_unavailable=deny` | 拦截，日志注明 |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，日志注明"未经判定" |
 | C3 | 观察模式下的 A2 | 转发，日志记"本应拦截" |

@@ -340,13 +340,14 @@ pub fn extract_request(
     }
     let kind = content_type.map(media_kind).unwrap_or_default();
     // The body is read as its media type says (docs/01 section 1.3). A body that does not read as
-    // structured data is judged as one text.
+    // structured data is judged as one text, unless it has no type and has the shape of a form.
     let read = match kind.as_str() {
         "application/x-www-form-urlencoded" => {
             pairs(&mut out, "body", &String::from_utf8_lossy(body));
             true
         }
-        "multipart/form-data" => content_type
+        // Every multipart type with a boundary is read by its parts: form-data, mixed, related, ...
+        kind if kind.starts_with("multipart/") => content_type
             .and_then(boundary_of)
             .is_some_and(|boundary| multipart_body(&mut out, body, &boundary)),
         kind if is_json_media(kind) => walk_json(&mut out, body, "body", None),
@@ -358,7 +359,13 @@ pub fn extract_request(
         }
     };
     if !read {
-        whole_body(&mut out, body);
+        if kind.is_empty() && form_shaped(body) {
+            // A body with no type whose shape is a form is read as its fields. Every byte of it is in
+            // a field, so nothing is left out and it is not truncated (docs/01 section 1.3).
+            pairs(&mut out, "body", &String::from_utf8_lossy(body));
+        } else {
+            whole_body(&mut out, body);
+        }
     }
     out
 }
@@ -373,6 +380,16 @@ fn whole_body(out: &mut ExtractedRequest, body: &[u8]) {
         None,
         String::from_utf8_lossy(body).into_owned(),
     );
+}
+
+/// Whether a body with no type has the shape of a form (docs/01 section 1.3): once its blanks at the
+/// ends are trimmed it is not empty, it holds no whitespace or control character, and every
+/// `&`-separated segment holds an `=`.
+fn form_shaped(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body.trim_ascii());
+    !text.is_empty()
+        && !text.chars().any(|c| c.is_whitespace() || c.is_control())
+        && text.split('&').all(|segment| segment.contains('='))
 }
 
 /// Walks `bytes` as a JSON document into values at `at`. Returns false, having read nothing, when
@@ -1373,6 +1390,66 @@ mod tests {
         );
         assert!(unended.truncated);
         assert_eq!(unended.values.len(), 1);
+    }
+
+    #[test]
+    fn every_multipart_type_with_a_boundary_is_read_by_its_parts() {
+        let body = "--b\r\nContent-Disposition: form-data; name=\"patient_id\"\r\n\r\n8\r\n\
+            --b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhello\r\n--b--\r\n";
+        for kind in ["multipart/mixed", "multipart/related"] {
+            let content_type = format!("{kind}; boundary=b");
+            let request = extract_request("/", None, Some(content_type.as_str()), body.as_bytes());
+            assert_eq!(
+                located(&request),
+                [("body.patient_id", "8"), ("body.note", "hello")],
+                "{kind}"
+            );
+            assert_eq!(
+                request.values[0].key.as_deref(),
+                Some("patient_id"),
+                "{kind}"
+            );
+            assert!(!request.truncated, "{kind}");
+            // The boundary and the part headers are in no value.
+            assert!(
+                request.values.iter().all(|value| {
+                    !value.value.contains("--b") && !value.value.contains("Content-Disposition")
+                }),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_with_no_type_that_is_a_form_is_read_as_its_fields() {
+        let request = extract_request("/", None, None, b"patient_id=8&note=routine");
+        assert!(!request.truncated);
+        assert_eq!(
+            located(&request),
+            [("body.patient_id", "8"), ("body.note", "routine")]
+        );
+        assert!(request.values.iter().any(
+            |value| value.at == "body.patient_id" && value.key.as_deref() == Some("patient_id")
+        ));
+    }
+
+    #[test]
+    fn a_body_with_no_type_that_is_not_a_form_stays_one_text() {
+        for text in [
+            "a sentence with spaces",
+            "a=1&b",
+            "a=1\nb=2",
+            "a=1&&b=2",
+            "a=1&",
+        ] {
+            let request = extract_request("/", None, None, text.as_bytes());
+            assert!(request.truncated, "{text:?}");
+            assert_eq!(located(&request), [("body", text)], "{text:?}");
+        }
+        // Other types are not read as forms, whatever their shape.
+        let plain = extract_request("/", None, Some("text/plain"), b"patient_id=8&note=routine");
+        assert!(plain.truncated);
+        assert_eq!(located(&plain), [("body", "patient_id=8&note=routine")]);
     }
 
     #[test]

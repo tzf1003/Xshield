@@ -40,8 +40,9 @@
 
 - 表单（`application/x-www-form-urlencoded`）：每个字段一个值，位置 `body.<字段名>`。
 - JSON（`application/json` 及 `application/…+json`）：每个标量一个值。嵌套超过 16 层的对象或数组整棵保留为它的 JSON 文本，作为当前位置的一个值，不丢弃。
-- `multipart/form-data`：按 `boundary` 切成部分，取 `Content-Disposition` 里的 `name`。文本部分的内容和表单字段一样处理，位置 `body.<name>`，键是 `name`；带 `filename` 或 `filename*` 的文件部分只把文件名作为值放在 `body.<name>#filename`，不带键，**内容不拆值、不判定**。没有边界、没有部分，按整段。
-- 其他类型，或没有 `Content-Type`：去掉首尾空白后以 `{` 或 `[` 开头且能解析成 JSON 的，按 JSON；否则按**整段**。
+- `multipart/*`，只要带 `boundary`（`multipart/form-data`、`multipart/mixed`、`multipart/related` 等）：按 `boundary` 切成部分，取 `Content-Disposition` 里的 `name`。文本部分的内容和表单字段一样处理，位置 `body.<name>`，键是 `name`；部分自己的类型是 JSON 且能解析时，按 JSON 展开到 `body.<name>` 之下。没有 `name` 的部分放在 `body`，没有键。带 `filename` 或 `filename*` 的文件部分只把文件名作为值放在 `body.<name>#filename`，不带键，**内容不拆值、不判定**。没有边界、没有部分，按整段。
+- 没有 `Content-Type`：去掉首尾空白后以 `{` 或 `[` 开头且能解析成 JSON 的，按 JSON。不是 JSON、而形状是表单的，按表单读：每个字段一个值，位置 `body.<字段名>`，`truncated` 为假。形状的判据：去掉首尾空白后非空，不含任何空白字符和控制字符，按 `&` 切开后每一段都含 `=`。其余的按**整段**。
+- 其他类型（如 `text/plain`、`text/xml`）：去掉首尾空白后以 `{` 或 `[` 开头且能解析成 JSON 的，按 JSON；否则按**整段**。这些类型的正文即使形状是表单也不按表单读，常见框架不把它们当表单解析。
 - **整段**：正文按 UTF-8（有损）解码后作为一个值放在 `body`，没有键，不限长度。`truncated` 为真，表示正文没有被完整拆成请求值。超过 512 个字符的值由 [02](02-jev.md) 2.2 分片送判。
 
 键名超过 64 个字符，或含 `$`、引号、分隔符这类语法字符，本身作为一个 `#name` 值送判。
