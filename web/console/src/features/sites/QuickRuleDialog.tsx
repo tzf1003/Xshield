@@ -4,7 +4,7 @@
 
 import { Link } from "@tanstack/react-router";
 import { Modal, Radio } from "antd";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ApiError } from "../../api/client.ts";
 import { useEvidence, usePreview, useSaveSite, useSite } from "../../api/queries.ts";
 import type { SiteSpec } from "../../api/types.ts";
@@ -27,6 +27,8 @@ type Props = {
   target: QuickTarget | null;
   onClose: () => void;
 };
+
+const FOLLOW_MS = 30_000;
 
 const TITLES: Record<QuickTarget["kind"], string> = {
   entry: "登记为入口",
@@ -142,11 +144,26 @@ function QuickRuleBody({ target, onClose }: { target: QuickTarget; onClose: () =
 
   const issues = draft ? validateSpec(draft) : { errors: [], warnings: [] };
   const preview = usePreview(target.site, issues.errors.length === 0 ? draft : null);
+  // After a save the site is polled each second until the gateway has loaded
+  // the version, for 30 s at most (docs/07 7.10.4).
+  const [following, setFollowing] = useState(false);
   const siteState = useSite(savedVersion === null ? null : target.site, {
-    refetchInterval: savedVersion === null ? false : 1000,
+    refetchInterval: following ? 1000 : false,
   });
   const loaded = siteState.data?.loaded_version ?? null;
   const effective = savedVersion !== null && loaded !== null && loaded >= savedVersion;
+  useEffect(() => {
+    if (savedVersion === null || effective) {
+      setFollowing(false);
+      return;
+    }
+    setFollowing(true);
+    const timer = setTimeout(() => setFollowing(false), FOLLOW_MS);
+    return () => clearTimeout(timer);
+  }, [savedVersion, effective]);
+  const waiting = `已保存 v${savedVersion} · ${
+    following ? "等待网关加载…" : "网关 30 秒内没有加载，请到站点页查看状态"
+  }`;
 
   const change = choices.length > 0 ? (choices[selected]?.value ?? "") : "";
   const impact = preview.data?.changes ?? [];
@@ -328,9 +345,7 @@ function QuickRuleBody({ target, onClose }: { target: QuickTarget; onClose: () =
           ) : (
             <div className="stack">
               <div className={effective ? undefined : "muted"} role="status">
-                {effective
-                  ? `● v${savedVersion} 已生效`
-                  : `已保存 v${savedVersion} · 等待网关加载…`}
+                {effective ? `● v${savedVersion} 已生效` : waiting}
               </div>
               <div className="row saved-links" style={{ justifyContent: "flex-end" }}>
                 <Link to="/sites/$name" params={{ name: target.site }} search={{ tab: "history" }}>
