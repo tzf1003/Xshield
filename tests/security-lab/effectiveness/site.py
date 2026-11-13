@@ -105,6 +105,7 @@ def _score_site(args: argparse.Namespace, started: datetime, clock: float) -> in
                    exclude_suspicious=True, probe_values_from_record=True)
     _apply_real_site_rules(result, has_learning=learned is not None)
     result["label_checks"]["business_error"] = converted.business_error
+    result["label_checks"]["conflict"] = converted.conflicts
     result["skipped"].extend(_suite_skips(converted))
     result["passed"] = all(gate["ok"] is not False for gate in result["gates"])
 
@@ -116,7 +117,8 @@ def _score_site(args: argparse.Namespace, started: datetime, clock: float) -> in
         "started": started.isoformat(timespec="seconds"),
         "seconds": round(time.monotonic() - clock, 3),
         "site": label,
-        "note": f"站点模式：{mode_text}；origin_served 未知，P5 未执行",
+        "note": (f"站点模式：{mode_text}；套件计分行 {converted.scored_rows} 个，"
+                 f"对应请求 {converted.requests} 个；origin_served 未知，P5 未执行"),
     }
     _write_observations(out / "observations.jsonl", converted.observations)
     if args.truth is not None:

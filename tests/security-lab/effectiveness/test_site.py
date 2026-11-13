@@ -30,6 +30,8 @@ from effectiveness.adapters.browser_suite import (
 from effectiveness.builders import decision, entry, jev, source
 from effectiveness.cli import PASSWORD_ENV, main
 from effectiveness.contracts import ContractError, load_learned, load_observations, load_truth
+from effectiveness.report import _label_lines
+from effectiveness.score import _costs, _label_flags, score
 from effectiveness.site import learned_from_objects
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -144,6 +146,31 @@ class AdapterTests(_Fixture):
         self.assertEqual(by_case["block-with-session"]["mode"], "observe")
         self.assertTrue(all(row["origin_served"] is None for row in converted.observations))
 
+    def test_rows_that_share_a_request_and_labels_become_one_observation(self) -> None:
+        shared = {"traffic": "benign", "expected": "allow", "category": "Improper Input Validation",
+                  "url": "http://juice.test/rest/user/login", "request_id": "req_shared", "status": 200}
+        folder = write_suite(self.root / "suite", {1: [suite_row("login-admin", **shared),
+                                                       suite_row("login-jim", **shared),
+                                                       suite_row("login-bob", **shared)]})
+        converted = to_observations(read_runs(folder), site="juice", config="juice", mode="observe")
+        self.assertEqual([row["case"] for row in converted.observations], ["login-admin"])
+        self.assertIn("合并 3 行：login-jim、login-bob", converted.observations[0]["note"])
+        self.assertEqual((converted.scored_rows, converted.requests, converted.conflicts), (3, 1, []))
+        # One request is one benign observation in the scorer's denominator.
+        origin = decision("req_shared", path="fast_allow", outcome="allowed", session="s1", route="/rest/user/login")
+        self.assertEqual(score(converted.observations, [origin])["metrics"]["S3"]["den"], 1)
+
+    def test_rows_that_share_a_request_with_different_labels_are_not_scored(self) -> None:
+        folder = write_suite(self.root / "suite", {1: [
+            suite_row("attack-side", category="Injection", request_id="req_clash"),
+            suite_row("benign-side", traffic="benign", expected="allow", category="Improper Input Validation",
+                      request_id="req_clash", status=200),
+        ]})
+        converted = to_observations(read_runs(folder), site="juice", config="juice", mode="observe")
+        self.assertEqual(converted.observations, [])
+        self.assertEqual(converted.conflicts, [{"request_id": "req_clash", "cases": ["attack-side", "benign-side"]}])
+        self.assertEqual((converted.scored_rows, converted.requests), (2, 1))
+
     def test_an_unsent_observe_row_is_counted_as_unsent_not_observed(self) -> None:
         folder = write_suite(self.root / "suite", {1: [
             suite_row("observe-sent", expected="observe", request_id="req_9"),
@@ -204,6 +231,46 @@ class AdapterTests(_Fixture):
         start, end = window or (0, 0)
         self.assertEqual(end - start, 1000)
         self.assertEqual(start, 1794168429000)  # 2026-11-09T04:07:09+08:00 in Unix milliseconds
+
+
+class SiteRuleTests(unittest.TestCase):
+    """The scorer's share of the site rules (plan 4.6): the all-values suspicious check, the cost line and
+    the label section that lists a conflict."""
+
+    def test_a_site_probe_is_suspicious_only_when_every_value_it_carries_was_verified(self) -> None:
+        shown = decision("req_show", path="fast_allow", outcome="allowed", session="s1", route="/api/search")
+        records = {"req_show": shown}
+        row = {"expect": "block", "reason": "access", "refs": []}
+
+        def probe(*values: dict[str, Any]) -> dict[str, Any]:
+            return decision("req_probe", path="jev_deny", outcome="blocked", session="s1",
+                            route="/rest/basket/3", values=list(values))
+
+        verified = entry("42", verified=True, sources=[source("req_show")])
+        unverified = entry("43", verified=False, sources=[source("req_show")])
+        second = entry("44", verified=True, sources=[source("req_show")])
+        self.assertEqual(_label_flags(row, probe(), records, from_record=True), (False, False))
+        self.assertEqual(_label_flags(row, probe(verified, unverified), records, from_record=True), (False, False))
+        self.assertEqual(_label_flags(row, probe(verified, second), records, from_record=True), (True, False))
+
+    def test_the_cost_line_counts_judged_records_and_leaves_bypass_out(self) -> None:
+        decisions = [
+            decision("req_bypass", path="bypass", outcome="allowed", session="s1", route="/assets/x.json"),
+            decision("req_fast", path="fast_allow", outcome="allowed", session="s1", route="/api/a"),
+            decision("req_jev", path="jev_allow", outcome="allowed", session="s1", route="/api/b",
+                     jev_record=jev(access="ALLOW", attack="BENIGN")),
+        ]
+        costs = _costs(decisions)
+        self.assertEqual((costs["requests"], costs["judged_requests"]), (3, 2))
+        self.assertEqual(costs["fast_share"], 0.5)
+        self.assertEqual(costs["calls_per_judged_request"], 0.5)
+        self.assertEqual(costs["calls_per_request"], 0.5)
+
+    def test_a_conflict_is_listed_in_the_label_section(self) -> None:
+        lines = _label_lines({"applied": False, "suspicious": [], "bypass": [], "excluded": 0,
+                              "conflict": [{"request_id": "req_clash", "cases": ["attack-side", "benign-side"]}]})
+        self.assertIn("- 标签冲突（同一请求 ID 的标签不一致，全部不计分）：1 个请求", lines)
+        self.assertIn("  - 请求 req_clash：attack-side、benign-side", lines)
 
 
 class SiteRunTests(_Fixture):

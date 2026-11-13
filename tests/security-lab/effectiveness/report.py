@@ -217,6 +217,10 @@ def _label_lines(checks: dict[str, Any]) -> list[str]:
         cases = checks["business_error"]
         lines.append("- 源站业务错误（套件标 business_error）：" + f"{len(cases)} 条，{names(cases)}"
                      + "；已按判定记录计分，源站状态码不参与计分")
+    if "conflict" in checks:
+        conflicts = checks["conflict"]
+        lines.append(f"- 标签冲突（同一请求 ID 的标签不一致，全部不计分）：{len(conflicts)} 个请求")
+        lines += [f"  - 请求 {item['request_id']}：{'、'.join(item['cases'])}" for item in conflicts]
     return lines
 
 
@@ -309,7 +313,10 @@ def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
     failures = "、".join(f"{code} {count} 次" for code, count in costs["jev_failures"].items()) or "无"
     lines += ["", f"## 7 {SECTION_TITLES[6]}", "",
               f"- Jev 调用次数：{costs['jev_calls']}（判定记录 {costs['requests']} 条，"
-              f"每请求 {_ratio(costs['calls_per_request'])} 次）",
+              f"已判定 {costs['judged_requests']} 条，每已判定请求 {_ratio(costs['calls_per_request'])} 次）",
+              f"- 窗口内全部已判定记录 {costs['judged_requests']} 条（含探针，不含 bypass）："
+              f"快速放行占比 {_pct(costs['fast_share'])}，每个已判定请求的 Jev 调用数 "
+              f"{_ratio(costs['calls_per_judged_request'])}",
               f"- 判定耗时：中位数 {_count(costs['judge_ms_median'])} ms，p95 {_count(costs['judge_ms_p95'])} ms",
               f"- Jev 失败码：{failures}",
               "", f"## 8 {SECTION_TITLES[7]}", ""]

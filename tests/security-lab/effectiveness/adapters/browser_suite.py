@@ -13,6 +13,9 @@ Mapping, row by row:
 - The request ID is response.headers["x-xshield-request-id"], looked up without regard to case. A row with
   no response has an empty request ID, which matches no decision record, so the scorer counts it as a
   missing record.
+- The count unit is the request, not the row (plan 4.6). Rows that share a request ID and the same group,
+  expect and reason become one observation, named by the first row. Rows that share a request ID with
+  different labels are not scored and are listed as a label conflict.
 - outcome business_error is scored from the decision record like any other row. The origin's status code
   is kept as client_status for the report and never decides anything.
 - The expected reason is not stated by the suite, so it is inferred and the report says so: a block sent
@@ -60,11 +63,14 @@ class SuiteRun:
 class Conversion:
     """The observation rows of a suite, and what was left out of them."""
 
-    observations: list[dict[str, Any]] = field(default_factory=list)
+    observations: list[dict[str, Any]] = field(default_factory=list)  # one per request, plan 4.6
     observe: int = 0  # expected observe: recorded by the suite, not scored
     unrun: int = 0  # outcome unsupported or not_run: never sent
-    business_error: list[str] = field(default_factory=list)  # case names of the business_error rows
+    business_error: list[str] = field(default_factory=list)  # case names of the business_error observations
     unmatched: int = 0  # scored rows with no request ID
+    scored_rows: int = 0  # scored rows before the rows that share a request are merged
+    requests: int = 0  # distinct requests behind the scored rows; a row with no request ID counts as one
+    conflicts: list[dict[str, Any]] = field(default_factory=list)  # same request ID, different labels: not scored
 
 
 def read_runs(source: Path) -> list[SuiteRun]:
@@ -152,12 +158,50 @@ def _millis(text: Any) -> int | None:
 def to_observations(runs: list[SuiteRun], *, site: str, config: str, mode: str) -> Conversion:
     """Maps every row of every run (plan 4.6). `mode` is the site's mode, read from the decision records."""
     result = Conversion()
+    scored: list[dict[str, Any]] = []
     for run in runs:
         for index, row in enumerate(run.rows, 1):
             observation = _observation(run, index, row, site=site, config=config, mode=mode, result=result)
             if observation is not None:
-                result.observations.append(observation)
+                scored.append(observation)
+    result.scored_rows = len(scored)
+    _one_observation_per_request(scored, result)
+    result.business_error = [row["case"] for row in result.observations if BUSINESS_NOTE in row["note"]]
     return result
+
+
+def _one_observation_per_request(scored: list[dict[str, Any]], result: Conversion) -> None:
+    """The count unit is the request (plan 4.6). Rows that share a request ID and the same group, expect and
+    reason are one observation, named by the first row. Rows that share a request ID with different labels
+    are not scored at all; the report lists them as a conflict."""
+    members: dict[str, list[dict[str, Any]]] = {}
+    for row in scored:
+        if row["request_id"]:
+            members.setdefault(row["request_id"], []).append(row)
+    result.requests = len(members) + result.unmatched
+    emitted: set[str] = set()
+    for row in scored:
+        request_id = row["request_id"]
+        if not request_id:
+            result.observations.append(row)
+            continue
+        if request_id in emitted:
+            continue
+        emitted.add(request_id)
+        group = members[request_id]
+        labels = {(member["group"], member["expect"], member["reason"]) for member in group}
+        if len(labels) > 1:
+            result.conflicts.append({"request_id": request_id, "cases": [member["case"] for member in group]})
+            continue
+        if len(group) > 1:
+            row["note"] = _merged_note(group)
+        result.observations.append(row)
+
+
+def _merged_note(group: list[dict[str, Any]]) -> str:
+    parts = [BUSINESS_NOTE] if any(member["note"] == BUSINESS_NOTE for member in group) else []
+    parts.append(f"合并 {len(group)} 行：" + "、".join(member["case"] for member in group[1:]))
+    return "；".join(parts)
 
 
 def _observation(run: SuiteRun, index: int, row: dict[str, Any], *, site: str, config: str, mode: str,
@@ -182,10 +226,7 @@ def _observation(run: SuiteRun, index: int, row: dict[str, Any], *, site: str, c
     response = _mapping(row.get("response"))
     request_id = _request_id(response)
     category = row.get("category") if isinstance(row.get("category"), str) else "未分类"
-    note = ""
-    if row.get("outcome") == BUSINESS_ERROR:
-        note = BUSINESS_NOTE
-        result.business_error.append(probe)
+    note = BUSINESS_NOTE if row.get("outcome") == BUSINESS_ERROR else ""
     if not request_id:
         result.unmatched += 1
     return {

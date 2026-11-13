@@ -217,17 +217,24 @@ def _label_flags(row: dict[str, Any], rec: dict[str, Any], records: dict[str, di
                  from_record: bool = False) -> tuple[bool, bool]:
     """Section 4.6 checks for a probe. Only expected blocks are probes. The values checked are the probe's
     references, or with from_record every value its decision record carries: a real site has no origin
-    truth to name the references by."""
+    truth to name the references by. With from_record the probe is suspicious only when every one of those
+    values was verified and came from this session, so one unverified value keeps the probe in the rate."""
     if row["expect"] != "block":
         return False, False
-    values = _record_values(rec) if from_record else [ref["value"] for ref in row["refs"]]
-    suspicious = row["reason"] == "access" and any(
-        bool(entry.get("verified"))
-        and any(_same_session(rec, source, records) for source in entry.get("sources") or [])
-        for value in values
-        for entry in _entries(rec, value)
-    )
+    if from_record:
+        values = _record_values(rec)
+        suspicious = row["reason"] == "access" and bool(values) and all(
+            any(_proven_here(rec, entry, records) for entry in _entries(rec, value)) for value in values)
+    else:
+        suspicious = row["reason"] == "access" and any(
+            _proven_here(rec, entry, records) for ref in row["refs"] for entry in _entries(rec, ref["value"]))
     return suspicious, rec["decision_path"] == "bypass"
+
+
+def _proven_here(rec: dict[str, Any], entry: dict[str, Any], records: dict[str, dict[str, Any]]) -> bool:
+    """The value was verified, and one of the sources it came from was in this session."""
+    return bool(entry.get("verified")) and any(
+        _same_session(rec, source, records) for source in entry.get("sources") or [])
 
 
 def _record_values(rec: dict[str, Any]) -> list[str]:
@@ -517,15 +524,25 @@ def _p95(values: list[int]) -> int | None:
 
 
 def _costs(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    # A bypass never reached a decision, so it is not a judged record (plan 4.6). The lab has none, so its
+    # figures do not move. calls_per_request is the cost line's figure; calls_per_judged_request is the same
+    # figure under the name the plan uses for the window-wide count.
+    judged = [rec for rec in decisions if rec["decision_path"] != "bypass"]
     calls = sum(_jev_calls(rec) for rec in decisions)
+    judged_calls = sum(_jev_calls(rec) for rec in judged)
+    fast = sum(rec["decision_path"] in FAST_PATHS for rec in judged)
     timings = [value for value in (_judge_ms(rec) for rec in decisions) if value is not None]
     failures = Counter(
         (rec.get("jev") or {}).get("failure") for rec in decisions if (rec.get("jev") or {}).get("failure")
     )
+    per_judged = judged_calls / len(judged) if judged else None
     return {
         "requests": len(decisions),
         "jev_calls": calls,
-        "calls_per_request": calls / len(decisions) if decisions else None,
+        "judged_requests": len(judged),
+        "calls_per_request": per_judged,
+        "fast_share": fast / len(judged) if judged else None,
+        "calls_per_judged_request": per_judged,
         "judge_ms_median": statistics.median(timings) if timings else None,
         "judge_ms_p95": _p95(timings),
         "jev_failures": dict(sorted(failures.items())),
