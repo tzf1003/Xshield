@@ -1,8 +1,8 @@
 // The cold start list (console design 1): the named positions the recent requests read, grouped by the class the rules
 // propose, each with the class it will be written as. The empty map's cold start panel and the wizard's object step
-// both show it. The selection lives in a hook, so the footer of each page can confirm what is picked (1.6): a field
-// position becomes a field declaration, a path position an object slot, and a class the map lacks is added with its
-// name. Nothing is written until the save dialog saves the draft.
+// both show it. The selection lives in a hook, so the footer of each page can confirm what is picked (1.6): each
+// position becomes an object slot under its key, and a class the map lacks is added with its name. Nothing is written
+// until the save dialog saves the draft.
 
 import { useState } from "react";
 import type { BootstrapCandidate, ObjectClass, ObjectSide, SiteSpec } from "../../../api/types.ts";
@@ -11,7 +11,6 @@ import {
   checkDeclarations,
   checkKind,
   checkObjects,
-  declarationProblem,
   pathSlotOf,
 } from "../../../lib/objects-validate.ts";
 import { nameReasonText, OBJECT_SIDE_INFO, OBJECT_TEXT, DECLARE_TEXT } from "../../../lib/vocab.ts";
@@ -22,10 +21,8 @@ import {
   type BootstrapChoice,
   type BootstrapPlan,
   candidateName,
-  entriesOf,
   fieldOfKey,
   planBootstrap,
-  scopeOfKey,
 } from "./objects-model.ts";
 
 /** What the user has changed on one row; the rest follows the candidate. */
@@ -125,7 +122,7 @@ export function useBootstrapSelection(
   const plan = planBootstrap(choices, classes, working.objects);
 
   const messages = [
-    ...checkDeclarations([...(working.advanced?.field_kinds ?? []), ...plan.declarations]),
+    ...checkDeclarations(working.advanced?.field_kinds ?? []),
     ...checkObjects({
       classes: [...(working.objects?.classes ?? []), ...plan.classes],
       slots: [...(working.objects?.slots ?? []), ...plan.slots],
@@ -148,24 +145,14 @@ export function useBootstrapSelection(
   };
 }
 
-/** Why a position cannot take this class: the backend's conflict, or what the draft already says about it. */
+/** Why a position cannot take this class: the backend's conflict, or the slot the draft already holds for its key. */
 function blockedBy(candidate: BootstrapCandidate, kind: string, working: SiteSpec): string | null {
   if (candidate.conflict !== null) return OBJECT_TEXT.coldStart.conflict(candidate.conflict);
-  const field = fieldOfKey(candidate.key);
-  if (field !== null) {
-    const declaration = { field, kind, in: [scopeOfKey(candidate.key)] };
-    const clash = declarationProblem(working.advanced?.field_kinds ?? [], declaration);
-    if (clash === null) return null;
-    return clash.kind === "duplicate"
-      ? OBJECT_TEXT.coldStart.inDraft
-      : OBJECT_TEXT.coldStart.conflict(clash.with.kind);
-  }
-  const held = entriesOf(working, candidate.key);
-  if (held.length === 0) return null;
   const same = (working.objects?.slots ?? []).find((item) => item.key === candidate.key);
-  return same !== undefined && same.class === kind
+  if (same === undefined) return null;
+  return same.class === kind
     ? OBJECT_TEXT.coldStart.inDraft
-    : OBJECT_TEXT.coldStart.conflict(same?.class ?? kind);
+    : OBJECT_TEXT.coldStart.conflict(same.class);
 }
 
 /** The source of a candidate in words: the rule that named its class (console design 1.5). */
@@ -321,12 +308,7 @@ export function BootstrapList({ selection, classes, windowHours, records }: Prop
         <div className="small muted">{OBJECT_TEXT.coldStart.noneChosen}</div>
       ) : (
         <div className="small muted">
-          {OBJECT_TEXT.coldStart.summary(
-            plan.declarations.length,
-            plan.slots.length,
-            plan.classes.length,
-            names,
-          )}
+          {OBJECT_TEXT.coldStart.summary(plan.slots.length, plan.classes.length, names)}
         </div>
       )}
     </div>
