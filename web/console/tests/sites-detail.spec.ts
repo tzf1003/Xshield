@@ -3,7 +3,7 @@
 
 import { expect, type Page, test } from "@playwright/test";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
-import { mockApi } from "./helpers/mock-api.ts";
+import { mockApi, reply } from "./helpers/mock-api.ts";
 import { callsTo, freezeClock } from "./helpers/sites-flow.ts";
 
 async function openSite(page: Page, path: string): Promise<void> {
@@ -201,6 +201,25 @@ test("an unknown site says it is not there", async ({ page }) => {
 
   await expect(page.getByRole("alert")).toContainText("站点不存在，可能已被删除");
   await expect(page.getByRole("alert")).toContainText("SITE_NOT_FOUND");
+});
+
+test("a failed delete says so and stays on the page", async ({ page }) => {
+  await freezeClock(page);
+  await mockApi(page, {
+    overrides: { "DELETE /api/sites/emr": reply(500, { error: "INTERNAL" }) },
+  });
+  await page.goto("/sites/emr");
+  await expect(page.getByRole("tablist")).toBeVisible();
+
+  await page.getByRole("button", { name: "更多操作" }).click();
+  await page.getByRole("menuitem", { name: "删除站点" }).click();
+  const confirm = page.getByRole("dialog", { name: "删除站点 emr？" });
+  await confirm.getByRole("button", { name: "删除站点" }).click();
+
+  await expect.poll(() => callsTo(page, "DELETE", "/api/sites/emr").length).toBe(1);
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page).toHaveURL((url) => url.pathname === "/sites/emr");
+  await expect(page.getByRole("heading", { level: 1, name: "emr" })).toBeVisible();
 });
 
 const PAGES = [

@@ -3,6 +3,7 @@
 
 import {
   keepPreviousData,
+  type QueryClient,
   useInfiniteQuery,
   useMutation,
   useQuery,
@@ -18,6 +19,7 @@ import type {
   ObjectEventsFilter,
   ObjectJudgementConfirmation,
   ObjectsFilter,
+  SiteDetail,
   SiteSpec,
   SiteWriteBody,
 } from "./types.ts";
@@ -236,6 +238,17 @@ export function useLogin() {
   });
 }
 
+/** A site got a new version: its detail is replaced, and everything computed for the old version is read again. */
+function siteVersionChanged(client: QueryClient, site: SiteDetail): void {
+  client.setQueryData(keys.site(site.name), site);
+  void client.invalidateQueries({ queryKey: keys.sites });
+  void client.invalidateQueries({ queryKey: keys.versions(site.name) });
+  void client.invalidateQueries({ queryKey: keys.insights(site.name) });
+  // A save can undo an automatic change or move a position, so the map and its events are read again.
+  void client.invalidateQueries({ queryKey: ["objects", site.name] });
+  void client.invalidateQueries({ queryKey: ["object-events", site.name] });
+}
+
 /** Saves a configuration as a new version. `expected_version` makes a stale save fail (409). */
 export function useSaveSite() {
   const client = useQueryClient();
@@ -249,15 +262,7 @@ export function useSaveSite() {
         object_event: args.body?.object_event,
       });
     },
-    onSuccess: (site) => {
-      client.setQueryData(keys.site(site.name), site);
-      void client.invalidateQueries({ queryKey: keys.sites });
-      void client.invalidateQueries({ queryKey: keys.versions(site.name) });
-      void client.invalidateQueries({ queryKey: keys.insights(site.name) });
-      // A save can undo an automatic change or move a position, so the map and its events are read again.
-      void client.invalidateQueries({ queryKey: ["objects", site.name] });
-      void client.invalidateQueries({ queryKey: ["object-events", site.name] });
-    },
+    onSuccess: (site) => siteVersionChanged(client, site),
   });
 }
 
@@ -283,11 +288,7 @@ export function useRollback() {
         expected_version: args.expectedVersion,
         note: args.note,
       }),
-    onSuccess: (site) => {
-      client.setQueryData(keys.site(site.name), site);
-      void client.invalidateQueries({ queryKey: keys.versions(site.name) });
-      void client.invalidateQueries({ queryKey: keys.sites });
-    },
+    onSuccess: (site) => siteVersionChanged(client, site),
   });
 }
 
@@ -295,11 +296,24 @@ export function useLookup() {
   return useMutation({ mutationFn: (ids: string[]) => api.lookup(ids) });
 }
 
+/** The key roots of every list and figure built from the decision log. */
+const DECISION_LOG_ROOTS = [
+  "requests",
+  "requests-pages",
+  "counts",
+  "sessions",
+  "summary",
+  "timeseries",
+  "jev-stats",
+] as const;
+
 export function useImport() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (text: string) => api.importLog(text),
-    onSuccess: () => client.invalidateQueries({ queryKey: ["requests"] }),
+    // An import adds records, so every list and figure built from the log is read again.
+    onSuccess: () =>
+      Promise.all(DECISION_LOG_ROOTS.map((root) => client.invalidateQueries({ queryKey: [root] }))),
   });
 }
 

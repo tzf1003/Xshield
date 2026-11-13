@@ -46,7 +46,7 @@
 - 提交标题用英文 Conventional Commits，带范围：`feat(judge): …`、`fix(control): …`、`test(lab): …`、`docs(design): …`。
 - 用户可见的行为变化在 `CHANGELOG.md` 的 `Unreleased` 顶部加一条中文记录，并同步对应的 docs 章节；行为与文档不一致算缺陷。
 - PR 描述按 `templates/pull-request.md` 的五个标题填写（它不在 `.github/` 下，GitHub 不会自动带出）。
-- `validation/report.*` 由 `scripts/validate_library.py` 生成，不手改。
+- `validation/report.*` 由 `scripts/validate_library.py` 每次运行时生成，不入库（已在 `.gitignore`），不要提交。
 
 ## 不要为了变绿而做的事
 跳过、忽略或删除失败的测试；放宽 clippy 或 biome 规则、加 `#[allow]` 压掉告警；修改 `.github/workflows/` 或 `deny.toml` 让检查不再运行；给 e2e 加重试掩盖真实失败。检查失败时修原因；确实要调整门槛时，在 PR 里单独说明理由。

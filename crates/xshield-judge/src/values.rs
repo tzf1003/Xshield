@@ -284,6 +284,25 @@ fn push(out: &mut ExtractedRequest, at: String, key: Option<String>, value: Stri
     });
 }
 
+/// The media type of a `Content-Type` header value: the part before the parameters,
+/// trimmed and in lower case.
+#[must_use]
+pub fn media_kind(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Whether a media type (parameters already removed, lower case) is a JSON document:
+/// `application/json` or a structured-syntax suffix type such as `application/vnd.api+json`.
+#[must_use]
+pub fn is_json_media(kind: &str) -> bool {
+    kind == "application/json" || (kind.starts_with("application/") && kind.ends_with("+json"))
+}
+
 /// Extracts every value of one request. The credential is never passed in.
 #[must_use]
 pub fn extract_request(
@@ -308,16 +327,7 @@ pub fn extract_request(
     if body.is_empty() {
         return out;
     }
-    let kind = content_type
-        .map(|value| {
-            value
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase()
-        })
-        .unwrap_or_default();
+    let kind = content_type.map(media_kind).unwrap_or_default();
     if body.len() > BODY_PARSE_MAX {
         out.truncated = true;
     }
@@ -327,10 +337,12 @@ pub fn extract_request(
                 pairs(&mut out, "body", &String::from_utf8_lossy(body));
                 true
             }
-            "application/json" => serde_json::from_slice::<Value>(body).is_ok_and(|json| {
-                walk_request(&mut out, &json, "body", None, 0);
-                true
-            }),
+            kind if is_json_media(kind) => {
+                serde_json::from_slice::<Value>(body).is_ok_and(|json| {
+                    walk_request(&mut out, &json, "body", None, 0);
+                    true
+                })
+            }
             _ => false,
         };
     if !parsed {
@@ -452,18 +464,9 @@ pub fn extract_response_facts(content_type: Option<&str>, body: &[u8]) -> Respon
     if body.len() > RESPONSE_PARSE_MAX {
         return facts;
     }
-    let kind = content_type
-        .map(|value| {
-            value
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase()
-        })
-        .unwrap_or_default();
+    let kind = content_type.map(media_kind).unwrap_or_default();
     match kind.as_str() {
-        "application/json" => {
+        kind if is_json_media(kind) => {
             if let Ok(json) = serde_json::from_slice::<Value>(body) {
                 let mut shape = BTreeSet::new();
                 walk_response(&mut facts.values, &mut shape, &json, "", "value", "", 0);
@@ -858,6 +861,64 @@ mod tests {
         for field in ["age", "name", "status"] {
             assert!(!is_id_like(field), "{field}");
         }
+    }
+
+    #[test]
+    fn json_media_is_application_json_or_a_json_suffix_type() {
+        for kind in [
+            "application/json",
+            "application/vnd.api+json",
+            "application/problem+json",
+        ] {
+            assert!(is_json_media(kind), "{kind}");
+        }
+        for kind in [
+            "text/html",
+            "application/x-ndjson",
+            "application/jsonp",
+            "text/json",
+            "",
+        ] {
+            assert!(!is_json_media(kind), "{kind}");
+        }
+        assert_eq!(
+            media_kind(" Application/Vnd.API+JSON ; charset=utf-8"),
+            "application/vnd.api+json"
+        );
+    }
+
+    #[test]
+    fn a_json_suffix_request_body_is_read_like_application_json() {
+        let body = br#"{"patient":{"id":7,"tags":["a","b"],"ok":true},"note":"x' OR 1=1"}"#;
+        let suffix = extract_request(
+            "/",
+            None,
+            Some("application/vnd.api+json; charset=utf-8"),
+            body,
+        );
+        assert!(!suffix.truncated);
+        assert!(values(&suffix).contains(&("body.patient.id", "7", false)));
+        assert_eq!(
+            suffix,
+            extract_request("/", None, Some("application/json"), body)
+        );
+    }
+
+    #[test]
+    fn a_json_suffix_response_body_is_read_like_application_json() {
+        let body = br#"{"items":[{"id":7,"name":"A","age":8},{"id":9}],"total":2,"ok":true}"#;
+        let suffix = extract_response_facts(Some("application/vnd.api+json; charset=utf-8"), body);
+        assert!(
+            suffix
+                .values
+                .iter()
+                .any(|value| value.field == "id" && value.value == "7")
+        );
+        assert!(suffix.shape.is_some());
+        assert_eq!(
+            suffix,
+            extract_response_facts(Some("application/json"), body)
+        );
     }
 
     #[test]

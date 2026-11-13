@@ -1,7 +1,7 @@
 // Live mode (docs/06 6.4.3, docs/07 7.9.3). Every two seconds the list is fetched again for the rows
 // written in the minute before the newest row on screen (`since_millis`, at most 200 rows). The page
 // matches rows by request ID, so a row that arrives twice is shown once. The poll stops by itself after
-// ten minutes without any interaction, and resumes with one click.
+// ten minutes without any interaction, and resumes with one click. A hidden tab is not polled.
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client.ts";
@@ -30,6 +30,12 @@ export function liveQuery(query: string, since: number): string {
   return `?${params.toString()}`;
 }
 
+/** Whether a poll hit its limit before reaching `since`, so rows inside its window may be missing. */
+export function liveOverflow(rows: readonly { at_millis: number }[], since: number): boolean {
+  const oldest = rows.reduce((min, row) => Math.min(min, row.at_millis), Number.POSITIVE_INFINITY);
+  return rows.length >= LIVE_LIMIT && oldest > since;
+}
+
 export type LivePoll = { paused: boolean; resume: () => void };
 
 /**
@@ -48,7 +54,6 @@ export function useLivePoll(input: {
   const lastTouch = useRef(Date.now());
   const newest = useRef(newestMillis);
   const handler = useRef(onRows);
-  const busy = useRef(false);
 
   useEffect(() => {
     newest.current = newestMillis;
@@ -59,30 +64,34 @@ export function useLivePoll(input: {
 
   useEffect(() => {
     if (!enabled || paused) return undefined;
+    let current = true;
+    let busy = false;
     const timer = window.setInterval(() => {
       if (Date.now() - lastTouch.current > LIVE_IDLE_MS) {
         setPaused(true);
         return;
       }
-      if (busy.current) return;
+      if (document.hidden) return;
+      if (busy) return;
       const since = liveSince(query, newest.current, Date.now());
-      busy.current = true;
+      busy = true;
       api
         .requests(liveQuery(query, since))
         .then((page) => {
-          const oldest = page.rows.reduce(
-            (min, row) => Math.min(min, row.at_millis),
-            Number.POSITIVE_INFINITY,
-          );
-          handler.current(page.rows, page.rows.length >= LIVE_LIMIT && oldest > since);
+          // A poll that answers after the filter changed belongs to the old list and is dropped.
+          if (!current) return;
+          handler.current(page.rows, liveOverflow(page.rows, since));
         })
         // A failed poll is simply tried again on the next tick.
         .catch(() => undefined)
         .finally(() => {
-          busy.current = false;
+          busy = false;
         });
     }, LIVE_POLL_MS);
-    return () => window.clearInterval(timer);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
   }, [enabled, paused, query]);
 
   useEffect(() => {

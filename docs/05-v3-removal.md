@@ -37,8 +37,8 @@ v4 的判定路径、控制面、控制台和迁移已经按本组文档实现�
 | `migrations/`、`sql/` | 产品尚未上线，用一份新的基线迁移取代现有迁移；ClickHouse schema（`sql/clickhouse.sql`）已删除；`sql/postgres.sql`（v3 数据模型草案）已与 `migrations/` 核对后删除，它的表都属于上面删除的 v3 能力，v4 的表以 `migrations/` 为准 |
 | `web/console` | 按 [06](06-console-ui.md) 重写：总览、请求追溯、会话、Jev 调用、站点、系统（[03.5](03-admin-config-audit.md#35-控制台范围)） |
 | `sensor/` | 已删除（浏览器探针，连同其 CI 作业与验收脚本） |
-| `deploy/` | 已删除（含 `compose`）；v4 尚无参考部署，这是已知且接受的缺口（[04](04-deployment-testing.md)），不在本次改造中补上 |
-| `schemas/`、`examples/`、`validation/`、`templates/` | 已换成 v4 的站点配置和判定日志样例：契约为 `schemas/site-config.schema.json` 和 `schemas/decision-record.schema.json`，样例为 `examples/site-emr.yaml`、`examples/sites-dev.json`、`examples/decision-log.jsonl`，模板为 `templates/site.yaml`。v3 的契约、证据与清单样例、验收用例目录和对应校验已删除；`scripts/validate_library.py` 按 v4 重写，报告写入 `validation/`，`crates/xshield-core/tests/v4_samples.rs` 用代码解析同一批样例 |
+| `deploy/` | 已删除（含 `compose`、`helm`、`systemd`、`prometheus`）；v4 的参考部署是仓库根目录的 `docker-compose.yml`（[04.1](04-deployment-testing.md#41-部署形态)） |
+| `schemas/`、`examples/`、`validation/`、`templates/` | 已换成 v4 的站点配置和判定日志样例：契约为 `schemas/site-config.schema.json` 和 `schemas/decision-record.schema.json`，样例为 `examples/site-emr.yaml`、`examples/sites-dev.json`、`examples/decision-log.jsonl`，模板为 `templates/site.yaml`。v3 的契约、证据与清单样例、验收用例目录和对应校验已删除；`scripts/validate_library.py` 按 v4 重写，报告写入 `validation/`（生成物，不入库），`crates/xshield-core/tests/v4_samples.rs` 用代码解析同一批样例 |
 | `tests/`、`scripts/` | IDOR 靶场改造成 [04.3](04-deployment-testing.md#43-验收场景) 的场景；只服务于已删机制的回归脚本已删除（最后两个是 `scripts/bench_fsync.py` 和 `scripts/register_juice_shop.py`） |
 | `fuzz/` | 目标改为 v4 解析器：`request_path`（请求路径的规范写法与模板）和 `site_config`（v4 站点配置 `SiteSpec`）。原先的 `path_shape`、`page_fingerprint`、`upstream_address` 和 v3 的 `site_config` 只测 `xshield-core` 里已删除的 v3 模块，随这些模块删除；`seal_manifest` 随 `xshield-audit` 删除 |
 
@@ -52,7 +52,7 @@ v3 代码读取 109 个变量，下面是它们在 v4 里的去留。v4 代码�
 
 **保留（可选部署项）**：`XSHIELD_JEV_ROUTE`、`XSHIELD_JEV_API_KEY`、`XSHIELD_EDGE_TLS_CERT_PATH`、`XSHIELD_EDGE_TLS_KEY_PATH`、`XSHIELD_CONTROL_CONSOLE_ORIGIN`；`XSHIELD_EDGE_SITES_FILE`（仅开发，新增）。
 
-**原计划保留、v4 代码没有实现**：`XSHIELD_CONTROL_OPS_LISTEN`、`XSHIELD_ALLOWED_UPSTREAM_CIDRS`、`XSHIELD_ALLOW_LOOPBACK_UPSTREAM`。v4 代码不读取这三个变量，设置了也没有效果；源站地址由管理员在站点配置里填写，网关不再按网段限制。
+**有意不实现**（管理员 2026-11-13 确认）：`XSHIELD_ALLOWED_UPSTREAM_CIDRS`、`XSHIELD_ALLOW_LOOPBACK_UPSTREAM`、`XSHIELD_CONTROL_OPS_LISTEN`。v3 的前两个变量限制源站可以落在哪些网段，那时站点配置要经多个角色提交和审批才生效。v4 只有一个管理员，`origin` 由他本人填写并立即生效；他本来就能把网关指向任何地址，再加一层网段限制防不住任何人，只多一项配置（[00.5](00-overview.md#05-设计原则) 做减法）。所以网关不按网段限制源站，回环和内网地址都可以填。控制面只有一个监听端口，健康检查是同一端口的 `/health`，不再单设运维监听。v4 代码不读取这三个变量，设置了也没有效果。
 
 **被替换**：
 

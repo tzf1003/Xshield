@@ -15,13 +15,17 @@
 //! binary at build time and needs no setting. `XSHIELD_CONTROL_PLAIN_HTTP=true`
 //! drops `Secure` from the administrator cookie, for a console reached over
 //! plain `http://` on a network that is already encrypted (docs/03 section 3.3).
+//! `XSHIELD_CONTROL_TRUSTED_PROXIES` lists the reverse proxies in front of the
+//! console, so failed sign-ins are counted per client and not per proxy.
 //! `XSHIELD_CONTEXT_KEY_HEX`, the same secret the gateways read, lets the model
 //! page save API keys; without it those keys cannot be saved.
 
 use std::{env, error::Error, io::Read as _, net::SocketAddr};
 
 use sqlx::postgres::PgPoolOptions;
-use xshield_control::{ControlState, hash_password, router, run_maintenance, run_migrations};
+use xshield_control::{
+    ControlState, TrustedProxies, hash_password, router, run_maintenance, run_migrations,
+};
 use xshield_core::hex::decode_hex;
 use xshield_postgres::key_seal::KeySealer;
 
@@ -69,6 +73,14 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    let trusted_proxies =
+        TrustedProxies::parse(&env::var("XSHIELD_CONTROL_TRUSTED_PROXIES").unwrap_or_default())
+            .map_err(|item| {
+                format!(
+                    "XSHIELD_CONTROL_TRUSTED_PROXIES: {item:?} is not an address or a CIDR network"
+                )
+            })?;
+
     let pool = PgPoolOptions::new().connect(&database_url).await?;
     run_migrations(&pool).await.map_err(|error| {
         format!(
@@ -82,6 +94,7 @@ async fn run_server() -> Result<(), Box<dyn Error>> {
         console_origin,
         plain_http,
         key_sealer,
+        trusted_proxies,
     )
     .map_err(|error| error.to_string())?;
 

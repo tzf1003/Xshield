@@ -646,7 +646,7 @@ CREATE TABLE jev_prompts (
 
 | 方法与路径 | 用途 |
 |---|---|
-| `POST /api/login`、`POST /api/logout`、`GET /api/session` | 口令登录（沿用 PR #73：PBKDF2 哈希、HMAC 签名的无状态 Cookie、12 小时）；同一来源 IP 10 分钟内失败 10 次返回 429 |
+| `POST /api/login`、`POST /api/logout`、`GET /api/session` | 口令登录（沿用 PR #73：PBKDF2 哈希、HMAC 签名的无状态 Cookie、12 小时）；同一客户端地址 10 分钟内失败 10 次返回 429，其他地址不受影响。客户端地址是连接的对端地址；对端在 `XSHIELD_CONTROL_TRUSTED_PROXIES`（[03.3](03-admin-config-audit.md#33-部署级环境变量)）列出的反向代理中时，取 `X-Forwarded-For` 从右往左第一个不在列表里的地址，只读这个头，不读 `Forwarded` |
 | `GET /api/requests` | 请求列表（7.9.3） |
 | `GET /api/requests/counts` | 同样的筛选条件下一次扫描算出各快捷筛选标签的计数（7.9.3） |
 | `GET /api/requests/{request_id}` | 请求详情（7.9.4） |
@@ -786,7 +786,7 @@ CREATE TABLE jev_prompts (
 
 ### 7.9.9 导入与导出
 
-- 导出：`GET /api/requests/export?format=jsonl|csv&…`。JSONL 每行一条完整记录，格式与网关文件模式的标准输出相同，已有的离线分析脚本可以直接用；CSV 只含列表列，单元格以 `=`、`+`、`-`、`@` 开头时前置 `'`，防止表格软件执行公式。
+- 导出：`GET /api/requests/export?format=jsonl|csv&…`。JSONL 每行一条完整记录，格式与网关文件模式的标准输出相同，已有的离线分析脚本可以直接用；CSV 只含列表列，单元格以 `=`、`+`、`-`、`@`、制表符或回车开头时前置 `'`，防止表格软件执行公式。
 - 导入：`POST /api/import`，请求体为 JSON 行（`application/x-ndjson`，最大 100 MiB），逐行解析为 `DecisionRecord`，`edge` 记为 `import`，同一 `request_id` 与时间已存在的跳过。v4 当前格式（没有 `trace`）的行也接受，`trace` 记为 `{"v":0}`，界面标“旧格式记录”。`at_millis` 超出保留窗口（早于 `now − 7 天`，或晚于 `now + 7 天`）的行没有分区可写，不入库，单独计入 `out_of_range`，不算出错。返回导入、跳过、超出保留窗口、出错的行数和前 20 个错误行号。行按每 1000 行一批读取，每批查重、写入后即释放，内存里不会同时存放整个文件解析出的行。每条写入语句单独提交，导入不在一个事务里：中途失败时已写入的行保留，重新导入同一文件会跳过它们，可以直接重试。用途：把 Windows 文件模式试跑的 `decisions.jsonl` 放进控制台看。
 
 ### 7.9.10 影响预估

@@ -61,6 +61,7 @@ v4 代码读取的环境变量只有这些（TLS 多证书、PROXY 协议、运�
 | `XSHIELD_CONTROL_LISTEN` | 控制台监听地址，默认 `127.0.0.1:8081` |
 | `XSHIELD_CONTROL_CONSOLE_ORIGIN` | 仅开发：控制台前端从另一个源（Vite 开发服务器）访问 API 时，允许这个源跨域带 Cookie 调用 |
 | `XSHIELD_CONTROL_PLAIN_HTTP` | 可选：控制台只经 `http://` 访问时设为 `true`。管理员 Cookie 改为不带 `__Host-` 前缀、不带 `Secure`，因为浏览器不保存 HTTP 下的 Secure Cookie。只用于网络本身已加密或可信的情况，例如经 Tailscale 访问 `http://主机名:端口`；其余情况保持默认 |
+| `XSHIELD_CONTROL_TRUSTED_PROXIES` | 可选：控制台前面的反向代理地址，逗号分隔，每项是 IP 地址或 CIDR 网段（如 `10.0.0.1, 172.16.0.0/12`，不接受主机名）。只有连接的对端在这个列表里时，才取 `X-Forwarded-For` 中从右往左第一个不在列表里的地址作为客户端地址，用来统计口令登录失败次数（[07.9.2](07-console-architecture.md#792-端点一览)）。默认不设置：始终以连接的对端计数，`X-Forwarded-For` 被忽略，直连部署不需要设置。代理必须把它看到的客户端地址追加到 `X-Forwarded-For`（nginx 用 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`）。列表只放代理自己的地址，不要放客户端所在的网段：否则同一网段的客户端能伪造 `X-Forwarded-For`，自选计数的地址 |
 | `XSHIELD_ADMIN_PASSWORD_HASH` | 管理员口令哈希（新增） |
 | `XSHIELD_CONTEXT_KEY_HEX` | 会话键和已见值哈希用的密钥（新增）。控制面也读它，用来加密控制台保存的模型密钥（3.3.1）；网关和控制面必须设成同一个值 |
 | `AI_GATEWAY_API_KEY` | Jev 调用凭证。控制台保存了 Jev 密钥（3.3.1）后以控制台为准，这个变量不再使用 |

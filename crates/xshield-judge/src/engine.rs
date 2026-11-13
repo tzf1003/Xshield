@@ -30,7 +30,7 @@ use crate::state::{
     Answers, Prompt, StateInput, StateValue, build_state, conclude, parse_response, request_body,
 };
 use crate::tiers;
-use crate::trace::{Place, entry_trace, recent_trace, redacted_query, value_entry};
+use crate::trace::{Place, entry_trace, recent_trace, redacted_path, redacted_query, value_entry};
 use crate::values::{
     ExtractedRequest, ResponseValue, extract_request, extract_response_facts, json_unescape,
     path_segment, percent_decode,
@@ -143,9 +143,14 @@ struct Limiter {
 
 impl Limiter {
     fn allow(&mut self, key: Digest16, limit: u32, now_ms: u64) -> bool {
-        if self.windows.len() >= LIMITER_MAX {
+        if self.windows.len() >= LIMITER_MAX && !self.windows.contains_key(&key) {
             self.windows
                 .retain(|_, (start, _)| now_ms.saturating_sub(*start) < WINDOW_MS);
+            // Every window is still running: a new key gets no call, so the map
+            // stays at its cap and is not scanned again for each known key.
+            if self.windows.len() >= LIMITER_MAX {
+                return false;
+            }
         }
         let entry = self.windows.entry(key).or_insert((now_ms, 0));
         if now_ms.saturating_sub(entry.0) >= WINDOW_MS {
@@ -256,6 +261,8 @@ struct Turn<'a> {
     extracted: &'a ExtractedRequest,
     cache_key: &'a Digest16,
     tuning: &'a Tuning<'a>,
+    /// The session credential as it must be redacted (see [`redaction_secret`]).
+    secret: Option<&'a str>,
 }
 
 impl<J: JevPort> Judge<J> {
@@ -362,6 +369,7 @@ impl<J: JevPort> Judge<J> {
             extracted: &extracted,
             cache_key: &cache_key,
             tuning: &tuning,
+            secret: redaction_secret(Some(site), request),
         };
         let mut jev = None;
         let mut sent = Vec::new();
@@ -465,10 +473,13 @@ impl<J: JevPort> Judge<J> {
             return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
         }
         // An attempt goes to Jev, whatever an earlier allow of the same request said.
+        // A request with unread values is never settled by an earlier allow either:
+        // the key covers only the values that were read.
         if tuning.cache_ms > 0
             && !unknown
             && !attempted
             && !unplaceable
+            && !turn.extracted.truncated
             && let Some(source) = session.cached_allow(turn.cache_key, request.now_ms)
         {
             trace.cache_source = request_text(source);
@@ -595,7 +606,7 @@ impl<J: JevPort> Judge<J> {
                 seen.is_some(),
                 verified,
                 &ranked,
-                request.credential,
+                turn.secret,
                 tuning.secret_words,
                 place,
             ));
@@ -646,10 +657,10 @@ impl<J: JevPort> Judge<J> {
             entries_passed: &entries,
             recent: snapshot.recent.iter().collect(),
             method: request.method,
-            path: turn.resolved.logical_path(),
+            path: &redacted_path(turn.resolved.logical_path(), turn.secret),
             values,
             truncated: turn.extracted.truncated,
-            credential: request.credential,
+            credential: turn.secret,
             secret_words: tuning.secret_words,
         };
         let (state, trim) = match build_state(&input) {
@@ -691,7 +702,7 @@ impl<J: JevPort> Judge<J> {
         row.conclusion = Some(conclusion);
         let verdict = match conclusion {
             Conclusion::Allow => {
-                if tuning.cache_ms > 0 && !turn.resolved.is_unknown() {
+                if tuning.cache_ms > 0 && !turn.resolved.is_unknown() && !turn.extracted.truncated {
                     self.lock()
                         .store
                         .session(turn.session_id.unwrap_or(limit_key), request.now_ms)
@@ -837,6 +848,14 @@ impl<J: JevPort> Judge<J> {
         let as_sent = values.clone();
         self.without_echo(&mut values, observation.echo);
 
+        // The recent requests are only ever shown (to Jev and in the log), so a path that carries
+        // the credential is remembered redacted. An origin keeps its request as it was: positions
+        // are matched on it, and it is scrubbed where it is shown.
+        let secret = observation
+            .credential
+            .map(|credential| credential_token(site, credential))
+            .filter(|secret| !secret.is_empty());
+        let shown_path = redacted_path(resolved.logical_path(), secret);
         let request = format!("{} {}", observation.method, resolved.logical_path());
         let request_id = request_number(observation.request_id);
         let source = Source {
@@ -942,7 +961,7 @@ impl<J: JevPort> Judge<J> {
             }
             session.record_request(Recent {
                 method: observation.method.to_owned(),
-                path: resolved.logical_path().to_owned(),
+                path: shown_path.clone().into_owned(),
                 status: observation.status,
                 request_id,
                 at_ms: observation.now_ms,
@@ -1105,6 +1124,16 @@ fn credential_token<'a>(site: &SiteSpec, credential: &'a str) -> &'a str {
     }
 }
 
+/// The text that must never reach Jev or the log for this request: the session credential, and for
+/// an `Authorization` header its token without the scheme. A client that repeats its bearer token
+/// in the query, the body or the path sends the bare token, never `Bearer <token>`, and the bare
+/// token is part of the full header value, so matching on it covers both.
+fn redaction_secret<'a>(site: Option<&SiteSpec>, request: &RequestFacts<'a>) -> Option<&'a str> {
+    let credential = request.credential?;
+    let secret = site.map_or(credential, |site| credential_token(site, credential));
+    (!secret.is_empty()).then_some(secret)
+}
+
 /// `value` without a leading authentication scheme, such as `Bearer `. A scheme is a token
 /// (RFC 9110 section 11.1), so digits and some symbols may be in it.
 fn without_scheme(value: &str) -> &str {
@@ -1184,6 +1213,7 @@ fn base_row(
     resolved: &Resolved,
 ) -> DecisionRecord {
     let secret_words = site.map_or(&[][..], |site| site.advanced().secret_fields());
+    let secret = redaction_secret(site, request);
     DecisionRecord {
         at_millis: request.now_ms,
         request_id: request.request_id.to_owned(),
@@ -1195,13 +1225,13 @@ fn base_row(
         session: String::new(),
         context: None,
         method: request.method.to_owned(),
-        path: request.path.to_owned(),
-        logical_path: resolved.logical_path().to_owned(),
+        path: redacted_path(request.path, secret).into_owned(),
+        logical_path: redacted_path(resolved.logical_path(), secret).into_owned(),
         api: resolved.api().cloned(),
         request_headers: request.request_headers.to_vec(),
         query: request
             .query
-            .map(|query| redacted_query(query, request.credential, secret_words)),
+            .map(|query| redacted_query(query, secret, secret_words)),
         status: None,
         decision_path: DecisionPath::NoSession,
         outcome: Outcome::Blocked,
@@ -1266,10 +1296,10 @@ fn lenient_text(bytes: &[u8]) -> String {
 
 /// JSON or HTML by content type; anything else is not read.
 fn response_kind(content_type: Option<&str>) -> Option<Observed> {
-    let lower = content_type?.to_ascii_lowercase();
-    if lower.contains("json") {
+    let kind = crate::values::media_kind(content_type?);
+    if crate::values::is_json_media(&kind) {
         Some(Observed::Json)
-    } else if lower.starts_with("text/html") {
+    } else if kind.starts_with("text/html") {
         Some(Observed::Html)
     } else {
         None
@@ -1423,6 +1453,25 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use xshield_core::context::LoginUnbound;
+
+    #[test]
+    fn a_full_limiter_refuses_new_keys_and_does_not_grow() {
+        let mut limiter = Limiter::default();
+        for n in 0..LIMITER_MAX {
+            let mut key = [0_u8; 16];
+            key[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            assert!(limiter.allow(key, 2, 1_000));
+        }
+        let fresh = [0xFF_u8; 16];
+        assert!(!limiter.allow(fresh, 2, 1_000));
+        assert_eq!(limiter.windows.len(), LIMITER_MAX);
+        // A known key keeps its own budget while the map is full.
+        assert!(limiter.allow([0; 16], 2, 1_000));
+        assert!(!limiter.allow([0; 16], 2, 1_000));
+        // Once the windows have run out the map is pruned and the new key is served.
+        assert!(limiter.allow(fresh, 2, 1_000 + WINDOW_MS));
+        assert_eq!(limiter.windows.len(), 1);
+    }
 
     /// The gateway id of the origin responses the tests observe.
     const RID: &str = "req_00000000000000000000000000000001";
@@ -1725,6 +1774,26 @@ mod tests {
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
         judge.observe(&site, &list_response("alice", 0));
+        let verdict = judge
+            .judge(&site, &get("/api/patients/7", None, Some("alice"), 1_000))
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn objects_shown_by_a_json_suffix_response_are_allowed_without_jev() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        judge.observe(
+            &site,
+            &Observation {
+                content_type: Some("application/hal+json"),
+                ..list_response("alice", 0)
+            },
+        );
         let verdict = judge
             .judge(&site, &get("/api/patients/7", None, Some("alice"), 1_000))
             .await;
@@ -3797,6 +3866,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_truncated_request_is_never_allowed_from_the_cache() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // The gateway cannot read this body, so the same visible values can hide any
+        // remainder: the allow of one such request says nothing about the next.
+        for now_ms in [1_000, 2_000] {
+            let request = RequestFacts {
+                method: "POST",
+                content_type: Some("application/json"),
+                body: b"{broken",
+                ..get("/api/patients/D4411", None, Some("alice"), now_ms)
+            };
+            let verdict = judge.judge(&site, &request).await;
+            assert!(verdict.record.trace.values_truncated);
+            assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        }
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
     async fn the_state_and_the_trace_line_up_value_by_value() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
@@ -3908,6 +3998,72 @@ mod tests {
             Judge::<FakeJev>::credential_from(&header, Some("SID=x"), Some("Bearer t")),
             Some("Bearer t")
         );
+    }
+
+    #[tokio::test]
+    async fn a_bearer_token_repeated_without_its_scheme_reaches_neither_jev_nor_the_log() {
+        use crate::state::REDACTED;
+        const TOKEN: &str = "tok-5ecret-0123456789";
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = SiteSpec::from_json(
+            r#"{"name":"h","hosts":["h.test"],"origin":"http://o:1","session":{"header":"Authorization"},"entries":["/login"],"mode":"enforce"}"#,
+        )
+        .unwrap();
+        let credential = format!("Bearer {TOKEN}");
+        let path = format!("/api/echo/{TOKEN}/detail");
+        let query = format!("t={TOKEN}&page=2");
+        let body = format!(r#"{{"jwt":"{TOKEN}","note":"x"}}"#);
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get(&path, Some(&query), Some(&credential), 1_000)
+        };
+        let first = judge.judge(&site, &request).await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        // The origin answers, so the request joins the session's recent requests and origins.
+        judge.observe(
+            &site,
+            &Observation {
+                path: &path,
+                method: "POST",
+                body: br#"{"id":"41"}"#,
+                ..list_response(&credential, 1_500)
+            },
+        );
+        let second = judge
+            .judge(&site, &get("/api/items/41", None, Some(&credential), 2_000))
+            .await;
+        let third = judge
+            .judge(&site, &get("/api/items/77", None, Some(&credential), 3_000))
+            .await;
+        assert!(fake.calls() >= 2, "later requests are asked about too");
+        assert!(
+            fake.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(1)
+                .any(|sent| sent.contains("/api/echo/<redacted>/detail")),
+            "a later state quotes the earlier request, without the token"
+        );
+
+        for sent in fake.sent.lock().unwrap().iter() {
+            assert!(!sent.contains(TOKEN), "Jev was sent the token: {sent}");
+        }
+        for judgement in [&first, &second, &third] {
+            let row = serde_json::to_string(&judgement.record).unwrap();
+            assert!(!row.contains(TOKEN), "the log row carries the token: {row}");
+        }
+        assert_eq!(first.record.path, format!("/api/echo/{REDACTED}/detail"));
+        assert_eq!(
+            first.record.query.as_deref(),
+            Some(format!("{REDACTED}&page=2").as_str())
+        );
+        // A row refused before judging redacts the same way.
+        let refused = refused_row(Some(&site), &request, DecisionPath::BodyNotInspectable, 413);
+        assert!(!serde_json::to_string(&refused).unwrap().contains(TOKEN));
     }
 
     #[test]
