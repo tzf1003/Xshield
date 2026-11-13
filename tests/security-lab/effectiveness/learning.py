@@ -5,8 +5,9 @@ The stage starts a throwaway PostgreSQL database and xshield-control on it, then
 administrator does with the object map, through the same HTTP API the console uses:
 
 - round 0: the training decisions are imported with their time moved 15 minutes back (the control
-  reads decisions that are at least 10 minutes old), and the cold-start candidates are confirmed as
-  they are, as the console's cold start does;
+  reads decisions that are at least 10 minutes old), and the cold-start candidates the console
+  preselects (no note and no conflict, BootstrapList.tsx `startsPicked`) are confirmed as they are;
+  the others are kept apart in learned.json as `bootstrap_unpicked`, with their note and conflict;
 - rounds 1 to n: the control is restarted, which runs one learning pass at start-up; the object map
   is read, and what the pass proposes is confirmed as it is (classes of positions, tiers, accepts-public).
   The rounds stop when two in a row propose nothing; one more restart then checks stability;
@@ -118,8 +119,9 @@ def _learn(rows: list[tuple[int, bytes]], base_spec: dict[str, Any], out_dir: Pa
         final_spec = learner.final_spec()
     # `events` is what the control's automatic changes left over the last round (tightenings and pauses); the
     # scorer does not read it, and it explains the positions the rounds show.
-    learned = {"bootstrap": learner.bootstrap, "rounds": rounds, "final_spec": final_spec,
-               "events": learner.last_events}
+    # `bootstrap_unpicked`: what round 0 did not confirm, since the console does not preselect it. The scorer ignores it.
+    learned = {"bootstrap": learner.bootstrap, "bootstrap_unpicked": learner.bootstrap_unpicked, "rounds": rounds,
+               "final_spec": final_spec, "events": learner.last_events}
     learned_path = out_dir / "learned.json"
     dump_json(learned_path, learned)
     return {"status": "ok", "why": "", "learned_path": learned_path, "final_spec": final_spec}
@@ -407,6 +409,17 @@ class _Api:
         return json.loads(data) if data else None
 
 
+def _is_picked(candidate: dict[str, Any]) -> bool:
+    """The console preselects a candidate with no note and no conflict (BootstrapList.tsx `startsPicked`)."""
+    return candidate.get("note") is None and candidate.get("conflict") is None
+
+
+def _candidate_doc(item: dict[str, Any]) -> dict[str, Any]:
+    """A cold-start candidate as learned.json keeps it: the fields the scorer reads."""
+    return {"key": item["key"], "side": item["side"], "class": item["kind"], "uses": item["uses"],
+            "sessions": item["sessions"]}
+
+
 class _Learner:
     """The control plane for one stage: the process, the site, and the rounds run on it."""
 
@@ -421,6 +434,7 @@ class _Learner:
         self.control: _Control | None = None
         self.api: _Api | None = None
         self.bootstrap: list[dict[str, Any]] = []
+        self.bootstrap_unpicked: list[dict[str, Any]] = []
         self.last_events: list[dict[str, Any]] = []
         self.confirmed: set[tuple[str, ...]] = set()
 
@@ -504,11 +518,14 @@ class _Learner:
         self._api().call("POST", "/api/sites", {"spec": base_spec}, expect=(201,))
         self._await_startup_pass()
         candidates = self._api().call("GET", f"{self.site_path}/objects/bootstrap")["candidates"]
-        self.bootstrap = [{"key": item["key"], "side": item["side"], "class": item["kind"],
-                           "uses": item["uses"], "sessions": item["sessions"]} for item in candidates]
-        items = [(item["key"], item["kind"], item.get("name") or item["kind"]) for item in candidates]
-        written = self._write_entries(items, {}, "学习段第 0 轮：原样确认冷启动候选")
-        self.log(f"学习段：第 0 轮 冷启动候选 {len(candidates)} 条，原样确认写入 {written} 项")
+        picked = [item for item in candidates if _is_picked(item)]
+        self.bootstrap = [_candidate_doc(item) for item in picked]
+        self.bootstrap_unpicked = [{**_candidate_doc(item), "note": item.get("note"), "conflict": item.get("conflict")}
+                                   for item in candidates if not _is_picked(item)]
+        items = [(item["key"], item["kind"], item.get("name") or item["kind"]) for item in picked]
+        written = self._write_entries(items, {}, "学习段第 0 轮：确认控制台预选的冷启动候选")
+        self.log(f"学习段：第 0 轮 冷启动候选 {len(candidates)} 条，预选确认 {len(picked)} 条（写入 {written} 项），"
+                 f"未预选 {len(self.bootstrap_unpicked)} 条")
 
     def _await_partitions(self, moments: set[int]) -> None:
         """The decision log has one partition per UTC day, created by the control's first maintenance pass at
