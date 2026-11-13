@@ -29,6 +29,7 @@ use xshield_core::{
     context::{
         IdentityRole, ObjectMap, ObjectSlot, Reliability, SiteSpec, SlotSource, Tier,
         learning::{Evidence, RETIRE_DAYS, Vote, WINDOW_DAYS, day_of, observe},
+        objects::{KEY_MAX, valid_class_id},
     },
     kind::{NameReason, NameSource, Rules, path_segment, request_name, response_name},
 };
@@ -281,6 +282,9 @@ pub(crate) struct ObjectsBody {
     agent_health: &'static str,
     learning_run: LearningRunBody,
     classes: Vec<ClassBody>,
+    /// Whether the site declares a user identity, so its response units are users and not sessions (the rules
+    /// count them so). The console says that a judgement on a site without one is not tightened automatically.
+    identified: bool,
     slots: Vec<SlotRow>,
     /// The acceptance proposals waiting for an administrator, in key order.
     judgements: Vec<JudgementBody>,
@@ -536,6 +540,7 @@ pub async fn list(
         agent_health: agent_api::health(&state.pool).await?,
         learning_run,
         classes: classes_of(&record.spec, &rows),
+        identified: record.spec.objects().declares_user_identity(),
         slots: rows.into_iter().filter(|row| filter.matches(row)).collect(),
         judgements: judgement_bodies(&record.spec, proposals, tiers),
         features: FEATURES,
@@ -1392,6 +1397,8 @@ impl Tally {
 /// literal path position, and whose name gives a kind, the most used first, at most [`CANDIDATES_MAX`].
 /// The votes check each candidate's kind: `conflict` names the kind the votes give instead, when they
 /// dispute it. A candidate short of the site's learning thresholds, or with a short kind word, carries a note.
+/// A candidate the configuration cannot hold is no candidate (LQ-7): a key longer than [`KEY_MAX`], or a
+/// kind word that is not a valid class id, since confirming one would fail the whole save.
 fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>, votes: &[Vote]) -> Vec<Value> {
     let map = spec.objects();
     let rules = Rules::of(spec.advanced());
@@ -1402,13 +1409,19 @@ fn candidates_of(spec: &SiteSpec, tallies: &BTreeMap<String, Tally>, votes: &[Vo
     let by_key = votes_by_key(votes);
     let mut found: Vec<(u32, &str, Value)> = tallies
         .iter()
-        .filter(|(key, _)| map.declared_class_of(key).is_none() && !literal_path(key))
+        .filter(|(key, _)| {
+            key.len() <= KEY_MAX && map.declared_class_of(key).is_none() && !literal_path(key)
+        })
         .filter_map(|(key, tally)| {
             let (reason, side) = name_of(key, &rules)?;
             let class = map
                 .classes()
                 .iter()
                 .find(|class| rules.relates(&reason.word, &class.id));
+            // A word that names no class of the map is the candidate's kind as it stands.
+            if class.is_none() && !valid_class_id(&reason.word) {
+                return None;
+            }
             let short = class.is_none() && reason.word.len() <= SHORT_WORD;
             let sessions = u32::try_from(tally.sessions.len()).unwrap_or(u32::MAX);
             let thin = tally.uses < min_uses || sessions < min_sessions;
@@ -2673,6 +2686,41 @@ mod tests {
     }
 
     #[test]
+    fn a_kind_word_or_a_key_the_configuration_cannot_hold_is_no_candidate() {
+        let spec = site_with_slots("");
+        // A route word of 26 letters names a kind no class id holds (3 to 24 letters).
+        let long_word = "GET /api/telecommunicationsproviders [].id";
+        // A key past `KEY_MAX` bytes: a route of 70 placeholders, which still names the doctor kind.
+        let long_key = format!("GET /api/doctors{} [].id", "/{id}".repeat(70));
+        assert!(long_key.len() > KEY_MAX);
+        // Both are named, so only the length keeps them out; a 15-letter word on the same route shape stays.
+        let rules = Rules::of(spec.advanced());
+        assert_eq!(
+            name_word(long_word, &rules).as_deref(),
+            Some("telecommunicationsprovider")
+        );
+        assert!(name_word(&long_key, &rules).is_some());
+        let tallies = BTreeMap::from([
+            (long_word.to_owned(), tally_of(20, 5)),
+            (long_key.clone(), tally_of(20, 5)),
+            ("GET /api/doctors [].id".to_owned(), tally_of(20, 5)),
+            (
+                "GET /api/telecomproviders [].id".to_owned(),
+                tally_of(20, 5),
+            ),
+        ]);
+        let candidates = candidates_of(&spec, &tallies, &[]);
+        let keys: Vec<&str> = candidates
+            .iter()
+            .filter_map(|candidate| candidate["key"].as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            ["GET /api/doctors [].id", "GET /api/telecomproviders [].id"]
+        );
+    }
+
+    #[test]
     fn a_candidate_short_of_the_learning_thresholds_asks_for_a_look() {
         let spec = site_with_slots("");
         let tallies = BTreeMap::from([
@@ -3431,6 +3479,8 @@ mod live_tests {
         let (state, name) = seeded_site("lists").await;
         let all = listed(&state, &name, &[]).await;
         assert_eq!(all["counts"]["classes"], 1);
+        // The seeded site declares no user identity, so the console says its acceptance is not tightened (LQ-7).
+        assert_eq!(all["identified"], false);
         assert_eq!(all["counts"]["confirmed"], 1);
         assert_eq!(all["counts"]["pending"], 1);
         assert_eq!(all["counts"]["proposed"], 1);

@@ -12,7 +12,12 @@ import type {
   ObjectJudgementConfirmation,
   ObjectSlotRow,
 } from "../../../api/types.ts";
-import { isAcceptance, proposalFigures, proposalWords } from "../../../lib/judgement.ts";
+import {
+  isAcceptance,
+  proposalFigures,
+  proposalWords,
+  unidentifiedNoteOfProposal,
+} from "../../../lib/judgement.ts";
 import { errorText, OBJECT_JUDGEMENT, OBJECT_SIDE_INFO } from "../../../lib/vocab.ts";
 import { ApiError } from "../../../api/client.ts";
 import { Card, Notice } from "../../../ui/Page.tsx";
@@ -25,6 +30,8 @@ type Props = {
   /** The position rows, to name each position's side and class. */
   rows: readonly ObjectSlotRow[];
   classes: readonly ObjectClass[];
+  /** Whether the site declares a user identity: an acceptance proposal says so when it does not (LQ-7). */
+  identified: boolean;
   /** Whether the draft holds changes of its own: a confirmation then waits for them to be saved or dropped. */
   dirty: boolean;
 };
@@ -41,7 +48,7 @@ function errorOf(error: unknown): string {
   return error instanceof ApiError ? errorText(error.code) : errorText(undefined);
 }
 
-export function JudgementPanel({ site, judgements, rows, classes, dirty }: Props) {
+export function JudgementPanel({ site, judgements, rows, classes, identified, dirty }: Props) {
   const confirm = useConfirmJudgement();
   const dismiss = useDismissJudgement();
   const [pending, setPending] = useState<ObjectJudgement | null>(null);
@@ -91,6 +98,7 @@ export function JudgementPanel({ site, judgements, rows, classes, dirty }: Props
           const row = rowOf(proposal);
           const side = row === undefined ? null : OBJECT_SIDE_INFO[row.side];
           const cls = row === undefined ? null : classNameOf(classes, row.class);
+          const note = unidentifiedNoteOfProposal(proposal, identified);
           return (
             <li key={proposal.id} className="obj-judge-row">
               <div className="obj-judge-where">
@@ -111,6 +119,11 @@ export function JudgementPanel({ site, judgements, rows, classes, dirty }: Props
               <div className="obj-judge-what">
                 <SafeText text={proposalWords(proposal)} />
                 <span className="small muted"> {proposalFigures(proposal).join(" · ")}</span>
+                {note === null ? null : (
+                  <div className="small muted">
+                    <SafeText text={note} />
+                  </div>
+                )}
               </div>
               <div className="obj-judge-actions">
                 <button

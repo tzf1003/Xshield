@@ -176,6 +176,7 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
         <SlotTable
           rows={rows}
           classes={data.classes}
+          identified={data.identified}
           selected={slot ?? null}
           now={now}
           onOpen={open}
@@ -199,6 +200,7 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
           cls={current}
           rows={rows}
           classes={data.classes}
+          identified={data.identified}
           selected={slot ?? null}
           now={now}
           onOpen={open}
@@ -323,6 +325,7 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
           judgements={data.judgements ?? []}
           rows={data.slots}
           classes={data.classes}
+          identified={data.identified}
           dirty={drafted}
         />
       )}

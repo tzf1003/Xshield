@@ -1650,6 +1650,8 @@ export interface ObjectsResponse {
   /** False when no model is configured: the agent switch of the learning settings is then greyed out. */
   agent_configured: boolean;
   classes: ObjectClass[];
+  /** Whether the site declares a user identity, so its units are users and not sessions (LQ-7). */
+  identified: boolean;
   slots: ObjectSlotRow[];
   /** The judgements the rules propose for declared positions and no administrator has answered yet (docs/07 7.9.16). */
   judgements: ObjectJudgement[];

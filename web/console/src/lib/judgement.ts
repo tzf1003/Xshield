@@ -8,6 +8,7 @@ import type {
   ObjectJudgement,
   ObjectReliability,
   ObjectSlotEntry,
+  ObjectSlotRow,
   ObjectTier,
 } from "../api/types.ts";
 import { OBJECT_JUDGEMENT } from "./vocab.ts";
@@ -97,7 +98,9 @@ export function proposalWords(proposal: ObjectJudgement): string {
   return `${OBJECT_JUDGEMENT.field.tier} ${OBJECT_JUDGEMENT.tier[proposal.tier].name} · ${reliability}`;
 }
 
-/** The figures a proposal rests on, in short phrases: `票 1234`, `会话 56`, `公共票 0.4%`; for a tier, `单位 12`. */
+/** The figures a proposal rests on, in short phrases: `票 1234`, `会话 56`, `公共票 0.4%`; for a tier, `单位 12`.
+ *  An administrator's tier rests on who was refused, not on the counts of what ordinary users saw, so it has one
+ *  sentence in their place (LQ-7). */
 export function proposalFigures(proposal: ObjectJudgement): string[] {
   if (isAcceptance(proposal)) {
     return [
@@ -106,11 +109,47 @@ export function proposalFigures(proposal: ObjectJudgement): string[] {
       `公共票 ${shareOfMille(proposal.public_per_mille)}`,
     ];
   }
+  if (proposal.tier === "admin") return [OBJECT_JUDGEMENT.adminBasis];
   return [
     `单位 ${proposal.units}`,
     `不同值 ${proposal.seen_values}`,
     `一致 ${shareOfMille(proposal.agreement_per_mille)}`,
   ];
+}
+
+/** Whether a judgement carries the note of a site that declares no user identity (LQ-7): an acceptance of no public
+ *  source at medium. The judge tightens an acceptance only at high, and a site without identity reaches medium only, so
+ *  the note says that the judge does not tighten it there. An acceptance of public sources is no tightening, and a
+ *  high one is tightened, so neither carries the note. */
+function unidentifiedTightening(
+  acceptsPublic: boolean | undefined,
+  reliability: ObjectReliability | undefined,
+  identified: boolean,
+): boolean {
+  return !identified && acceptsPublic === false && reliability === "medium";
+}
+
+/** The note a proposal carries on a site that declares no user identity (LQ-7). Null for a tier, and on a site that
+ *  declares identity. */
+export function unidentifiedNoteOfProposal(
+  proposal: ObjectJudgement,
+  identified: boolean,
+): string | null {
+  if (!isAcceptance(proposal)) return null;
+  return unidentifiedTightening(proposal.accepts_public, proposal.reliability, identified)
+    ? OBJECT_JUDGEMENT.unidentified
+    : null;
+}
+
+/** The note a declared position's judgement carries on a site that declares no user identity (LQ-7): the same
+ *  condition as a proposal's, on the fields the entry carries. */
+export function unidentifiedNoteOfEntry(
+  entry: Pick<ObjectSlotRow, "accepts_public" | "reliability">,
+  identified: boolean,
+): string | null {
+  return unidentifiedTightening(entry.accepts_public, entry.reliability, identified)
+    ? OBJECT_JUDGEMENT.unidentified
+    : null;
 }
 
 /** Whether a proposal is an acceptance judgement of a request position (it has `accepts_public`). */
