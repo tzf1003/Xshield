@@ -46,15 +46,16 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
-def loopback_source(index: int) -> str | None:
-    """The local address 127.0.1.<index> when this system lets a client bind to it, else None.
+def loopback_source(index: int, *, net: int = 1) -> str | None:
+    """The local address 127.0.<net>.<index> when this system lets a client bind to it, else None.
 
     Linux routes the whole of 127/8 to loopback, so each simulated user can send from its own
     address and count against its own address budget (docs/07 section 7.6). macOS and Windows bind
     only 127.0.0.1 unless an alias is added; there the caller uses 127.0.0.1 and one line says so.
+    The probe pool uses net 1 (127.0.1.x); the WAF batch 11 cases use net 2 (127.0.2.x).
     """
     global _source_notice_printed
-    address = f"127.0.1.{index}"
+    address = f"127.0.{net}.{index}"
     try:
         with socket.socket() as probe:
             probe.bind((address, 0))

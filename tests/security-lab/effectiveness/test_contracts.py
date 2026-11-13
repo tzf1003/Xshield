@@ -123,10 +123,10 @@ class ContractTests(unittest.TestCase):
         self.assertIn("缺少必填字段 final_spec", self.message(load_learned, self.write("learned.json", doc)))
 
     def test_a_baseline_value_is_a_number_or_null(self):
-        bad = self.write("bad.json", raw=json.dumps({"values": {"S3": "0.5"}}))
+        bad = self.write("bad.json", raw=json.dumps({"groups": {"quick": {"seed": 1, "commit": "c", "values": {"S3": "0.5"}}}}))
         self.assertIn("应为数字或 null", self.message(load_baseline, bad))
-        good = self.write("good.json", raw=json.dumps({"values": {"S3": None, "S1": 0.5}}))
-        self.assertEqual(load_baseline(good)["values"], {"S3": None, "S1": 0.5})
+        good = self.write("good.json", raw=json.dumps({"groups": {"quick": {"seed": 1, "commit": "c", "values": {"S3": None, "S1": 0.5}}}}))
+        self.assertEqual(load_baseline(good)["groups"]["quick"]["values"], {"S3": None, "S1": 0.5})
 
     def test_a_missing_file_is_a_contract_error(self):
         self.assertIn("无法读取", self.message(load_observations, self.dir / "absent.jsonl"))

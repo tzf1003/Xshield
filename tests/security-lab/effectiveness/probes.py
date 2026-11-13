@@ -143,8 +143,9 @@ class Prober:
             return True
         return bool({meta.case, meta.category, meta.case.split("/", 1)[0]} & self.only)
 
-    def login(self, account: str) -> Session:
-        session = Session(source=self.pool.next())
+    def login(self, account: str, *, source: str | None = None) -> Session:
+        """Logs in as the account, from `source` when one is given; the probe pool's next address otherwise."""
+        session = Session(source=source or self.pool.next())
         sent = self.request(session, "POST", "/login", form={"username": account, "password": PASSWORD})
         session.token = _session_cookie(sent)
         return session
