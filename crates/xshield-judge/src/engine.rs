@@ -465,10 +465,13 @@ impl<J: JevPort> Judge<J> {
             return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
         }
         // An attempt goes to Jev, whatever an earlier allow of the same request said.
+        // A request with unread values is never settled by an earlier allow either:
+        // the key covers only the values that were read.
         if tuning.cache_ms > 0
             && !unknown
             && !attempted
             && !unplaceable
+            && !turn.extracted.truncated
             && let Some(source) = session.cached_allow(turn.cache_key, request.now_ms)
         {
             trace.cache_source = request_text(source);
@@ -691,7 +694,7 @@ impl<J: JevPort> Judge<J> {
         row.conclusion = Some(conclusion);
         let verdict = match conclusion {
             Conclusion::Allow => {
-                if tuning.cache_ms > 0 && !turn.resolved.is_unknown() {
+                if tuning.cache_ms > 0 && !turn.resolved.is_unknown() && !turn.extracted.truncated {
                     self.lock()
                         .store
                         .session(turn.session_id.unwrap_or(limit_key), request.now_ms)
@@ -3794,6 +3797,27 @@ mod tests {
             second.record.trace.cache_source.as_deref(),
             Some("req_00000000000000000000000000000002")
         );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_request_is_never_allowed_from_the_cache() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // The gateway cannot read this body, so the same visible values can hide any
+        // remainder: the allow of one such request says nothing about the next.
+        for now_ms in [1_000, 2_000] {
+            let request = RequestFacts {
+                method: "POST",
+                content_type: Some("application/json"),
+                body: b"{broken",
+                ..get("/api/patients/D4411", None, Some("alice"), now_ms)
+            };
+            let verdict = judge.judge(&site, &request).await;
+            assert!(verdict.record.trace.values_truncated);
+            assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        }
+        assert_eq!(fake.calls(), 2);
     }
 
     #[tokio::test]
