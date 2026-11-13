@@ -27,8 +27,9 @@ EXPECTED_CASES = (
     "p0-1-pad-200", "p0-1-multipart", "p0-1-text-plain", "p0-1-long-value", "p0-1-big-upload", "p0-1-big-json",
     "p0-2-limit-then-inject",
     "p0-3-fake-cookie-metrics", "p0-3-fake-cookie-export", "p0-3-function-level", "p0-3-function-level-metrics",
+    "p0-3-function-route-word",
     "p1-1-rotation", "p1-2-search-id-then-open", "p1-3-preflight", "p1-4-conditional-304",
-    "p1-5-observe-learns-would-block", "p1-9-big-form",
+    "p1-5-observe-learns-would-block", "p1-9-big-form", "p1-9-big-form-on-object",
     "p2-1-mass-assignment", "p2-3-header-injection", "p2-5-prompt-injection",
     "p3-method-override",
 )
@@ -67,7 +68,7 @@ class RegressionTableTests(unittest.TestCase):
 
     def test_the_function_level_cases_need_a_function_table_and_expect_access(self):
         by_name = {case.name: case for case in regressions.CASES}
-        for name in ("p0-3-function-level", "p0-3-function-level-metrics"):
+        for name in ("p0-3-function-level", "p0-3-function-level-metrics", "p0-3-function-route-word"):
             with self.subTest(case=name):
                 self.assertEqual(by_name[name].requires, ("functions",))
                 self.assertEqual((by_name[name].expect, by_name[name].reason), ("block", "access"))

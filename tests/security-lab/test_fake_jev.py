@@ -276,10 +276,46 @@ class FunctionTest(unittest.TestCase):
     def test_an_unknown_function_on_an_ordinary_path_is_judged_on_its_values(self) -> None:
         self.assertEqual(choices(self.with_function("/api/comments", {"known": False})), ("ALLOW", "BENIGN"))
 
+    def test_an_unknown_bulk_export_is_refused_and_an_export_of_one_record_is_not(self) -> None:
+        self.assertEqual(
+            choices(self.with_function("/api/patients/export-all", {"known": False})), ("DENY", "BENIGN"))
+        self.assertEqual(
+            choices(self.with_function("/api/patients/export-pdf", {"known": False})), ("ALLOW", "BENIGN"))
+
     def test_without_a_function_the_answer_is_the_same_as_before(self) -> None:
         plain = document("/api/admin/search", [])
         self.assertEqual(choices(plain), ("ALLOW", "BENIGN"))
         self.assertNotIn("function", plain["state"]["request"])
+
+
+class UnsentPathIdTest(unittest.TestCase):
+    """A digit segment of the path needs a path value that carries it, in every batch (plan 3.5)."""
+
+    def test_a_path_id_carried_by_a_path_value_is_judged_by_the_rules_as_before(self) -> None:
+        shown = value("path[2]", "7005", "reference", verified=True)
+        self.assertEqual(choices(document("/api/patients/7005/notes", [shown], method="POST")), ("ALLOW", "BENIGN"))
+        unshown = value("path[2]", "7005", "reference")
+        self.assertEqual(choices(document("/api/patients/7005/notes", [unshown], method="POST")), ("DENY", "BENIGN"))
+
+    def test_a_path_id_without_a_path_value_is_refused_while_the_same_values_are_allowed_without_it(self) -> None:
+        batch = document("/api/patients/7005/notes", [value("body.field00", "正常的文字")], method="POST")
+        self.assertEqual(choices(batch), ("DENY", "BENIGN"))
+        without_id = document("/api/feedback", [value("body.field00", "正常的文字")], method="POST")
+        self.assertEqual(choices(without_id), ("ALLOW", "BENIGN"))
+
+    def test_a_path_without_a_digit_segment_is_not_affected(self) -> None:
+        names = document("/api/patients/PT-7001/notes", [value("body.field00", "正常的文字")], method="POST")
+        self.assertEqual(choices(names), ("ALLOW", "BENIGN"))
+        mixed = document("/api/v2a/7005x", [])
+        self.assertEqual(choices(mixed), ("ALLOW", "BENIGN"))
+
+    def test_the_ideal_model_refuses_it_too(self) -> None:
+        batch = document("/api/patients/7005/notes", [value("body.field00", "正常的文字")], method="POST")
+        self.assertEqual(choices(batch, attack_forms_of(["zzz-not-in-the-request"])), ("DENY", "BENIGN"))
+
+    def test_only_a_path_position_carries_the_id(self) -> None:
+        batch = document("/api/patients/7005/notes", [value("body.patient", "7005")], method="POST")
+        self.assertEqual(choices(batch), ("DENY", "BENIGN"))
 
 
 class ServedTest(unittest.TestCase):

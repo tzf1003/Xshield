@@ -701,9 +701,32 @@ mod tests {
     }
 
     #[test]
-    fn a_public_sighting_the_draft_marks_as_own_no_longer_proves_the_value() {
-        // The search is tier public in the current map and tier self in the draft: its sighting
-        // proves nothing as the session's own record, so the fast allow goes back to Jev.
+    fn a_public_sighting_the_draft_marks_as_own_proves_the_value() {
+        // The search is tier public in the current map and tier self in the draft, at a position
+        // that takes no public source. Its sighting is the session's own record, which proves the
+        // value as an untiered one does, so the attempt Jev judges becomes a fast allow.
+        let current = tiered("public", false, "admin", "high");
+        let proposed = tiered("self", false, "admin", "high");
+        let attempt = method_row("DELETE", "jev_deny", "/api/patients/7005");
+        let values = [value(
+            "path[2]",
+            false,
+            vec![origin(
+                "id",
+                "GET /api/search",
+                "GET /api/search results[].id",
+            )],
+        )];
+        assert_eq!(
+            shift_under(&current, &proposed, &attempt, &values),
+            Some(Shift::NewFastAllow)
+        );
+    }
+
+    #[test]
+    fn a_fast_allow_on_a_public_sighting_stays_when_the_draft_marks_it_own() {
+        // Marking the search as own does not send a fast allow back to Jev: the own sighting proves
+        // the value the public one proved (docs/07 section 7.4.7).
         let current = tiered("public", true, "admin", "high");
         let proposed = tiered("self", true, "admin", "high");
         let allowed = method_row("DELETE", "fast_allow", "/api/patients/7005");
@@ -716,10 +739,7 @@ mod tests {
                 "GET /api/search results[].id",
             )],
         )];
-        assert_eq!(
-            shift_under(&current, &proposed, &allowed, &values),
-            Some(Shift::BackToJev)
-        );
+        assert_eq!(shift_under(&current, &proposed, &allowed, &values), None);
     }
 
     #[test]
@@ -745,8 +765,9 @@ mod tests {
 
     #[test]
     fn an_administrator_fast_allow_goes_back_to_jev_when_the_listing_is_no_longer_admin_tier() {
-        let current = tiered("public", true, "admin", "high");
-        let proposed = tiered("public", true, "self", "high");
+        // The DELETE takes no public source, so a public listing proves nothing to the administrator.
+        let current = tiered("public", false, "admin", "high");
+        let proposed = tiered("public", false, "public", "high");
         let mut allowed = method_row("DELETE", "fast_allow", "/api/patients/7005");
         allowed.role = Some("admin".to_owned());
         let values = [value(
@@ -762,6 +783,25 @@ mod tests {
             shift_under(&current, &proposed, &allowed, &values),
             Some(Shift::BackToJev)
         );
+    }
+
+    #[test]
+    fn an_administrator_fast_allow_stands_when_the_listing_becomes_the_sessions_own() {
+        // A listing marked own proves the value to every session, the administrator included.
+        let current = tiered("public", false, "admin", "high");
+        let proposed = tiered("public", false, "self", "high");
+        let mut allowed = method_row("DELETE", "fast_allow", "/api/patients/7005");
+        allowed.role = Some("admin".to_owned());
+        let values = [value(
+            "path[2]",
+            true,
+            vec![origin(
+                "id",
+                "GET /api/admin/patients",
+                "GET /api/admin/patients patients[].id",
+            )],
+        )];
+        assert_eq!(shift_under(&current, &proposed, &allowed, &values), None);
     }
 
     #[test]

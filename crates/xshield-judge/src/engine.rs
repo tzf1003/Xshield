@@ -389,8 +389,11 @@ fn function_view(
     }
     let attempt = admin_entry.is_some() && !admin;
     // Unknown is judged on the transport method and the first template only: the table was learned from
-    // the traffic's methods and paths, not from the overrides or the decoded slashes.
-    let unknown = objects.asks_unknown_functions()
+    // the traffic's methods and paths, not from the overrides or the decoded slashes. An administrator's
+    // session is not asked about an unknown function: the table does not list every administrator
+    // interface, so such a request is judged by its values alone (docs/07 section 7.9.18).
+    let unknown = !admin
+        && objects.asks_unknown_functions()
         && (!is_templatable(logical) || !objects.knows_function(&method, first));
     let redacted = redacted_path(logical, secret);
     let key = cut(
@@ -2069,6 +2072,9 @@ mod tests {
     /// What a call to the fake answers: the two choices, or a failure.
     type Reply = Result<(&'static str, &'static str), JevFailure>;
 
+    /// A rule that answers a call from its body, or returns None to leave that call to the other answers.
+    type Rule = fn(&str) -> Option<(&'static str, &'static str)>;
+
     #[derive(Clone)]
     struct FakeJev {
         calls: Arc<AtomicUsize>,
@@ -2077,6 +2083,8 @@ mod tests {
         reply: Arc<Mutex<Reply>>,
         /// Replies for the calls whose body contains a marker, looked up before `reply`.
         marked: Arc<Mutex<Vec<(&'static str, Reply)>>>,
+        /// Rules that answer the calls whose body they pick, looked up before `marked` and `reply`.
+        rules: Arc<Mutex<Vec<Rule>>>,
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
     }
@@ -2089,6 +2097,7 @@ mod tests {
                 timeouts: Arc::default(),
                 reply: Arc::new(Mutex::new(Ok(("ALLOW", "BENIGN")))),
                 marked: Arc::default(),
+                rules: Arc::default(),
                 in_flight: Arc::default(),
                 peak: Arc::default(),
             }
@@ -2101,6 +2110,10 @@ mod tests {
         }
         fn fail(&self, failure: JevFailure) {
             *self.reply.lock().unwrap() = Err(failure);
+        }
+        /// The calls whose body `rule` picks answer what the rule returns; it returns None for the others.
+        fn answer_by(&self, rule: Rule) {
+            self.rules.lock().unwrap().push(rule);
         }
         /// The calls whose body contains `marker` answer `access` and `attack`.
         fn answer_marked(&self, marker: &'static str, access: &'static str, attack: &'static str) {
@@ -2164,6 +2177,13 @@ mod tests {
             // The call waits here, so that calls made together are in flight together.
             tokio::task::yield_now().await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            let ruled: Option<Reply> = self
+                .rules
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|rule| rule(&text))
+                .map(Ok);
             let marked = self
                 .marked
                 .lock()
@@ -2171,7 +2191,7 @@ mod tests {
                 .iter()
                 .find(|(marker, _)| text.contains(marker))
                 .map(|(_, reply)| reply.clone());
-            let reply = match marked {
+            let reply = match ruled.or(marked) {
                 Some(reply) => reply,
                 None => self.reply.lock().unwrap().clone(),
             };
@@ -6493,13 +6513,12 @@ mod tests {
             .find(|value| value.value == "7005")
             .expect("the id is recorded");
         assert_eq!(value.attempt, None, "the own listing is a source");
-        assert!(!value.verified, "a self sighting never allows on its own");
-        assert_eq!(fake.calls(), 2);
-        let sent = fake.sent.lock().unwrap()[1].clone();
-        assert!(
-            !state_of(&sent).contains(r#""attempt""#),
-            "the value is no attempt any more: {sent}"
-        );
+        // The own listing proves the value, as an untiered listing would, so the delete is a fast
+        // allow and Jev is not called a second time.
+        assert!(value.verified, "the own listing proves the value");
+        assert!(verdict.forward, "a verified delete is forwarded");
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1, "the second delete does not reach Jev");
     }
 
     /// A site whose admin listing shows its patients only to administrator sessions, and whose
@@ -7527,6 +7546,81 @@ mod tests {
         }
     }
 
+    /// The scripted model of the lab (tests/security-lab/fake_jev.py, plan 3.5): a batch whose values
+    /// carry no verified id at the path position is denied, since the id has no evidence in it.
+    fn id_unshown_in_a_batch(body: &str) -> Option<(&'static str, &'static str)> {
+        let document: serde_json::Value = serde_json::from_str(body).ok()?;
+        let carried = document["state"]["request"]["values"]
+            .as_array()?
+            .iter()
+            .any(|value| value["at"] == "path[2]" && value["verified"] == true);
+        (!carried).then_some(("DENY", "BENIGN"))
+    }
+
+    /// A note of 24 fields of 420 characters and one of 1,500 (docs/02 section 2.4), as a JSON object:
+    /// its state is cut into two batches or more.
+    fn long_note() -> String {
+        let fields: Vec<String> = (0..24)
+            .map(|index| format!(r#""field{index:02}":"{}""#, "正常的文字".repeat(84)))
+            .collect();
+        format!(
+            r#"{{{},"remark":"{}"}}"#,
+            fields.join(","),
+            "正常的文字".repeat(300)
+        )
+    }
+
+    #[tokio::test]
+    async fn every_batch_of_a_note_on_an_id_route_carries_the_verified_id() {
+        // The public search showed patient 7005 to the session, and a note takes that sighting. The note
+        // is cut into batches (docs/02 section 2.4) and each one names the id in its path, so each one
+        // must carry the id with its verification, not only the first.
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        fake.answer_by(id_unshown_in_a_batch);
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let body = long_note();
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get("/api/patients/7005/notes", None, Some("alice"), 1_000)
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(verdict.forward, "{:?}", verdict.record.decision_path);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        let batches = verdict
+            .record
+            .jev
+            .as_ref()
+            .and_then(|jev| jev.batches)
+            .unwrap_or(0);
+        assert!(batches >= 2, "{batches} batches");
+        assert_eq!(fake.calls(), usize::from(batches));
+    }
+
+    #[tokio::test]
+    async fn the_same_note_on_a_patient_the_session_was_never_shown_is_refused() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        fake.answer_by(id_unshown_in_a_batch);
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let body = long_note();
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get("/api/patients/7006/notes", None, Some("alice"), 1_000)
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+    }
+
     #[tokio::test]
     async fn an_attempt_on_an_admin_function_neither_reads_nor_writes_the_allow_cache() {
         let fake = FakeJev::new();
@@ -8049,6 +8143,95 @@ mod tests {
             .await;
         assert_eq!(plain.record.decision_path, DecisionPath::JevAllow);
         assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_route_word_under_an_id_function_is_asked_as_unknown() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"enforce","objects":{"ask_unknown_functions":true,"functions":[{"key":"GET /api/patients/{id}","source":"rule"}]}"#,
+        );
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+        );
+        let numbered = judge
+            .judge(
+                &site,
+                &call_as("GET", "/api/patients/7005", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(numbered.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        // A route word is no value: the `{id}` entry does not cover it, so Jev is asked with the
+        // function unknown and refuses it.
+        let route_word = judge
+            .judge(
+                &site,
+                &call_as("GET", "/api/patients/export-all", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(route_word.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(function_shown(&fake, 0), json!({"known": false}));
+    }
+
+    #[tokio::test]
+    async fn an_administrator_session_is_not_asked_about_an_unknown_function() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(true);
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        let reports = judge
+            .judge(&site, &call_as("GET", "/api/admin/reports", "root", 1_000))
+            .await;
+        assert_eq!(reports.record.decision_path, DecisionPath::FastAllow);
+        assert!(reports.record.trace.function.is_none());
+        assert_eq!(fake.calls(), 0);
+        // The same request from an ordinary session is asked, with the function unknown.
+        let doctor = judge
+            .judge(
+                &site,
+                &call_as("GET", "/api/admin/reports", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(function_shown(&fake, 0), json!({"known": false}));
+        assert_eq!(
+            doctor.record.trace.function.and_then(|trace| trace.known),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_administrator_override_to_an_unlisted_method_is_not_unknown() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(true);
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        let overrides = ["PUT".to_owned()];
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method_overrides: &overrides,
+                    ..call_as("GET", "/api/admin/reports", "root", 1_000)
+                },
+            )
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert!(verdict.record.trace.function.is_none());
+        assert_eq!(fake.calls(), 0);
     }
 
     #[tokio::test]
