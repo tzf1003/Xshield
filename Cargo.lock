@@ -3107,6 +3107,7 @@ version = "4.0.0-rc1"
 dependencies = [
  "async-trait",
  "bytes",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper",
