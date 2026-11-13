@@ -1201,12 +1201,12 @@ fn anonymous_unit(record: &DecisionFacts) -> Option<String> {
 /// since the rules must tell that ordinary units were around. `identified` says whether the site declares
 /// user identity positions.
 ///
-/// A request on an entry counts as an ordinary use or refusal whoever made it, so an entry is never proposed
-/// as an administrator function. An administrator's request on an entry also counts as an administrator use:
-/// the unit is then left out of the site's ordinary units (`site_ordinary_units`), so an administrator who only
-/// logged in is no bystander. Same for the administrator's session with no identity: its requests count as
-/// anonymous, so the first requests of an administrator whose user is not yet declared do not propose the
-/// function.
+/// On an entry, a request that went through counts as an ordinary use whoever made it, so an entry is never
+/// proposed as an administrator function. A refused request on an entry is no fact. An administrator's request on
+/// an entry also counts as an administrator use: the unit is then left out of the site's ordinary units
+/// (`site_ordinary_units`), so an administrator who only logged in is no bystander. Same for the administrator's
+/// session with no identity: its requests count as anonymous, so the first requests of an administrator whose user
+/// is not yet declared do not propose the function.
 #[must_use]
 pub fn observe_functions(record: &DecisionFacts, identified: bool) -> Vec<FunctionFact> {
     if record.trace.bypass.is_some() {
