@@ -181,6 +181,20 @@ test("an ID older than retention, a future ID and a malformed ID each give their
   await expect(page).toHaveURL(/\/requests\/req_not-a-real-id$/);
 });
 
+// A request that observe mode would refuse (docs/07 7.4.6): its response was not read into the context, so
+// the learning step says it is unlearned, and the attention line says the response stayed out of the context.
+const REFUSED = "req_01a1973f5b2c3d4e6f708192a3b4c5d6";
+
+test("a response that observe mode would refuse is named as unlearned, and the step says it stayed out", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto(`/requests/${REFUSED}`);
+  await expect(heading(page, "/rest/basket/6")).toBeVisible();
+  await expect(page.getByText("未观察：本应拦截，未学习")).toBeVisible();
+  await expect(page.getByText("本应拦截请求的响应没有进入上下文")).toBeVisible();
+});
+
 const TABS = [
   { name: "判定过程", search: "" },
   { name: "请求值", search: "?tab=values" },

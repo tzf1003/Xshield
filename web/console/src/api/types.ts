@@ -524,7 +524,7 @@ export interface SessionListResponse {
 }
 
 export interface TimelineRow extends RequestRow {
-  /** New values the response taught the session (`trace.response.new_values`). */
+  /** New values the response taught the session (`trace.response.new_values`); null when the response was not read. */
   learned: number | null;
   entry_passed: boolean;
   issued_session: string | null;

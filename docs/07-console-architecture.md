@@ -267,7 +267,7 @@ GET /api/patients ──响应里出现 id=7──┐
 - 请求发出的值照常记下。签发了凭证时，新会话照常继承这些值，之后的回显不会被当作已见值学回来。
 - 摘要：`response.observed` 为 `skipped`，`skip` 为 `would_block`，`after_would_block` 为 `true`，`new_values` 为 0；`issued_session` 照常填。非 2xx 的响应仍按 `status` 记原因，判断顺序不变。
 
-这样观察期学到的值不会让切到拦截模式后的判定变宽松，观察期看到的“本应拦截”也和切换后实际拦截的请求一致。控制台在请求详情的学习一步里标出这类响应。就绪检查不再列“由本应拦截请求学到的值被引用次数”，这一项已删除。
+这样观察期学到的值不会让切到拦截模式后的判定变宽松，观察期看到的“本应拦截”也和切换后实际拦截的请求一致。控制台在请求详情的学习一步里标出这类响应。升级前写下的记录仍保存着当时学到的值（`observed` 为 `json` 或 `html`），控制台把它们写成“本应拦截请求的响应也进入了上下文（旧版本的记录）”，时间线标“本应拦截学习”；判定日志保留 7 天，之后这类记录不再出现。就绪检查不再列“由本应拦截请求学到的值被引用次数”，这一项已删除。
 
 ### 7.4.7 档位在判定中的使用
 
@@ -745,7 +745,7 @@ CREATE TABLE jev_prompts (
 ### 7.9.6 会话
 
 - `GET /api/sessions?site=&since_millis=&until_millis=&flag=blocked|jev&limit=`：在时间窗内按 `session` 聚合，返回标签、上下文类型、站点、首末时间、请求数、Jev 调用数、拦截与本应拦截数、签发它的请求 ID（来自 `trace.response.issued_session`），按最后活动倒序，最多 200 个。时间窗缺省 24 小时。
-- `GET /api/sessions/{label}?site=&only=judged|jev|blocks&cursor=`：会话摘要和按时间正序的请求行；每行附带 `learned`（`trace.response.new_values`）、`entry_passed`、`issued_session`，供时间线标注。签发这个会话的登录请求发生在会话建立之前，按客户端地址记账（`context = address`），带的不是这个会话标签；时间线把它按 `trace.response.issued_session = {label}` 另外查出，排在第一行。
+- `GET /api/sessions/{label}?site=&only=judged|jev|blocks&cursor=`：会话摘要和按时间正序的请求行；每行附带 `learned`（`trace.response.new_values`，响应没读过时为 null）、`entry_passed`、`issued_session`，供时间线标注。签发这个会话的登录请求发生在会话建立之前，按客户端地址记账（`context = address`），带的不是这个会话标签；时间线把它按 `trace.response.issued_session = {label}` 另外查出，排在第一行。
 
 ### 7.9.7 Jev
 

@@ -40,7 +40,7 @@ const EVIDENCE: &str = include_str!("../../../web/console/tests/fixtures/evidenc
 const PREVIEW: &str = include_str!("../../../web/console/tests/fixtures/preview.json");
 const SESSION_TIMELINE: &str =
     include_str!("../../../web/console/tests/fixtures/session-timeline.json");
-const DETAILS: [&str; 3] = [
+const DETAILS: [&str; 4] = [
     include_str!(
         "../../../web/console/tests/fixtures/request-detail-req_01a1971a07e079639a823d4257b43172.json"
     ),
@@ -49,6 +49,9 @@ const DETAILS: [&str; 3] = [
     ),
     include_str!(
         "../../../web/console/tests/fixtures/request-detail-req_01a1973ed5c0732b8f29804d7fc746d3.json"
+    ),
+    include_str!(
+        "../../../web/console/tests/fixtures/request-detail-req_01a1973f5b2c3d4e6f708192a3b4c5d6.json"
     ),
 ];
 
