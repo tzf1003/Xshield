@@ -324,6 +324,25 @@ impl FunctionView {
     }
 }
 
+/// The key of the first administrator-only function that one of `templates` reaches under one of
+/// `methods`, the methods taken in order (docs/07 section 7.9.18). `None` when no method reaches one.
+fn first_admin_function<'m>(
+    objects: &ObjectMap,
+    templates: &[String],
+    methods: impl Iterator<Item = &'m str>,
+) -> Option<String> {
+    for method in methods {
+        for template in templates {
+            if objects.admin_only(method, template) {
+                return objects
+                    .function_of(method, template)
+                    .map(|function| function.key.clone());
+            }
+        }
+    }
+    None
+}
+
 /// The function view of one request, or `None` when the site's table does not guard functions. A site
 /// without a guarding table is judged exactly as before, and runs no lookup for it (docs/07 section 7.9.18).
 fn function_view(
@@ -343,18 +362,26 @@ fn function_view(
     // The administrator-only function the request reaches: the transport method first, then each method
     // the request names for itself, each with every template, in that order. The first hit names it.
     let overrides = override_methods(&method, request, extracted);
-    let mut admin_entry = None;
-    'search: for candidate in
-        std::iter::once(method.as_str()).chain(overrides.iter().map(String::as_str))
-    {
-        for template in &templates {
-            if objects.admin_only(candidate, template) {
-                admin_entry = objects
-                    .function_of(candidate, template)
-                    .map(|function| function.key.clone());
-                break 'search;
+    let candidates = std::iter::once(method.as_str()).chain(overrides.iter().map(String::as_str));
+    let mut admin_entry = first_admin_function(objects, &templates, candidates);
+    // A body read as one text may hold a `_method` this reader did not read, naming any method the table
+    // holds. Each of those methods is tried, in the table's order, the ones already tried left out
+    // (docs/07 section 7.9.18). The request is then judged by the stricter method.
+    if admin_entry.is_none() && extracted.method_field_unread {
+        let tried: Vec<&str> = std::iter::once(method.as_str())
+            .chain(overrides.iter().map(String::as_str))
+            .collect();
+        let mut untried: Vec<&str> = Vec::new();
+        for table_method in objects
+            .functions()
+            .iter()
+            .filter_map(|function| function.key.split(' ').next())
+        {
+            if !tried.contains(&table_method) && !untried.contains(&table_method) {
+                untried.push(table_method);
             }
         }
+        admin_entry = first_admin_function(objects, &templates, untried.into_iter());
     }
     let attempt = admin_entry.is_some() && !admin;
     // Unknown is judged on the transport method and the first template only: the table was learned from
@@ -7687,6 +7714,314 @@ mod tests {
             .await;
         assert_eq!(plain.record.decision_path, DecisionPath::JevAllow);
         assert_eq!(fake.calls(), 2);
+    }
+
+    /// A site whose table holds an administrator's `DELETE /api/users/{id}`: the function a method field
+    /// names in a request that is otherwise a plain `POST /api/users/5`.
+    fn users_site() -> SiteSpec {
+        site(&format!(
+            r#","mode":"enforce","objects":{}"#,
+            objects_with(
+                r#","functions":[{"key":"DELETE /api/users/{id}","source":"rule","tier":"admin","reliability":"high"}]"#
+            )
+        ))
+    }
+
+    /// The attempt the trace of a judgement records, `None` when it records none or names no function.
+    fn attempt_of(verdict: &Judgement) -> Option<Attempt> {
+        verdict
+            .record
+            .trace
+            .function
+            .as_ref()
+            .and_then(|function| function.attempt)
+    }
+
+    /// Asserts that a judgement stopped an over-privilege attempt on `DELETE /api/users/{id}`.
+    fn assert_users_delete_attempt(verdict: &Judgement) {
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let trace = verdict
+            .record
+            .trace
+            .function
+            .clone()
+            .expect("the trace names the function");
+        assert_eq!(trace.entry.as_deref(), Some("DELETE /api/users/{id}"));
+        assert_eq!(trace.attempt, Some(Attempt::OverPrivilege));
+    }
+
+    #[tokio::test]
+    async fn a_method_field_behind_two_hundred_values_is_judged_by_the_stricter_method() {
+        // `_method=DELETE` comes after the 200th value: in the query, in a form body and in a JSON body.
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = users_site();
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let filler = (0..197)
+            .map(|i| format!("k{i}=v{i}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let pairs = format!("{filler}&_method=DELETE");
+        let mut members = (1..=200)
+            .map(|i| format!(r#""A{i:03}":"v{i}""#))
+            .collect::<Vec<_>>();
+        members.push(r#""_method":"DELETE""#.to_owned());
+        let json = format!("{{{}}}", members.join(","));
+        let in_query = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    query: Some(&pairs),
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&in_query);
+        let in_form = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some("application/x-www-form-urlencoded"),
+                    body: pairs.as_bytes(),
+                    ..call_as("POST", "/api/users/5", "doctor-a", 2_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&in_form);
+        let in_json = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some("application/json"),
+                    body: json.as_bytes(),
+                    ..call_as("POST", "/api/users/5", "doctor-a", 3_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&in_json);
+        assert_eq!(
+            function_shown(&fake, 0),
+            json!({"tier": "admin", "attempt": "over_privilege"})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_method_field_in_a_multipart_body_is_judged_by_the_stricter_method() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = users_site();
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let upload = "multipart/form-data; boundary=b";
+        let delete: &[u8] =
+            b"--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nDELETE\r\n--b--\r\n";
+        let put: &[u8] =
+            b"--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nPUT\r\n--b--\r\n";
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some(upload),
+                    body: delete,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&attempt);
+        // The field was read, so it names PUT and the table's DELETE is not reached by it.
+        let read = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some(upload),
+                    body: put,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 2_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt_of(&read), None);
+    }
+
+    #[tokio::test]
+    async fn an_unread_method_field_is_judged_by_any_method_of_the_table() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = users_site();
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        // A body with no type that is not the shape of a form is read as one text, and the origin may still
+        // split it into fields: a raw space, an empty segment, a trailing `&`.
+        let spaced: &[u8] = b"note=hello world&_method=DELETE";
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    body: spaced,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&attempt);
+        let empty_segment: &[u8] = b"a=1&&_method=DELETE";
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    body: empty_segment,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_100)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&attempt);
+        let trailing: &[u8] = b"_method=DELETE&";
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    body: trailing,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_200)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&attempt);
+        // A multipart/mixed body the reader does not read, holding `_method`, is judged the same way.
+        let mixed: &[u8] = b"--b\r\nContent-Type: text/plain\r\n\r\n_method=DELETE\r\n--b--\r\n";
+        let mixed_type = "multipart/mixed; boundary=b";
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some(mixed_type),
+                    body: mixed,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 2_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&attempt);
+        // The same body without `_method` names nothing.
+        let plain: &[u8] = b"--b\r\nContent-Type: text/plain\r\n\r\nnote\r\n--b--\r\n";
+        let ordinary = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some(mixed_type),
+                    body: plain,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 3_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt_of(&ordinary), None);
+        // No method of the table reaches `/api/notes/{id}`, so the unread field names no function there.
+        let elsewhere = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some(mixed_type),
+                    body: mixed,
+                    ..call_as("POST", "/api/notes/5", "doctor-a", 4_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt_of(&elsewhere), None);
+    }
+
+    #[tokio::test]
+    async fn an_administrator_is_not_held_by_an_unread_method_field() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = users_site();
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        let mixed: &[u8] = b"--b\r\nContent-Type: text/plain\r\n\r\n_method=DELETE\r\n--b--\r\n";
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some("multipart/mixed; boundary=b"),
+                    body: mixed,
+                    ..call_as("POST", "/api/users/5", "root", 1_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt_of(&verdict), None);
+    }
+
+    #[tokio::test]
+    async fn a_method_field_read_as_a_field_is_judged_by_the_method_it_names() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = users_site();
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        // A body with no type that is the shape of a form is read as fields, so its `_method` is a value.
+        // PUT names no administrator function, so the table's DELETE is not flagged.
+        let put: &[u8] = b"_method=PUT&a=1";
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    body: put,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt_of(&verdict), None);
+        // The same shape naming DELETE is read as that field, and is an attempt on the field's own value.
+        let delete: &[u8] = b"_method=DELETE&a=1";
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    body: delete,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 2_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&verdict);
+        // A named part of multipart/mixed is read as a field too: PUT is not an attempt, DELETE is.
+        let mixed_put: &[u8] =
+            b"--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nPUT\r\n--b--\r\n";
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some("multipart/mixed; boundary=b"),
+                    body: mixed_put,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 3_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt_of(&verdict), None);
+        let mixed_delete: &[u8] =
+            b"--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nDELETE\r\n--b--\r\n";
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some("multipart/mixed; boundary=b"),
+                    body: mixed_delete,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 4_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&verdict);
     }
 
     #[tokio::test]

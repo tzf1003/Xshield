@@ -65,6 +65,10 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | F11 | 不带凭证的 `DELETE /api/patients`（入口路径，基线里没有这个方法） | 交 Jev：`state.entry.matched` 为真，`function` 为 `{"known":false}`；Jev 放行，源站答 401 | `jev_allow` |
 | F12 | 没有功能表的站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 都快速放行（源站分别答 200、404），不新增 Jev 调用，判定记录没有 `trace.function`。与 F5、F9 对照 | `fast_allow`，`fast_allow` |
 | F13 | 观察模式的功能表站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 两个都转发（源站收到），记为本应拦截 | `jev_deny`（`would_block`） |
+| F16 | 医生 A 对自己新建的患者 `POST`，查询串排在 200 个值之后（第 231 个）带 `_method=DELETE` | 拦截，判定记录的 `trace.function.attempt` 为 `over_privilege`，源站不收到请求 | `jev_deny` |
+| F17 | 医生 A 对自己新建的患者 `POST`，`multipart/form-data` 的文本字段 `_method` 为 `DELETE` | 同 F16 | `jev_deny` |
+| F18 | 医生 A 对自己新建的患者 `POST`，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，不像表单） | 同 F16；网关按文字读这个请求体 | `jev_deny` |
+| F19 | 医生 A 对自己新建的患者 `POST`，不带 `Content-Type`，请求体 `note=x&_method=DELETE`（像表单） | 同 F16；网关按字段读这个请求体 | `jev_deny` |
 
 ### A9 至 A11 说明：搜索结果与档位
 
@@ -93,6 +97,10 @@ F5b 用请求头 `X-HTTP-Method-Override` 把 `POST` 覆盖为 `DELETE`。网关
 `baseline` 站点的功能表列出基线里的接口（不带档位），开关打开。没有列出的 `GET /metrics`、`GET /api/comments`、`DELETE /api/patients` 交给 Jev：假 Jev 对路径里含运维词的未知功能答 DENY（F9，见下方「Fake Jev 的脚本」）；其他照值判定，放行后进入放行缓存（F10）。
 
 `fobserve` 站点两张表都有，开关打开，是观察模式（F13）。`admin` 站点没有功能表，用来对照 F12。
+
+### F16 至 F19 说明：方法覆盖
+
+四条都用 `functions` 站点，医生 A 对自己新建的患者发 `POST`，`_method=DELETE` 放在网关读取方式不同的位置：查询串的第 231 个值（F16，请求值不设上限，网关读到它）、multipart 的文本字段（F17，读成带字段名的值）、没有类型且带空格的请求体（F18，不像表单，网关按文字读，字节里含 `_method`，于是按功能表里出现过的每个方法判定）、没有类型、形状像表单的请求体（F19，网关按字段读到 `_method`，与 F16 和 F17 一样按读到的方法判定）。四条都要求判定记录的 `trace.function.attempt` 为 `over_privilege`，只看 403 不够（[docs/07](../../docs/07-console-architecture.md) 7.9.18）。
 
 靶场的站点地址限额都设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。
 

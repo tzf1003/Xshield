@@ -136,6 +136,10 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | F11 | 不带凭证的 `DELETE /api/patients`（入口路径，基线里没有这个方法） | 交 Jev：`state.entry.matched` 为真，`function` 为 `{"known":false}`；Jev 放行，源站答 401 |
 | F12 | 没有功能表的站点：医生 `POST /api/admin/export`、`GET /metrics` | 都快速放行，不交 Jev，判定记录没有 `trace.function`（与 F5、F9 对照） |
 | F13 | 观察模式的功能表站点：医生 `POST /api/admin/export`、`GET /metrics` | 都转发（源站收到），记为本应拦截 |
+| F16 | 医生 `POST` 自己新建的患者，查询串排在 200 个值之后（第 231 个）是 `_method=DELETE` | 拦截，判定记录的 `trace.function.attempt` 为 `over_privilege`，源站不收到请求 |
+| F17 | 医生 `POST` 自己新建的患者，`multipart/form-data` 的文本字段 `_method` 为 `DELETE` | 同 F16 |
+| F18 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，不像表单，网关按文字读） | 同 F16 |
+| F19 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x&_method=DELETE`（像表单，网关按字段读） | 同 F16 |
 
 靶场的站点把地址限额设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。
 
