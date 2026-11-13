@@ -154,7 +154,7 @@ function TimelineLine({
     );
   }
   if (row.entry_passed) tags.push({ key: "entry", text: "⇢ 首次经过入口" });
-  if (row.after_would_block) tags.push({ key: "learned", text: "▲ 本应拦截学习" });
+  if (row.after_would_block) tags.push({ key: "learned", text: "▲ 本应拦截，未学习" });
 
   const learned = row.learned;
   const barWidth =

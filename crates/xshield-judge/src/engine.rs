@@ -126,7 +126,7 @@ pub struct Observation<'a> {
     /// large, or a HEAD request.
     pub unread: Option<Skip>,
     /// The request was judged to be refused and was forwarded because the site
-    /// is in observe mode.
+    /// is in observe mode. Its response teaches nothing (docs/07 section 7.4.6).
     pub would_block: bool,
     /// Unix time in milliseconds.
     pub now_ms: u64,
@@ -857,7 +857,10 @@ impl<J: JevPort> Judge<J> {
     ///
     /// Only 2xx responses teach values. A redirect that issues a credential (a
     /// login form answering `302` with `Set-Cookie`) creates the new session,
-    /// empty. A failed request teaches nothing.
+    /// empty. A failed request teaches nothing. Nor does a response to a request
+    /// the gateway would refuse (observe mode forwards it): its values are not
+    /// learned and nothing it declares is kept, as if the request had never
+    /// reached the origin (docs/07 section 7.4.6).
     // The steps for one response stay in one function, in the order they happen: learning, then
     // the identity and the exposure alert that read what was just learned.
     #[allow(clippy::too_many_lines)]
@@ -909,6 +912,25 @@ impl<J: JevPort> Judge<J> {
             summary.skip = Some(Skip::Status);
         }
         if !(success || issuing_redirect) {
+            return summary;
+        }
+        // A request the gateway would refuse teaches its response nothing (docs/07 section 7.4.6).
+        // The values it sent are still noted: a credential it issued inherits them, as before, so
+        // the session does not learn them back from an echo later.
+        if observation.would_block {
+            // A redirect that issues a credential is not a 2xx, so its status reason stays.
+            summary.skip = summary.skip.or(Some(Skip::WouldBlock));
+            if let Some(credential) = issued {
+                let mut inner = self.lock();
+                let session = inner.store.session(
+                    self.session_key(site.name(), credential),
+                    observation.now_ms,
+                );
+                if let Some(record) = &inherited {
+                    session.inherit_sent(record);
+                }
+                session.note_sent(observation.sent);
+            }
             return summary;
         }
         let ResponseFacts {
@@ -2940,6 +2962,144 @@ mod tests {
             (record.decision_path, record.outcome),
             (DecisionPath::JevDeny, Outcome::WouldBlock)
         );
+    }
+
+    #[tokio::test]
+    async fn a_response_to_a_request_that_would_be_refused_teaches_nothing() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        let refused = judge
+            .judge(&site, &get("/api/patients/D4411", None, Some("alice"), 0))
+            .await;
+        assert!(refused.forward);
+        assert_eq!(refused.record.outcome, Outcome::WouldBlock);
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                sent: &refused.sent,
+                echo: &refused.echo,
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert_eq!(observed.new_values, 0);
+        assert_eq!(observed.skip, Some(Skip::WouldBlock));
+        assert!(observed.after_would_block);
+        let later = judge
+            .judge(&site, &get("/api/patients/7", None, Some("alice"), 2_000))
+            .await;
+        assert_ne!(later.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn the_same_response_is_learned_when_the_request_would_not_be_refused() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        let refused = judge
+            .judge(&site, &get("/api/patients/D4411", None, Some("alice"), 0))
+            .await;
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                sent: &refused.sent,
+                echo: &refused.echo,
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert!(observed.new_values > 0);
+        assert_eq!(observed.skip, None);
+        assert!(!observed.after_would_block);
+        let later = judge
+            .judge(&site, &get("/api/patients/7", None, Some("alice"), 2_000))
+            .await;
+        assert_eq!(later.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn a_refused_login_that_issues_a_credential_gives_its_session_nothing_seen() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        let login = RequestFacts {
+            route: None,
+            request_headers: &[],
+            method: "POST",
+            path: "/login",
+            content_type: Some("application/json"),
+            body: br#"{"username":"alice","password":"hunter2"}"#,
+            ..get("/login", None, None, 1_000)
+        };
+        let judged = judge.judge(&site, &login).await;
+        assert!(judged.forward);
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                route: None,
+                request_id: RID,
+                unread: None,
+                would_block: true,
+                credential: None,
+                client: "10.0.0.1",
+                issued_credential: Some("fresh"),
+                method: "POST",
+                path: "/login",
+                status: 200,
+                content_type: Some("application/json"),
+                body: br#"{"userId":"P-0000099","token":"t"}"#,
+                now_ms: 1_001,
+                sent: &judged.sent,
+                echo: &judged.echo,
+            },
+        );
+        assert_eq!(observed.skip, Some(Skip::WouldBlock));
+        assert!(observed.issued_session.is_some());
+        assert_eq!(observed.new_values, 0);
+        assert!(!observed.entry_passed);
+        // The new session has seen nothing, so the id the response showed goes to Jev.
+        let calls = fake.calls();
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("fresh"), 2_000),
+            )
+            .await;
+        assert_ne!(object.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), calls + 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_anonymous_entry_response_is_not_learned_by_its_address() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        // A sign-up page: no credential yet, the origin shows the new id.
+        let sign_up = |client| RequestFacts {
+            route: None,
+            request_headers: &[],
+            client,
+            ..get("/api/patients", Some("id=7"), None, 5_000)
+        };
+        let blind = judge.judge(&site, &sign_up("10.0.0.9")).await;
+        assert_eq!(blind.record.outcome, Outcome::WouldBlock);
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                credential: None,
+                client: "10.0.0.9",
+                ..list_response("unused", 1_000)
+            },
+        );
+        assert_eq!(observed.new_values, 0);
+        assert_eq!(observed.skip, Some(Skip::WouldBlock));
+        let shown = judge.judge(&site, &sign_up("10.0.0.9")).await;
+        assert_ne!(shown.record.decision_path, DecisionPath::FastAllow);
     }
 
     #[tokio::test]

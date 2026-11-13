@@ -360,12 +360,12 @@
  – 缓存       没有可复用的放行
 ┃✦ Jev        越权 DENY 86% · 无攻击 BENIGN 99%       512 ms / 超时 2000 ms   ▲ 本应拦截   查看 Jev 上下文
  ✓ 执行       观察模式 → 转发，源站 200                                          290 ms
- ▲ 学习       JSON 响应 1.8 KiB：取出 14 个值，新增 9 个 · 本应拦截请求的响应也进入了上下文
+ ▲ 学习       未观察：本应拦截，未学习 · 本应拦截请求的响应没有进入上下文
 ```
 
 “接口名”一步在“站点”之后：有规则时写 `✓ 接口名  规则 /weixin/…/gateway → bus.buriedPointService/saveBuriedPointList（请求头）`；路径没有规则时写 `– 接口名  没有规则，用 URL 路径`（灰字）；取不到接口名时用 `!` 写原因。
 
-“学习”一步对应 `trace.response`：未观察时写原因（非 2xx、类型不是 JSON/HTML、压缩、超过 1 MiB、HEAD、未转发）；签发了新会话时写“签发会话 3b9f…”并链接；首次经过入口时写“会话第一次经过入口 /api/Products”；`after_would_block` 为真时显示琥珀色说明（[07.4.6](07-console-architecture.md#746-附带发现观察模式下本应拦截请求的响应仍进入上下文)）。
+“学习”一步对应 `trace.response`：未观察时写原因（非 2xx、类型不是 JSON/HTML、压缩、超过 1 MiB、HEAD、未转发、本应拦截）；签发了新会话时写“签发会话 3b9f…”并链接；首次经过入口时写“会话第一次经过入口 /api/Products”；`after_would_block` 为真时显示琥珀色说明“本应拦截请求的响应没有进入上下文”（[07.4.6](07-console-architecture.md#746-观察模式下本应拦截请求的响应不学习)）。
 
 **标签 2：请求值**。表格列：位置（`path[2]`、`query.q`、`body.items[].id`）、字段、值、类别、类型、已见、已核验、来源、Jev 序号。类别是值指向的对象类别（6.6.7）。下面的例子省略了类型和 Jev 序号两列：
 
@@ -504,7 +504,7 @@
 21:16:26.100  GET  /rest/basket/6            200  ✦ Jev 拒绝   ▲ 本应拦截
 ```
 
-- 按时间正序；每行：时间、方法、路径、状态、判定、标注（签发会话、首次经过入口、本应拦截学习）、学到的值数（细条形）。
+- 按时间正序；每行：时间、方法、路径、状态、判定、标注（签发会话、首次经过入口、本应拦截，未学习）、学到的值数（细条形）。
 - 两个请求间隔超过 5 分钟时插入“⋯ 9 分钟无请求”。
 - 顶部的累计已见值折线显示上下文的增长，悬停对应到当时的请求。
 - 绕过请求不识别会话，不在时间线里；时间线顶部注明。
@@ -846,7 +846,6 @@
 │  ▲ 本应拦截 14 条：Jev 拒绝 11 · 无会话 3                               逐条查看 →      │
 │  ▲ 待处理建议 1 条：登记入口 /rest/admin/application-configuration       查看 →         │
 │  ✓ Jev 正常（p95 910 ms，超时 0.7%）                                                    │
-│  ▲ 由本应拦截请求学到的值被后续请求引用 5 次（切换后这些请求也可能被拦截）               │
 │  ✓ Jev 不可用时：拒绝                                                                   │
 │ 影响：过去 24 小时有 14 个请求会被拦截（返回 401 / 403）                                │
 │ □ 我已查看这些请求，确认它们应当被拦截                                                  │
@@ -991,7 +990,7 @@
 | `JEV_UNKNOWN` | 答不上来 | 最高项是 UNKNOWN 或两项并列 |
 | `JEV_STATE_TOO_LARGE` | 上下文过大 | 裁剪后仍超过 8 KiB，没有调用 |
 | `JEV_CALL_LIMIT` | 达到上限 | 会话或地址每分钟调用次数用完，没有调用 |
-| 响应未观察：`status` / `content_type` / `compressed` / `too_large` / `head` / `not_forwarded` | — | 非 2xx / 类型不是 JSON 或 HTML / 响应被压缩 / 超过 1 MiB / HEAD 请求 / 请求没有转发 |
+| 响应未观察：`status` / `content_type` / `compressed` / `too_large` / `head` / `not_forwarded` / `would_block` | — | 非 2xx / 类型不是 JSON 或 HTML / 响应被压缩 / 超过 1 MiB / HEAD 请求 / 请求没有转发 / 本应拦截（观察模式，响应不学习） |
 | 源站错误：`connect_refused` / `connect_timeout` / `read_timeout` / `tls` / `other` | — | 连接被拒绝 / 连接超时 / 读取超时 / TLS 握手失败 / 其他错误 |
 
 建议类型：`entry_candidate` 登记入口、`bypass_candidate` 加入绕过、`upload_candidate` 上传接口加入绕过、`raise_jev_timeout` 调大 Jev 超时、`raise_call_limit` 调大调用上限、`secret_field_candidate` 追加脱敏词、`hot_would_block` 本应拦截集中的路径、`object_proposals` 对象表待确认、`route_rule_candidate` 可能是统一网关。影响预估类型的名称直接用 [07.9.10](07-console-architecture.md#7910-影响预估) 表中的“含义”列，新增的五类见 6.4.9。

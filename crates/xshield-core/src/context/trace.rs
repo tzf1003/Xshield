@@ -549,6 +549,9 @@ pub enum Skip {
     Bypass,
     /// The request was refused before it reached the origin.
     NotForwarded,
+    /// Observe mode forwarded a request the gateway would refuse. Its response teaches nothing
+    /// (docs/07 section 7.4.6).
+    WouldBlock,
 }
 
 /// How often a field name occurred in a response.

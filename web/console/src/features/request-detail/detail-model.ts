@@ -560,7 +560,7 @@ export function exposureNote(exposure: ResponseExposure | null | undefined): str
 /** The attention line of the learning step: what the response did beyond teaching the session. */
 function learningAttention(response: TraceResponse): string | null {
   const notes = [
-    response.after_would_block ? "本应拦截请求的响应也进入了上下文" : null,
+    response.after_would_block ? "本应拦截请求的响应没有进入上下文" : null,
     exposureNote(response.exposure),
   ].filter((note): note is string => note !== null);
   return notes.length > 0 ? notes.join("；") : null;

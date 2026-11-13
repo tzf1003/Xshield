@@ -512,6 +512,26 @@ fn c3_observe_mode_forwards_and_logs_would_block() {
 }
 
 #[test]
+fn c3_observe_mode_does_not_learn_from_a_response_it_would_refuse() {
+    // The list names a patient nobody showed the session, so observe mode forwards it as refused.
+    // The ids it shows are not learned from that response.
+    let refused = get(
+        "observe.test",
+        "/api/patients?pid=patient-Q-c3n&who=c3n",
+        Some("s-c3n"),
+    );
+    assert_eq!(refused.status, 200);
+    let row = record(&refused);
+    assert_eq!(row.outcome, Outcome::WouldBlock);
+    let response = row.trace.response.expect("the response was observed");
+    assert_eq!(response.skip, Some(Skip::WouldBlock));
+    assert_eq!(response.new_values, 0);
+    let shown = get("observe.test", "/api/patients/patient-B-c3n", Some("s-c3n"));
+    assert_eq!(shown.status, 200);
+    assert_ne!(record(&shown).decision_path, DecisionPath::FastAllow);
+}
+
+#[test]
 fn a_login_redirect_creates_the_session_the_next_requests_use() {
     let login = call(
         "enforce.test",

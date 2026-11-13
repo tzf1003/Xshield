@@ -78,15 +78,6 @@ export function readinessRows(readiness: Readiness, now: number): Row[] {
       : { key: "jev", mark: "▲", text: `Jev ${health}（p95 ${fmtMs(readiness.jev_p95_ms)}）` },
   );
   rows.push(
-    readiness.after_would_block_refs > 0
-      ? {
-          key: "learned",
-          mark: "▲",
-          text: `由本应拦截请求学到的值被后续请求引用 ${fmtInt(readiness.after_would_block_refs)} 次（切换后这些请求也可能被拦截）`,
-        }
-      : { key: "learned", mark: "✓", text: "由本应拦截请求学到的值没有被后续请求引用" },
-  );
-  rows.push(
     readiness.on_jev_unavailable === "deny"
       ? { key: "unavailable", mark: "✓", text: "Jev 不可用时：拒绝" }
       : {

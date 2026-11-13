@@ -975,40 +975,6 @@ fn name_pattern(names: &[String]) -> Option<String> {
     (!alternatives.is_empty()).then(|| format!("({})", alternatives.join("|")))
 }
 
-/// Requests in `since_millis..` whose trace says they cite a value learned
-/// from a request that observe mode let through as would-be refused
-/// (docs/07 section 7.4.6).
-///
-/// # Errors
-/// Returns [`sqlx::Error`] when the query fails.
-pub async fn after_would_block_references(
-    pool: &PgPool,
-    site: &str,
-    since_millis: i64,
-) -> Result<i64, sqlx::Error> {
-    let count: i64 = sqlx::query_scalar(
-        "WITH learners AS (
-             SELECT request_id FROM decision_log
-             WHERE site = $1 AND at_millis >= $2
-               AND trace #>> '{response,after_would_block}' = 'true'
-             LIMIT 5000
-         )
-         SELECT count(*)::bigint FROM decision_log d
-         WHERE d.site = $1 AND d.at_millis >= $2
-           AND EXISTS (
-               SELECT 1
-               FROM jsonb_array_elements(COALESCE(d.trace -> 'values', '[]'::jsonb)) AS v,
-                    jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
-               WHERE s ->> 'request_id' IN (SELECT request_id FROM learners)
-           )",
-    )
-    .bind(site)
-    .bind(since_millis)
-    .fetch_one(pool)
-    .await?;
-    Ok(count)
-}
-
 /// Requests of a site's window that carry an attempt (docs/07 section 7.4.7): a value that only
 /// public responses showed, used at a position that takes no public source. Counted by request, not by
 /// value, from the `attempt` marks of the decision's values.

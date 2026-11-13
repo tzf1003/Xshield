@@ -66,7 +66,8 @@ export type ResponseSkip =
   | "compressed"
   | "too_large"
   | "head"
-  | "not_forwarded";
+  | "not_forwarded"
+  | "would_block";
 
 // ------------------------------------------------------------------ request list (7.9.3)
 
@@ -889,8 +890,6 @@ export interface Readiness {
   jev_health: JevHealth;
   jev_p95_ms: number | null;
   jev_timeout_ratio: number | null;
-  /** Requests that cited a value learned from a "would block" response (7.4.6). */
-  after_would_block_refs: number;
   /** Requests whose values were attempts to act on another user's object (7.4.7). */
   attempts: number;
   on_jev_unavailable: OnJevUnavailable;
