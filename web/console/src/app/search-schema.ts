@@ -294,10 +294,23 @@ export type LoginSearch = {
   next?: string;
 };
 
+function unsafeInPath(path: string): boolean {
+  for (let i = 0; i < path.length; i += 1) {
+    const code = path.charCodeAt(i);
+    if (code === 0x5c || code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
 export function validateLogin(raw: Record<string, unknown>): LoginSearch {
   // Only a path inside the console may be a destination after login (docs/06 6.4.1).
+  // A browser reads `\` as `/`, so `/\host` would leave the console like `//host`; control
+  // characters are dropped from a URL before it is read, so they are refused as well.
   const next =
-    typeof raw.next === "string" && raw.next.startsWith("/") && !raw.next.startsWith("//")
+    typeof raw.next === "string" &&
+    raw.next.startsWith("/") &&
+    !raw.next.startsWith("//") &&
+    !unsafeInPath(raw.next)
       ? raw.next
       : undefined;
   return { next };

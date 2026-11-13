@@ -126,6 +126,29 @@ test("while the gateways have not loaded the new version, the dialog says it is 
   await expect(dialog.getByRole("status")).not.toContainText("已生效");
 });
 
+test("after 30 s without a gateway loading the version, the dialog stops polling and says so", async ({
+  page,
+}) => {
+  await page.clock.install({ time: FIXTURE_NOW_MS });
+  await mockApi(page, { gatewaysLoadSaved: false });
+  await page.goto("/requests");
+
+  await openRowMenu(page, NO_SESSION);
+  await page.getByRole("menuitem", { name: "登记为入口…" }).click();
+  const dialog = page.getByRole("dialog", { name: DIALOG });
+  await dialog.getByRole("button", { name: "保存为 v8" }).click();
+  await expect(dialog.getByRole("status")).toHaveText("已保存 v8 · 等待网关加载…");
+
+  await page.clock.fastForward(31_000);
+
+  await expect(dialog.getByRole("status")).toHaveText(
+    "已保存 v8 · 网关 30 秒内没有加载，请到站点页查看状态",
+  );
+  const polls = callsTo(page, "GET", "/api/sites/juice").length;
+  await page.clock.fastForward(5_000);
+  expect(callsTo(page, "GET", "/api/sites/juice")).toHaveLength(polls);
+});
+
 test("once the gateways load the rule, the dialog offers the requests on this path after the change", async ({
   page,
 }) => {
