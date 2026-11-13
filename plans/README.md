@@ -37,7 +37,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | Finding | Category | Effort | Risk of fix | Evidence |
 |---|---|---|---|---|
 | Any non-empty credential creates a session before anything is judged: random cookies evict real sessions (20 000 cap), cost a full scan under the global lock, and each gets its own 60/min Jev budget. | security | M | MED | `engine.rs:347,443,724-751`, `context.rs:861-872` |
-| ✔ The Jev limiter map is pruned at its cap but then inserts anyway, so it grows without bound and scans on every insert. | bug | S | LOW | `engine.rs:143-150` |
 | Body-less POSTs and `/api/import` do not enforce the documented "writes require `Content-Type: application/json`" CSRF rule; `SameSite=Lax` does not stop same-site origins. | security | S | LOW–MED | `docs/07-console-architecture.md:638,1125`, `crates/xshield-control/src/requests.rs:953`, `object_agent_api.rs:513,548`, `object_map.rs:747,772,1064,1157` |
 | The saved model key is sent to an endpoint supplied in the test/save body, so an admin session can exfiltrate it by pointing the endpoint elsewhere. | security | S | LOW–MED (UX) | `crates/xshield-control/src/models.rs:748,848-866` |
 | JSON request bodies with duplicate keys: the gateway judges the last one, an origin may use the first. | security | S | LOW | `crates/xshield-judge/src/values.rs:336`, cf. `crates/xshield-core/src/context/route.rs:623` |
@@ -45,8 +44,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | Mixed-case path words up to 32 chars are inert, wider than docs/01 §1.3 (lower case, 24). Decision drift: fix code or doc. | security / docs | S–M | MED | `values.rs:156-165,305-309` |
 | Partition retention aborts forever after an interrupted `DETACH … CONCURRENTLY`; a failed DROP orphans the table. | bug | S–M | LOW | `crates/xshield-postgres/src/partitions.rs:172-175` |
 | Two learning runs of one site can start concurrently (check-then-act, no unique index or lock). | bug | S | LOW–MED | `crates/xshield-postgres/src/object_agent_store.rs:88-93`, `crates/xshield-control/src/object_agent_api.rs:519-526` |
-| ✔ CSV export neutralises `= + - @` but not a leading tab or carriage return. | security | S | LOW | `crates/xshield-control/src/requests.rs:695` |
-| ✔ An IPv6-literal origin keeps its brackets and can never be resolved (502 on every request). | bug | S | LOW | `crates/xshield-edge/src/sites.rs:57`, `proxy.rs:481` |
 | The requests and Jev lists reset to a skeleton every 30 s because the preset window moves with the clock and is part of the query key. | bug | S–M | MED | `web/console/src/app/scope.ts:18-24`, `src/api/queries.ts:114-121`, `src/features/requests/RequestsPage.tsx:116-120,458` |
 | The quick-rule dialog polls every second forever and never shows a failed or absent gateway (docs/07 §7.10.4 says 30 s at most). | bug | S | LOW | `web/console/src/features/sites/QuickRuleDialog.tsx:145-149` |
 | Bulk acknowledge fires N mutations on one observer; earlier failures are lost and each fires three invalidations. | bug | S | LOW | `web/console/src/features/sites/objects/ObjectsBanner.tsx:91-93` |
@@ -77,6 +74,8 @@ in docs/05 and the unused console dependencies were dropped on 2026-11-13: main 
 
 The first backlog row (a header credential redacted only together with its scheme) was fixed on 2026-11-13 without a plan file: see `redaction_secret` in `crates/xshield-judge/src/engine.rs` and `scrubbed` / `redacted_path` in `trace.rs`. Not covered by that fix: a row for an unknown host (404) has no site and therefore no credential to redact.
 
+Two more rows were fixed on 2026-11-13 without plan files (see `CHANGELOG.md`): the Jev limiter map growing past its cap, and CSV cells starting with a tab or carriage return.
+
 ### Direction (options, not defects)
 
 - **Ship the single-host Compose reference deployment** that docs/04 §4.1 describes, or retract it: docs/05:40 says there is no reference deployment, while signed edge and control images are already published. Medium effort; a shipped compose file becomes a security default.
@@ -90,6 +89,8 @@ The first backlog row (a header credential redacted only together with its schem
 - Stateless session tokens that stay valid after logout until expiry: a known property of the single-admin design; worth a note in docs/03, not a plan.
 - `rust-version = "1.94"` versus toolchain 1.99: untested claim but harmless for an unpublished workspace; fold into any future toolchain bump.
 - v3 leftovers named in docs/05 and code comments citing old `docs/NN` numbers: documented in AGENTS.md and handled by the v3 removal work.
+
+- An IPv6-literal origin keeping its brackets (502 on every request): not reachable. `valid_origin` in `crates/xshield-core/src/context/config.rs` refuses a bracketed host (`SITE_CONFIG_ORIGIN_INVALID`), so such a site never loads. Accepting IPv6 origins would be a feature (core validator, console `site-validate.ts`, edge address), not a fix.
 
 ## Not audited
 

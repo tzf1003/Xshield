@@ -786,7 +786,7 @@ CREATE TABLE jev_prompts (
 
 ### 7.9.9 导入与导出
 
-- 导出：`GET /api/requests/export?format=jsonl|csv&…`。JSONL 每行一条完整记录，格式与网关文件模式的标准输出相同，已有的离线分析脚本可以直接用；CSV 只含列表列，单元格以 `=`、`+`、`-`、`@` 开头时前置 `'`，防止表格软件执行公式。
+- 导出：`GET /api/requests/export?format=jsonl|csv&…`。JSONL 每行一条完整记录，格式与网关文件模式的标准输出相同，已有的离线分析脚本可以直接用；CSV 只含列表列，单元格以 `=`、`+`、`-`、`@`、制表符或回车开头时前置 `'`，防止表格软件执行公式。
 - 导入：`POST /api/import`，请求体为 JSON 行（`application/x-ndjson`，最大 100 MiB），逐行解析为 `DecisionRecord`，`edge` 记为 `import`，同一 `request_id` 与时间已存在的跳过。v4 当前格式（没有 `trace`）的行也接受，`trace` 记为 `{"v":0}`，界面标“旧格式记录”。`at_millis` 超出保留窗口（早于 `now − 7 天`，或晚于 `now + 7 天`）的行没有分区可写，不入库，单独计入 `out_of_range`，不算出错。返回导入、跳过、超出保留窗口、出错的行数和前 20 个错误行号。用途：把 Windows 文件模式试跑的 `decisions.jsonl` 放进控制台看。
 
 ### 7.9.10 影响预估
