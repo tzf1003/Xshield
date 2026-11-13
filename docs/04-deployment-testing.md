@@ -105,6 +105,8 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | A12 | 医生 A 搜到医生 B 的患者 D（慢速 id `PT-7004`）后按这个 id 删除 | 拦截（尝试越权，交 Jev 判 DENY） |
 | B1 | 搜索框、表单里输入正常中文和英文文本 | 放行 |
 | B2 | 参数里带注入、命令执行、路径穿越类内容 | 拦截 |
+| B3 | 医生 A 在搜到的自己新建患者上提交两批以上的长备注（路径里带编号） | 放行，判定记录 `batches` 不少于 2 |
+| B4 | 同样的长备注发给医生 B 的患者，医生 A 没见过这个编号 | 拦截 |
 | C1 | Jev 超时或不可用，`on_jev_unavailable=deny` | 拦截，日志注明 |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，日志注明"未经判定" |
 | C3 | 观察模式下的 A2 | 转发，日志记"本应拦截" |
