@@ -34,7 +34,8 @@ const JSON_DEPTH_MAX: usize = 16;
 /// A field name longer than this is judged as a name that carries syntax (docs/01 section 1.3).
 const KEY_CHARS_MAX: usize = 64;
 const FIELD_MAX: usize = 32;
-/// Most distinct field names read for one multipart part. A part with more is read as one text.
+/// Most distinct field names read under their own places for one multipart part. A part with more is
+/// read under the names of its first and last headers instead (docs/01 section 1.3).
 const PART_NAMES_MAX: usize = 4;
 
 /// One scalar found in a request.
@@ -360,11 +361,12 @@ pub fn extract_request(
         return out;
     }
     if kind.is_empty() {
-        // With no type, each reading that makes sense is taken (docs/01 section 1.3). A body of the
-        // strict shape of a form is read as its fields, every one of them. Any other body is read
-        // for the names that look like field names, and it is one text as well unless it is JSON or
-        // a form.
-        let form = form_shaped(body);
+        // With no type, each reading that makes sense is taken (docs/01 section 1.3). A body that
+        // parses as JSON is read for the names that look like field names only, even when its text
+        // has the shape of a form, so compact JSON is not cut into keys. A body of the strict shape
+        // of a form is read as its fields, every one of them. Any other body is read for the names
+        // that look like field names, and it is one text as well.
+        let form = !json && form_shaped(body);
         if form {
             pairs(&mut out, "body", &lossy);
         } else {
@@ -707,8 +709,8 @@ fn multipart_body(out: &mut ExtractedRequest, body: &[u8], boundary: &str) -> bo
 /// read. Any other part is a text: its content is read under each of its field names, as a form
 /// field does, or as the JSON it holds when its own type says JSON. A part whose transfer encoding
 /// is base64 or quoted-printable is read decoded as well. A part with more than [`PART_NAMES_MAX`]
-/// field names is read as one text at `body`, flagged. A part whose headers never end is one text
-/// at `body`.
+/// field names is read under the names of its first and last headers (see [`reduced_names`]), and
+/// flagged. A part whose headers never end is one text at `body`.
 fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
     let Some((head, content)) = split_headers(block) else {
         out.truncated = true;
@@ -758,23 +760,25 @@ fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
             }
         }
     }
-    let mut places: Vec<(String, Option<String>)> = Vec::new();
-    if names.len() > PART_NAMES_MAX {
-        // Too many names to read each under its own place: the content is one text, and flagged.
+    let names: Vec<String> = if names.len() > PART_NAMES_MAX {
+        // Too many names to read each under its own place: the names that a parser taking the first
+        // or the last name reaches are read, and the part is flagged (docs/01 section 1.3).
         out.truncated = true;
-        places.push(("body".to_owned(), None));
+        reduced_names(&dispositions)
     } else {
-        for name in names {
-            let at = format!("body.{name}");
-            push_unusual_key(out, &at, name);
-            places.push((at, Some(name.to_owned())));
-        }
-        let nameless = params
-            .iter()
-            .any(|(param, value)| param == "name" && value.is_empty());
-        if places.is_empty() || nameless {
-            places.push(("body".to_owned(), None));
-        }
+        names.into_iter().map(str::to_owned).collect()
+    };
+    let mut places: Vec<(String, Option<String>)> = Vec::new();
+    for name in names {
+        let at = format!("body.{name}");
+        push_unusual_key(out, &at, &name);
+        places.push((at, Some(name)));
+    }
+    let nameless = params
+        .iter()
+        .any(|(param, value)| param == "name" && value.is_empty());
+    if places.is_empty() || nameless {
+        places.push(("body".to_owned(), None));
     }
     // An empty file name is no file name, so such a part is a text and its content is judged.
     let file_names: BTreeSet<&str> = params
@@ -802,6 +806,29 @@ fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
             read_text(out, &decoded, is_json, &places);
         }
     }
+}
+
+/// The field names read from a part with more than [`PART_NAMES_MAX`] of them (docs/01 section 1.3):
+/// from its first and from its last `Content-Disposition` header, the first `name` and the last three
+/// `name`s that `parameters` gives, which are the ones a parser taking the first or the last name
+/// reaches. Each name is given once, so there are at most eight.
+fn reduced_names(dispositions: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for disposition in dispositions.first().into_iter().chain(dispositions.last()) {
+        let own: Vec<String> = parameters(disposition)
+            .into_iter()
+            .filter(|(param, value)| param == "name" && !value.is_empty())
+            .map(|(_, value)| value)
+            .collect();
+        let first = own.first().cloned();
+        let last_three = own.iter().skip(own.len().saturating_sub(3)).cloned();
+        for name in first.into_iter().chain(last_three) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
 }
 
 /// Reads the content of a text part under each of its places (docs/01 section 1.3): as the JSON it
@@ -895,8 +922,8 @@ fn base64_value(byte: u8) -> Option<u8> {
 }
 
 /// The bytes of a quoted-printable text, read leniently (docs/01 section 1.3): `=` with two hex digits,
-/// in either case, is the byte they name, and `=` at the end of a line is a soft line break. Any other
-/// `=` stands for itself, so the decoding never fails.
+/// in either case, is the byte they name, and `=` at the end of a line, with blanks allowed before the
+/// break, is a soft line break. Any other `=` stands for itself, so the decoding never fails.
 fn quoted_printable_decoded(text: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     let mut rest = text;
@@ -925,9 +952,14 @@ fn quoted_pair(tail: &[u8]) -> Option<(u8, &[u8])> {
     Some(((hex_digit(*high)? << 4) | hex_digit(*low)?, after))
 }
 
-/// What follows a `=` that is not a hex pair, when it is a line break: the text after the break.
+/// What follows a `=` that is not a hex pair, when it is a line break after any blanks (the blanks at
+/// the end of a line are dropped before the line is read): the text after the break.
 fn soft_break(tail: &[u8]) -> Option<&[u8]> {
-    match tail {
+    let blanks = tail
+        .iter()
+        .take_while(|&&byte| byte == b' ' || byte == b'\t')
+        .count();
+    match tail.get(blanks..)? {
         [b'\r', b'\n', after @ ..] | [b'\n', after @ ..] => Some(after),
         _ => None,
     }
@@ -1944,6 +1976,20 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_printable_soft_break_may_have_blanks_before_it() {
+        // Blanks at the end of a line are dropped before the break, so `=` followed by blanks and a line
+        // break is a soft break too. Blanks with no break after them keep their `=` literal.
+        assert_eq!(
+            super::quoted_printable_decoded(b"abc=  \r\ndef=\t\nghi= 41"),
+            b"abcdefghi= 41".to_vec()
+        );
+        assert_eq!(
+            super::quoted_printable_decoded(b"a=\r\nb=41"),
+            b"abA".to_vec()
+        );
+    }
+
+    #[test]
     fn a_json_body_is_json_whatever_its_type() {
         let form = extract_request(
             "/",
@@ -2028,12 +2074,18 @@ mod tests {
         let markup = extract_request("/", None, None, br#"<user id="5">t</user>"#);
         assert!(markup.truncated);
         assert_eq!(located(&markup), [("body", r#"<user id="5">t</user>"#)]);
-        // A JSON object: its values. It is also a strict form, so its one field, `{"token":"abc`,
-        // is read as well; the rule as written does not exempt it (see the report on this test).
+        // A JSON object with no type is read for its values, and for the names that look like field
+        // names only, even when its text has the shape of a form: `{"token":"abc` is no name, so the
+        // JSON value is the only reading (17:20 UTC revision).
         let token = extract_request("/", None, None, br#"{"token":"abc=="}"#);
         assert!(!token.truncated);
-        assert!(located(&token).contains(&("body.token", "abc==")));
-        assert!(!located(&token).iter().any(|(at, _)| *at == "body"));
+        assert_eq!(located(&token), [("body.token", "abc==")]);
+        // Compact JSON with two members: no key is cut out of the text between them.
+        let compact = extract_request("/", None, None, br#"{"user":"bob","sig":"abc=="}"#);
+        assert!(!compact.truncated);
+        assert!(located(&compact).contains(&("body.user", "bob")));
+        assert!(located(&compact).contains(&("body.sig", "abc==")));
+        assert_eq!(located(&compact).len(), 2);
     }
 
     #[test]
@@ -2136,22 +2188,49 @@ mod tests {
     }
 
     #[test]
-    fn a_part_with_many_field_names_is_one_flagged_text() {
-        let names: Vec<String> = (0..=super::PART_NAMES_MAX)
-            .map(|i| format!("name=\"n{i}\""))
-            .collect();
-        let body = format!(
-            "--b\r\nContent-Disposition: form-data; {}\r\n\r\n8\r\n--b--\r\n",
-            names.join("; ")
-        );
+    fn a_part_with_many_field_names_reads_the_first_and_last_names_of_each_header() {
+        // Five names in one header: the first name and the last three are read. Django takes the last
+        // name, so `patient_id`, the fifth, is read; `n1` is in the middle and is not.
+        let one_header = "--b\r\nContent-Disposition: form-data; name=\"n0\"; name=\"n1\"; name=\"n2\"; name=\"n3\"; name=\"patient_id\"\r\n\r\n8\r\n--b--\r\n";
         let request = extract_request(
             "/",
             None,
             Some("multipart/form-data; boundary=b"),
-            body.as_bytes(),
+            one_header.as_bytes(),
         );
         assert!(request.truncated);
-        assert_eq!(located(&request), [("body", "8")]);
+        assert_eq!(
+            located(&request),
+            [
+                ("body.n0", "8"),
+                ("body.n2", "8"),
+                ("body.n3", "8"),
+                ("body.patient_id", "8")
+            ]
+        );
+        assert_eq!(request.values[3].key.as_deref(), Some("patient_id"));
+        // Two headers, seven names: the first name and the last three of the first header, and of the
+        // last one. Of the last header's names, `q` is in the middle and is not read.
+        let two_headers = "--b\r\nContent-Disposition: form-data; name=\"x\"; name=\"y\"\r\nContent-Disposition: form-data; name=\"p\"; name=\"q\"; name=\"r\"; name=\"s\"; name=\"patient_id\"\r\n\r\n8\r\n--b--\r\n";
+        let request = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            two_headers.as_bytes(),
+        );
+        assert!(request.truncated);
+        assert_eq!(
+            located(&request),
+            [
+                ("body.x", "8"),
+                ("body.y", "8"),
+                ("body.p", "8"),
+                ("body.r", "8"),
+                ("body.s", "8"),
+                ("body.patient_id", "8")
+            ]
+        );
+        assert_eq!(request.values[5].key.as_deref(), Some("patient_id"));
     }
 
     #[test]
