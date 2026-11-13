@@ -637,20 +637,25 @@ async fn judge_accepts(
         return Ok(());
     }
     let evidence = store::load_evidence(pool, site, &slots, oldest_day).await?;
-    // The votes count sessions, not users, so a session stands for a user here, whether or not
-    // the site declares identities. The admin sessions are not counted by role yet, and
-    // reliability drops one step for the same reason.
-    let admins = BTreeSet::new();
+    // Where the site declares identities, its units are the users and the votes of its administrator
+    // sessions are left out (docs/07 section 7.9.16). Elsewhere the units are the sessions, and
+    // reliability drops one step, as before.
+    let identified = identified_by(map);
     for slot in &slots {
         let Some(evidence) = evidence.get(slot) else {
             judgements::withdraw(pool, site, generation, slot, None).await?;
             continue;
         };
+        let admins = if identified {
+            evidence.admin_sessions()
+        } else {
+            BTreeSet::new()
+        };
         match judge_accepts_public(
             evidence,
             |position| map.tier_of(position),
             &admins,
-            false,
+            identified,
             thresholds,
         ) {
             Some(judged)
@@ -959,6 +964,8 @@ mod tests {
                 session: format!("s{}", index % sessions),
                 day: u64::from(index),
                 from: vec![from.to_owned()],
+                user: None,
+                admin: false,
             });
         }
         evidence
@@ -2022,6 +2029,235 @@ mod judgement_pass_tests {
         judgements::proposal(pool, "clinic", slot)
             .await
             .expect("read the proposal")
+    }
+
+    /// `clinic`, with the user identity the lab's base configuration declares: the `id` of `GET /api/me`.
+    fn clinic_with_users(requests: &[(&str, Value)], learning: &Value) -> SiteSpec {
+        let mut slots = vec![
+            json!({"key": SEARCH, "class": "patient", "source": "admin", "tier": "public"}),
+            json!({"key": OWN, "class": "patient", "source": "admin", "tier": "self"}),
+            json!({"key": "GET /api/me user.id", "class": "patient", "source": "admin", "identity": "user"}),
+        ];
+        for (key, judgement) in requests {
+            let mut entry = json!({"key": key, "class": "patient", "source": "admin"});
+            if let Value::Object(fields) = judgement {
+                for (field, value) in fields {
+                    entry[field] = value.clone();
+                }
+            }
+            slots.push(entry);
+        }
+        let spec = json!({
+            "name": "clinic",
+            "hosts": ["clinic.example.com"],
+            "origin": "http://10.0.0.5:8080",
+            "session": {"cookie": "SESSIONID"},
+            "entries": ["/login"],
+            "objects": {
+                "classes": [{"id": "patient", "name": "患者"}],
+                "slots": slots,
+                "learning": learning.clone()
+            }
+        });
+        SiteSpec::from_json(&spec.to_string()).expect("test spec")
+    }
+
+    /// The sessions that make the uses of one position in `traffic_of_users`: `count` uses from
+    /// `sessions` sessions, `users` users among them, and the first `admins` sessions showing the
+    /// administrator role.
+    #[derive(Clone, Copy)]
+    struct Crowd {
+        count: i64,
+        sessions: i64,
+        users: i64,
+        admins: i64,
+    }
+
+    /// `traffic`, where session `s<k>` shows the user `u<k % users>`, and the first `admins` sessions
+    /// the administrator role, as the decision records of an identified site carry them.
+    async fn traffic_of_users(
+        pool: &PgPool,
+        now: i64,
+        crowd: Crowd,
+        method: &str,
+        path: &str,
+        value_slot: &str,
+        source: (&str, &str),
+    ) {
+        for index in 0..crowd.count {
+            let at_millis = now - (1 + index / crowd.sessions) * DAY_MILLIS;
+            let session = index % crowd.sessions;
+            let mut identity = json!({"user": format!("u{}", session % crowd.users)});
+            if session < crowd.admins {
+                identity["role"] = json!("admin");
+            }
+            let trace = json!({
+                "v": 1,
+                "values_truncated": false,
+                "values": [{
+                    "at": "path[1]",
+                    "value": "7",
+                    "kind": "reference",
+                    "inert": false,
+                    "seen": true,
+                    "verified": true,
+                    "slot": value_slot,
+                    "sources": [{"field": "id", "request": source.0, "slot": source.1}]
+                }],
+                "timing": {"judge_ms": 1},
+                "session": {"age_seconds": 1, "known_values": 0, "identity": identity}
+            });
+            sqlx::query(
+                "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                    method, path, status, decision_path, outcome, trace)
+                 VALUES ($1, $2, 'clinic', 'edge-1', 'clinic.example.com', '10.0.0.1', $3,
+                    $4, $5, 200, 'fast_allow', 'allowed', $6)",
+            )
+            .bind(at_millis)
+            .bind(format!("req_{method}{}_{index:08}", path.replace('/', "_")))
+            .bind(format!("s{session}"))
+            .bind(method)
+            .bind(path)
+            .bind(trace)
+            .execute(pool)
+            .await
+            .expect("insert a decision row");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_identified_site_proposes_high_for_a_position_fed_only_by_its_own_values() {
+        let Some((admin, pool, name)) = scratch("accepts_identified").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic_with_users(&[(SHARE, json!({})), (DELETE, json!({}))], &quiet()),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        // Forty uses of each position from twenty sessions of ten users: the doubled thresholds of
+        // users and votes, so the rules reach high.
+        let crowd = Crowd {
+            count: 40,
+            sessions: 20,
+            users: 10,
+            admins: 0,
+        };
+        traffic_of_users(
+            &pool,
+            now,
+            crowd,
+            "GET",
+            "/api/share/7",
+            SHARE,
+            ("GET /api/search", SEARCH),
+        )
+        .await;
+        traffic_of_users(
+            &pool,
+            now,
+            crowd,
+            "DELETE",
+            "/api/patients/7",
+            DELETE,
+            ("GET /api/patients", OWN),
+        )
+        .await;
+        learn_once(&pool, None, now).await;
+
+        let delete = proposal_of(&pool, DELETE)
+            .await
+            .expect("the delete is proposed");
+        assert!(!delete.accepts_public);
+        assert_eq!(delete.reliability, Reliability::High);
+        assert_eq!((delete.votes, delete.sessions), (40, 10));
+        let share = proposal_of(&pool, SHARE)
+            .await
+            .expect("the share is proposed");
+        assert!(share.accepts_public);
+        assert_eq!(share.reliability, Reliability::High);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn the_sessions_of_one_user_are_one_unit_on_an_identified_site() {
+        let Some((admin, pool, name)) = scratch("accepts_one_user").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic_with_users(&[(DELETE, json!({}))], &quiet()),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        // Forty uses from twenty sessions, all of one user: one unit, below the sessions threshold.
+        let crowd = Crowd {
+            count: 40,
+            sessions: 20,
+            users: 1,
+            admins: 0,
+        };
+        traffic_of_users(
+            &pool,
+            now,
+            crowd,
+            "DELETE",
+            "/api/patients/7",
+            DELETE,
+            ("GET /api/patients", OWN),
+        )
+        .await;
+        learn_once(&pool, None, now).await;
+        assert!(proposal_of(&pool, DELETE).await.is_none());
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn the_votes_of_administrator_sessions_are_left_out_on_an_identified_site() {
+        let Some((admin, pool, name)) = scratch("accepts_admins").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic_with_users(&[(DELETE, json!({}))], &quiet()),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        // The first ten of the twenty sessions show the administrator role: their twenty votes are
+        // left out, so the other twenty are all that count.
+        let crowd = Crowd {
+            count: 40,
+            sessions: 20,
+            users: 10,
+            admins: 10,
+        };
+        traffic_of_users(
+            &pool,
+            now,
+            crowd,
+            "DELETE",
+            "/api/patients/7",
+            DELETE,
+            ("GET /api/patients", OWN),
+        )
+        .await;
+        learn_once(&pool, None, now).await;
+        let delete = proposal_of(&pool, DELETE)
+            .await
+            .expect("the delete is proposed");
+        assert_eq!((delete.votes, delete.sessions), (20, 10));
+        assert_eq!(delete.reliability, Reliability::Medium);
+        drop_scratch(admin, pool, name).await;
     }
 
     #[tokio::test]
