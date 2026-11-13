@@ -154,7 +154,13 @@ function TimelineLine({
     );
   }
   if (row.entry_passed) tags.push({ key: "entry", text: "⇢ 首次经过入口" });
-  if (row.after_would_block) tags.push({ key: "learned", text: "▲ 本应拦截学习" });
+  // A response observe mode refused was never read, so it has no count (learned is null). A record
+  // written before that change was read, and says so even when none of its values were new.
+  if (row.after_would_block)
+    tags.push({
+      key: "learned",
+      text: row.learned === null ? "▲ 本应拦截，未学习" : "▲ 本应拦截学习",
+    });
 
   const learned = row.learned;
   const barWidth =
