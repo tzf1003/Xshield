@@ -20,12 +20,29 @@ printf '%s\n' '管理员口令' | docker compose run --rm --no-deps -T xshield-c
 docker compose up -d --build
 ```
 
+Windows（PowerShell）没有 `openssl` 和 `printf`，同样的步骤写成：
+
+```powershell
+Copy-Item .env.example .env
+# 各输出一行随机十六进制：先取 48 位填入 XSHIELD_POSTGRES_PASSWORD，再取 64 位填入 XSHIELD_CONTEXT_KEY_HEX
+$b = New-Object byte[] 24; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); -join ($b | ForEach-Object { $_.ToString('x2') })
+$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); -join ($b | ForEach-Object { $_.ToString('x2') })
+docker compose build xshield-control
+# Windows PowerShell 5.1 按 ASCII 发送管道里的文本，非 ASCII 字符会变成 ?。同一窗口里先把输出编码设为 UTF-8
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+# 输出填入 XSHIELD_ADMIN_PASSWORD_HASH，保留单引号
+'管理员口令' | docker compose run --rm --no-deps -T xshield-control hash-password
+docker compose up -d --build
+```
+
 - 控制台只监听本机的 `127.0.0.1:8081`。管理员 Cookie 带 `Secure`，所以在本机用 `http://localhost:8081` 打开，或经 SSH 隧道，或在前面放一个 HTTPS 反向代理（[07.2.3](07-console-architecture.md#723-部署)）。
 - 控制台前面放了反向代理时，在 `.env` 里设置 `XSHIELD_CONTROL_TRUSTED_PROXIES`（代理的地址或网段，逗号分隔，[03.3](03-admin-config-audit.md#33-部署级环境变量)），并让代理追加 `X-Forwarded-For`。不设置时，所有登录失败都按代理的地址计数，任何人输错口令都会把所有人（包括管理员）锁住 10 分钟。
 - 网关监听所有网卡的 `8080`（明文）。要让网关自己终结 TLS，在 `docker-compose.yml` 的 `xshield-edge` 里挂载证书和私钥并设置 `XSHIELD_EDGE_TLS_CERT_PATH`、`XSHIELD_EDGE_TLS_KEY_PATH`（[03.3](03-admin-config-audit.md#33-部署级环境变量)）。
 - Jev 密钥可以写在 `.env` 的 `AI_GATEWAY_API_KEY`（取消该行注释后填写），也可以启动后在控制台“系统”页的“模型”标签里保存；控制台保存的密钥优先。两处都没有时判定记为 `JEV_NOT_CONFIGURED`。
 - 网关在表还没建好时会退出，由 Compose 重启，直到控制台执行完迁移。
 - 数据在卷 `xshield_postgres-data` 里；`docker compose down` 保留它，加 `-v` 才删除。
+- 启动后 `docker compose ps` 应显示 `postgres` 为 healthy，`xshield-control` 和 `xshield-edge` 为运行中；在本机打开 `http://localhost:8081/health` 应返回 `ok`。
+- 默认端口 8080 或 8081 被本机其他程序占用时，在 `.env` 里设置 `XSHIELD_EDGE_PORT` 或 `XSHIELD_CONTROL_PORT`（见 `.env.example`）。
 
 ## 4.2 上线步骤
 
