@@ -112,6 +112,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | B12 | 一个值里 600 个字符的填充之后是注入串 | 拦截 |
 | B13 | 120 个字段的正常表单 | 放行到源站 |
 | B14 | 没有 `Content-Type` 的表单，字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
+| B15 | 表单类型的请求体同时是能解析的 JSON，表单字段引用医生 B 的患者编号 | 拦截（Jev 收到 `body.patient_id` 为引用） |
 | C1 | Jev 超时或不可用，`on_jev_unavailable=deny` | 拦截，日志注明 |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，日志注明"未经判定" |
 | C3 | 观察模式下的 A2 | 转发，日志记"本应拦截" |
@@ -128,6 +129,9 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | W4b | 管理员没在管理档搜索里见过的患者，直接删除 | 拦截（角色不是放行理由） |
 | W4c | 管理员在公共搜索里搜到医生 B 的患者后删除 | 拦截（公共档的见过不证明删除） |
 | W4d | 管理员在管理档搜索里搜到患者后写备注（POST 子路径） | 放行（备注位置接受公开来源） |
+| W4e | 站点声明“我的患者”`GET /api/patients patients[].id` 为 `self`、`DELETE` 不接受公共来源：医生 A 新开会话，看自己的列表后打开、删除自己的患者 | 放行（本人档的展示证明会话见过对象，不调用 Jev） |
+| W4f | 同一站点：医生 A 在公共搜索里搜到医生 B 的患者后删除 | 拦截（尝试越权，交 Jev 判 DENY；本人档不放行别人的患者） |
+| W4g | 同一站点：医生 A 先在搜索里搜到自己的患者，删除被拦；之后它出现在自己的列表里，再删除 | 第一次拦截（尝试越权）；列表之后再删除放行 |
 | W6 | 站点声明身份，评论接口返回另一位医生的手机号与邮箱（[07.9.17](07-console-architecture.md#7917-属性越权告警w6)） | 放行；判定记录的 `trace.response.exposure` 记一条告警且不含值；读取本人资料、未声明身份的站点不告警 |
 | F5 | 医生登录后 `POST /api/admin/export`（功能表里的管理档功能） | 拦截，交 Jev 判为越权尝试（Jev 收到的 `function.attempt` 为 `over_privilege`），源站没收到；判定记录的 `trace.function` 带 `tier` 和 `attempt` |
 | F5b | 医生新建患者后 `POST /api/patients/{新编号}`，并带请求头 `X-HTTP-Method-Override: DELETE` | 拦截，按更严的 `DELETE /api/patients/{id}` 判为越权尝试；`trace.function.key` 仍是 `POST /api/patients/{id}` |
@@ -141,10 +145,11 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | F13 | 观察模式的功能表站点：医生 `POST /api/admin/export`、`GET /metrics` | 都转发（源站收到），记为本应拦截 |
 | F16 | 医生 `POST` 自己新建的患者，查询串排在 200 个值之后（第 231 个）是 `_method=DELETE` | 拦截，判定记录的 `trace.function.attempt` 为 `over_privilege`，源站不收到请求 |
 | F17 | 医生 `POST` 自己新建的患者，`multipart/form-data` 的文本字段 `_method` 为 `DELETE` | 同 F16 |
-| F18 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，不像表单，网关按文字读） | 同 F16 |
+| F18 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，网关按字段读到 `_method`） | 同 F16 |
 | F19 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x&_method=DELETE`（像表单，网关按字段读） | 同 F16 |
 | F20 | 医生 `POST` 自己新建的患者，表单类型，请求体 `{"a":"&_method=DELETE&b="}`（能解析成 JSON，网关按 JSON 读，源站可能按表单读到 `_method`） | 同 F16 |
-| F21 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&%5Fm%65thod=DELETE`（带空格按文字读，`_method` 的一个字母做了百分号编码，解码后是 `_method`） | 同 F16 |
+| F21 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x;%5Fm%65thod=DELETE`（带分号，按文字读，`_method` 的一个字母做了百分号编码，解码一遍后是 `_method`） | 同 F16 |
+| F23 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&%5Fm%65thod=DELETE`（带空格，网关按字段读到解码后的 `_method`） | 同 F16 |
 | F22 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x;_method=DELETE`（带分号，不像表单，网关按文字读） | 同 F16 |
 
 靶场的站点把地址限额设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。会话合计的总额度按来源地址算（[02](02-jev.md) 2.5），所以 `limit.lab` 上的 C5、C9 各自从回环的另一个地址（127.0.0.2、127.0.0.3、127.0.0.4）发请求，其他场景的会话不占它们的总额度。
