@@ -29,7 +29,9 @@ pub enum DecisionPath {
     JevAllow,
     /// Jev judged the request an out-of-path access or an attack (step 6).
     JevDeny,
-    /// Jev failed, timed out, answered UNKNOWN, or was not asked (step 7).
+    /// Jev failed, timed out, answered UNKNOWN, or was not asked (step 7). A spent call limit is
+    /// refused with 429 and a state too large with 403, whatever `on_jev_unavailable` says; the
+    /// other failures follow `on_jev_unavailable`.
     JevUnavailable,
     /// No session credential on a non-entry path (step 2).
     NoSession,
@@ -41,7 +43,8 @@ pub enum DecisionPath {
 pub enum Outcome {
     /// Forwarded after a positive judgement, or as a bypass.
     Allowed,
-    /// Refused with 403 (or 401 without a session), or 404 and 413.
+    /// Refused with 403 (or 401 without a session, or 429 when the Jev calls of the session or
+    /// address for the minute are used up), or 404 and 413.
     Blocked,
     /// Observe mode: the request would have been refused but was forwarded.
     WouldBlock,
@@ -164,7 +167,8 @@ pub struct DecisionRecord {
     /// Why the decision was made; see docs/07 section 7.4.3.
     #[serde(default)]
     pub trace: Trace,
-    /// Present when Jev was asked, or when the call was skipped for a limit.
+    /// Present when Jev was asked, or when the call was skipped because the call budget was spent or
+    /// the state did not fit.
     pub jev: Option<JevRecord>,
 }
 

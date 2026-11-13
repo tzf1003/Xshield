@@ -465,10 +465,10 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
         if judgement.forward {
             return Ok(false);
         }
-        let error = if refuse_status == 401 {
-            "unauthenticated"
-        } else {
-            "forbidden"
+        let error = match refuse_status {
+            401 => "unauthenticated",
+            429 => "rate_limited",
+            _ => "forbidden",
         };
         refuse(session, refuse_status, &ctx.request_id, error).await?;
         Ok(true)

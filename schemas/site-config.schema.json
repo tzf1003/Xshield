@@ -59,7 +59,7 @@
       "type": "string",
       "enum": ["deny", "allow"],
       "default": "deny",
-      "description": "Jev 超时、出错、超出调用限额或答不上来时的处理。deny 拦截（默认）；allow 放行，并在判定日志里标注为未经判定。"
+      "description": "Jev 超时、出错或答不上来时的处理。deny 拦截（默认）；allow 放行，并在判定日志里标注为未经判定。超出调用限额的请求始终拒绝（429），不受此项影响。"
     },
     "advanced": {
       "$ref": "#/$defs/advanced",

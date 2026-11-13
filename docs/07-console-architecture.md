@@ -86,7 +86,7 @@ AGENTS.md 要求新增配置项、表、依赖之前先确认现有机制不够�
 
 `request_id` 沿用现有格式：`req_` 加 UUIDv7 的 32 位小写十六进制（`uuid::Uuid::now_v7().simple()`）。前 12 位十六进制是毫秒时间戳，例如 `req_01a19741107477ff9224781077354552` 生成于 2026-11-01 13:16:26.100 UTC。控制面按 ID 查询时先解出时间 `t`，查 `at_millis BETWEEN t − 60 秒 AND t + 60 秒` 且 `request_id` 相等的行：`at_millis` 取自请求到达时刻，与 ID 生成时刻只差几毫秒，留 60 秒余量是为了不依赖这个假设；跨午夜时窗口自然落在相邻两个分区，PostgreSQL 只扫这两个。解不出时间的输入（不是 `req_` 加 32 位十六进制）不按 ID 查询。
 
-请求 ID 出现在：网关返回给客户端的每个响应头 `X-Xshield-Request-Id`；拦截响应体 `{"error":"forbidden","request_id":"req_…"}`；转发给源站的请求头 `X-Xshield-Request-Id`（源站日志可以用它关联）。用户反馈“被拦了”时，让他提供这个 ID。
+请求 ID 出现在：网关返回给客户端的每个响应头 `X-Xshield-Request-Id`；拦截响应体 `{"error":"forbidden","request_id":"req_…"}`（`error` 随拒绝原因变化，见 7.4.1）；转发给源站的请求头 `X-Xshield-Request-Id`（源站日志可以用它关联）。用户反馈“被拦了”时，让他提供这个 ID。
 
 ### 7.3.2 追溯链路
 
@@ -132,7 +132,9 @@ GET /api/patients ──响应里出现 id=7──┐
 | `cached_allow` | 缓存时长内同一请求已由 Jev 放行 | `allowed` | 判定记录 |
 | `jev_allow` | Jev 通过 | `allowed` | Jev 记录 |
 | `jev_deny` | Jev 判越权或攻击 | `blocked` / `would_block` | Jev 记录 |
-| `jev_unavailable` | Jev 超时、出错、限额用尽或答 UNKNOWN | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽时没有 `state`） |
+| `jev_unavailable` | Jev 超时、出错、限额用尽、state 过大或答 UNKNOWN | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽和 state 过大时没有 `state`，也没有调用） |
+
+`jev_unavailable` 的拒绝不全由 `on_jev_unavailable` 决定：调用限额用完时回 429，`refused` 为 `rate_limited`；state 裁剪后仍超过 8 KiB 时回 403。两者都不论 `on_jev_unavailable`，观察模式下只记“本应拦截”并照常转发。其余失败按 `on_jev_unavailable`：`deny` 回 403，`allow` 记为 `unjudged` 并转发（7.5.4 列出每个失败码的处理）。
 
 `413` 和 `404` 与模式无关，观察模式下也拒绝（现有行为，[01.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。源站不可达等转发错误不是新的判定路径：记录照常写，`status` 为网关返回的 502/504，`trace.upstream_error` 写原因。
 
@@ -211,7 +213,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | 字段 | 说明 |
 |---|---|
 | `entry` / `bypass` | 命中的入口、绕过模式原文（不止是布尔值，界面要显示“命中 `/share/*`”） |
-| `refused` | 网关自己回的错误码：`unauthenticated`、`forbidden`、`body_not_inspectable`、`unknown_site` |
+| `refused` | 网关自己回的错误码：`unauthenticated`（401）、`forbidden`（403）、`rate_limited`（429，Jev 调用限额用完）、`body_not_inspectable`（413）、`unknown_site`（404） |
 | `values[]` | 请求里拆出的**全部**值，按提取顺序，含惰性值（`inert: true`）；最多 200 个（`REQUEST_VALUES_MAX`） |
 | `values[].kind` | `reference` / `route` / `input`，与 `state` 里的 `kind` 同一函数（`values::value_kind`） |
 | `values[].at`、`key`、`slot` | 位置、键名和位置标识超过 256 字节（`TRACE_NAME_BYTES_MAX`）时截到 256 字节，不切断字符；`values[].at_len` 记截断前的 `at` 长度（字节），只用于显示“已裁剪”，判定不看它。来源的字段名和请求不截，因为 `seen_as` 要逐字相同 |
@@ -356,18 +358,18 @@ GET /api/patients ──响应里出现 id=7──┐
 
 ### 7.5.4 失败码
 
-| 失败码 | 含义 | 有无 `state` |
-|---|---|---|
-| `JEV_TIMEOUT` | 超过 `timeout_ms`（站点值或 `XSHIELD_JEV_TIMEOUT_MS`，默认 2000 ms） | 有 |
-| `JEV_RATE_LIMITED` | 模型服务返回 429 | 有 |
-| `JEV_TRANSPORT` | 连接、TLS 或协议错误 | 有 |
-| `JEV_HTTP_ERROR` | 其他非 200 状态，状态码在 `http_status` | 有 |
-| `JEV_RESPONSE_TOO_LARGE` | 响应超过 64 KiB | 有 |
-| `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 |
-| `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 |
-| `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 |
-| `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB | 无 |
-| `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调） | 无 |
+| 失败码 | 含义 | 有无 `state` | 网关的处理 |
+|---|---|---|---|
+| `JEV_TIMEOUT` | 超过 `timeout_ms`（站点值或 `XSHIELD_JEV_TIMEOUT_MS`，默认 2000 ms） | 有 | 按 `on_jev_unavailable` |
+| `JEV_RATE_LIMITED` | 模型服务返回 429 | 有 | 按 `on_jev_unavailable` |
+| `JEV_TRANSPORT` | 连接、TLS 或协议错误 | 有 | 按 `on_jev_unavailable` |
+| `JEV_HTTP_ERROR` | 其他非 200 状态，状态码在 `http_status` | 有 | 按 `on_jev_unavailable` |
+| `JEV_RESPONSE_TOO_LARGE` | 响应超过 64 KiB | 有 | 按 `on_jev_unavailable` |
+| `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 | 按 `on_jev_unavailable` |
+| `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 | 按 `on_jev_unavailable` |
+| `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 | 按 `on_jev_unavailable` |
+| `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
+| `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调）。没有发出调用 | 无 | 429（`rate_limited`），不论 `on_jev_unavailable` |
 
 ### 7.5.5 指令版本表
 
@@ -395,7 +397,7 @@ advanced:
 | 字段 | 默认 | 取值 | 作用 | 调整的代价 |
 |---|---|---|---|---|
 | `jev_timeout_ms` | `XSHIELD_JEV_TIMEOUT_MS`，未设时 2000 | 100–30000 | 本站点每次 Jev 调用的超时 | 调大：慢链路下少按 `on_jev_unavailable` 处理，但要判定的请求最多多等这么久；调小：反之 |
-| `session_calls_per_minute` | 60 | 1–600 | 每个会话每分钟 Jev 调用上限，超出按 `on_jev_unavailable` 处理 | 调大：单个会话能消耗的模型费用上限提高 |
+| `session_calls_per_minute` | 60 | 1–600 | 每个会话每分钟 Jev 调用上限，超出的请求回 429 拒绝，不论 `on_jev_unavailable` | 调大：单个会话能消耗的模型费用上限提高 |
 | `address_calls_per_minute` | 30 | 1–600 | 没有会话的请求（登录、注册等入口）按客户端地址的同一上限 | NAT 或代理后多个用户共用一个地址时需要调大；调大后未登录请求能消耗的额度也提高 |
 | `allow_cache_minutes` | 10 | 0–60 | 同一会话、同一请求被 Jev 放行后直接复用结论的时长 | 调大：调用次数减少；修改配置或提示词后，旧的放行结论仍复用到期。已缓存的条目按写入时的时长到期 |
 | `secret_fields` | 空 | 最多 32 个词，每个 3–32 个字符，小写字母、数字、`_`、`-` | 追加在内置 9 个脱敏词之后（不能删除内置词），按“字段名或位置包含该词”匹配；命中的值发给 Jev 和写日志时都写成 `<redacted>` | 被脱敏的值 Jev 只看到长度，无法判断它是否越权。只加纯输入字段（身份证号、银行卡号），不要加对象引用字段；最短 3 个字符就是为了挡住 `id`、`no` 这类会把所有 ID 都脱敏的词 |

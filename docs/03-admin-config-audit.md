@@ -40,7 +40,7 @@ advanced:                      # 可选：站点级判定参数，省略的项�
 | `entries` | 是 | 入口路径，`*` 匹配任意后缀；登录、首页、起始列表、分享兑换接口都写在这里 |
 | `bypass` | 否 | 静态资源等无需判定的路径，默认空 |
 | `mode` | 否 | 默认 `observe` |
-| `on_jev_unavailable` | 否 | 默认 `deny`；设为 `allow` 时，未经判定放行的请求在判定日志里单独标注 |
+| `on_jev_unavailable` | 否 | 默认 `deny`；设为 `allow` 时，Jev 超时、出错或答不上来的请求未经判定放行，在判定日志里单独标注。超出调用限额的请求始终拒绝（429），不受此项影响 |
 | `advanced` | 否 | 站点级判定参数：`jev_timeout_ms`、`session_calls_per_minute`、`address_calls_per_minute`、`allow_cache_minutes`、`secret_fields`、`synonyms`、`field_kinds`。每项都可省略，省略时取代码默认值，判定行为不变。取值范围、作用和调整的代价见 [07.6](07-console-architecture.md#76-站点级判定参数advanced) |
 | `objects` | 否 | 对象表：`classes`（对象类别，`id`、`name`、可选 `description`）和 `slots`（已确认的位置，`key` 形如 `GET /doctor/{id} path[1]`（路径须为规范拼写，见 [07.4.7](07-console-architecture.md#747-档位在判定中的使用)），`class`，`source` 为 `admin`、`rule` 或 `agent`；响应位置可选 `identity`，取 `user`、`org` 或 `role`，声明它携带本会话的用户、机构或角色，见 [07.9.15](07-console-architecture.md#7915-对象表的身份位置w1)；可选的 `tier`、`accepts_public`、`reliability`，以及为真时暂停位置的 `paused`（判断保留但不被使用），见 [07.9.16](07-console-architecture.md#7916-对象表的档位与可靠性w3)）。省略时为空，判定与之前相同。`functions`（功能表，可选）是 `objects` 下的另一个列表：每项的 `key` 形如 `POST /api/admin/export`（方法大写、一个空格、以 `/` 开头的规范路由模板，`{id}` 是唯一的占位符），`source` 为 `admin`、`rule` 或 `agent`，可选的 `tier` 只接受 `admin`（省略表示对所有会话开放），可选的 `reliability` 只能与 `tier` 同在，见 [07.9.18](07-console-architecture.md#7918-功能表)。本版只读入、校验和保存，网关的判定还不使用它。学习提议只在学习状态里，确认后才写入这里。`learning` 段省略即默认（学习开启，20 次使用、5 个会话，代理关闭）；与默认全部相同时不写入。`agent.enabled` 为真时，控制面只在配置了学习代理模型时提问，没有模型时位置照常等待，不会出错 |
 
@@ -87,7 +87,7 @@ v3 的 109 个 `XSHIELD_*` 变量逐个的去留见 [05.3](05-v3-removal.md#53-�
 网关处理的每个请求都在 PostgreSQL 写一行，包括命中 `bypass` 的请求、请求体不可判定（413）和未知站点（404）的请求（这三类只写简记录）：
 
 - 时间、站点和配置版本、请求 ID、会话标签（不是凭证）、方法、路径、脱敏后的查询串、状态码、耗时；
-- 判定路径：绕过 / 快速放行 / 缓存放行 / Jev 通过 / Jev 拒绝 / Jev 不可用后按配置处理（含超出调用限额）/ 无会话拒绝 / 请求体不可判定 / 未知站点；
+- 判定路径：绕过 / 快速放行 / 缓存放行 / Jev 通过 / Jev 拒绝 / Jev 不可用后按配置处理 / 超出调用限额后拒绝（429）/ 无会话拒绝 / 请求体不可判定 / 未知站点；
 - 结论：放行、拦截、观察模式下的“本应拦截”，或 Jev 不可用时按配置放行的“未经判定”；
 - 判定依据：每个请求值是否见过、是否已核验、从哪个请求的响应学到（来源请求 ID）；
 - 调用了 Jev 时，附带发送的 `state`（已脱敏）、指令版本、原始响应、两个问题的完整概率、耗时、超时和失败码。
