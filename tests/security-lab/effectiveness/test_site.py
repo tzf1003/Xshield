@@ -456,16 +456,16 @@ class ConsoleFlowTests(_Fixture):
                     if json.loads(body or "{}").get("password") == CONSOLE_PASSWORD:
                         self._reply(200, {"authenticated": True}, cookie=True)
                     else:
-                        self._reply(401, {"code": "INVALID_PASSWORD"})
+                        self._reply(401, {"error": "INVALID_PASSWORD"})
                 elif self.path == "/api/logout":
                     self._reply(200, {"authenticated": False})
                 else:
-                    self._reply(404, {"code": "NOT_FOUND"})
+                    self._reply(404, {"error": "NOT_FOUND"})
 
             def do_GET(self) -> None:  # noqa: N802
                 self._record("")
                 if not self._signed_in():
-                    self._reply(401, {"code": "UNAUTHENTICATED"})
+                    self._reply(401, {"error": "UNAUTHENTICATED"})
                     return
                 path = self.path.split("?", 1)[0]
                 if path == "/api/requests/export":
@@ -475,7 +475,7 @@ class ConsoleFlowTests(_Fixture):
                 elif path == "/api/sites/juice/objects":
                     self._reply(200, owner.objects)
                 else:
-                    self._reply(404, {"code": "NOT_FOUND"})
+                    self._reply(404, {"error": "NOT_FOUND"})
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
         threading.Thread(target=server.serve_forever, daemon=True).start()

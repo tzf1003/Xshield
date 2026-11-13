@@ -307,7 +307,7 @@ class _Console:
 def _error_code(error: urllib.error.HTTPError) -> str:
     """The console's error code only; its message can carry request data, so it is not printed."""
     try:
-        code = json.loads(error.read(4096).decode("utf-8")).get("code")
+        code = json.loads(error.read(4096).decode("utf-8")).get("error")
     except (OSError, ValueError, AttributeError):
         return "没有错误码"
     return code if isinstance(code, str) else "没有错误码"
