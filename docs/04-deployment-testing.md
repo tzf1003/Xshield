@@ -141,7 +141,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 
   `crates/xshield-judge/tests/live_jev.rs` 是这组真实调用的测试（默认忽略）：`XSHIELD_JEV_ROUTE=direct XSHIELD_JEV_API_KEY=... cargo test -p xshield-judge --test live_jev -- --ignored --nocapture`，每个场景打印一行判定、概率和耗时。
 
-  功能表的真实调用是其中的 `live_function_table`：75 例加 2 条只记录的请求，发给四个站点（两个 emr 站点、一个带管理员身份位置的站点、一个商店），每条核对网关送给 Jev 的 `function`。其中 4 例是已知做不到的（`KnownGap`，只打印，不算失败）。同一文件里的 `function_cases_reach_jev_as_intended` 不需要密钥，CI 里用桩模型运行：它只核对每条请求是否带着用例写明的 `function` 送到了模型面前，不核对模型的结论。
+  功能表的真实调用是其中的 `live_function_table`：75 例加 2 条只记录的请求，发给四个站点（两个 emr 站点、一个带管理员身份位置的站点、一个商店），每条核对网关送给 Jev 的 `function`。其中 6 例是已知做不到的（`KnownGap`，只打印，不算失败）。同一文件里的 `function_cases_reach_jev_as_intended` 不需要密钥，CI 里用桩模型运行：它只核对每条请求是否带着用例写明的 `function` 送到了模型面前，不核对模型的结论。
 - **代码质量**：沿用 `cargo fmt`、`cargo clippy`、`cargo test` 和 `scripts/verify_all.sh`。
 
 v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回归已随对应功能一起删除。
@@ -192,3 +192,29 @@ v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回�
 第三轮修复后重跑同一套件：`fast_allow` 386、`cached_allow` 78、`jev_allow` 45、`jev_deny` 21、`no_session` 18，Jev 调用 66 次，中位数 0.55 秒，p95 0.9 秒，无失败、无限流。10 个正常业务请求全部放行，其中结算、注册各步（含 `SecurityAnswers`）和 `/hacking-instructor-*` 都不再误判，没有一条误报。24 个预期拦截探针里 19 个会被拦：7 个注入（2 个搜索、5 个登录）、跨账号读购物车和 11 个未登录访问 `/ftp/`、`/metrics`、`/redirect` 等；其余 5 个中，2 个因 `/assets/*` 绕过没有记录，3 个注册探针（缺 passwordRepeat、`role` 批量赋值、空用户，后者源站也返回 400）判为请求本身无害，属于业务规则校验，不在 IDOR 和攻击检测的范围。不在 24 个探针清单里的 `would_block` 行全是遍历他人购物车（`/rest/basket/N`）以及目录浏览（`/ftp/`、`/infrastructure/`），都是套件自己的探针。
 
 第四轮里 `/assets/*` 绕过掉的两个探针是 `GET /assets/i18n/tlh_AA.json`（源站真实存在的 35 KB 克林贡语翻译文件）和 `GET /assets/public/images/uploads/<未编码的文件名>`（源站对它返回单页应用首页）。两者都只是读静态资源，不涉及对象引用或注入内容，所以按设计跳过判定和记录。随后用 `/assets/../rest/basket/1`、`/assets/%2e%2e/rest/basket/1`、`/assets/..%2frest/basket/1`、`/assets/public/../../ftp/acquisitions.md` 实测：点段、编码的点和斜杠都不命中绕过，照常判定（未登录的记 `no_session`）；`/assets/..;/rest/basket/1`（Tomcat 一类容器把 `..;` 当作点段）原来会命中绕过，现在路径里出现 `;` 一律不命中绕过和入口。
+
+### 4.5.5 功能表回归（2026-11-13，三遍共 222 次调用）
+
+用 TypeSafe `jev-1.13.0` 的直连端点、提示词 `jq_77be488d34440d84`，把 4.4 的 `live_function_table` 连跑三遍。每遍 77 条请求，74 条调用模型，3 条快速放行。调用耗时 170 到 520 毫秒，中位数 210 毫秒，没有超时，也没有限流。
+
+69 条必须符合预期的请求，三遍全部符合：
+
+- 管理档功能上的尝试越权 4 条（`POST /api/admin/export`、`GET /api/audit-logs`、`PUT /api/staff/{id}/role`、`GET /api/settings/clinic`）全部被拦，DENY 概率不低于 0.98。最后一条的路径名看不出是管理功能，靠的是功能表里的管理档。
+- 功能表里没有、名字显示管理或运维功能的 29 条（`/metrics`、`/actuator/env`、`/.env`、`/backup.sql`、`/ftp/` 等）全部被拦。其中 `DELETE /api/patients`（DENY 0.64 到 0.73）和 `POST /api/permissions/grant`（0.63 到 0.77）离平局较近。
+- 功能表里没有的普通接口 30 条全部放行，DENY 概率最高的是 `GET /api/wards/occupancy`（0.21 到 0.37）。
+- 不带 `function` 的对照 6 条不受新指令影响：没展示过的病人编号仍被拦（DENY 1.00），其余 5 条放行。
+
+6 条已知做不到的（`KnownGap`，只记录，不算失败）：
+
+| 请求 | 想要的结论 | 三遍的结果 | 原因 |
+|---|---|---|---|
+| `GET /api/patients/export-all` | 拦 | 三遍都放行，没有问模型 | 功能表里 `GET /api/patients/{id}` 的 `{id}` 盖住了 `export-all` 这个路由词，请求被当成已知功能快速放行 |
+| `GET /trace` | 拦 | 拦了一遍（DENY 0.44 到 0.50） | 接近平局 |
+| `GET /api/accounts/all` | 拦 | 拦了两遍（DENY 0.47 到 0.53） | 接近平局 |
+| 商店 `GET /api/Users` | 拦 | 三遍都放行（DENY 0.05 到 0.07） | 路径名看不出是全部用户的列表 |
+| 商店 `GET /redirect?to=https://example.org/x` | 拦 | 三遍都放行（`access` 答 ALLOW 约 0.90，`attack` 的 ATTACK 概率 0.41 到 0.45） | 功能表管不到开放重定向，要靠 `attack` 问题，而它在这条上接近平局 |
+| `GET /api/config/ui` | 放行 | 三遍都被拦（DENY 0.92 到 0.95） | 普通接口，路径里的 `config` 被当成配置功能。这是误拦 |
+
+另外两条只记录的请求：被认作管理员的会话请求功能表里没有的 `GET /api/admin/reports` 和 `GET /api/admin/users/export`，三遍都被拦（DENY 0.99 和 1.00）。这说明打开“未知功能交 Jev”之后，管理员用到没有进功能表的管理接口也会被拦，打开之前要先把这些接口加进功能表。
+
+样本很小，只说明这组请求上的表现，不构成准确率。

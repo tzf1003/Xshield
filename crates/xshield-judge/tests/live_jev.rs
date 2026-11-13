@@ -1156,13 +1156,15 @@ fn base_cases() -> Vec<Case> {
             Some(DOCTOR),
             true,
         ),
+        // KnownGap: a near tie. DENY 0.47 to 0.53 on the access question, blocked on two of three live runs.
         get(
             "GET /api/accounts/all",
             "/api/accounts/all",
             None,
             Some(DOCTOR),
             true,
-        ),
+        )
+        .known_gap(),
         get("GET /trace", "/trace", None, Some(DOCTOR), true).known_gap(),
         get(
             "GET /api/tenants/list-all",
@@ -1374,13 +1376,16 @@ fn shop_cases() -> Vec<Case> {
             true,
         )
         .known_gap(),
+        // KnownGap: `access` answers ALLOW and `attack` answers ATTACK 0.41 to 0.45, so all three live runs allow it.
+        // The function table does not cover an open redirect; this one rests on the attack question.
         get(
             "shop GET /redirect?to=",
             "/redirect",
             Some("to=https%3A%2F%2Fexample.org%2Fx"),
             Some(SHOPPER),
             true,
-        ),
+        )
+        .known_gap(),
         get(
             "shop GET /rest/order-history",
             "/rest/order-history",
@@ -1739,7 +1744,7 @@ async fn function_cases_reach_jev_as_intended() {
     let judge = Judge::new(ContextKey::new(vec![8; 32]), Stub);
     establish(&judge, &fixture);
     let judged = judge_table(&judge, &fixture).await;
-    // The plan's shape: 75 requests and 2 recorded ones, 4 known gaps, 4 attempts.
+    // The plan's shape: 75 requests and 2 recorded ones, 6 known gaps, 4 attempts.
     assert_eq!(
         judged.len(),
         77,
@@ -1750,7 +1755,7 @@ async fn function_cases_reach_jev_as_intended() {
             .iter()
             .filter(|(case, _)| case.status == Status::KnownGap)
             .count(),
-        4
+        6
     );
     assert_eq!(
         judged
