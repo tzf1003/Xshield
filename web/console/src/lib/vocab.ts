@@ -759,6 +759,11 @@ export const OBJECT_JUDGEMENT = {
     desc: "这个值只由公共响应展示过，而请求位置不接受公共来源。判定不快速放行，交 Jev，指令要求拒绝",
   },
   identityRow: "会话身份",
+  /** The figures of an administrator's tier proposal: its counts describe the ordinary users, which none of them is. */
+  adminBasis: "只有管理员拿到了数据，其他用户被拒绝",
+  /** On a site that declares no user identity, the judge does not tighten an acceptance the learning gave medium. */
+  unidentified:
+    "本站点没有声明用户身份，这一条不会自动收紧，需要收紧时请声明用户身份的位置，或手动把这个请求位置设为不接受公共来源。",
   editor: {
     title: "判断",
     none: "未判断",

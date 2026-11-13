@@ -15,6 +15,8 @@ import {
   proposalFigures,
   proposalWords,
   shareOfMille,
+  unidentifiedNoteOfEntry,
+  unidentifiedNoteOfProposal,
   withJudgement,
 } from "../src/lib/judgement.ts";
 import { checkObjects, objectChanges, parseObjects } from "../src/lib/objects-validate.ts";
@@ -200,4 +202,42 @@ test("a change of a position's judgement is listed as the change it makes, both 
   const after: ObjectsSpec = { classes, slots: [{ ...doctor, identity: "user" }] };
   assert.deepEqual(objectChanges(before, after), ["GET /api/doctors [].id 判断 无 → 身份 用户"]);
   assert.deepEqual(objectChanges(after, before), ["GET /api/doctors [].id 判断 身份 用户 → 无"]);
+});
+
+test("an administrator's tier proposal says who got the data, in place of the counts of the ordinary units", () => {
+  const admin: ObjectTierJudgement = { ...tier, tier: "admin", reliability: "high" };
+  assert.deepEqual(proposalFigures(admin), ["只有管理员拿到了数据，其他用户被拒绝"]);
+  // A tier of ordinary users keeps its counts.
+  assert.deepEqual(proposalFigures(tier), ["单位 12", "不同值 3", "一致 95%"]);
+});
+
+test("a site that declares no user identity says that an acceptance of no public source at medium is not tightened", () => {
+  const note =
+    "本站点没有声明用户身份，这一条不会自动收紧，需要收紧时请声明用户身份的位置，或手动把这个请求位置设为不接受公共来源。";
+  const medium: ObjectAcceptanceJudgement = { ...acceptance, reliability: "medium" };
+  // Only an acceptance of no public source at medium carries the note: an acceptance of public sources is no
+  // tightening, and the judge tightens a high one, so the note would read wrongly on either.
+  assert.equal(unidentifiedNoteOfProposal(medium, false), note);
+  assert.equal(unidentifiedNoteOfProposal({ ...medium, accepts_public: true }, false), null);
+  assert.equal(unidentifiedNoteOfProposal(acceptance, false), null);
+  assert.equal(unidentifiedNoteOfProposal(medium, true), null);
+  assert.equal(unidentifiedNoteOfProposal(tier, false), null);
+  // A declared position's judgement follows the same condition, on the fields it carries.
+  assert.equal(
+    unidentifiedNoteOfEntry({ accepts_public: false, reliability: "medium" }, false),
+    note,
+  );
+  assert.equal(
+    unidentifiedNoteOfEntry({ accepts_public: true, reliability: "medium" }, false),
+    null,
+  );
+  assert.equal(
+    unidentifiedNoteOfEntry({ accepts_public: false, reliability: "high" }, false),
+    null,
+  );
+  assert.equal(unidentifiedNoteOfEntry({ reliability: "medium" }, false), null);
+  assert.equal(
+    unidentifiedNoteOfEntry({ accepts_public: false, reliability: "medium" }, true),
+    null,
+  );
 });

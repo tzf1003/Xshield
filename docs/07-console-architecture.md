@@ -35,7 +35,7 @@ AGENTS.md 要求新增配置项、表、依赖之前先确认现有机制不够�
 | `decision_log` 按天分区 | 绕过请求也要记录后行数会增加一个数量级，7 天保留用删分区代替大批量 `DELETE` |
 | 前端依赖 `yaml`、`@codemirror/*`（懒加载） | YAML 编辑需要解析器和带行号、错误标记的编辑器；见 [7.10.1](#7101-技术栈与依赖) |
 | 后端依赖 `rust-embed`（或等价方案） | 控制面同端口提供控制台静态文件，部署少一个服务、少一组 CORS 配置；见 [7.2.3](#723-部署) |
-| `objects.learning` 段（学习开关、阈值、代理上限） | 学习要按站点调：低流量站点需要更少的使用次数，个别站点要能暂停学习而不发版。默认值写在代码里，与默认全部相同时不写入配置；`auto_tighten` 默认关闭，开启后学习任务按证据拆分类别；`auto_pause` 同样由学习任务生效（两者都以新版本写入，学习设置见 [06](06-console-ui.md)）；`agent` 段要到学习代理（PR-5）合并、并且控制台配置了学习代理模型之后才提问，在此之前只保存、不起作用 |
+| `objects.learning` 段（学习开关、阈值、代理上限） | 学习要按站点调：低流量站点需要更少的使用次数，个别站点要能暂停学习而不发版。默认值写在代码里，与默认全部相同时不写入配置；`auto_tighten` 默认关闭，开启后学习任务按证据拆分类别；`auto_pause` 同样由学习任务生效（两者都以新版本写入，学习设置见 [06](06-console-ui.md)；自动暂停的备注写出与被暂停位置矛盾的类别，以及那一类中票数最多的来源位置，LQ-7）；`agent` 段要到学习代理（PR-5）合并、并且控制台配置了学习代理模型之后才提问，在此之前只保存、不起作用 |
 | 表 `object_evidence`（学习证据） | 判定要数 7 天窗口内的会话和拒绝，控制面可能多实例运行，证据必须在库里共享且重启不丢；放进站点配置会让每次投票都产生一个配置版本 |
 | 表 `object_positions`（位置判定状态） | 管理员对提议的确认、驳回和歧义标记要跨重启保留；提议只是建议，写进 `site_configs` 会改变网关轮询的版本号，每个提议都触发一次配置变更 |
 | `object_positions` 的 `id`、`side`、`dismissed`、`dismissed_class`、`dismissed_votes` 列，状态 `pending` 取代 `dismissed` 状态（迁移 0004） | 控制台按行号寻址学习位置（`s<id>`），不用键，键很长且含路径模板；`side` 区分请求和响应两侧，两侧的位置都要列出；驳回是一个标记而不是一种状态，它记住驳回时的类别和票数，证据有实质变化（类别不同，或票数到驳回时的两倍）才会再次提议，否则同一个提议每次学习都会回来 |
@@ -691,7 +691,7 @@ CREATE TABLE jev_prompts (
 | `POST /api/sites/{name}/preview` | 改动的影响预估（7.9.10） |
 | `GET /api/sites/{name}/insights` | 调优建议和切换模式的就绪检查（7.9.11） |
 | `GET /api/sites/{name}/evidence` | 判定参数旁边显示的证据：最近 24 小时 Jev 耗时 p50/p95/p99、超时次数、调用上限触发次数和每分钟最高调用数、缓存放行次数 |
-| `GET /api/sites/{name}/objects` | 对象表：各状态计数、声明的类别、位置列表，可按 `state`、`class`、`q` 过滤；位置行在条目带有判断时带 `tier`、`accepts_public`、`reliability`；`judgements` 列出待确认的提议，请求位置的接受公共来源与响应位置的档位（7.9.16）；声明的位置和学习到的位置各一行，默认不列已退役的位置；已退役的位置在最后一次使用后保留 90 天（`KEEP_RETIRED_DAYS`），之后学习任务删除它们，再次出现时从头学习。学习位置的 id 是 `s<行号>`，声明位置的 id 是 `a` 加上键的 SHA-256 前 8 字节（十六进制），控制台只把 id 当不透明字符串 |
+| `GET /api/sites/{name}/objects` | 对象表：各状态计数、声明的类别、位置列表，可按 `state`、`class`、`q` 过滤；位置行在条目带有判断时带 `tier`、`accepts_public`、`reliability`；`judgements` 列出待确认的提议，请求位置的接受公共来源与响应位置的档位（7.9.16）；`identified` 表示站点是否声明了用户身份；声明的位置和学习到的位置各一行，默认不列已退役的位置；已退役的位置在最后一次使用后保留 90 天（`KEEP_RETIRED_DAYS`），之后学习任务删除它们，再次出现时从头学习。学习位置的 id 是 `s<行号>`，声明位置的 id 是 `a` 加上键的 SHA-256 前 8 字节（十六进制），控制台只把 id 当不透明字符串 |
 | `GET /api/sites/{name}/objects/slots/{id}` | 一个位置的抽屉：流入的流向（份额、次数、会话，以及 Jev 通过和拒绝的次数）；有证据的流向最多 20 条，之后另列最多 20 条只有 Jev 判定的流向；示例请求（最多 3 个，最近的在前：请求位置列出用到它的请求，响应位置按返回值的观察时间列出返回过这个值的响应）。Jev 次数和示例都从决策记录读取，只统计学习窗口内且站点创建之后的记录（站点删除后决策记录保留，同名重建的站点不读旧记录），Jev 次数只看调用过 Jev 的记录（部分索引）。结构和历史待后续实现，当前为空。`impact` 是位置主操作（确认提议、恢复暂停的条目、暂停生效中的条目）让快速放行改变的数量，按最近一天计算，只读站点创建之后的记录，路径参数有值；字段位置的主操作暂不估计，此时 `impact_estimated` 为 false（`impact_complete` 同为 false）。`impact_complete` 为 false 表示窗口没有读完，数量可能偏小 |
 | `POST /api/sites/{name}/objects/slots/{id}/dismiss` | 驳回学习中的提议或学习中的位置，成功返回 204。409：`SLOT_IS_DECLARED`（声明的位置）、`SLOT_NOT_REQUEST`（响应侧的位置）、`SLOT_STATE_CONFLICT`（状态不接受驳回） |
 | `POST /api/sites/{name}/objects/slots/{id}/ambiguous` | 标为歧义，规则不再提议，成功返回 204；错误码同上 |
@@ -700,7 +700,7 @@ CREATE TABLE jev_prompts (
 | `GET /api/sites/{name}/objects/functions` | 功能表：配置里的功能及其证据、没有进表的候选、管理档提议，以及最近一天没有学到的流量（7.9.20） |
 | `POST /api/sites/{name}/objects/functions/changes` | 管理员对功能表的一批变更（删除、取消管理档、确认管理档提议、新增），写成一个新版本，成功返回 204。错误码：`FUNCTION_CHANGED`、`FUNCTION_ON_ENTRY`、`JUDGEMENT_CHANGED`、`VERSION_CONFLICT`（409）；`JUDGEMENT_NOT_FOUND`（404）；`INVALID_BODY`、`SITE_CONFIG_OBJECTS_INVALID`（400）（7.9.20） |
 | `POST /api/sites/{name}/objects/functions/proposals/dismiss` | 驳回一条功能的管理档提议，成功返回 204；`JUDGEMENT_NOT_FOUND`（404）、`INVALID_BODY`（400）（7.9.20） |
-| `GET /api/sites/{name}/objects/bootstrap` | 冷启动的类别候选（24 小时窗口） |
+| `GET /api/sites/{name}/objects/bootstrap` | 冷启动的类别候选（24 小时窗口）；类别词超过 24 个字母、或位置键超过 256 字节的候选不列出（LQ-7） |
 | `GET /api/status` | 顶栏状态灯和“配置生效”需要的轻量状态，每 15 秒轮询一次（7.9.13） |
 | `GET /api/system` | 网关实例、日志存储、运行参数（7.9.8）；只在系统页按需读取，不轮询 |
 | `GET /api/system/models`、`PUT /api/system/models/{group}`、`POST …/test`、`DELETE /api/system/models/jev`、`GET …/history` | 模型页：Jev 判定模型和学习代理模型的配置、测试、改回环境变量和变更记录（7.9.14） |
@@ -1030,6 +1030,8 @@ CREATE TABLE jev_prompts (
 - 确认：请求体 `{"tier", "reliability"}` 必须与当前提议一致，否则 409 `JUDGEMENT_CHANGED`。通过后 `tier` 与 `reliability` 作为站点配置的一个新版本写入（备注说明是确认），提议被清除。条目已带同样的判断时只清除提议，不写版本。
 - 身份位置没有档位，对它确认或驳回返回 409 `SLOT_NOT_JUDGED`。
 - 列表（`GET …/objects`）的 `judgements` 同时列出两种提议。档位提议的行带 `tier`、`units`（判断计入的单位数）、`seen_values`（其中的不同值数）和 `agreement_per_mille`（与档位一致的份额），不带 `accepts_public`、`votes` 与 `sessions`。
+- 管理档（`tier: admin`）的提议，`units`、`seen_values` 与 `agreement_per_mille` 都为 0（普通单位没有拿到数据，见上面的学习规则），它的依据是管理员单位和被拒绝的普通单位。控制台对它不显示这三个数字，只写一句“只有管理员拿到了数据，其他用户被拒绝”（LQ-7）。
+- 列表的 `identified` 说明站点是否声明了用户身份。没有身份时，不接受公共来源（`accepts_public` 为假）且可靠性为中的提议和判断（条目带 `accepts_public`）在控制台上多一句说明：这一条不会自动收紧，需要收紧时请声明用户身份的位置，或手动把这个请求位置设为不接受公共来源。接受公共来源的不加，它本来就不是收紧；可靠性为高的也不加，判定器对高会收紧。这只是说明，判定器不因此收紧；是否对中等可靠性也收紧另行决定（LQ-7）。
 
 规则的限制（本次实现）：
 

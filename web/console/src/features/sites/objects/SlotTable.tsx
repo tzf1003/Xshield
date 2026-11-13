@@ -12,7 +12,7 @@ import {
   percentOf,
 } from "../../../lib/vocab.ts";
 import { SafeText } from "../../../ui/SafeText.tsx";
-import { judgementWords } from "../../../lib/judgement.ts";
+import { judgementWords, unidentifiedNoteOfEntry } from "../../../lib/judgement.ts";
 import { classNameOf, seenText } from "./objects-model.ts";
 
 /** A state as a tag: the icon and the name, with the state's meaning as its title. */
@@ -30,12 +30,18 @@ export function StateTag({ state }: { state: ObjectState }) {
 
 /** The judgement a declared position carries, in words under its class: its identity, its tier and reliability, or its
  *  acceptance of public sources (docs/07 7.9.15, 7.9.16). Nothing for a position that carries none. */
-export function JudgementLine({ row }: { row: ObjectSlotRow }) {
+export function JudgementLine({ row, identified }: { row: ObjectSlotRow; identified: boolean }) {
   const words = judgementWords(row);
   if (words === null) return null;
+  const note = unidentifiedNoteOfEntry(row, identified);
   return (
     <div className="small muted obj-judge-line" title={OBJECT_JUDGEMENT.editor.title}>
       <SafeText text={words} />
+      {note === null ? null : (
+        <div>
+          <SafeText text={note} />
+        </div>
+      )}
     </div>
   );
 }
@@ -78,13 +84,15 @@ function PausedCell({ row, classes }: { row: ObjectSlotRow; classes: readonly Ob
 type Props = {
   rows: readonly ObjectSlotRow[];
   classes: readonly ObjectClass[];
+  /** Whether the site declares a user identity (a judgement says so on a site that does not). */
+  identified: boolean;
   /** The position whose drawer is open, marked in the table. */
   selected: string | null;
   now: number;
   onOpen: (id: string) => void;
 };
 
-export function SlotTable({ rows, classes, selected, now, onOpen }: Props) {
+export function SlotTable({ rows, classes, identified, selected, now, onOpen }: Props) {
   return (
     <div className="tbl-wrap">
       <table className="tbl" aria-label={OBJECT_TEXT.table}>
@@ -123,12 +131,12 @@ export function SlotTable({ rows, classes, selected, now, onOpen }: Props) {
                     <>
                       <SafeText text={classNameOf(classes, row.class)} />{" "}
                       <StateTag state={row.state} />
-                      <JudgementLine row={row} />
+                      <JudgementLine row={row} identified={identified} />
                     </>
                   ) : (
                     <>
                       <PausedCell row={row} classes={classes} />
-                      <JudgementLine row={row} />
+                      <JudgementLine row={row} identified={identified} />
                     </>
                   )}
                 </td>
