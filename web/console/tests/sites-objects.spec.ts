@@ -211,7 +211,7 @@ test("the learning settings save through the save dialog, and the agent stays of
   await page.keyboard.press("Control+s");
   const dialog = page.getByRole("dialog", { name: "保存 emr 的配置" });
   await expect(dialog.getByRole("list", { name: "改动摘要" })).toContainText(
-    "学习设置 自动收紧 开 → 关",
+    "学习设置 自动收紧 关 → 开",
   );
 });
 

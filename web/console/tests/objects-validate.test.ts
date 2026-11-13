@@ -147,17 +147,18 @@ test("a whole list is checked: each entry, then the clashes between entries", ()
 
 test("the save dialog reads declarations and learning changes in words", () => {
   const before: SiteSpec["objects"] = undefined;
+  // The default is off, so an absent setting and a turned-on one differ by tightening.
   const after: SiteSpec["objects"] = {
     learning: {
       auto_learn: true,
-      auto_tighten: false,
+      auto_tighten: true,
       agent: { enabled: false, daily_limit: 200 },
       thresholds: { uses: 20, sessions: 5 },
       auto_pause: true,
     },
   };
-  assert.deepEqual(objectChanges(before, after), ["学习设置 自动收紧 开 → 关"]);
-  assert.deepEqual(objectChanges(after, before), ["学习设置 自动收紧 关 → 开"]);
+  assert.deepEqual(objectChanges(before, after), ["学习设置 自动收紧 关 → 开"]);
+  assert.deepEqual(objectChanges(after, before), ["学习设置 自动收紧 开 → 关"]);
   assert.deepEqual(objectChanges(undefined, undefined), []);
   assert.deepEqual(objectChanges({}, { learning: undefined }), []);
 
