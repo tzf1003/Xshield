@@ -1,0 +1,153 @@
+{"id": "ben-name-01", "class": "name", "text": "O'Brien", "quick": true, "note": "带撇号的英文姓"}
+{"id": "ben-name-02", "class": "name", "text": "D'Angelo", "quick": false, "note": "带撇号的英文姓"}
+{"id": "ben-name-03", "class": "name", "text": "Mary O'Connor", "quick": false, "note": "带撇号的英文名"}
+{"id": "ben-name-04", "class": "name", "text": "Ng'ang'a Kamau", "quick": true, "note": "多个撇号的姓名"}
+{"id": "ben-name-05", "class": "name", "text": "林小雨", "quick": true, "note": "中文姓名"}
+{"id": "ben-name-06", "class": "name", "text": "Zhang Wei", "quick": false, "note": "拼音姓名"}
+{"id": "ben-name-07", "class": "name", "text": "Jean-Luc Picard", "quick": false, "note": "带连字符的姓名"}
+{"id": "ben-name-08", "class": "name", "text": "Anne-Marie O'Neil", "quick": false, "note": "连字符加撇号"}
+{"id": "ben-name-09", "class": "name", "text": "José García", "quick": false, "note": "带重音符号的姓名"}
+{"id": "ben-name-10", "class": "name", "text": "Müller Anna", "quick": false, "note": "带变音符号的姓名"}
+{"id": "ben-name-11", "class": "name", "text": "Tom 'TJ' Jones", "quick": false, "note": "姓名里带引号"}
+{"id": "ben-name-12", "class": "name", "text": "Alice & Bob", "quick": true, "note": "姓名里带与号"}
+{"id": "ben-name-13", "class": "name", "text": "Lee, Jin-ho", "quick": false, "note": "带逗号的姓名"}
+{"id": "ben-name-14", "class": "name", "text": "Dr. O'Sullivan (ENT)", "quick": false, "note": "带称谓和括号"}
+{"id": "ben-name-15", "class": "name", "text": "Pat Riley Jr.", "quick": false, "note": "带后缀的姓名"}
+{"id": "ben-name-16", "class": "name", "text": "O'Malley's Pharmacy", "quick": false, "note": "带撇号的药房名"}
+{"id": "ben-name-17", "class": "name", "text": "d'Artagnan Dupont", "quick": false, "note": "小写前缀加撇号"}
+{"id": "ben-clinic-01", "class": "clinic", "text": "患者主诉头痛三天，无发热", "quick": true, "note": "中文病历用语"}
+{"id": "ben-clinic-02", "class": "clinic", "text": "血压 130/85 mmHg，心率 72 次/分", "quick": false, "note": "中文病历用语，含斜杠"}
+{"id": "ben-clinic-03", "class": "clinic", "text": "处方：阿莫西林胶囊 0.5g 每日三次", "quick": true, "note": "中文处方用语"}
+{"id": "ben-clinic-04", "class": "clinic", "text": "随访两周后复诊", "quick": false, "note": "中文随访用语"}
+{"id": "ben-clinic-05", "class": "clinic", "text": "化验单：血红蛋白 128 g/L", "quick": false, "note": "化验结果"}
+{"id": "ben-clinic-06", "class": "clinic", "text": "既往史：高血压 5 年", "quick": false, "note": "既往史"}
+{"id": "ben-clinic-07", "class": "clinic", "text": "过敏史：青霉素（皮疹）", "quick": false, "note": "过敏史，含括号"}
+{"id": "ben-clinic-08", "class": "clinic", "text": "诊断：急性上呼吸道感染", "quick": true, "note": "诊断用语"}
+{"id": "ben-clinic-09", "class": "clinic", "text": "建议：多饮水，注意休息", "quick": false, "note": "医嘱用语"}
+{"id": "ben-clinic-10", "class": "clinic", "text": "CT 报告见右肺下叶小结节", "quick": false, "note": "影像报告"}
+{"id": "ben-clinic-11", "class": "clinic", "text": "用药后症状明显缓解", "quick": false, "note": "疗效描述"}
+{"id": "ben-clinic-12", "class": "clinic", "text": "请于 2026-11-20 上午 9:00 到门诊复查", "quick": false, "note": "带日期和时间"}
+{"id": "ben-clinic-13", "class": "clinic", "text": "医嘱：低盐饮食，每周运动三次", "quick": false, "note": "医嘱用语，含数字"}
+{"id": "ben-clinic-14", "class": "clinic", "text": "病程记录：今日查房，患者精神好", "quick": false, "note": "病程记录"}
+{"id": "ben-clinic-15", "class": "clinic", "text": "输液 0.9% 氯化钠 250 mL", "quick": true, "note": "输液剂量"}
+{"id": "ben-clinic-16", "class": "clinic", "text": "体温 37.2℃，无咳嗽", "quick": false, "note": "体温描述"}
+{"id": "ben-clinic-17", "class": "clinic", "text": "转诊至心内科会诊", "quick": false, "note": "转诊用语"}
+{"id": "ben-keyword-01", "class": "keyword", "text": "Please select the department from the list.", "quick": true, "note": "含 select 的普通句子"}
+{"id": "ben-keyword-02", "class": "keyword", "text": "Drop the old draft before 5pm.", "quick": false, "note": "含 drop 的普通句子"}
+{"id": "ben-keyword-03", "class": "keyword", "text": "The union of both teams' notes is complete.", "quick": false, "note": "含 union 的普通句子"}
+{"id": "ben-keyword-04", "class": "keyword", "text": "Update the note after the visit.", "quick": true, "note": "含 update 的普通句子"}
+{"id": "ben-keyword-05", "class": "keyword", "text": "Delete the duplicate draft if it is empty.", "quick": false, "note": "含 delete 的普通句子"}
+{"id": "ben-keyword-06", "class": "keyword", "text": "Insert a line break here, then continue.", "quick": false, "note": "含 insert 的普通句子"}
+{"id": "ben-keyword-07", "class": "keyword", "text": "Order by date, newest first.", "quick": false, "note": "含 order by 的普通句子"}
+{"id": "ben-keyword-08", "class": "keyword", "text": "Where is the nearest pharmacy?", "quick": true, "note": "含 where 的问句"}
+{"id": "ben-keyword-09", "class": "keyword", "text": "Exec summary: patient stable.", "quick": false, "note": "含 exec 的普通句子"}
+{"id": "ben-keyword-10", "class": "keyword", "text": "Cat scan booked for Tuesday.", "quick": false, "note": "含 cat 的普通句子"}
+{"id": "ben-keyword-11", "class": "keyword", "text": "Sleep well and drink more water.", "quick": false, "note": "含 sleep 的普通句子"}
+{"id": "ben-keyword-12", "class": "keyword", "text": "Ping the nurse station when ready.", "quick": false, "note": "含 ping 的普通句子"}
+{"id": "ben-keyword-13", "class": "keyword", "text": "This script is for the nurses only.", "quick": false, "note": "含 script 的普通句子"}
+{"id": "ben-keyword-14", "class": "keyword", "text": "Use the table below to compare results.", "quick": false, "note": "含 table 的普通句子"}
+{"id": "ben-keyword-15", "class": "keyword", "text": "The select committee meets on Monday.", "quick": true, "note": "含 select 的普通句子"}
+{"id": "ben-keyword-16", "class": "keyword", "text": "Shutdown of the ward printer is scheduled.", "quick": false, "note": "含 shutdown 的普通句子"}
+{"id": "ben-keyword-17", "class": "keyword", "text": "Please sort by name, then by room number.", "quick": false, "note": "含 sort by 的普通句子"}
+{"id": "ben-path_url-01", "class": "path_url", "text": "/var/log/app.log", "quick": true, "note": "文件路径"}
+{"id": "ben-path_url-02", "class": "path_url", "text": "C:\\Users\\doctor\\Desktop\\report.pdf", "quick": false, "note": "Windows 文件路径"}
+{"id": "ben-path_url-03", "class": "path_url", "text": "https://example.com/docs/index.html", "quick": true, "note": "网址"}
+{"id": "ben-path_url-04", "class": "path_url", "text": "https://www.example.org/search?q=blood+pressure", "quick": false, "note": "带查询串的网址"}
+{"id": "ben-path_url-05", "class": "path_url", "text": "../README.md", "quick": true, "note": "相对路径（含 ../）"}
+{"id": "ben-path_url-06", "class": "path_url", "text": "./images/logo.png", "quick": false, "note": "相对路径（含 ./）"}
+{"id": "ben-path_url-07", "class": "path_url", "text": "docs/guide/install.md", "quick": false, "note": "相对路径"}
+{"id": "ben-path_url-08", "class": "path_url", "text": "~/Downloads/lab-results.csv", "quick": false, "note": "家目录路径"}
+{"id": "ben-path_url-09", "class": "path_url", "text": "\\\\server\\share\\clinic", "quick": false, "note": "网络共享路径"}
+{"id": "ben-path_url-10", "class": "path_url", "text": "/api/patients/PT-7001/notes", "quick": false, "note": "接口路径"}
+{"id": "ben-path_url-11", "class": "path_url", "text": "file.tar.gz", "quick": false, "note": "压缩包文件名"}
+{"id": "ben-path_url-12", "class": "path_url", "text": "/home/user/projects/report-2026.txt", "quick": false, "note": "长文件路径"}
+{"id": "ben-path_url-13", "class": "path_url", "text": "https://example.com/a/b/c/", "quick": false, "note": "多层网址"}
+{"id": "ben-path_url-14", "class": "path_url", "text": "ftp://files.example.org/readme.txt", "quick": false, "note": "FTP 网址"}
+{"id": "ben-path_url-15", "class": "path_url", "text": "/static/css/site.css", "quick": true, "note": "静态资源路径"}
+{"id": "ben-path_url-16", "class": "path_url", "text": "C:\\Program Files\\Viewer\\viewer.exe", "quick": false, "note": "带空格的 Windows 路径"}
+{"id": "ben-path_url-17", "class": "path_url", "text": "/var/www/html/index.html", "quick": false, "note": "网站根目录路径"}
+{"id": "ben-math-01", "class": "math", "text": "1=1 出现在化验说明里", "quick": true, "note": "化验说明里的等式"}
+{"id": "ben-math-02", "class": "math", "text": "血红蛋白 Hb ≥ 120 g/L", "quick": false, "note": "不等式"}
+{"id": "ben-math-03", "class": "math", "text": "剂量 2+3=5 mL", "quick": true, "note": "加法式"}
+{"id": "ben-math-04", "class": "math", "text": "公式 x=1 或 x=2 均成立", "quick": false, "note": "方程解"}
+{"id": "ben-math-05", "class": "math", "text": "温度差 37.5 - 36.0 = 1.5", "quick": true, "note": "减法式"}
+{"id": "ben-math-06", "class": "math", "text": "BMI = 体重 / 身高²", "quick": false, "note": "公式"}
+{"id": "ben-math-07", "class": "math", "text": "比值 1:1", "quick": false, "note": "比值"}
+{"id": "ben-math-08", "class": "math", "text": "(a+b)*c = 12", "quick": false, "note": "括号乘法式"}
+{"id": "ben-math-09", "class": "math", "text": "2 * 7 = 14", "quick": false, "note": "乘法式"}
+{"id": "ben-math-10", "class": "math", "text": "面积 = 长 × 宽", "quick": false, "note": "乘号公式"}
+{"id": "ben-math-11", "class": "math", "text": "阳性率 15% 对比 12%", "quick": false, "note": "百分比"}
+{"id": "ben-math-12", "class": "math", "text": "P < 0.05 有统计学差异", "quick": false, "note": "统计显著性"}
+{"id": "ben-math-13", "class": "math", "text": "3 OR 4 依次列出", "quick": false, "note": "含 OR 的数字列表"}
+{"id": "ben-math-14", "class": "math", "text": "剂量 10 mg/kg/d，分两次服用", "quick": false, "note": "剂量式"}
+{"id": "ben-math-15", "class": "math", "text": "x ≤ 5 且 y ≥ 3", "quick": false, "note": "不等式组"}
+{"id": "ben-math-16", "class": "math", "text": "计算 1 + 1 = 2", "quick": false, "note": "加法式"}
+{"id": "ben-math-17", "class": "math", "text": "7 * 7 = 49", "quick": false, "note": "乘法式"}
+{"id": "ben-code_markup-01", "class": "code_markup", "text": "```python\nprint('hello')\n```", "quick": true, "note": "Markdown 代码块"}
+{"id": "ben-code_markup-02", "class": "code_markup", "text": "用 `pip install requests` 安装", "quick": false, "note": "行内代码"}
+{"id": "ben-code_markup-03", "class": "code_markup", "text": "**注意**：请先备份", "quick": true, "note": "Markdown 加粗"}
+{"id": "ben-code_markup-04", "class": "code_markup", "text": "- [ ] 复查血常规", "quick": false, "note": "Markdown 任务列表"}
+{"id": "ben-code_markup-05", "class": "code_markup", "text": "# 诊疗摘要\n- 诊断：感冒", "quick": false, "note": "Markdown 标题和列表"}
+{"id": "ben-code_markup-06", "class": "code_markup", "text": "<b>加粗</b> 提示", "quick": false, "note": "HTML 标签"}
+{"id": "ben-code_markup-07", "class": "code_markup", "text": "<div class=\"note\">见下表</div>", "quick": false, "note": "HTML 片段"}
+{"id": "ben-code_markup-08", "class": "code_markup", "text": "SELECT name FROM patients WHERE id = 7;", "quick": false, "note": "SQL 文档示例"}
+{"id": "ben-code_markup-09", "class": "code_markup", "text": "git log --oneline -5", "quick": false, "note": "命令行文档示例"}
+{"id": "ben-code_markup-10", "class": "code_markup", "text": "npm run build", "quick": false, "note": "命令行文档示例"}
+{"id": "ben-code_markup-11", "class": "code_markup", "text": "ls -la", "quick": false, "note": "命令行文档示例"}
+{"id": "ben-code_markup-12", "class": "code_markup", "text": "console.log('hi')", "quick": false, "note": "JavaScript 片段"}
+{"id": "ben-code_markup-13", "class": "code_markup", "text": "使用 `{{ name }}` 占位符（模板语法示例）", "quick": true, "note": "模板占位符示例"}
+{"id": "ben-code_markup-14", "class": "code_markup", "text": "<!-- 备注：待核对 -->", "quick": false, "note": "HTML 注释"}
+{"id": "ben-code_markup-15", "class": "code_markup", "text": "[链接](https://example.com/docs)", "quick": false, "note": "Markdown 链接"}
+{"id": "ben-code_markup-16", "class": "code_markup", "text": "echo hello", "quick": false, "note": "Shell 片段"}
+{"id": "ben-code_markup-17", "class": "code_markup", "text": "print(\"ok\")", "quick": false, "note": "Python 片段"}
+{"id": "ben-json-01", "class": "json", "text": "{\"note\": \"复查\"}", "quick": true, "note": "JSON 文本"}
+{"id": "ben-json-02", "class": "json", "text": "{\"temp\": 37.2, \"unit\": \"C\"}", "quick": false, "note": "JSON 文本，含小数"}
+{"id": "ben-json-03", "class": "json", "text": "[{\"id\": 1, \"name\": \"张三\"}]", "quick": false, "note": "JSON 数组"}
+{"id": "ben-json-04", "class": "json", "text": "{\"status\": \"ok\", \"count\": 3}", "quick": false, "note": "JSON 状态"}
+{"id": "ben-json-05", "class": "json", "text": "{\"$schema\": \"https://example.com/schema.json\"}", "quick": false, "note": "JSON 含 $schema 键"}
+{"id": "ben-json-06", "class": "json", "text": "{\"name\": \"O'Brien\"}", "quick": true, "note": "JSON 含撇号"}
+{"id": "ben-json-07", "class": "json", "text": "{\"where\": \"ward 3\"}", "quick": false, "note": "JSON 键名为 where"}
+{"id": "ben-json-08", "class": "json", "text": "{\"sort\": \"name\", \"order\": \"asc\"}", "quick": false, "note": "JSON 排序参数"}
+{"id": "ben-json-09", "class": "json", "text": "[\"A\", \"B\", \"C\"]", "quick": false, "note": "JSON 字符串数组"}
+{"id": "ben-json-10", "class": "json", "text": "{\"ok\": true}", "quick": false, "note": "JSON 布尔值"}
+{"id": "ben-json-11", "class": "json", "text": "{\"allergy\": \"penicillin\"}", "quick": false, "note": "JSON 过敏史"}
+{"id": "ben-json-12", "class": "json", "text": "{\"dose\": \"0.5g\", \"times\": 3}", "quick": true, "note": "JSON 剂量"}
+{"id": "ben-json-13", "class": "json", "text": "{\"regex\": \"^[a-z]+$\"}", "quick": false, "note": "JSON 含正则文本"}
+{"id": "ben-json-14", "class": "json", "text": "{\"empty\": []}", "quick": false, "note": "JSON 空数组"}
+{"id": "ben-json-15", "class": "json", "text": "{\"nested\": {\"a\": {\"b\": 1}}}", "quick": false, "note": "JSON 嵌套对象"}
+{"id": "ben-json-16", "class": "json", "text": "{\"phone\": \"13800138000\"}", "quick": false, "note": "JSON 电话"}
+{"id": "ben-json-17", "class": "json", "text": "{\"text\": \"SELECT 的用法\"}", "quick": false, "note": "JSON 含 SELECT 文本"}
+{"id": "ben-contact-01", "class": "contact", "text": "13800138000", "quick": true, "note": "手机号"}
+{"id": "ben-contact-02", "class": "contact", "text": "+86 10 6255 0000", "quick": false, "note": "国际格式电话"}
+{"id": "ben-contact-03", "class": "contact", "text": "zhang.wei@example.com", "quick": true, "note": "邮箱"}
+{"id": "ben-contact-04", "class": "contact", "text": "frontdesk@clinic.example.org", "quick": false, "note": "邮箱"}
+{"id": "ben-contact-05", "class": "contact", "text": "010-62550000 转 812", "quick": false, "note": "电话加分机"}
+{"id": "ben-contact-06", "class": "contact", "text": "Tel: (02) 1234 5678", "quick": false, "note": "带括号的电话"}
+{"id": "ben-contact-07", "class": "contact", "text": "李医生 手机 139-0000-1111", "quick": true, "note": "中文上下文的电话"}
+{"id": "ben-contact-08", "class": "contact", "text": "mailto:info@example.com", "quick": false, "note": "mailto 链接"}
+{"id": "ben-contact-09", "class": "contact", "text": "support+lab@example.net", "quick": false, "note": "带加号的邮箱"}
+{"id": "ben-contact-10", "class": "contact", "text": "张三 <zhang.san@example.com>", "quick": false, "note": "带尖括号的邮箱"}
+{"id": "ben-contact-11", "class": "contact", "text": "微信 wx_clinic_01", "quick": false, "note": "微信号"}
+{"id": "ben-contact-12", "class": "contact", "text": "fax 021-5555-0000", "quick": false, "note": "传真号"}
+{"id": "ben-contact-13", "class": "contact", "text": "123 Main St, Springfield", "quick": false, "note": "英文地址"}
+{"id": "ben-contact-14", "class": "contact", "text": "北京市朝阳区建国路 88 号", "quick": false, "note": "中文地址"}
+{"id": "ben-contact-15", "class": "contact", "text": "ext. 4021", "quick": false, "note": "分机号"}
+{"id": "ben-contact-16", "class": "contact", "text": "a.b-c_d@example.co.uk", "quick": false, "note": "复杂邮箱"}
+{"id": "ben-contact-17", "class": "contact", "text": "room 3B / bed 12", "quick": false, "note": "病房床位"}
+{"id": "ben-long-01", "class": "long", "text": "患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。", "quick": false, "note": "长文本（约 202 字符）"}
+{"id": "ben-long-02", "class": "long", "text": "过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.", "quick": true, "note": "长文本（约 336 字符）"}
+{"id": "ben-long-03", "class": "long", "text": "Please select the department from the list before the visit.Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。", "quick": false, "note": "长文本（约 321 字符）"}
+{"id": "ben-long-04", "class": "long", "text": "这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.", "quick": false, "note": "长文本（约 386 字符）"}
+{"id": "ben-long-05", "class": "long", "text": "既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。", "quick": false, "note": "长文本（约 360 字符）"}
+{"id": "ben-long-06", "class": "long", "text": "医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.", "quick": false, "note": "长文本（约 459 字符）"}
+{"id": "ben-long-07", "class": "long", "text": "Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。", "quick": false, "note": "长文本（约 289 字符）"}
+{"id": "ben-long-08", "class": "long", "text": "化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.", "quick": false, "note": "长文本（约 256 字符）"}
+{"id": "ben-long-09", "class": "long", "text": "用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。", "quick": false, "note": "长文本（约 361 字符）"}
+{"id": "ben-long-10", "class": "long", "text": "Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.", "quick": true, "note": "长文本（约 333 字符）"}
+{"id": "ben-long-11", "class": "long", "text": "处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。", "quick": false, "note": "长文本（约 404 字符）"}
+{"id": "ben-long-12", "class": "long", "text": "CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.", "quick": false, "note": "长文本（约 412 字符）"}
+{"id": "ben-long-13", "class": "long", "text": "Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。", "quick": false, "note": "长文本（约 286 字符）"}
+{"id": "ben-long-14", "class": "long", "text": "血压 130/85 mmHg，心率 72 次/分，律齐。既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。", "quick": false, "note": "长文本（约 262 字符）"}
+{"id": "ben-long-15", "class": "long", "text": "建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。", "quick": false, "note": "长文本（约 319 字符）"}
+{"id": "ben-long-16", "class": "long", "text": "The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。既往史：高血压 5 年，规律服用降压药。CT 报告见右肺下叶小结节，建议随访。Please select the department from the list before the visit.Use the table below to compare the results with last month.患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。", "quick": false, "note": "长文本（约 379 字符）"}
+{"id": "ben-long-17", "class": "long", "text": "患者主诉头痛三天，无发热，夜间加重。化验单：血红蛋白 128 g/L，白细胞计数正常。建议：多饮水，注意休息，两周后复诊。医嘱：低盐饮食，每周运动三次。Update the note after the visit and send it to the family.这份记录由夜班护士补充，内容以主治医生的复核为准。处方：阿莫西林胶囊 0.5g 每日三次，连用五天。过敏史：青霉素（皮疹），已记录在案。用药后症状明显缓解，睡眠改善。The union of both teams' notes is complete for this week.Sleep well and drink more water, the nurse will check later.血压 130/85 mmHg，心率 72 次/分，律齐。", "quick": false, "note": "长文本（约 362 字符）"}

@@ -226,6 +226,13 @@ a:hover {
   transition: width 160ms ease-out;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .side {
+    animation: none;
+    transition: none;
+  }
+}
+
 .app.collapsed .side {
   width: var(--nav-w-collapsed);
 }
@@ -284,6 +291,24 @@ a:hover {
   flex: none;
 }
 
+.brand-name {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.nav-count {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.nav-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .app.collapsed .nav-label,
 .app.collapsed .brand-name,
 .app.collapsed .nav-count {
@@ -320,6 +345,22 @@ a:hover {
   background: var(--surface);
   border-bottom: 1px solid var(--border);
   min-width: 0;
+}
+
+.search-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 240px;
+  height: var(--control-h);
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
 }
 
 .topbar .search-trigger {
@@ -426,10 +467,23 @@ a:hover {
   line-height: 1.3;
 }
 
+.sub {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
 .pagehead .sub {
   color: var(--ink-2);
   font-size: 13px;
   margin-top: 2px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .pagehead .actions {
@@ -466,6 +520,11 @@ a:hover {
   margin-bottom: 10px;
   font-size: 14px;
   font-weight: 600;
+}
+
+.aside {
+  color: var(--ink-2);
+  font-size: 13px;
 }
 
 .card-h .aside {
@@ -603,6 +662,12 @@ a:hover {
   background: var(--accent-weak);
 }
 
+.count {
+  color: var(--ink-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .chip .count {
   font-variant-numeric: tabular-nums;
   color: var(--ink-2);
@@ -718,6 +783,12 @@ a:hover {
 .tag-path {
   border-color: var(--border-strong);
   color: var(--ink-2);
+}
+
+.ico {
+  display: inline-block;
+  width: 1.25em;
+  text-align: center;
 }
 
 .tag .ico {
@@ -856,6 +927,24 @@ a:hover {
   cursor: pointer;
 }
 
+.kv-table td {
+  height: auto;
+  padding: 6px 8px;
+  white-space: normal;
+  max-width: none;
+}
+
+.tbl .fresh td {
+  animation: fresh 2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tbl .fresh td {
+    animation: none;
+    transition: none;
+  }
+}
+
 .tbl tbody tr:hover td {
   background: var(--sunken);
 }
@@ -868,8 +957,17 @@ a:hover {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+.num {
+  color: var(--num-ink);
+}
+
 .tbl .num {
   text-align: right;
+}
+
+.path {
+  font-family: var(--mono);
+  word-break: break-all;
 }
 
 .tbl .path {
@@ -882,12 +980,13 @@ a:hover {
   max-width: 100%;
 }
 
-.tbl .query {
-  color: var(--ink-3);
+.query {
+  color: var(--ink);
+  font-family: var(--mono);
 }
 
-.tbl .fresh td {
-  animation: fresh 2s ease-out;
+.tbl .query {
+  color: var(--ink-3);
 }
 
 @keyframes fresh {
@@ -906,13 +1005,6 @@ a:hover {
   display: flex;
   gap: 12px;
   align-items: center;
-}
-
-.kv-table td {
-  height: auto;
-  padding: 6px 8px;
-  white-space: normal;
-  max-width: none;
 }
 
 /* ------------------------------------------------------------------ key-value, text, notices */
@@ -1289,8 +1381,16 @@ a:hover {
   max-height: 560px;
 }
 
+.k {
+  color: var(--accent);
+}
+
 .json-tree .k {
   color: var(--ink-2);
+}
+
+.str {
+  color: var(--s3);
 }
 
 .json-tree .str {
@@ -1301,6 +1401,10 @@ a:hover {
    the numeric ink, and literals the secondary ink. */
 .json-tree .num {
   color: var(--num-ink);
+}
+
+.lit {
+  color: var(--blocked);
 }
 
 .json-tree .lit {
@@ -1314,6 +1418,10 @@ a:hover {
   cursor: pointer;
   color: var(--ink-3);
   font: inherit;
+}
+
+.indent {
+  padding-left: 16px;
 }
 
 .json-tree .indent {
@@ -1348,8 +1456,19 @@ mark.hit {
   stroke-width: 1;
 }
 
+.axis-line {
+  stroke: var(--axis);
+  stroke-width: 1;
+}
+
 .chart .axis-line {
   stroke: var(--axis);
+  stroke-width: 1;
+}
+
+.threshold {
+  stroke: var(--ink-3);
+  stroke-dasharray: 4 3;
   stroke-width: 1;
 }
 
@@ -1373,6 +1492,12 @@ mark.hit {
 
 .chart .neutral {
   fill: var(--neutral-seg);
+}
+
+.spark-line {
+  fill: none;
+  stroke: var(--s1);
+  stroke-width: 1.5;
 }
 
 .chart .spark-line {
@@ -1960,12 +2085,13 @@ mark.hit {
   }
 }
 
+/* Reduced motion: the animations and transitions in this sheet stop at once. */
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    transition-duration: 0.001ms !important;
+  .skeleton,
+  .dimmed,
+  .tl-row.hl {
+    animation: none;
+    transition: none;
   }
 }
 
@@ -2025,30 +2151,6 @@ mark.hit {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-.aside {
-  color: var(--ink-2);
-  font-size: 13px;
-}
-.axis-line {
-  stroke: var(--axis);
-  stroke-width: 1;
-}
-.brand-name {
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-.count {
-  color: var(--ink-2);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
 .fail {
   color: var(--blocked);
 }
@@ -2057,79 +2159,11 @@ mark.hit {
   background: var(--accent-weak);
   color: inherit;
 }
-.ico {
-  display: inline-block;
-  width: 1.25em;
-  text-align: center;
-}
-.indent {
-  padding-left: 16px;
-}
 .info {
   color: var(--ink-2);
 }
 .notice.info {
   border-color: var(--accent-weak);
-}
-.k {
-  color: var(--accent);
-}
-.str {
-  color: var(--s3);
-}
-.num {
-  color: var(--num-ink);
-}
-.lit {
-  color: var(--blocked);
-}
-.nav-count {
-  margin-left: auto;
-  color: var(--ink-3);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.nav-label {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.path {
-  font-family: var(--mono);
-  word-break: break-all;
-}
-.query {
-  color: var(--ink);
-  font-family: var(--mono);
-}
-.search-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 240px;
-  height: var(--control-h);
-  padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--ink-3);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-.spark-line {
-  fill: none;
-  stroke: var(--s1);
-  stroke-width: 1.5;
-}
-.sub {
-  color: var(--ink-3);
-  font-size: 12px;
-}
-.threshold {
-  stroke: var(--ink-3);
-  stroke-dasharray: 4 3;
-  stroke-width: 1;
 }
 
 /* Links inside a notice are underlined, so they do not rely on colour alone (WCAG 1.4.1). */

