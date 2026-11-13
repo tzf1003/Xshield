@@ -45,8 +45,8 @@ class ReportTests(unittest.TestCase):
 
     def test_an_unexecuted_gate_is_shown_as_unexecuted(self):
         rows = {row[0]: row for row in score_rows(fixture_result("missing-and-skip"))}
-        self.assertEqual(rows["L1 误学数"][1], "—")
-        self.assertEqual(rows["L1 误学数"][5], "未执行")
+        self.assertEqual(rows["L1 误学数（未登记）"][1], "—")
+        self.assertEqual(rows["L1 误学数（未登记）"][5], "未执行")
 
     def test_an_empty_denominator_renders_as_a_dash(self):
         rows = {row[0]: row for row in score_rows(score([], []))}

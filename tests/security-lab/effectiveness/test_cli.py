@@ -76,8 +76,8 @@ class CommandTests(unittest.TestCase):
         self.assertIn("学习段 SKIP", out)
 
     def test_a_baseline_regression_fails_the_run_and_an_improvement_passes(self):
-        worse = self.write_json("worse.json", {"values": {"S3": 0.9}})
-        better = self.write_json("better.json", {"values": {"S3": 0.4}})
+        worse = self.write_json("worse.json", {"groups": {"quick": {"seed": 1, "commit": "c", "values": {"S3": 0.9}}}})
+        better = self.write_json("better.json", {"groups": {"quick": {"seed": 1, "commit": "c", "values": {"S3": 0.4}}}})
         status, _, _ = run_cli(*score_args("all-correct", self.out / "w", "--baseline", str(worse)))
         self.assertEqual(status, 1)
         status, _, _ = run_cli(*score_args("all-correct", self.out / "i", "--baseline", str(better)))
@@ -85,7 +85,7 @@ class CommandTests(unittest.TestCase):
 
     def test_the_lab_refuses_the_modes_that_are_not_built_and_prints_nothing_to_stdout(self):
         for args, text in ((["lab", "--mode", "full"], "批次 7"), (["lab", "--jev", "record"], "批次 9"),
-                           (["lab", "--keep"], "批次 5"), (["lab", "--update-baseline"], "批次 8")):
+                           (["lab", "--keep"], "批次 5"), (["lab", "--update-baseline", "--only", "idor_read"], "--only")):
             with self.subTest(args=args):
                 status, out, err = run_cli(*args)
                 self.assertEqual(status, 2)

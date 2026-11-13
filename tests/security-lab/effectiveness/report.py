@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .score import CONFIG_ORDER
+from .score import CONFIG_ORDER, LEARNING_GATE_NAMES
 
 FAILURES_IN_TERMINAL = 10
+KIND_LABELS = {"wrong": "误学", "unmodeled": "未模板化", "miss": "没学到", "failure": "学到的配置上失败"}
 SECTION_TITLES = (
     "结论",
     "记分表",
@@ -146,11 +147,22 @@ def score_rows(result: dict[str, Any]) -> list[tuple[str, str, str, str, str, st
              base_verdict(f"{layer}.accuracy"))
         rate(f"{layer} {label}覆盖率", f"{layer}.coverage", coverage, "不低于基线",
              base_verdict(f"{layer}.coverage"))
-        count(f"{layer} 误学数", wrong, "必须为 0", _verdict(gates, f"{layer} 误学数"))
+        count(f"{layer} 误学数（未登记）", wrong, "必须为 0", _verdict(gates, f"{layer} 误学数"))
+        if learning is not None:
+            count(f"{layer} 误学数（已登记为已知缺口）", learning["listed"], "不计门槛", "—")
+        if layer in ("L2", "L3") and learning is not None:
+            count(f"{layer} 其中类别不符（类别错、档位或接受公共来源对，计入准确率）",
+                  learning["class_wrong"], "不计门槛", "—")
     stability = metrics.get("stability")
     stable = stability["value"] if stability else None
     rows.append(("学习稳定性", "—" if stable is None else ("不变" if stable else "变化"),
                  "—", "—", "必须不变", _verdict(gates, "学习稳定性（不加数据再跑一轮，提议集合不变）")))
+    unmodeled = metrics.get("unmodeled")
+    count("未模板化的位置（未登记）", None if unmodeled is None else unmodeled["unlisted"],
+          "必须为 0", _verdict(gates, LEARNING_GATE_NAMES[5]))
+    known = result.get("learning_known")
+    stale = None if known is None or known["stale"] is None else len(known["stale"])
+    count("学习的已知缺口清单：已不再出现的条目", stale, "必须为 0", _verdict(gates, LEARNING_GATE_NAMES[6]))
 
     p1, p2, p3 = metrics["P1"], metrics["P2"], metrics["P3"]
     rate("P1 拦截率（总体）", "P1", p1["value"], "各类别不低于基线", base_verdict("P1"))
@@ -274,10 +286,44 @@ def _learning_lines(result: dict[str, Any]) -> list[str]:
             _describe(learned),
             "✓" if item["ok"] else "✗",
             item["why"] or "—",
+            item.get("gap") or "—",
         ])
-    if not rows:
-        return ["没有真值位置，也没有学到的提议。"]
-    return _md_table(["位置", "侧", "真值", "学到", "结果", "原因"], rows)
+    lines = _md_table(["位置", "侧", "真值", "学到", "结果", "原因", "已知缺口"], rows) if rows \
+        else ["没有真值位置，也没有学到的提议。"]
+    return lines + _known_lines(result.get("learning_known"))
+
+
+def _entry_target(entry: dict[str, Any]) -> str:
+    kind = entry["kind"]
+    if kind == "wrong":
+        return f"{entry['metric']} {entry['key']}"
+    if kind == "unmodeled":
+        return entry["pattern"]
+    if kind == "miss":
+        return entry["key"]
+    return f"{entry['case']}（{CONFIG_LABELS.get(entry['config'], entry['config'])}）"
+
+
+def _known_lines(known: dict[str, Any] | None) -> list[str]:
+    """The learning known-gap list (plan 8, 12b): each entry, the probes it still matches, and the batch that fixes it.
+    A stale entry says what to do: delete it in the change that fixed the problem."""
+    if known is None:
+        return ["", "学习的已知缺口清单：学习段未执行，没有核对。"]
+    rows = [[
+        entry["id"],
+        KIND_LABELS.get(entry["kind"], entry["kind"]),
+        _entry_target(entry),
+        entry.get("learned") or "—",
+        entry["ref"],
+        entry["lq"],
+        f"仍出现 {entry['matched']} 处" if entry["matched"] else "已不再出现：删除这一条",
+    ] for entry in known["entries"]]
+    lines = ["", "### 学习的已知缺口清单", ""]
+    lines += _md_table(["编号", "类别", "位置、模式或用例", "学到的值", "评审编号", "修法批次", "本次"], rows) if rows \
+        else ["清单是空的。"]
+    if not known["checked"]:
+        lines += ["", "本次只跑了一部分探针（--only），清单没有核对是否已不再出现。"]
+    return lines
 
 
 def _describe(fields: dict[str, Any]) -> str:
@@ -382,6 +428,7 @@ def report_document(result: dict[str, Any], meta: dict[str, Any]) -> dict[str, A
         "failures": result["failures"],
         "known_gaps": result["known_gaps"],
         "learning": result["learning"],
+        "learning_known": result.get("learning_known"),
         "label_checks": result["label_checks"],
         "costs": result["costs"],
         "counts": result["counts"],

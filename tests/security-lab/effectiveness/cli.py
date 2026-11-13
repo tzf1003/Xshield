@@ -29,7 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .contracts import ContractError, dump_json, load_baseline, load_decisions, load_learned, load_observations, load_truth
+from .contracts import (
+    ContractError, baseline_group, dump_json, load_baseline, load_decisions, load_learned, load_observations, load_truth,
+)
 from .report import render_markdown, render_terminal, report_document
 from .score import score
 
@@ -125,7 +127,7 @@ def _run_score(args: argparse.Namespace) -> int:
         decisions = load_decisions(args.decisions)
         truth = load_truth(args.truth) if args.truth else None
         learned = load_learned(args.learned) if args.learned else None
-        baseline = load_baseline(args.baseline) if args.baseline else None
+        baseline = baseline_group(load_baseline(args.baseline), "quick") if args.baseline else None
     except (ContractError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

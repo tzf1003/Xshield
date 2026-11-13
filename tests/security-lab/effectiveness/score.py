@@ -27,7 +27,10 @@ import json
 import math
 import statistics
 from collections import Counter
-from typing import Any, NamedTuple
+from collections.abc import Mapping, Sequence
+from typing import AbstractSet, Any, NamedTuple
+
+from . import known_gaps as gaplist
 
 BENIGN_GROUPS = frozenset({"train", "benign"})
 FAST_PATHS = frozenset({"fast_allow", "cached_allow"})
@@ -53,7 +56,10 @@ LEARNING_GATE_NAMES = (
     "L2 误学数",
     "L3 误学数",
     "学习稳定性（不加数据再跑一轮，提议集合不变）",
+    "未模板化的位置（门槛 0）",
+    "学习的已知缺口清单（条目都仍然出现）",
 )
+BASELINE_GATE_NAME = "基线比较（只进不退）"
 LEARNING_METRIC_NAMES = ("L0", "L1", "L2", "L3", "stability")
 
 
@@ -75,7 +81,12 @@ def score(
     exclude_suspicious: bool = False,
     baseline: dict[str, Any] | None = None,
     probe_values_from_record: bool = False,
+    gap_entries: Sequence[Mapping[str, Any]] = (),
+    check_gaps: bool = True,
+    require_baseline: bool = False,
 ) -> dict[str, Any]:
+    """`gap_entries` is the learning known-gap list (known_gaps.py); `check_gaps` False when the run cannot see every
+    probe (a --only run), so no entry can be called stale. `require_baseline` makes a missing baseline a failure."""
     records = {record["request_id"]: record for record in decisions}
     pairs: list[Pair] = []
     missing: list[dict[str, Any]] = []
@@ -94,17 +105,19 @@ def score(
     metrics: dict[str, Any] = {}
     metrics.update(_session_metrics(active))
     metrics.update(_defense_metrics(defend, active, pairs, caps))
-    learning, skip_reason = _learning(truth, learned, decisions)
+    failures, known_gaps = _failures(pairs, missing, caps, exclude_suspicious)
+    learning, skip_reason = _learning(truth, learned, decisions, gap_entries, failures, check_gaps)
     if learning is None:
         metrics.update({name: None for name in LEARNING_METRIC_NAMES})
+        metrics["unmodeled"] = None
         learning_gates = [_gate(name, None, None, None) for name in LEARNING_GATE_NAMES]
         learning_rows: list[dict[str, Any]] = []
+        known_list = None
     else:
         metrics.update(learning["metrics"])
         learning_gates = learning["gates"]
         learning_rows = learning["rows"]
-
-    failures, known_gaps = _failures(pairs, missing, caps, exclude_suspicious)
+        known_list = learning["known"]
     p4, p5, p7 = metrics["P4"], metrics["P5"], metrics["P7"]
     s2 = metrics["S2"]
     gates = [
@@ -121,12 +134,13 @@ def score(
     ]
     baseline_result = compare_baseline(_flatten(metrics), baseline)
     compared = baseline_result["compared"]
-    gates.append(_gate(
-        "基线比较（只进不退）",
-        len(baseline_result["regressions"]) if compared else None,
-        "== 0",
-        (not baseline_result["regressions"]) if compared else None,
-    ))
+    if compared:
+        gates.append(_gate(BASELINE_GATE_NAME, len(baseline_result["regressions"]), "== 0",
+                           not baseline_result["regressions"]))
+    elif require_baseline:
+        gates.append(_gate(BASELINE_GATE_NAME, "缺失", "== 0（需要基线文件）", False))
+    else:
+        gates.append(_gate(BASELINE_GATE_NAME, None, "== 0", None))
 
     skipped: list[dict[str, str]] = []
     if skip_reason is not None:
@@ -140,6 +154,7 @@ def score(
         "failures": failures,
         "known_gaps": known_gaps,
         "learning": learning_rows,
+        "learning_known": known_list,
         "label_checks": _label_summary(pairs, exclude_suspicious),
         "costs": _costs(decisions),
         "counts": {
@@ -604,11 +619,14 @@ def _costs(decisions: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _lmetric(correct: int, proposals: int, covered: int, truth_total: int,
-             high: tuple[int, int] | None = None) -> dict[str, Any]:
+             high: tuple[int, int] | None = None, unmodeled: int = 0) -> dict[str, Any]:
+    """One learning layer. `unmodeled` proposals (keys the truth does not hold) are part of the accuracy's
+    denominator, but they are not wrong labels: they count in the unmodeled-positions gate instead (plan 12b)."""
     result: dict[str, Any] = {
         "accuracy": _metric(correct, proposals),
         "coverage": _metric(covered, truth_total),
-        "wrong": proposals - correct,
+        "wrong": proposals - correct - unmodeled,
+        "unmodeled": unmodeled,
     }
     if high is not None:
         result["high"] = _metric(*high)
@@ -640,11 +658,15 @@ def _route_matches(rec: dict[str, Any], method: str, route: str) -> bool:
     return any(_template_matches(route, path) for path in paths)
 
 
-def _unseen(key: str, position: dict[str, Any], decisions: list[dict[str, Any]]) -> str:
-    """Why a truth position was not learned (report section 4), in the groups of section 3.2."""
+def _unseen(key: str, position: dict[str, Any], decisions: list[dict[str, Any]],
+            suspended: AbstractSet[str] = frozenset()) -> str:
+    """Why a truth position was not learned (report section 4), in the groups of section 3.2 and the group of plan
+    12b: a position the learning suspended itself (its evidence moved) is named as such."""
     if not position["learnable"]:
         why = f"（{position['why']}）" if position.get("why") else ""
         return f"没学到：规则学不到{why}"
+    if key in suspended:
+        return "没学到：被自动暂停"
     method, route = key.split(" ")[0], key.split(" ")[1]
     seen = [rec for rec in decisions if _route_matches(rec, method, route)]
     if any(rec["decision_path"] == "jev_deny" for rec in seen):
@@ -696,7 +718,9 @@ def _snapshot(conclusions: dict[str, dict[str, Any]]) -> set[tuple[Any, ...]]:
 
 
 def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
-              decisions: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
+              decisions: list[dict[str, Any]], gap_entries: Sequence[Mapping[str, Any]] = (),
+              failures: Sequence[Mapping[str, Any]] = (),
+              check_gaps: bool = True) -> tuple[dict[str, Any] | None, str | None]:
     if truth is None or learned is None:
         absent = [name for name, doc in (("truth.json", truth), ("learned.json", learned)) if doc is None]
         return None, f"未提供 {'、'.join(absent)}，L0 到 L3 与稳定性未计算"
@@ -708,8 +732,14 @@ def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
     rounds = learned["rounds"]
     last = rounds[-1] if rounds else {"positions": [], "judgements": []}
     concl = _conclusions(last, identity)
+    suspended = {p["key"] for p in last["positions"] if p["state"] == "suspended"}
     candidates = [c for c in learned["bootstrap"] if c["key"] not in identity]
+    candidate_of: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidate in candidates:
+        candidate_of.setdefault((candidate["side"], candidate["key"]), candidate)
     truth_total = len(request) + len(response)
+    # A key the truth holds at all. A proposal on any other key is unmodeled (plan 12b, item 3), not a wrong label.
+    held = set(request) | set(response) | non_objects
 
     # L0: cold-start candidates, which name a class from the route alone.
     def candidate_right(candidate: dict[str, Any]) -> bool:
@@ -717,41 +747,101 @@ def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
         return candidate["key"] in table and table[candidate["key"]]["class"] == candidate["class"]
 
     right0 = [c for c in candidates if candidate_right(c)]
-    l0 = _lmetric(len(right0), len(candidates), _unique(right0), truth_total)
+    wrong0 = [c for c in candidates if not candidate_right(c) and c["key"] in held]
+    unmodeled0 = [c for c in candidates if c["key"] not in held]
+    l0 = _lmetric(len(right0), len(candidates), _unique(right0), truth_total, unmodeled=len(unmodeled0))
+    l0["wrong"] = len(wrong0)
 
     # L1: request-position classes. A class on a response position is not scored in a round: it comes from
-    # the cold-start candidate, and L0 scores it. A class on a non-object or an unknown key is wrong (3.2).
+    # the cold-start candidate, and L0 scores it. A class on a non-object is wrong (3.2); an unknown key is unmodeled.
     props1 = [(key, found["class"]) for key, found in concl.items()
               if found["class"] is not None and key not in response]
     right1 = [key for key, cls in props1 if key in request and request[key]["class"] == cls]
-    l1 = _lmetric(len(right1), len(props1), len(right1), len(request))
+    wrong1 = [(key, cls) for key, cls in props1 if key in held and key not in right1]
+    unmodeled1 = [(key, cls) for key, cls in props1 if key not in held]
+    l1 = _lmetric(len(right1), len(props1), len(right1), len(request), unmodeled=len(unmodeled1))
+    l1["wrong"] = len(wrong1)
 
     # L2: response-position tiers. Every key with a tier conclusion is a proposal. A tier on a request
-    # position, a non-object or an unknown key has no tier in the truth, so it is wrong.
+    # position or a non-object has no tier in the truth, so it is wrong; an unknown key is unmodeled.
     tiered = {key: p for key, p in response.items() if p.get("tier")}
     props2 = [(key, found) for key, found in concl.items() if found["tier"] is not None]
     right2 = [key for key, found in props2 if key in tiered and tiered[key]["tier"] == found["tier"]]
+    wrong2 = [(key, found) for key, found in props2 if key in held and key not in right2]
+    unmodeled2 = [(key, found) for key, found in props2 if key not in held]
     high2 = [key for key in right2 if concl[key]["tier_reliability"] == "high"]
-    l2 = _lmetric(len(right2), len(props2), len(right2), len(tiered), high=(len(high2), len(tiered)))
+    l2 = _lmetric(len(right2), len(props2), len(right2), len(tiered), high=(len(high2), len(tiered)),
+                  unmodeled=len(unmodeled2))
+    l2["wrong"] = len(wrong2)
+    # Plan 12b: a tier that is right with the wrong class still counts as right; the report names those.
+    l2["class_wrong"] = sum(1 for key in right2
+                            if _candidate_class(candidate_of, key) not in (None, response[key]["class"]))
 
     # L3: request-position accepts_public, with the same rule as L2.
     props3 = [(key, found) for key, found in concl.items() if found["accepts_public"] is not None]
     right3 = [key for key, found in props3
               if key in request and request[key]["accepts_public"] == found["accepts_public"]]
+    wrong3 = [(key, found) for key, found in props3 if key in held and key not in right3]
+    unmodeled3 = [(key, found) for key, found in props3 if key not in held]
     high3 = [key for key in right3 if concl[key]["accepts_reliability"] == "high"]
-    l3 = _lmetric(len(right3), len(props3), len(right3), len(request), high=(len(high3), len(request)))
+    l3 = _lmetric(len(right3), len(props3), len(right3), len(request), high=(len(high3), len(request)),
+                  unmodeled=len(unmodeled3))
+    l3["wrong"] = len(wrong3)
+    l3["class_wrong"] = sum(1 for key in right3 if concl[key]["class"] not in (None, request[key]["class"]))
 
     stable = None
     if len(rounds) >= 2:
         stable = _snapshot(concl) == _snapshot(_conclusions(rounds[-2], identity))
 
-    rows = _learning_rows(request, response, non_objects, concl, candidates, decisions)
+    rows = _learning_rows(request, response, non_objects, concl, candidates, decisions, suspended)
+
+    # The known-gap list (known_gaps.py): the wrong proposals and unmodeled keys that it lists do not count.
+    unmodeled: dict[str, dict[str, Any]] = {}
+    for candidate in unmodeled0:
+        unmodeled.setdefault(candidate["key"], {"key": candidate["key"], "learned": candidate["class"]})
+    for key, cls in unmodeled1:
+        unmodeled.setdefault(key, {"key": key, "learned": cls})
+    for key, found in (*unmodeled2, *unmodeled3):
+        unmodeled.setdefault(key, {"key": key, "learned": found["class"]})
+    for item in unmodeled.values():
+        item["pattern"] = gaplist.pattern_of(item["key"])
+    wrong_items = [
+        *({"metric": "L0", "key": c["key"], "learned": c["class"], "side": c["side"]} for c in wrong0),
+        *({"metric": "L1", "key": key, "learned": cls, "side": "request"} for key, cls in wrong1),
+        *({"metric": "L2", "key": key, "learned": found["tier"], "side": _side(key, response)}
+          for key, found in wrong2),
+        *({"metric": "L3", "key": key, "learned": found["accepts_public"], "side": _side(key, response)}
+          for key, found in wrong3),
+    ]
+    misses = [{"key": row["key"], "why": row["why"]} for row in rows if "没学到" in row["why"]]
+    failures_learned = [item for item in failures if item.get("config") == "learned"]
+    applied = gaplist.apply(gap_entries, wrong=wrong_items, unmodeled=list(unmodeled.values()), misses=misses,
+                            failures=failures_learned, check=check_gaps)
+    applied["checked"] = check_gaps
+    _mark_gaps(rows, applied)
+
+    unlisted_wrong = Counter(item["metric"] for item in applied["unlisted"]["wrong"])
+    listed_wrong = Counter(item["metric"] for item in applied["listed"]["wrong"])
+    for metric, layer in (("L0", l0), ("L1", l1), ("L2", l2), ("L3", l3)):
+        layer["wrong"] = unlisted_wrong[metric]  # what the gate counts: wrong and not listed
+        layer["listed"] = listed_wrong[metric]
+    unlisted_unmodeled = applied["unlisted"]["unmodeled"]
+    unmodeled_metric = {
+        "positions": len(unmodeled),
+        "patterns": len({item["pattern"] for item in unmodeled.values()}),
+        "unlisted": len(unlisted_unmodeled),
+        "unlisted_patterns": len({item["pattern"] for item in unlisted_unmodeled}),
+    }
+    stale = applied["stale"]
     gates = [
         _gate(LEARNING_GATE_NAMES[0], l0["wrong"], "== 0", l0["wrong"] == 0),
         _gate(LEARNING_GATE_NAMES[1], l1["wrong"], "== 0", l1["wrong"] == 0),
         _gate(LEARNING_GATE_NAMES[2], l2["wrong"], "== 0", l2["wrong"] == 0),
         _gate(LEARNING_GATE_NAMES[3], l3["wrong"], "== 0", l3["wrong"] == 0),
         _gate(LEARNING_GATE_NAMES[4], None if stable is None else ("不变" if stable else "变化"), "不变", stable),
+        _gate(LEARNING_GATE_NAMES[5], unmodeled_metric["unlisted"], "== 0", unmodeled_metric["unlisted"] == 0),
+        _gate(LEARNING_GATE_NAMES[6], None if stale is None else len(stale), "== 0",
+              None if stale is None else not stale),
     ]
     metrics = {
         "L0": l0,
@@ -759,8 +849,37 @@ def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
         "L2": l2,
         "L3": l3,
         "stability": {"value": stable, "rounds": len(rounds)},
+        "unmodeled": unmodeled_metric,
     }
-    return {"metrics": metrics, "gates": gates, "rows": rows}, None
+    return {"metrics": metrics, "gates": gates, "rows": rows, "known": applied}, None
+
+
+def _candidate_class(candidate_of: Mapping[tuple[str, str], dict[str, Any]], key: str) -> str | None:
+    candidate = candidate_of.get(("response", key))
+    return candidate["class"] if candidate else None
+
+
+def _side(key: str, response: Mapping[str, Any]) -> str:
+    return "response" if key in response else "request"
+
+
+def _mark_gaps(rows: list[dict[str, Any]], applied: Mapping[str, Any]) -> None:
+    """Names, on each row of the learning table, the known-gap entry that lists its problem (if any)."""
+    by_key: dict[str, str] = {}
+    by_pattern: dict[str, str] = {}
+    for entry in applied["entries"]:
+        if not entry["matched"]:
+            continue
+        if entry["kind"] in ("wrong", "miss"):
+            by_key.setdefault(entry["key"], entry["id"])
+        elif entry["kind"] == "unmodeled":
+            by_pattern.setdefault(entry["pattern"], entry["id"])
+    for row in rows:
+        if row["ok"]:
+            continue
+        gap = by_key.get(row["key"]) or by_pattern.get(gaplist.pattern_of(row["key"]))
+        if gap is not None:
+            row["gap"] = gap
 
 
 def _wrong_row(key: str, side: str, truth: dict[str, Any], found: dict[str, Any] | None,
@@ -782,7 +901,7 @@ def _wrong_row(key: str, side: str, truth: dict[str, Any], found: dict[str, Any]
 
 def _learning_rows(request: dict[str, Any], response: dict[str, Any], non_objects: set[str],
                    concl: dict[str, dict[str, Any]], candidates: list[dict[str, Any]],
-                   decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                   decisions: list[dict[str, Any]], suspended: AbstractSet[str] = frozenset()) -> list[dict[str, Any]]:
     """One row per truth position and per wrong key (report section 4). A proposal that a metric counts as
     wrong gets a row with its reason, so the table explains each count."""
     candidate_of: dict[tuple[str, str], dict[str, Any]] = {}
@@ -794,12 +913,15 @@ def _learning_rows(request: dict[str, Any], response: dict[str, Any], non_object
         found = concl.get(key)
         learned: dict[str, Any] = {}
         if found is None:
-            why = _unseen(key, truth_position, decisions)
+            why = _unseen(key, truth_position, decisions, suspended)
         else:
             mismatches: list[str] = []
             if found["class"] != truth_position["class"]:
                 mismatches.append("类别不符")
-            if found["accepts_public"] != truth_position["accepts_public"]:
+            if found["accepts_public"] is None:
+                # Nothing proposed for the label: a position not learned, not a wrong label (plan 12b).
+                mismatches.append("没学到：接受公共来源未提议")
+            elif found["accepts_public"] != truth_position["accepts_public"]:
                 mismatches.append("接受公共来源不符")
             if found["tier"] is not None:
                 mismatches.append("误学：请求位置没有档位")
@@ -829,7 +951,7 @@ def _learning_rows(request: dict[str, Any], response: dict[str, Any], non_object
                 learned["reliability"] = found["tier_reliability"]
                 mismatches.append("误学：真值无档位")
         elif found is None or found["tier"] is None:
-            mismatches.append(_unseen(key, truth_position, decisions))
+            mismatches.append(_unseen(key, truth_position, decisions, suspended))
         else:
             learned["tier"] = found["tier"]
             learned["reliability"] = found["tier_reliability"]
@@ -858,11 +980,16 @@ def _learning_rows(request: dict[str, Any], response: dict[str, Any], non_object
     for key in sorted(unknown):
         found = concl.get(key)
         candidate = candidate_of.get(("response", key)) or candidate_of.get(("request", key))
-        rows.append(_wrong_row(key, "unknown", {}, found, candidate, "误学：真值里没有这个位置"))
+        rows.append(_wrong_row(key, "unknown", {}, found, candidate, "未模板化：真值里没有这个位置"))
     return rows
 
 
 # ---------------------------------------------------------------- baseline and flattening
+
+
+def baseline_values(metrics: dict[str, Any]) -> dict[str, float]:
+    """The numbers a baseline file keeps for one run (the ones compare_baseline compares)."""
+    return _flatten(metrics)
 
 
 def _flatten(metrics: dict[str, Any]) -> dict[str, float]:
