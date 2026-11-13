@@ -1529,6 +1529,62 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    async fn a_suspended_position_keeps_the_function_table_in_the_new_version() {
+        let Some((admin, pool, name)) = scratch("auto_pause_functions").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        let spec = SiteSpec::from_json(
+            &serde_json::json!({
+                "name": "clinic",
+                "hosts": ["clinic.example.com"],
+                "origin": "http://10.0.0.5:8080",
+                "session": {"cookie": "SESSIONID"},
+                "entries": ["/login"],
+                "objects": {
+                    "classes": [{"id": "doctor", "name": "医生"}, {"id": "document", "name": "文档"}],
+                    "slots": [
+                        {"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"},
+                        {"key": "GET /api/docs [].id", "class": "document", "source": "admin"}
+                    ],
+                    "functions": [
+                        {"key": "POST /api/admin/export", "source": "rule", "tier": "admin", "reliability": "high"},
+                        {"key": "GET /api/docs", "source": "admin"}
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .expect("test spec");
+        site_spec_store::create(&pool, &spec, None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..20 {
+            record_document_source(&pool, index, now).await;
+        }
+        learn_once(&pool, None, now).await;
+        let record = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        assert_eq!(record.version, 2);
+        assert!(record.spec.objects().is_paused("GET /doctor/{id} path[1]"));
+        // The pause writes a new version, and the function table is in it, unchanged.
+        assert_eq!(
+            record.spec.objects().functions(),
+            spec.objects().functions()
+        );
+        assert!(
+            record
+                .spec
+                .objects()
+                .admin_only("POST", "/api/admin/export")
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
     async fn with_auto_pause_off_a_suspended_position_is_only_marked() {
         let Some((admin, pool, name)) = scratch("auto_pause_off").await else {
             return;

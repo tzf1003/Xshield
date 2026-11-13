@@ -21,17 +21,12 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
-import os
 import secrets
-import socket
-import subprocess
 import sys
 import tempfile
-import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock, Thread
 from typing import Callable
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,11 +34,8 @@ sys.path.insert(0, str(ROOT / "tests/security-lab"))
 
 from fake_jev import FakeJev  # noqa: E402
 from idor_origin import PASSWORD, EmrOrigin, new_long_token  # noqa: E402
+from labkit import Edge, Sent, build_edge, exchange, free_port  # noqa: E402
 
-TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
-EDGE = TARGET / ("debug/xshield-edge.exe" if os.name == "nt" else "debug/xshield-edge")
-# A lab-only key for the context hashes; nothing outside this run uses it.
-CONTEXT_KEY_HEX = "5b" * 32
 ENTRIES = ["/login", "/api/home", "/api/patients", "/share/*"]
 # The EMR's object map (docs/01 section 1.4). The search shows every doctor's patients to any
 # logged-in doctor (tier public), so a sighting there proves no right to delete a patient, while a
@@ -103,24 +95,6 @@ class Expect:
     failure: str | None = None  # jev.failure code, when one is expected
 
 
-@dataclass
-class Reply:
-    status: int
-    request_id: str | None
-    headers: list[tuple[str, str]]
-    body: bytes
-
-    def json(self) -> dict:
-        return json.loads(self.body) if self.body else {}
-
-
-@dataclass
-class Sent:
-    reply: Reply
-    record: dict | None
-    served: bool
-
-
 def login_form(user: str) -> dict:
     """A login body. The csrf field is a fresh token, as a real login form sends,
     so identical logins are judged each time instead of served from the allow cache."""
@@ -157,83 +131,6 @@ def site_specs(origin_port: int) -> list[dict]:
                                   **spec.get("advanced", {})}} for spec in specs]
 
 
-class Edge:
-    """A running xshield-edge child process and the decision records it writes."""
-
-    def __init__(self, sites_file: Path, jev_url: str, port: int) -> None:
-        env = {key: value for key, value in os.environ.items() if not key.startswith("XSHIELD_")}
-        env.update({
-            "XSHIELD_EDGE_LISTEN_PORTS": str(port),
-            "XSHIELD_EDGE_SITES_FILE": str(sites_file),
-            "XSHIELD_CONTEXT_KEY_HEX": CONTEXT_KEY_HEX,
-            "XSHIELD_JEV_ROUTE": "direct",
-            "XSHIELD_JEV_API_KEY": "lab-only-key",
-            "XSHIELD_JEV_ENDPOINT": jev_url,
-        })
-        self.port = port
-        self.lock = Lock()
-        self.records: list[dict] = []
-        self.stderr: list[str] = []
-        self.process = subprocess.Popen(
-            [str(EDGE)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        Thread(target=self._read_stdout, daemon=True).start()
-        Thread(target=self._read_stderr, daemon=True).start()
-        try:
-            self._wait_listening()
-        except Exception:
-            self.stop()  # never leave a half-started edge running
-            raise
-
-    def _read_stdout(self) -> None:
-        for line in self.process.stdout:  # one JSON decision record per line
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            with self.lock:
-                self.records.append(record)
-
-    def _read_stderr(self) -> None:
-        for line in self.process.stderr:
-            with self.lock:
-                self.stderr.append(line.rstrip())
-
-    def _wait_listening(self) -> None:
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            if self.process.poll() is not None:
-                break
-            try:
-                socket.create_connection(("127.0.0.1", self.port), timeout=0.2).close()
-                return
-            except OSError:
-                time.sleep(0.05)
-        raise RuntimeError("xshield-edge did not start:\n" + "\n".join(self.stderr_tail()))
-
-    def record_for(self, request_id: str) -> dict | None:
-        deadline = time.monotonic() + 5
-        while True:
-            with self.lock:
-                for record in self.records:
-                    if record.get("request_id") == request_id:
-                        return record
-            if time.monotonic() > deadline:
-                return None
-            time.sleep(0.02)
-
-    def stderr_tail(self, lines: int = 40) -> list[str]:
-        with self.lock:
-            return self.stderr[-lines:]
-
-    def stop(self) -> None:
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-
-
 class Lab:
     """Sends requests through the edge and records every check's result."""
 
@@ -247,32 +144,12 @@ class Lab:
     def send(self, host: str, method: str, target: str, *, cookie: str | None = None,
              form: dict[str, str] | None = None, json_body: dict | None = None,
              authorization: str | None = None) -> Sent:
-        headers = {"Host": host}
-        if cookie:
-            headers["Cookie"] = cookie
-        if authorization:
-            headers["Authorization"] = authorization
-        body = b""
-        if json_body is not None:
-            body = json.dumps(json_body, ensure_ascii=False).encode()
-            headers["Content-Type"] = "application/json"
-        elif form is not None:
-            body = urllib.parse.urlencode(form).encode()
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
-        headers["Content-Length"] = str(len(body))
-        connection = http.client.HTTPConnection("127.0.0.1", self.edge.port, timeout=10)
-        try:
-            connection.request(method, target, body=body, headers=headers)
-            response = connection.getresponse()
-            reply = Reply(response.status, response.getheader("X-Xshield-Request-Id"),
-                          response.getheaders(), response.read())
-        finally:
-            connection.close()
-        record = self.edge.record_for(reply.request_id) if reply.request_id else None
-        served = reply.request_id is not None and any(
-            request_id == reply.request_id for _, _, request_id in self.origin_served()
-        )
-        return Sent(reply, record, served)
+        headers = {"Authorization": authorization} if authorization else None
+        return exchange(self.edge, self.origin_was_served, host, method, target,
+                        cookie=cookie, form=form, json_body=json_body, headers=headers)
+
+    def origin_was_served(self, request_id: str) -> bool:
+        return any(served_id == request_id for _, _, served_id in self.origin_served())
 
     def origin_served(self) -> list[tuple[str, str, str | None]]:
         with self.origin.lock:
@@ -656,7 +533,7 @@ def c4(lab: Lab) -> None:
               PASSWORD not in logged, "password in the decision record")
 
 
-@scenario("C5", "同一会话一分钟内超过调用上限：超出部分按 on_jev_unavailable 处理")
+@scenario("C5", "同一会话一分钟内超过调用上限：超出部分拒绝并回 429")
 def c5(lab: Lab) -> None:
     cookie = lab.login("limit.lab", "doctor_a")
     lab.expect("first judged call", lab.send(
@@ -665,9 +542,12 @@ def c5(lab: Lab) -> None:
     lab.expect("second judged call", lab.send(
         "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第二条"}),
         Expect(201, "jev_allow", "allowed", True))
-    lab.expect("third call is over the session limit", lab.send(
-        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"}),
-        Expect(403, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+    refused = lab.send("limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"})
+    lab.expect("third call is over the session limit", refused,
+               Expect(429, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+    lab.check("the refusal says rate_limited whatever on_jev_unavailable is",
+              refused.reply.json().get("error") == "rate_limited",
+              refused.reply.body[:200].decode("utf-8", "replace"))
 
 
 @scenario("G1", "JSON 凭证站点：登录响应里的长令牌绑定会话，入口放行；登录响应和列表都没给过的病人交 Jev 拦截")
@@ -891,8 +771,7 @@ def main() -> int:
         print(f"no scenario matches {arguments.only!r}", file=sys.stderr)
         return 2
 
-    subprocess.run(["cargo", "build", "--quiet", "--locked", "-p", "xshield-edge", "--bin", "xshield-edge"],
-                   cwd=ROOT, check=True)
+    build_edge()
     origin = EmrOrigin()
     jev = FakeJev()
     origin.start()
@@ -926,12 +805,6 @@ def main() -> int:
                 edge.stop()
             origin.stop()
             jev.stop()
-
-
-def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
 
 
 if __name__ == "__main__":

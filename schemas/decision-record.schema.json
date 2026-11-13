@@ -59,7 +59,7 @@
         "v": {"type": "integer", "minimum": 0, "maximum": 1, "description": "1 为网关写入的行；0 为旧格式导入的行，没有 trace。"},
         "entry": {"type": ["string", "null"], "description": "覆盖该路径的入口模式，原样记录。"},
         "bypass": {"type": ["string", "null"], "description": "覆盖该路径的绕过模式，原样记录。"},
-        "refused": {"type": ["string", "null"], "enum": ["unauthenticated", "forbidden", "body_not_inspectable", "unknown_site", null], "description": "网关自己给出的拒绝原因。"},
+        "refused": {"type": ["string", "null"], "enum": ["unauthenticated", "forbidden", "rate_limited", "body_not_inspectable", "unknown_site", null], "description": "网关自己给出的拒绝原因。rate_limited 表示 Jev 调用限额用完，回 429（不论 on_jev_unavailable）。"},
         "values_truncated": {"type": "boolean", "description": "请求没有被完整拆成请求值（请求体不是结构化数据，或超过上限）。"},
         "values": {"type": "array", "items": {"$ref": "#/$defs/trace_value"}, "description": "请求拆出的全部请求值，按提取顺序，包括惰性值。"},
         "session": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/trace_session"}]},

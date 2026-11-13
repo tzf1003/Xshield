@@ -86,7 +86,7 @@ AGENTS.md 要求新增配置项、表、依赖之前先确认现有机制不够�
 
 `request_id` 沿用现有格式：`req_` 加 UUIDv7 的 32 位小写十六进制（`uuid::Uuid::now_v7().simple()`）。前 12 位十六进制是毫秒时间戳，例如 `req_01a19741107477ff9224781077354552` 生成于 2026-11-01 13:16:26.100 UTC。控制面按 ID 查询时先解出时间 `t`，查 `at_millis BETWEEN t − 60 秒 AND t + 60 秒` 且 `request_id` 相等的行：`at_millis` 取自请求到达时刻，与 ID 生成时刻只差几毫秒，留 60 秒余量是为了不依赖这个假设；跨午夜时窗口自然落在相邻两个分区，PostgreSQL 只扫这两个。解不出时间的输入（不是 `req_` 加 32 位十六进制）不按 ID 查询。
 
-请求 ID 出现在：网关返回给客户端的每个响应头 `X-Xshield-Request-Id`；拦截响应体 `{"error":"forbidden","request_id":"req_…"}`；转发给源站的请求头 `X-Xshield-Request-Id`（源站日志可以用它关联）。用户反馈“被拦了”时，让他提供这个 ID。
+请求 ID 出现在：网关返回给客户端的每个响应头 `X-Xshield-Request-Id`；拦截响应体 `{"error":"forbidden","request_id":"req_…"}`（`error` 随拒绝原因变化，见 7.4.1）；转发给源站的请求头 `X-Xshield-Request-Id`（源站日志可以用它关联）。用户反馈“被拦了”时，让他提供这个 ID。
 
 ### 7.3.2 追溯链路
 
@@ -132,7 +132,9 @@ GET /api/patients ──响应里出现 id=7──┐
 | `cached_allow` | 缓存时长内同一请求已由 Jev 放行 | `allowed` | 判定记录 |
 | `jev_allow` | Jev 通过 | `allowed` | Jev 记录 |
 | `jev_deny` | Jev 判越权或攻击 | `blocked` / `would_block` | Jev 记录 |
-| `jev_unavailable` | Jev 超时、出错、限额用尽或答 UNKNOWN | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽时没有 `state`） |
+| `jev_unavailable` | Jev 超时、出错、限额用尽、state 过大或答 UNKNOWN | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽和 state 过大时没有 `state`，也没有调用） |
+
+`jev_unavailable` 的拒绝不全由 `on_jev_unavailable` 决定：调用限额用完时回 429，`refused` 为 `rate_limited`；state 裁剪后仍超过 8 KiB 时回 403。两者都不论 `on_jev_unavailable`，观察模式下只记“本应拦截”并照常转发。其余失败按 `on_jev_unavailable`：`deny` 回 403，`allow` 记为 `unjudged` 并转发（7.5.4 列出每个失败码的处理）。
 
 `413` 和 `404` 与模式无关，观察模式下也拒绝（现有行为，[01.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。源站不可达等转发错误不是新的判定路径：记录照常写，`status` 为网关返回的 502/504，`trace.upstream_error` 写原因。
 
@@ -211,7 +213,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | 字段 | 说明 |
 |---|---|
 | `entry` / `bypass` | 命中的入口、绕过模式原文（不止是布尔值，界面要显示“命中 `/share/*`”） |
-| `refused` | 网关自己回的错误码：`unauthenticated`、`forbidden`、`body_not_inspectable`、`unknown_site` |
+| `refused` | 网关自己回的错误码：`unauthenticated`（401）、`forbidden`（403）、`rate_limited`（429，Jev 调用限额用完）、`body_not_inspectable`（413）、`unknown_site`（404） |
 | `values[]` | 请求里拆出的**全部**值，按提取顺序，含惰性值（`inert: true`）；最多 200 个（`REQUEST_VALUES_MAX`） |
 | `values[].kind` | `reference` / `route` / `input`，与 `state` 里的 `kind` 同一函数（`values::value_kind`） |
 | `values[].at`、`key`、`slot` | 位置、键名和位置标识超过 256 字节（`TRACE_NAME_BYTES_MAX`）时截到 256 字节，不切断字符；`values[].at_len` 记截断前的 `at` 长度（字节），只用于显示“已裁剪”，判定不看它。来源的字段名和请求不截，因为 `seen_as` 要逐字相同 |
@@ -356,18 +358,18 @@ GET /api/patients ──响应里出现 id=7──┐
 
 ### 7.5.4 失败码
 
-| 失败码 | 含义 | 有无 `state` |
-|---|---|---|
-| `JEV_TIMEOUT` | 超过 `timeout_ms`（站点值或 `XSHIELD_JEV_TIMEOUT_MS`，默认 2000 ms） | 有 |
-| `JEV_RATE_LIMITED` | 模型服务返回 429 | 有 |
-| `JEV_TRANSPORT` | 连接、TLS 或协议错误 | 有 |
-| `JEV_HTTP_ERROR` | 其他非 200 状态，状态码在 `http_status` | 有 |
-| `JEV_RESPONSE_TOO_LARGE` | 响应超过 64 KiB | 有 |
-| `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 |
-| `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 |
-| `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 |
-| `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB | 无 |
-| `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调） | 无 |
+| 失败码 | 含义 | 有无 `state` | 网关的处理 |
+|---|---|---|---|
+| `JEV_TIMEOUT` | 超过 `timeout_ms`（站点值或 `XSHIELD_JEV_TIMEOUT_MS`，默认 2000 ms） | 有 | 按 `on_jev_unavailable` |
+| `JEV_RATE_LIMITED` | 模型服务返回 429 | 有 | 按 `on_jev_unavailable` |
+| `JEV_TRANSPORT` | 连接、TLS 或协议错误 | 有 | 按 `on_jev_unavailable` |
+| `JEV_HTTP_ERROR` | 其他非 200 状态，状态码在 `http_status` | 有 | 按 `on_jev_unavailable` |
+| `JEV_RESPONSE_TOO_LARGE` | 响应超过 64 KiB | 有 | 按 `on_jev_unavailable` |
+| `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 | 按 `on_jev_unavailable` |
+| `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 | 按 `on_jev_unavailable` |
+| `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 | 按 `on_jev_unavailable` |
+| `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
+| `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调）。没有发出调用 | 无 | 429（`rate_limited`），不论 `on_jev_unavailable` |
 
 ### 7.5.5 指令版本表
 
@@ -395,7 +397,7 @@ advanced:
 | 字段 | 默认 | 取值 | 作用 | 调整的代价 |
 |---|---|---|---|---|
 | `jev_timeout_ms` | `XSHIELD_JEV_TIMEOUT_MS`，未设时 2000 | 100–30000 | 本站点每次 Jev 调用的超时 | 调大：慢链路下少按 `on_jev_unavailable` 处理，但要判定的请求最多多等这么久；调小：反之 |
-| `session_calls_per_minute` | 60 | 1–600 | 每个会话每分钟 Jev 调用上限，超出按 `on_jev_unavailable` 处理 | 调大：单个会话能消耗的模型费用上限提高 |
+| `session_calls_per_minute` | 60 | 1–600 | 每个会话每分钟 Jev 调用上限，超出的请求回 429 拒绝，不论 `on_jev_unavailable` | 调大：单个会话能消耗的模型费用上限提高 |
 | `address_calls_per_minute` | 30 | 1–600 | 没有会话的请求（登录、注册等入口）按客户端地址的同一上限 | NAT 或代理后多个用户共用一个地址时需要调大；调大后未登录请求能消耗的额度也提高 |
 | `allow_cache_minutes` | 10 | 0–60 | 同一会话、同一请求被 Jev 放行后直接复用结论的时长 | 调大：调用次数减少；修改配置或提示词后，旧的放行结论仍复用到期。已缓存的条目按写入时的时长到期 |
 | `secret_fields` | 空 | 最多 32 个词，每个 3–32 个字符，小写字母、数字、`_`、`-` | 追加在内置 9 个脱敏词之后（不能删除内置词），按“字段名或位置包含该词”匹配；命中的值发给 Jev 和写日志时都写成 `<redacted>` | 被脱敏的值 Jev 只看到长度，无法判断它是否越权。只加纯输入字段（身份证号、银行卡号），不要加对象引用字段；最短 3 个字符就是为了挡住 `id`、`no` 这类会把所有 ID 都脱敏的词 |
@@ -859,7 +861,7 @@ CREATE TABLE jev_prompts (
 - `name` 与路径参数不一致：400 `SITE_NAME_MISMATCH`。
 - `hosts` 中有其他站点已占用的主机名：409 `SITE_HOST_TAKEN`，`field` 指出哪一项。现状是网关按站点名顺序先到先得、落选站点只写 stderr，控制面在保存时就拒绝。
 - 请求体最大 64 KiB；`note` 最长 500 字符。
-- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复）、`key_invalid`（位置格式不对或过长）、`too_many`（超过 64 个类别或 2,048 个位置）、`class_id_invalid`（类别 id 格式不对）、`judgement_conflict`（一个条目同时带 `tier` 和 `accepts_public`）、`reliability_without_judgement`（`reliability` 没有 `tier` 或 `accepts_public` 与之同在）；其余对象表错误只带 `field`。
+- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复；功能的键忽略模板大小写后重复）、`key_invalid`（位置或功能的键格式不对或过长）、`too_many`（超过 64 个类别、2,048 个位置或 2,048 条功能）、`class_id_invalid`（类别 id 格式不对）、`judgement_conflict`（一个条目同时带 `tier` 和 `accepts_public`）、`reliability_without_judgement`（`reliability` 没有 `tier` 或 `accepts_public` 与之同在；功能条目的 `reliability` 没有 `tier` 同在也是它）、`function_tier_unsupported`（功能的 `tier` 不是 `admin`，见 7.9.18）；其余对象表错误只带 `field`。
 
 ### 7.9.13 状态灯与配置生效
 
@@ -1030,6 +1032,52 @@ CREATE TABLE jev_prompts (
 - 告警说的是“同一个响应里同时有这两类内容”，不判断敏感属性属于哪一个对象。字段遮挡和拦截要等有数据再定，因为改响应体比拦请求风险大。
 - 请求里自己发出的值（回声）不排除。
 - 控制台的请求详情在学习步骤里显示“疑似属性越权，仅告警未拦截”，只列出类别，不显示值。
+
+### 7.9.18 功能表
+
+功能表是站点配置 `objects` 下的 `functions` 列表（[03.2](03-admin-config-audit.md#32-站点配置)）。对象表的位置说的是“某个接口里的某个值是哪一类对象”，装不下“这个接口本身归谁用”，所以功能单独成表。本节定义格式、校验和查找规则。本版只读入、校验和保存，网关的判定还不使用它，判定结果与没有功能表时相同；判定的启用、学习基线和确认写入见后续改动。
+
+格式：
+
+```yaml
+objects:
+  functions:
+    - key: POST /api/admin/export
+      source: rule
+      tier: admin
+      reliability: high
+    - key: "GET /api/patients/{id}"
+      source: admin
+```
+
+| 字段 | 必填 | 取值 |
+|---|---|---|
+| `key` | 是 | `方法 路由模板`，中间一个空格 |
+| `source` | 是 | `admin`、`rule`、`agent`，与位置条目相同 |
+| `tier` | 否 | 只接受 `admin`。省略表示对所有会话开放，条目只说明“站点有这个功能” |
+| `reliability` | 否 | `low`、`medium`、`high`，只能与 `tier` 同在。省略按 `low` 算 |
+
+功能条目没有 `paused`。目前没有对功能的自动暂停：想停用一个管理功能，删掉 `tier` 即可，条目仍是已知功能。有了自动暂停的需求再加。`functions` 省略或为空时不写出这个键，现有站点的配置逐字不变。最多 2,048 条，与位置相同。
+
+**键的校验**。拒绝时 `reason` 为 `key_invalid`，位置是 `objects.functions[n]`。键必须是判定能产生的拼写，全部满足才接受：
+
+1. 恰好两段，用一个空格分开；整个键不超过 256 字节。
+2. 方法是 3 到 7 个大写 ASCII 字母，且不是 `HEAD` 或 `OPTIONS`。这两个方法在查找时另有规则，写成条目永远匹配不上。
+3. 模板以 `/` 开头，不含 `?`、`#`、控制字符和 `;`，并且是规范拼写（与位置键相同，见 [7.4.7](#747-档位在判定中的使用)）。
+4. 模板中纯数字或 UUID 的段必须写成 `{id}`。
+5. 含 `{` 或 `}` 的段只能恰好是 `{id}`。写成 `{userId}` 的会被拒绝，免得管理员以为它是占位符。
+
+其他校验：超过 2,048 条为 `too_many`；忽略模板字母大小写后两条键相同为 `duplicate_key`（位置是后一条）；`tier` 为 `self`、`org`、`public` 等非 `admin` 的档位为 `function_tier_unsupported`；有 `reliability` 没有 `tier` 为 `reliability_without_judgement`。`tier` 写成完全不认识的字样（如 `everyone`）时，与位置条目相同，整个 `objects` 段按段解析失败处理。条目里有不认识的字段（如 `paused`）时也是段解析失败。错误信息不回显配置值。
+
+**查找**。`ObjectMap` 的三个方法（`function_of`、`admin_only`、`knows_function`）接收方法和请求的路由模板，即 `position_template(逻辑路径)` 的结果（判定里对应 `route_template`），方法内部不再规范化：
+
+- **段的比较**。条目模板和请求模板按 `/` 分段，段数必须相同。条目的 `{id}` 段覆盖请求的任意一个非空段。其他段先去掉请求段的第一个 `;` 及之后的部分，再与条目段做忽略 ASCII 大小写的比较；去掉之后为空的段不匹配任何字面段。逐字相等（或忽略大小写相等）的段数记为字面段数。位置条目的比较（`template_covers`）不改。
+- **为什么忽略大小写和 `;` 参数**。源站如果不分大小写（IIS、部分框架）或会剥掉 `;` 参数（Java 系），`/API/Admin/export` 与 `/api/admin;x/export` 到的是同一个功能，条目必须照样管住。源站如果区分，这些写法本来就是 404，多管一下没有代价。
+- **`function_of`**。在方法相同、覆盖请求的条目中取第一名：字面段数多的优先；一样多时，档位为 `admin` 且可靠性为 `high` 的优先，取更严的；再一样时，书写顺序靠前的优先。
+- **`HEAD` 和 `OPTIONS`**。`HEAD` 按 `GET` 查。`OPTIONS` 是预检，不带凭证，不参与功能查找：`function_of` 返回空，`admin_only` 为假。`knows_function` 对 `OPTIONS` 的判断是：任何方法下该路由已知即为真。
+- **`admin_only`**。`function_of` 的结果是 `admin` 档且可靠性为 `high`。可靠性不是 `high` 的条目不收紧，与位置条目的规矩相同。
+- **`knows_function`**。功能表有条目覆盖请求，或者对象表里有位置（暂停与否都算）的方法与请求方法相同（`HEAD` 按 `GET`）且模板覆盖请求，即为已知。位置声明过的接口，它的功能自动算已知，不必在功能表里重复登记。
+- **性能**。校验时把键按方法和段数分组，并把模板预先切分成段（每个请求只切分一次）。查找只看同方法、同段数的组，不扫全表，也不对每个键重新切分。对象表追加位置时同步更新这个索引。
 
 ## 7.10 控制台前端架构
 

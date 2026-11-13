@@ -19,3 +19,11 @@ on_jev_unavailable: deny       # deny（默认）或 allow
 advanced:                      # 可选：站点级判定参数，省略的项取代码默认值
   jev_timeout_ms: 3000
   secret_fields: [ssn, idcard]
+objects:                       # 功能表（docs/07 7.9.18）：本版只读入和保存，网关还不按它判定
+  functions:
+    - key: POST /api/admin/export
+      source: rule
+      tier: admin              # 管理功能：只有管理员会话用它
+      reliability: high
+    - key: "GET /api/patients/{id}"
+      source: admin            # 已知功能，对所有会话开放

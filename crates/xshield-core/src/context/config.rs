@@ -685,6 +685,48 @@ mod tests {
     }
 
     #[test]
+    fn the_functions_are_read_in_the_objects_section() {
+        let with = |objects: &str| {
+            MINIMAL.replace(
+                "\"entries\"",
+                &format!("\"objects\": {objects}, \"entries\""),
+            )
+        };
+        let site = SiteSpec::from_json(&with(
+            r#"{"functions":[
+                {"key":"POST /api/admin/export","source":"rule","tier":"admin","reliability":"high"},
+                {"key":"GET /api/patients/{id}","source":"admin"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(site.objects().functions().len(), 2);
+        assert!(site.objects().admin_only("POST", "/api/admin/export"));
+        let again: SiteSpec = serde_json::from_str(&serde_json::to_string(&site).unwrap()).unwrap();
+        assert_eq!(again.objects(), site.objects());
+        // An entry with a field it does not know is refused as the objects section.
+        assert_eq!(
+            SiteSpec::from_json(&with(
+                r#"{"functions":[{"key":"GET /a","source":"admin","paused":true}]}"#
+            ))
+            .unwrap_err(),
+            ConfigError::Objects(ObjectsIssue {
+                place: ObjectsPlace::Section,
+                reason: None,
+            }),
+        );
+        // A refused entry names itself and the reason.
+        assert_eq!(
+            SiteSpec::from_json(&with(
+                r#"{"functions":[{"key":"get /a","source":"admin"}]}"#
+            ))
+            .unwrap_err(),
+            ConfigError::Objects(ObjectsIssue {
+                place: ObjectsPlace::Function(0),
+                reason: Some(ObjectsReason::KeyInvalid),
+            }),
+        );
+    }
+
+    #[test]
     fn routes_are_optional_validated_and_round_trip() {
         let plain = SiteSpec::from_json(MINIMAL).unwrap();
         assert!(plain.routes().is_empty());
