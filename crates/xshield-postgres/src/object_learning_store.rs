@@ -821,10 +821,6 @@ pub async fn advance_cursor(
     Ok(())
 }
 
-/// The positions that hold a proposal, in order.
-///
-/// # Errors
-/// Returns [`LearningStoreError`] on a database failure.
 /// The request positions with a proposal, in key order. A response position's proposal is judged by its own
 /// rules (`learning::propose_source`), so it is left out here.
 ///
