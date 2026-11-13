@@ -135,6 +135,11 @@ def function_level_metrics(p: Prober) -> None:
     p.request(session, "GET", "/metrics", scored=True)
 
 
+def function_route_word(p: Prober) -> None:
+    session = p.login(account(DOCTOR_A))
+    p.request(session, "GET", "/api/patients/export-all", scored=True)
+
+
 # P1: sessions that refresh, search, revalidate, and observation mode.
 
 def rotation(p: Prober) -> None:
@@ -231,13 +236,13 @@ def method_override(p: Prober) -> None:
 
 
 CASES: tuple[Case, ...] = (
-    Case("p0-1-pad-200", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, pad_200,
+    Case("p0-1-pad-200", "P0-1", "must", "block", "attack", SITE_TRUTH, pad_200,
          note="injection after 200 query values"),
-    Case("p0-1-multipart", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, multipart,
+    Case("p0-1-multipart", "P0-1", "must", "block", "attack", SITE_TRUTH, multipart,
          note="injection in multipart/form-data after 600 bytes of filler"),
     Case("p0-1-text-plain", "P0-1", "must", "block", "attack", SITE_TRUTH, text_plain,
          note="JSON sent as text/plain"),
-    Case("p0-1-long-value", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, long_value,
+    Case("p0-1-long-value", "P0-1", "must", "block", "attack", SITE_TRUTH, long_value,
          note="injection after 600 characters of one value"),
     Case("p0-1-big-upload", "P0-1", "known_gap", "allow", None, SITE_TRUTH, big_upload,
          note="benign upload over 48 KiB"),
@@ -245,14 +250,16 @@ CASES: tuple[Case, ...] = (
          note="benign JSON over 48 KiB"),
     Case("p0-2-limit-then-inject", "P0-2", "must", "block", "limit", SITE_LIMIT, limit_then_inject,
          note="injection after the session's Jev budget is spent, on-unavailable allow"),
-    Case("p0-3-fake-cookie-metrics", "P0-3", "known_gap", "block", "no_session", SITE_TRUTH, fake_cookie_metrics,
+    Case("p0-3-fake-cookie-metrics", "P0-3", "must", "block", "no_session", SITE_TRUTH, fake_cookie_metrics,
          note="forged credential on /metrics"),
-    Case("p0-3-fake-cookie-export", "P0-3", "known_gap", "block", "no_session", SITE_TRUTH, fake_cookie_export,
+    Case("p0-3-fake-cookie-export", "P0-3", "must", "block", "no_session", SITE_TRUTH, fake_cookie_export,
          note="forged credential on /api/admin/export"),
     Case("p0-3-function-level", "P0-3", "must", "block", "access", SITE_TRUTH, function_level_export,
          requires=("functions",), note="doctor's real session on /api/admin/export"),
     Case("p0-3-function-level-metrics", "P0-3", "must", "block", "access", SITE_TRUTH, function_level_metrics,
          requires=("functions",), note="doctor's real session on /metrics"),
+    Case("p0-3-function-route-word", "P0-3", "must", "block", "access", SITE_TRUTH, function_route_word,
+         requires=("functions",), note="doctor's real session on /api/patients/export-all: a route word under {id}"),
     Case("p1-1-rotation", "P1-1", "known_gap", "allow", None, SITE_TRUTH, rotation,
          note="the credential is refreshed between the list and the open"),
     Case("p1-2-search-id-then-open", "P1-2", "known_gap", "allow", None, SITE_TRUTH, search_id_then_open,
@@ -263,7 +270,7 @@ CASES: tuple[Case, ...] = (
          note="a new session gets 304 and then opens the patient"),
     Case("p1-5-observe-learns-would-block", "P1-5", "must", "block", "access", SITE_OBSERVE,
          observe_learns_would_block, note="a visit id from a would-block answer, in observation mode"),
-    Case("p1-9-big-form", "P1-9", "known_gap", "allow", None, SITE_TRUTH, big_form,
+    Case("p1-9-big-form", "P1-9", "must", "allow", None, SITE_TRUTH, big_form,
          note="benign form with 120 fields"),
     Case("p1-9-big-form-on-object", "P1-9", "must", "allow", None, SITE_TRUTH, big_form_on_object,
          note="benign note of two batches on the session's own patient, id in the path"),

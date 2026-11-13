@@ -169,6 +169,17 @@ fn is_route_word(segment: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
 }
 
+/// Whether `segment` reads as a route word and nothing else: 1 to [`FUNCTION_SEGMENT_MAX`] bytes, each
+/// an ASCII letter, `.`, `_`, `~` or `-`. A segment with a digit, a longer one, or any other byte is a
+/// value, and a function's `{id}` covers a value but not a route word (docs/07 section 7.9.18).
+#[must_use]
+pub fn is_plain_word(segment: &str) -> bool {
+    (1..=FUNCTION_SEGMENT_MAX).contains(&segment.len())
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
+}
+
 /// A segment counts as variable only when it is entirely digits or a
 /// canonical (hyphenated, case-insensitive) UUID. Anything else — including a
 /// mixed alphanumeric slug — is kept literal: the heuristic would rather
@@ -356,7 +367,29 @@ mod tests {
 
 #[cfg(test)]
 mod function_template_tests {
-    use super::function_template;
+    use super::{function_template, is_plain_word};
+
+    #[test]
+    fn a_plain_word_is_letters_and_marks_only() {
+        let longest = "a".repeat(32);
+        let too_long = "a".repeat(33);
+        for word in ["export-all", "users", "a.b_c~d", longest.as_str()] {
+            assert!(is_plain_word(word), "{word}");
+        }
+        for segment in [
+            "",
+            "7005",
+            "PT-7004",
+            "a1",
+            too_long.as_str(),
+            "a%2Fb",
+            "a@b",
+            "{id}",
+            "{name}",
+        ] {
+            assert!(!is_plain_word(segment), "{segment}");
+        }
+    }
 
     #[test]
     fn a_function_template_replaces_numbers_and_uuids() {

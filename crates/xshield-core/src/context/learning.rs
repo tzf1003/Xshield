@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::kind::is_id_like;
-use crate::path_template::function_template;
+use crate::path_template::{function_template, is_plain_word};
 
 use super::log::{DecisionPath, Outcome};
 use super::objects::{KEY_MAX, ObjectMap, Reliability, Tier};
@@ -1672,18 +1672,20 @@ pub struct FunctionUse {
     pub units: u32,
 }
 
-/// Light siblings that contain a digit, at least this many, make the segment they differ at `{id}`
-/// (docs/07 section 7.9.19).
+/// Light siblings that are values, not route words (`is_plain_word`), at least this many, make the segment
+/// they differ at `{id}` (docs/07 section 7.9.19).
 pub const MERGE_IDS_MIN: usize = 10;
-/// Light siblings that contain no digit, at least this many, make the segment they differ at `{id}`. It is
+/// Light siblings that are route words, at least this many, make the segment they differ at `{name}`. It is
 /// far above [`MERGE_IDS_MIN`]: route words such as `users` and `orders` contain no digit either, and a
 /// small site has not yet reached the units to tell them from names.
 pub const MERGE_WORDS_MIN: usize = 50;
 /// Function keys one learning pass analyzes at most, the units used most first.
 pub const FUNCTION_KEYS_MAX: usize = 20_000;
 
-/// The segment a merged segment becomes.
-const MERGED_SEGMENT: &str = "{id}";
+/// The segment a merged value becomes: `{id}` covers a value and no route word (docs/07 section 7.9.18).
+const MERGED_ID: &str = "{id}";
+/// The segment a merged route word becomes: `{name}` covers any segment, so it is the wider placeholder.
+const MERGED_NAME: &str = "{name}";
 
 /// A function key as the merge works on it.
 struct Merging<'a> {
@@ -1710,11 +1712,12 @@ fn segments_of(path: &str) -> Vec<&str> {
 /// (docs/07 section 7.9.19). The result has an entry for every distinct key of `uses`.
 ///
 /// Segments merge level by level, from the first one. At a level, the keys sharing a method and the segments
-/// already decided before it form a group. In a group, each value of the segment at the level, other than
-/// `{id}`, is a child, weighed by the most units any of its keys used. A child lighter than
-/// `thresholds.sessions` is light. When at least [`MERGE_IDS_MIN`] light children contain a digit, or at
-/// least [`MERGE_WORDS_MIN`] light children contain none, every light child of that kind becomes `{id}` at
-/// that level. A heavy child is a function of its own and stays.
+/// already decided before it form a group. In a group, each value of the segment at the level, other than a
+/// placeholder (`{id}` or `{name}`), is a child, weighed by the most units any of its keys used. A child
+/// lighter than `thresholds.sessions` is light. When at least [`MERGE_IDS_MIN`] light children are values,
+/// not route words (`is_plain_word`), every one of them becomes `{id}` at that level. When at least
+/// [`MERGE_WORDS_MIN`] light children are route words, every one of them becomes `{name}`. A heavy child is
+/// a function of its own and stays.
 ///
 /// A key whose leading segments are the segments of one of `named_under` (the stems of the site's route
 /// paths, without the trailing slash) is kept as it is, and takes part in no step: its segments below a
@@ -1769,8 +1772,8 @@ pub fn merge_functions(
         .collect();
     let depth_max = keys.iter().map(|key| key.segments.len()).max().unwrap_or(0);
     for depth in 0..depth_max {
-        for index in merged_at(&keys, depth, thresholds) {
-            MERGED_SEGMENT.clone_into(&mut keys[index].segments[depth]);
+        for (index, placeholder) in merged_at(&keys, depth, thresholds) {
+            placeholder.clone_into(&mut keys[index].segments[depth]);
         }
     }
     keys.iter()
@@ -1785,9 +1788,13 @@ pub fn merge_functions(
         .collect()
 }
 
-/// The indices of the keys whose segment at `depth` becomes `{id}` at that level: the members of every group
-/// whose light children are numerous enough, as [`merge_functions`] describes.
-fn merged_at(keys: &[Merging<'_>], depth: usize, thresholds: Thresholds) -> Vec<usize> {
+/// The keys whose segment at `depth` becomes a placeholder at that level, each with its placeholder: the members
+/// of every group whose light children are numerous enough, as [`merge_functions`] describes.
+fn merged_at(
+    keys: &[Merging<'_>],
+    depth: usize,
+    thresholds: Thresholds,
+) -> Vec<(usize, &'static str)> {
     let mut groups: BTreeMap<(&str, Vec<&str>), Vec<usize>> = BTreeMap::new();
     for (index, key) in keys.iter().enumerate() {
         if key.held || key.segments.len() <= depth {
@@ -1801,7 +1808,7 @@ fn merged_at(keys: &[Merging<'_>], depth: usize, thresholds: Thresholds) -> Vec<
         let mut weights: BTreeMap<&str, u32> = BTreeMap::new();
         for &index in members {
             let value = keys[index].segments[depth].as_str();
-            if value != MERGED_SEGMENT {
+            if value != MERGED_ID && value != MERGED_NAME {
                 let weight = weights.entry(value).or_default();
                 *weight = (*weight).max(keys[index].units);
             }
@@ -1811,22 +1818,20 @@ fn merged_at(keys: &[Merging<'_>], depth: usize, thresholds: Thresholds) -> Vec<
             .filter(|(_, weight)| **weight < thresholds.sessions)
             .map(|(value, _)| *value)
             .collect();
-        let (with_digits, words): (Vec<&str>, Vec<&str>) = light
-            .into_iter()
-            .partition(|value| value.bytes().any(|byte| byte.is_ascii_digit()));
-        let mut chosen: BTreeSet<&str> = BTreeSet::new();
-        if with_digits.len() >= MERGE_IDS_MIN {
-            chosen.extend(with_digits);
+        let (values, words): (Vec<&str>, Vec<&str>) =
+            light.into_iter().partition(|value| !is_plain_word(value));
+        let mut chosen: BTreeMap<&str, &'static str> = BTreeMap::new();
+        if values.len() >= MERGE_IDS_MIN {
+            chosen.extend(values.into_iter().map(|value| (value, MERGED_ID)));
         }
         if words.len() >= MERGE_WORDS_MIN {
-            chosen.extend(words);
+            chosen.extend(words.into_iter().map(|value| (value, MERGED_NAME)));
         }
-        merged.extend(
-            members
-                .iter()
-                .copied()
-                .filter(|&index| chosen.contains(keys[index].segments[depth].as_str())),
-        );
+        merged.extend(members.iter().filter_map(|&index| {
+            chosen
+                .get(keys[index].segments[depth].as_str())
+                .map(|&placeholder| (index, placeholder))
+        }));
     }
     merged
 }
@@ -2840,8 +2845,8 @@ mod function_tests {
     }
 
     #[test]
-    fn words_merge_only_from_fifty_light_siblings() {
-        let few: Vec<FunctionUse> = (0..25)
+    fn fifty_word_children_merge_into_a_name() {
+        let few: Vec<FunctionUse> = (0..49)
             .map(|index| use_of(format!("GET /api/{}", word(index)), 1))
             .collect();
         let merged = merge_functions(&few, Thresholds::default(), &[]);
@@ -2849,15 +2854,57 @@ mod function_tests {
             assert_eq!(merged[&function.key], function.key);
         }
 
-        let mut many: Vec<FunctionUse> = (0..60)
+        let mut many: Vec<FunctionUse> = (0..50)
             .map(|index| use_of(format!("GET /u/{}", word(index)), 1))
             .collect();
         many.push(use_of("GET /u/settings", 30));
         let merged = merge_functions(&many, Thresholds::default(), &[]);
-        for function in many.iter().take(60) {
-            assert_eq!(merged[&function.key], "GET /u/{id}");
+        for function in many.iter().take(50) {
+            assert_eq!(merged[&function.key], "GET /u/{name}");
         }
         assert_eq!(merged["GET /u/settings"], "GET /u/settings");
+    }
+
+    #[test]
+    fn words_and_ids_at_one_level_merge_apart() {
+        let mut uses: Vec<FunctionUse> = (0..10)
+            .map(|index| use_of(format!("GET /products/PT-70{index:02}"), 1))
+            .collect();
+        uses.extend((0..50).map(|index| use_of(format!("GET /products/{}", word(index)), 1)));
+        uses.push(use_of("GET /products/featured", 30));
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for index in 0..10 {
+            assert_eq!(
+                merged[&format!("GET /products/PT-70{index:02}")],
+                "GET /products/{id}"
+            );
+        }
+        for index in 0..50 {
+            assert_eq!(
+                merged[&format!("GET /products/{}", word(index))],
+                "GET /products/{name}"
+            );
+        }
+        assert_eq!(merged["GET /products/featured"], "GET /products/featured");
+    }
+
+    #[test]
+    fn a_route_word_among_ids_stays_a_function() {
+        let mut uses: Vec<FunctionUse> = (0..10)
+            .map(|index| use_of(format!("GET /api/patients/PT-70{index:02}"), 1))
+            .collect();
+        uses.push(use_of("GET /api/patients/export-all", 1));
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for index in 0..10 {
+            assert_eq!(
+                merged[&format!("GET /api/patients/PT-70{index:02}")],
+                "GET /api/patients/{id}"
+            );
+        }
+        assert_eq!(
+            merged["GET /api/patients/export-all"],
+            "GET /api/patients/export-all"
+        );
     }
 
     #[test]
@@ -2889,7 +2936,7 @@ mod function_tests {
         }
         let merged = merge_functions(&uses, Thresholds::default(), &[]);
         for function in &uses {
-            assert_eq!(merged[&function.key], "GET /u/{id}/posts/{id}");
+            assert_eq!(merged[&function.key], "GET /u/{name}/posts/{id}");
         }
     }
 
@@ -2942,6 +2989,7 @@ mod function_tests {
         let mut uses: Vec<FunctionUse> = (0..12)
             .map(|index| use_of(format!("GET /products/PT-70{index:02}"), 1))
             .collect();
+        uses.extend((0..50).map(|index| use_of(format!("GET /products/{}", word(index)), 1)));
         uses.push(use_of("GET /products/featured", 30));
         let thresholds = Thresholds::default();
         let once = merge_functions(&uses, thresholds, &[]);

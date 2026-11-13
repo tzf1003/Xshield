@@ -199,7 +199,7 @@
             "additionalProperties": false,
             "required": ["key", "source"],
             "properties": {
-              "key": {"type": "string", "pattern": "^[A-Z]{3,7} /[^ ]*$", "description": "方法（大写）、一个空格、路由模板，如 POST /api/admin/export。模板须为规范拼写，{id} 是唯一的占位符；HEAD、OPTIONS 和 256 字节的上限由网关检查。"},
+              "key": {"type": "string", "pattern": "^[A-Z]{3,7} /[^ ]*$", "description": "方法（大写）、一个空格、路由模板，如 POST /api/admin/export。模板须为规范拼写，占位符只有两个：{id} 覆盖一段值，即不是纯路由词的段（纯路由词是 1 到 32 字节的字母、`.`、`_`、`~`、`-`，如 export-all），{name} 覆盖任意一段；HEAD、OPTIONS 和 256 字节的上限由网关检查。"},
               "source": {"type": "string", "enum": ["admin", "rule", "agent"]},
               "tier": {"type": "string", "enum": ["admin"], "description": "只接受 admin：管理功能。省略表示对所有会话开放。"},
               "reliability": {"type": "string", "enum": ["low", "medium", "high"], "description": "tier 的可靠性；只能与 tier 同在。"}
