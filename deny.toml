@@ -1,4 +1,4 @@
-# Supply-chain policy for `cargo deny check` (docs/17 §17.7, CI job "supply-chain").
+# Supply-chain policy for `cargo deny check` (CI job "supply-chain").
 #
 # Third-party licenses are limited to permissive ones; a new dependency under any
 # other license fails the check until someone decides it is acceptable and adds

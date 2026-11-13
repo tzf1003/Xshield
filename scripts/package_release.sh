@@ -14,7 +14,7 @@
 #   scripts/package_release.sh
 #
 # This packages artifacts; it does not publish, sign or deploy them, and it
-# does not run the test suites (see docs/17 section 17.10 for the gates).
+# does not run the test suites (scripts/verify_all.sh runs the gates).
 set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
@@ -58,7 +58,6 @@ stage="$dist_dir/stage/$name"
 binaries=(
     xshield-edge
     xshield-control
-    xshield-build
 )
 
 rm -rf -- "$stage"

@@ -2,7 +2,7 @@ name: release-images
 
 # Publishes the two deployable images (Dockerfile targets edge and control) for a release tag to GitHub Container Registry, with a build
 # provenance attestation and SBOM, and signs each pushed digest with a keyless
-# Sigstore signature bound to this workflow and tag (docs/19 19.7). Deploy by
+# Sigstore signature bound to this workflow and tag. Deploy by
 # digest and verify before use:
 #
 #   cosign verify ghcr.io/<owner>/xshield-edge@sha256:... \
@@ -86,7 +86,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           cosign sign --yes "$IMAGE"
-          # The identity deployers verify (docs/19 19.7): this file, at a release
+          # The identity deployers verify: this file, at a release
           # tag (tag push) or at main (called by release.yml).
           identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/release-images\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$"
           cosign verify "$IMAGE" \

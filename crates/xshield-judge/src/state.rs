@@ -18,16 +18,18 @@ pub const STATE_BYTES_MAX: usize = 8 * 1024;
 pub const RESPONSE_BYTES_MAX: usize = 64 * 1024;
 /// What a secret value is shown as in the state and the trace.
 pub const REDACTED: &str = "<redacted>";
-const SECRET_WORDS: [&str; 9] = [
-    "password",
+/// The words that mark a field name as a secret on every site, sorted. The
+/// heartbeat and the console report this same list (docs/07 section 7.9.8).
+pub const SECRET_WORDS: [&str; 9] = [
+    "authorization",
+    "credential",
+    "cvv",
+    "otp",
     "passwd",
+    "password",
     "pwd",
     "secret",
     "token",
-    "otp",
-    "credential",
-    "authorization",
-    "cvv",
 ];
 
 /// The `access` question options.

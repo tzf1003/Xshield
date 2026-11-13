@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 体检修复：README、[docs/00](docs/00-overview.md)、[docs/03](docs/03-admin-config-audit.md)、[docs/04](docs/04-deployment-testing.md)、[docs/05](docs/05-v3-removal.md) 不再写“代码仍是 v3”，环境变量表与代码实际读取的一致（补上 `XSHIELD_CONTROL_CONSOLE_ORIGIN` 和 `XSHIELD_CONTROL_LISTEN` 的默认值，标明三个没有实现的 v3 保留项）；`scripts/package_release.sh` 不再打包不存在的 `xshield-build`（此前脚本必然失败）；`./dev.sh` 没有 Jev 密钥时改为提示而不是拒绝启动，与网关的行为一致；内置脱敏词只保留判定引擎里的一份，心跳和控制台直接引用；脚本、Dockerfile 和工作流注释里指向 v3 文档编号的引用改为现有章节。
 - 判定按声明位置覆盖请求值的其他写法：在有接受公共来源设定的站点上，对象表里 `{id}` 段覆盖任意一个非空段，所以 `DELETE /api/patients/PT-7004`、带分号参数的写法与编码斜杠（`%2F`）的同一位置，按声明位置的档位判定，只由公共响应展示过的值变为尝试越权，交 Jev 要求 DENY（[docs/07](docs/07-console-architecture.md#747-档位在判定中的使用) 7.4.7）。请求路径无法化为规范拼写（不是绝对路径、百分号编码不完整，或规范拼写超过 256 字节）时，在有接受公共来源设定的站点上不快速放行，没有声明覆盖的值标为 `unplaced` 交 Jev（`values[].unplaced`）；这种值不判为尝试越权。
 - 靶场新增慢速 id 场景 A12（[docs/04](docs/04-deployment-testing.md) 4.3）：搜索到的患者 id `PT-7004` 不是数字，删除按声明的 `DELETE /api/patients/{id}` 位置判定，交 Jev 判 DENY，源站不收到请求。
 - 对象表显示并编辑声明位置的判断（[docs/06](docs/06-console-ui.md) 6.4.10，[docs/07](docs/07-console-architecture.md) 7.9.16）：位置行显示身份、归属、接受公共来源与可靠性，位置抽屉可改，改动随草稿保存；学习提出的判断提议列在表上方，确认经对话框写入一个新版本，驳回让同一判断不再提议。请求详情显示会话身份和来源的档位，并把只由公共响应展示过的值标为“尝试越权”；就绪检查新增尝试越权的请求数。保存对象表不再丢失身份等新字段：同一位置两边都改动时逐项合并，学习任务写入的暂停保留。

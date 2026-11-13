@@ -1,7 +1,7 @@
 name: release
 
-# Cuts a release from GitHub Actions, without anyone pushing a tag by hand
-# (docs/19 19.7). Run it from the Actions tab (or `gh workflow run release.yml
+# Cuts a release from GitHub Actions, without anyone pushing a tag by hand.
+# Run it from the Actions tab (or `gh workflow run release.yml
 # -f version=0.1.0`); it needs write access to the repository, like any
 # workflow_dispatch.
 #
@@ -137,7 +137,7 @@ jobs:
             echo
             echo "## Images"
             echo
-            echo "Deploy by digest and verify each image first (docs/19 19.7):"
+            echo "Deploy by digest and verify each image first (.github/workflows/release-images.yml):"
             echo
             for target in edge control; do
               image="ghcr.io/${OWNER,,}/xshield-$target"

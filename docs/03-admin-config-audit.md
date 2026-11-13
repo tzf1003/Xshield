@@ -50,7 +50,7 @@ Jev 超时、调用限额、放行缓存时长、追加脱敏字段、同义词�
 
 ## 3.3 部署级环境变量
 
-v4 目标状态必需的环境变量只有这些（TLS 多证书、PROXY 协议、运维监听等 v3 部署项不再提供，见 [05.3](05-v3-removal.md#53-环境变量去留)）：
+v4 代码读取的环境变量只有这些（TLS 多证书、PROXY 协议、运维监听等 v3 部署项不再提供，见 [05.3](05-v3-removal.md#53-环境变量去留)）：
 
 | 变量 | 用途 |
 |---|---|
@@ -58,7 +58,8 @@ v4 目标状态必需的环境变量只有这些（TLS 多证书、PROXY 协议�
 | `XSHIELD_EDGE_LISTEN_PORTS` | 网关监听端口，逗号分隔，监听所有网卡 |
 | `XSHIELD_EDGE_TLS_CERT_PATH` / `XSHIELD_EDGE_TLS_KEY_PATH` | 可选：证书和私钥文件，两者同时设置时所有端口都走 TLS（只有一张证书；多域名证书请用前置负载均衡终结 TLS）。不设置则监听明文 |
 | `XSHIELD_EDGE_SITES_FILE` | 仅开发和测试：站点配置 JSON 数组文件。设置它且不设 `XSHIELD_DATABASE_URL` 时，网关不连数据库，判定日志以 JSON 行写到标准输出 |
-| `XSHIELD_CONTROL_LISTEN` | 控制台监听地址 |
+| `XSHIELD_CONTROL_LISTEN` | 控制台监听地址，默认 `127.0.0.1:8081` |
+| `XSHIELD_CONTROL_CONSOLE_ORIGIN` | 仅开发：控制台前端从另一个源（Vite 开发服务器）访问 API 时，允许这个源跨域带 Cookie 调用 |
 | `XSHIELD_CONTROL_PLAIN_HTTP` | 可选：控制台只经 `http://` 访问时设为 `true`。管理员 Cookie 改为不带 `__Host-` 前缀、不带 `Secure`，因为浏览器不保存 HTTP 下的 Secure Cookie。只用于网络本身已加密或可信的情况，例如经 Tailscale 访问 `http://主机名:端口`；其余情况保持默认 |
 | `XSHIELD_ADMIN_PASSWORD_HASH` | 管理员口令哈希（新增） |
 | `XSHIELD_CONTEXT_KEY_HEX` | 会话键和已见值哈希用的密钥（新增）。控制面也读它，用来加密控制台保存的模型密钥（3.3.1）；网关和控制面必须设成同一个值 |
@@ -78,7 +79,7 @@ Jev 判定模型和学习代理模型在控制台“系统”页的“模型”�
 - 控制面没有设置 `XSHIELD_CONTEXT_KEY_HEX` 时，模型页仍可查看和修改地址、模型名、超时，但不能保存密钥（503 `MODEL_KEY_UNAVAILABLE`）。
 - 学习代理模型只由控制台进程调用，不经网关。
 
-v3 代码目前读取 109 个 `XSHIELD_*` 变量，逐个的去留见 [05.3](05-v3-removal.md#53-环境变量去留)。
+v3 的 109 个 `XSHIELD_*` 变量逐个的去留见 [05.3](05-v3-removal.md#53-环境变量去留)。
 
 ## 3.4 判定日志
 
