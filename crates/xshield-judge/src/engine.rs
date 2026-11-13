@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -46,6 +47,9 @@ use crate::values::{
 pub const SESSION_CALLS_PER_MINUTE: u32 = 60;
 /// Jev calls allowed per client address per minute for requests without a session.
 pub const ADDRESS_CALLS_PER_MINUTE: u32 = 30;
+/// All the sessions created from one source address together may make this many times the
+/// per-session limit of Jev calls per minute (docs/02 section 2.5). A fixed value, not a setting.
+const ADDRESS_SESSIONS_FACTOR: u32 = 10;
 const WINDOW_MS: u64 = 60_000;
 const LIMITER_MAX: usize = 50_000;
 const RECENT_IN_STATE: usize = 10;
@@ -139,7 +143,7 @@ pub struct Observation<'a> {
     /// large, or a HEAD request.
     pub unread: Option<Skip>,
     /// The request was judged to be refused and was forwarded because the site
-    /// is in observe mode.
+    /// is in observe mode. Its response teaches nothing (docs/07 section 7.4.6).
     pub would_block: bool,
     /// Unix time in milliseconds.
     pub now_ms: u64,
@@ -155,24 +159,48 @@ struct Limiter {
 }
 
 impl Limiter {
+    /// Counts one call against the window of `key`, which allows `limit` calls a minute.
+    #[cfg(test)]
     fn allow(&mut self, key: Digest16, limit: u32, now_ms: u64) -> bool {
-        if self.windows.len() >= LIMITER_MAX && !self.windows.contains_key(&key) {
+        self.allow_all(&[(key, limit)], now_ms)
+    }
+
+    /// Counts one call against each of the windows `wanted` names (a key and its limit), but only
+    /// when none of them is full: a refused call counts against none, and creates no window. A
+    /// new key gets a window only while the map has room, so the map never passes its cap.
+    fn allow_all(&mut self, wanted: &[(Digest16, u32)], now_ms: u64) -> bool {
+        let new_keys = |windows: &HashMap<Digest16, (u64, u32)>| {
+            wanted
+                .iter()
+                .filter(|(key, _)| !windows.contains_key(key))
+                .count()
+        };
+        if self.windows.len() + new_keys(&self.windows) > LIMITER_MAX {
             self.windows
                 .retain(|_, (start, _)| now_ms.saturating_sub(*start) < WINDOW_MS);
             // Every window is still running: a new key gets no call, so the map
             // stays at its cap and is not scanned again for each known key.
-            if self.windows.len() >= LIMITER_MAX {
+            if self.windows.len() + new_keys(&self.windows) > LIMITER_MAX {
                 return false;
             }
         }
-        let entry = self.windows.entry(key).or_insert((now_ms, 0));
-        if now_ms.saturating_sub(entry.0) >= WINDOW_MS {
-            *entry = (now_ms, 0);
-        }
-        if entry.1 >= limit {
+        let room = wanted.iter().all(|(key, limit)| {
+            let used = match self.windows.get(key) {
+                Some((start, used)) if now_ms.saturating_sub(*start) < WINDOW_MS => *used,
+                _ => 0,
+            };
+            used < *limit
+        });
+        if !room {
             return false;
         }
-        entry.1 += 1;
+        for (key, _) in wanted {
+            let entry = self.windows.entry(*key).or_insert((now_ms, 0));
+            if now_ms.saturating_sub(entry.0) >= WINDOW_MS {
+                *entry = (now_ms, 0);
+            }
+            entry.1 += 1;
+        }
         true
     }
 }
@@ -276,6 +304,9 @@ struct Turn<'a> {
     session_id: Option<Digest16>,
     /// The context of the client address on this site, for a request without a credential.
     address: Digest16,
+    /// The source address group of the request, which a session it creates is recorded under
+    /// (see [`address_group`]).
+    origin: Digest16,
     /// What the request is judged against while its credential has no session.
     unconfirmed: &'a SessionContext,
     extracted: &'a ExtractedRequest,
@@ -480,15 +511,26 @@ impl<J: JevPort> Judge<J> {
     }
 
     /// The key a Jev call is counted against: the credential's while its session is live, and the
-    /// client address's otherwise. These budgets are shared by all sites (docs/02 section 2.5).
+    /// client address group's otherwise. These budgets are shared by all sites (docs/02 section
+    /// 2.5).
     fn budget_key(&self, request: &RequestFacts<'_>, session_live: bool) -> Digest16 {
         match request
             .credential
             .filter(|credential| session_live && !credential.is_empty())
         {
             Some(credential) => self.key.mac("session", credential.as_bytes()),
-            None => self.key.mac("address", request.client.as_bytes()),
+            None => self
+                .key
+                .mac("address", address_group(request.client).as_bytes()),
         }
+    }
+
+    /// The key of the address group of `client`: what a session records as the source that
+    /// created it, and what the calls of all the sessions of that source are counted under
+    /// (docs/02 section 2.5). A keyed hash, so no address is kept.
+    fn origin_key(&self, client: &str) -> Digest16 {
+        self.key
+            .mac("address-group", address_group(client).as_bytes())
     }
 
     /// Decides one request (docs/01 section 1.4 steps 1 to 7) and returns the
@@ -523,6 +565,7 @@ impl<J: JevPort> Judge<J> {
             .filter(|credential| !credential.is_empty())
             .map(|credential| self.session_key(site.name(), credential));
         let address = self.address_key(site.name(), request.client);
+        let origin = self.origin_key(request.client);
         // A credential that no session holds yet starts its session from the JSON login response
         // that issued it, when one is held (docs/01 section 1.7). Only an entry starts it: after a
         // login the first request lands on an entry. This runs before anything reads the session,
@@ -537,10 +580,10 @@ impl<J: JevPort> Judge<J> {
             let token = self
                 .key
                 .mac("value", credential_token(site, credential).as_bytes());
-            unbound = self
-                .lock()
-                .store
-                .start_from_login(site.name(), id, token, request.now_ms);
+            unbound =
+                self.lock()
+                    .store
+                    .start_from_login(site.name(), id, origin, token, request.now_ms);
         }
         let unconfirmed = SessionContext::unconfirmed(request.now_ms, unbound);
         let mut extracted = extract_request(
@@ -575,6 +618,7 @@ impl<J: JevPort> Judge<J> {
             entry: entry.is_some(),
             session_id,
             address,
+            origin,
             unconfirmed: &unconfirmed,
             extracted: &extracted,
             cache_key: &cache_key,
@@ -663,7 +707,9 @@ impl<J: JevPort> Judge<J> {
                 None => (turn.unconfirmed, self.budget_key(request, false)),
             },
             None => (
-                inner.store.session(turn.address, request.now_ms),
+                inner
+                    .store
+                    .session(turn.address, turn.origin, request.now_ms),
                 self.budget_key(request, false),
             ),
         };
@@ -1071,7 +1117,11 @@ impl<J: JevPort> Judge<J> {
         let mut inner = self.lock();
         let session = match turn.session_id {
             Some(id) => inner.store.existing(id, request.now_ms),
-            None => Some(inner.store.session(turn.address, request.now_ms)),
+            None => Some(
+                inner
+                    .store
+                    .session(turn.address, turn.origin, request.now_ms),
+            ),
         };
         if let Some(session) = session {
             session.cache_allow(
@@ -1097,12 +1147,26 @@ impl<J: JevPort> Judge<J> {
         // The session's budget is for a session the store holds; a credential without one
         // spends the budget of its address (`limit_key` is then the address).
         let session_id = session_id.filter(|id| inner.store.contains(id, request.now_ms));
-        let limit = if session_id.is_some() {
-            tuning.session_calls
-        } else {
-            tuning.address_calls
+        let origin = session_id.and_then(|id| inner.store.origin_of(&id, request.now_ms));
+        let allowed = match origin {
+            // A session's call also counts against all the sessions of the address that created
+            // it. Either budget being spent refuses the call and neither is charged, so a session
+            // that used up its own does not use up its neighbours' share of the address's.
+            Some(origin) => inner.limiter.allow_all(
+                &[
+                    (
+                        self.key.mac("address-sessions", &origin),
+                        tuning.session_calls.saturating_mul(ADDRESS_SESSIONS_FACTOR),
+                    ),
+                    (limit_key, tuning.session_calls),
+                ],
+                request.now_ms,
+            ),
+            None => inner
+                .limiter
+                .allow_all(&[(limit_key, tuning.address_calls)], request.now_ms),
         };
-        if !inner.limiter.allow(limit_key, limit, request.now_ms) {
+        if !allowed {
             return Err("JEV_CALL_LIMIT");
         }
         let Some(session) = session_id.and_then(|id| inner.store.existing(id, request.now_ms))
@@ -1170,7 +1234,10 @@ impl<J: JevPort> Judge<J> {
     ///
     /// Only 2xx responses teach values. A redirect that issues a credential (a
     /// login form answering `302` with `Set-Cookie`) creates the new session,
-    /// empty. A failed request teaches nothing.
+    /// empty. A failed request teaches nothing. Nor does a response to a request
+    /// the gateway would refuse (observe mode forwards it): its values are not
+    /// learned and nothing it declares is kept, as if the request had never
+    /// reached the origin (docs/07 section 7.4.6).
     // The steps for one response stay in one function, in the order they happen: learning, then
     // the identity and the exposure alert that read what was just learned.
     #[allow(clippy::too_many_lines)]
@@ -1195,6 +1262,7 @@ impl<J: JevPort> Judge<J> {
             return summary;
         }
         let success = (200..300).contains(&observation.status);
+        let origin = self.origin_key(observation.client);
         // The origin accepted a credential that has no session yet, on an entry: the session
         // starts here, with the reason no held login set it up (docs/01 section 1.7). The judge
         // starts a session only from the login that issued its credential.
@@ -1209,6 +1277,7 @@ impl<J: JevPort> Judge<J> {
             self.lock().store.start_session(
                 site.name(),
                 self.session_key(site.name(), credential),
+                origin,
                 token,
                 observation.now_ms,
             );
@@ -1222,6 +1291,26 @@ impl<J: JevPort> Judge<J> {
             summary.skip = Some(Skip::Status);
         }
         if !(success || issuing_redirect) {
+            return summary;
+        }
+        // A request the gateway would refuse teaches its response nothing (docs/07 section 7.4.6).
+        // The values it sent are still noted: a credential it issued inherits them, as before, so
+        // the session does not learn them back from an echo later.
+        if observation.would_block {
+            // A redirect that issues a credential is not a 2xx, so its status reason stays.
+            summary.skip = summary.skip.or(Some(Skip::WouldBlock));
+            if let Some(credential) = issued {
+                let mut inner = self.lock();
+                let session = inner.store.session(
+                    self.session_key(site.name(), credential),
+                    origin,
+                    observation.now_ms,
+                );
+                if let Some(record) = &inherited {
+                    session.inherit_sent(record);
+                }
+                session.note_sent(observation.sent);
+            }
             return summary;
         }
         let ResponseFacts {
@@ -1332,6 +1421,7 @@ impl<J: JevPort> Judge<J> {
                 .store
                 .session(
                     self.address_key(site.name(), observation.client),
+                    origin,
                     observation.now_ms,
                 )
                 .remember(&self.key, &source, &values);
@@ -1340,6 +1430,7 @@ impl<J: JevPort> Judge<J> {
         for credential in [seeded, issued].into_iter().flatten() {
             let session = inner.store.session(
                 self.session_key(site.name(), credential),
+                origin,
                 observation.now_ms,
             );
             if issued == Some(credential) {
@@ -1472,7 +1563,11 @@ impl<J: JevPort> Judge<J> {
         } else if !observation.sent.is_empty() {
             inner
                 .store
-                .session(request_context, observation.now_ms)
+                .session(
+                    request_context,
+                    self.origin_key(observation.client),
+                    observation.now_ms,
+                )
                 .note_sent(observation.sent);
         }
         inherited
@@ -1500,6 +1595,25 @@ impl<J: JevPort> Judge<J> {
     #[must_use]
     pub fn session_count(&self) -> usize {
         self.lock().store.len()
+    }
+}
+
+/// The group a client address belongs to, for the limits on what one source can do (docs/02
+/// section 2.5): an IPv4 address by itself, an IPv6 address by its first 64 bits (a /64 is one
+/// user or one site, and an attacker holds the whole of it), an IPv4-mapped IPv6 address as the
+/// IPv4 address it carries. Text that is not an address, an empty one included, is a group of its
+/// own as it stands.
+fn address_group(client: &str) -> Cow<'_, str> {
+    match client
+        .parse::<IpAddr>()
+        .map(|address| address.to_canonical())
+    {
+        Ok(IpAddr::V4(address)) => Cow::Owned(address.to_string()),
+        Ok(IpAddr::V6(address)) => {
+            let [first, second, third, fourth, ..] = address.segments();
+            Cow::Owned(format!("{first:x}:{second:x}:{third:x}:{fourth:x}::/64"))
+        }
+        Err(_) => Cow::Borrowed(client),
     }
 }
 
@@ -1982,6 +2096,9 @@ mod tests {
     /// What a call to the fake answers: the two choices, or a failure.
     type Reply = Result<(&'static str, &'static str), JevFailure>;
 
+    /// A rule that answers a call from its body, or returns None to leave that call to the other answers.
+    type Rule = fn(&str) -> Option<(&'static str, &'static str)>;
+
     #[derive(Clone)]
     struct FakeJev {
         calls: Arc<AtomicUsize>,
@@ -1990,6 +2107,8 @@ mod tests {
         reply: Arc<Mutex<Reply>>,
         /// Replies for the calls whose body contains a marker, looked up before `reply`.
         marked: Arc<Mutex<Vec<(&'static str, Reply)>>>,
+        /// Rules that answer the calls whose body they pick, looked up before `marked` and `reply`.
+        rules: Arc<Mutex<Vec<Rule>>>,
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
     }
@@ -2002,6 +2121,7 @@ mod tests {
                 timeouts: Arc::default(),
                 reply: Arc::new(Mutex::new(Ok(("ALLOW", "BENIGN")))),
                 marked: Arc::default(),
+                rules: Arc::default(),
                 in_flight: Arc::default(),
                 peak: Arc::default(),
             }
@@ -2014,6 +2134,10 @@ mod tests {
         }
         fn fail(&self, failure: JevFailure) {
             *self.reply.lock().unwrap() = Err(failure);
+        }
+        /// The calls whose body `rule` picks answer what the rule returns; it returns None for the others.
+        fn answer_by(&self, rule: Rule) {
+            self.rules.lock().unwrap().push(rule);
         }
         /// The calls whose body contains `marker` answer `access` and `attack`.
         fn answer_marked(&self, marker: &'static str, access: &'static str, attack: &'static str) {
@@ -2077,6 +2201,13 @@ mod tests {
             // The call waits here, so that calls made together are in flight together.
             tokio::task::yield_now().await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            let ruled: Option<Reply> = self
+                .rules
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|rule| rule(&text))
+                .map(Ok);
             let marked = self
                 .marked
                 .lock()
@@ -2084,7 +2215,7 @@ mod tests {
                 .iter()
                 .find(|(marker, _)| text.contains(marker))
                 .map(|(_, reply)| reply.clone());
-            let reply = match marked {
+            let reply = match ruled.or(marked) {
                 Some(reply) => reply,
                 None => self.reply.lock().unwrap().clone(),
             };
@@ -2135,11 +2266,23 @@ mod tests {
     /// The origin answers a request of `credential` with nothing to learn, which is what gives the
     /// credential a session: until then it is judged against an empty view, on its address's budget.
     fn confirm(judge: &Judge<FakeJev>, site: &SiteSpec, credential: &str) {
+        confirm_from(judge, site, credential, "10.0.0.1");
+    }
+
+    /// As [`confirm`], for a response to a request from `client`: the session is created from
+    /// that address.
+    fn confirm_from<'a>(
+        judge: &Judge<FakeJev>,
+        site: &SiteSpec,
+        credential: &'a str,
+        client: &'a str,
+    ) {
         judge.observe(
             site,
             &Observation {
                 path: "/api/ping",
                 body: b"{}",
+                client,
                 ..list_response(credential, 0)
             },
         );
@@ -3412,6 +3555,264 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_response_to_a_request_that_would_be_refused_teaches_nothing() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        let refused = judge
+            .judge(&site, &get("/api/patients/D4411", None, Some("alice"), 0))
+            .await;
+        assert!(refused.forward);
+        assert_eq!(refused.record.outcome, Outcome::WouldBlock);
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                sent: &refused.sent,
+                echo: &refused.echo,
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert_eq!(observed.new_values, 0);
+        assert_eq!(observed.skip, Some(Skip::WouldBlock));
+        assert!(observed.after_would_block);
+        let later = judge
+            .judge(&site, &get("/api/patients/7", None, Some("alice"), 2_000))
+            .await;
+        assert_ne!(later.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn the_same_response_is_learned_when_the_request_would_not_be_refused() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        let refused = judge
+            .judge(&site, &get("/api/patients/D4411", None, Some("alice"), 0))
+            .await;
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                sent: &refused.sent,
+                echo: &refused.echo,
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert!(observed.new_values > 0);
+        assert_eq!(observed.skip, None);
+        assert!(!observed.after_would_block);
+        let later = judge
+            .judge(&site, &get("/api/patients/7", None, Some("alice"), 2_000))
+            .await;
+        assert_eq!(later.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn a_refused_login_that_issues_a_credential_gives_its_session_nothing_seen() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        let login = RequestFacts {
+            route: None,
+            request_headers: &[],
+            method: "POST",
+            path: "/login",
+            content_type: Some("application/json"),
+            body: br#"{"username":"alice","password":"hunter2"}"#,
+            ..get("/login", None, None, 1_000)
+        };
+        let judged = judge.judge(&site, &login).await;
+        assert!(judged.forward);
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                route: None,
+                request_id: RID,
+                unread: None,
+                would_block: true,
+                credential: None,
+                client: "10.0.0.1",
+                issued_credential: Some("fresh"),
+                method: "POST",
+                path: "/login",
+                status: 200,
+                content_type: Some("application/json"),
+                body: br#"{"userId":"P-0000099","token":"t"}"#,
+                now_ms: 1_001,
+                sent: &judged.sent,
+                echo: &judged.echo,
+            },
+        );
+        assert_eq!(observed.skip, Some(Skip::WouldBlock));
+        assert!(observed.issued_session.is_some());
+        assert_eq!(observed.new_values, 0);
+        assert!(!observed.entry_passed);
+        // The new session has seen nothing, so the id the response showed goes to Jev.
+        let calls = fake.calls();
+        let object = judge
+            .judge(
+                &site,
+                &get("/api/patients/P-0000099", None, Some("fresh"), 2_000),
+            )
+            .await;
+        assert_ne!(object.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), calls + 1);
+    }
+
+    #[tokio::test]
+    async fn a_refused_anonymous_entry_response_is_not_learned_by_its_address() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        // A sign-up page: no credential yet, the origin shows the new id.
+        let sign_up = |client| RequestFacts {
+            route: None,
+            request_headers: &[],
+            client,
+            ..get("/api/patients", Some("id=7"), None, 5_000)
+        };
+        let blind = judge.judge(&site, &sign_up("10.0.0.9")).await;
+        assert_eq!(blind.record.outcome, Outcome::WouldBlock);
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                credential: None,
+                client: "10.0.0.9",
+                ..list_response("unused", 1_000)
+            },
+        );
+        assert_eq!(observed.new_values, 0);
+        assert_eq!(observed.skip, Some(Skip::WouldBlock));
+        let shown = judge.judge(&site, &sign_up("10.0.0.9")).await;
+        assert_ne!(shown.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn a_refused_json_login_is_not_held_and_its_token_learns_nothing() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"observe","advanced":{"field_kinds":[{"field":"bid","kind":"basket"}]}"#,
+        );
+        let body = login_body(LOGIN_TOKEN, 6);
+        let login = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                ..json_login(body.as_bytes(), "10.0.0.1", 0)
+            },
+        );
+        assert_eq!(login.pending_values, None);
+        assert_eq!(login.skip, Some(Skip::WouldBlock));
+        assert_eq!(login.new_values, 0);
+        // The token's session was not set up from the values of the refused login.
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 1))
+            .await;
+        assert!(
+            entry
+                .record
+                .trace
+                .session
+                .as_ref()
+                .is_none_or(|session| session.login_request_id.is_none())
+        );
+        let own = judge
+            .judge(&site, &get("/rest/basket/6", None, Some(LOGIN_TOKEN), 2))
+            .await;
+        assert_ne!(own.record.decision_path, DecisionPath::FastAllow);
+        // The address context learned nothing from it either.
+        let anon = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    client: "10.0.0.1",
+                    ..get("/api/patients", Some("id=6"), None, 3)
+                },
+            )
+            .await;
+        assert_ne!(anon.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn a_refused_response_leaves_no_trace_in_a_live_session() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        confirm(&judge, &site, "alice");
+        let refused = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                path: "/api/home",
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert!(!refused.entry_passed);
+        assert_eq!(refused.new_values, 0);
+        assert_eq!(refused.values, 0);
+        assert!(refused.fingerprints.is_empty());
+        assert!(refused.shape.is_none());
+        assert!(refused.exposure.is_none());
+        // The same response, not refused, passes the entry for the first time: the refused one kept
+        // nothing.
+        let learned = judge.observe(
+            &site,
+            &Observation {
+                path: "/api/home",
+                ..list_response("alice", 2_000)
+            },
+        );
+        assert!(learned.entry_passed);
+        assert!(learned.new_values > 0);
+    }
+
+    #[tokio::test]
+    async fn a_refused_redirect_and_bypass_keep_their_skip_reasons() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        let redirect = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                credential: None,
+                issued_credential: Some("fresh"),
+                status: 302,
+                path: "/login",
+                ..list_response("x", 1_000)
+            },
+        );
+        assert_eq!(redirect.skip, Some(Skip::Status));
+        assert!(redirect.issued_session.is_some());
+        let bypass = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                path: "/static/app.js",
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert_eq!(bypass.skip, Some(Skip::Bypass));
+        let failed = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                status: 500,
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert_eq!(failed.skip, Some(Skip::Status));
+    }
+
+    #[tokio::test]
     async fn c4_secrets_never_reach_jev() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
@@ -4204,6 +4605,36 @@ mod tests {
             let prompt: serde_json::Value = serde_json::from_str(body).expect("the prompt is JSON");
             assert_eq!(prompt["state"]["request"]["truncated"], json!(false));
         }
+    }
+
+    #[tokio::test]
+    async fn a_base64_field_sends_its_decoded_injection_and_the_request_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The note is base64 for `' OR 1=1--`. The origin decodes it, so the decoded text is judged too.
+        let body = "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nJyBPUiAxPTEtLQ==\r\n--b--\r\n";
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("multipart/form-data; boundary=b"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert!(fake.sent().iter().any(|body| {
+            sent_values(body)
+                .iter()
+                .any(|item| item["at"] == "body.note" && item["value"] == "' OR 1=1--")
+        }));
     }
 
     #[tokio::test]
@@ -7033,6 +7464,275 @@ mod tests {
         assert_eq!(fake.calls(), 0);
     }
 
+    /// A request of `credential` that Jev has to decide: its query value is new to every session.
+    async fn ask(
+        judge: &Judge<FakeJev>,
+        site: &SiteSpec,
+        credential: &str,
+        tag: &str,
+        now_ms: u64,
+    ) -> Judgement {
+        let query = format!("q={tag}x");
+        judge
+            .judge(
+                site,
+                &get("/api/search", Some(&query), Some(credential), now_ms),
+            )
+            .await
+    }
+
+    /// Asserts that the call was refused for the spent call limit and made no Jev call.
+    fn assert_call_limited(verdict: &Judgement) {
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 429);
+        assert_eq!(
+            verdict.record.trace.refused.as_deref(),
+            Some("rate_limited")
+        );
+        assert_eq!(
+            verdict.record.jev.as_ref().unwrap().failure.as_deref(),
+            Some("JEV_CALL_LIMIT")
+        );
+    }
+
+    #[test]
+    fn a_client_address_is_grouped_by_its_source() {
+        let group = |client: &str| address_group(client).into_owned();
+        // An IPv4 address is a group of its own.
+        assert_eq!(group("203.0.113.7"), "203.0.113.7");
+        assert_ne!(group("203.0.113.7"), group("203.0.113.8"));
+        // An IPv6 address is grouped by its first 64 bits, however it is written.
+        assert_eq!(
+            group("2001:db8:1:2:aaaa::1"),
+            group("2001:db8:1:2:bbbb:cccc:dddd:eeee")
+        );
+        assert_eq!(group("2001:0db8:0001:0002::1"), group("2001:db8:1:2::1"));
+        assert_ne!(group("2001:db8:1:2::1"), group("2001:db8:1:3::1"));
+        assert_ne!(group("2001:db8:1:2::1"), group("2001:db9:1:2::1"));
+        // An IPv4-mapped IPv6 address is the IPv4 address it carries.
+        assert_eq!(group("::ffff:203.0.113.7"), group("203.0.113.7"));
+        assert_eq!(group("::FFFF:203.0.113.7"), group("203.0.113.7"));
+        // What is not an address is a group of its own as it stands, and nothing panics.
+        for text in [
+            "",
+            "unknown",
+            "2001:db8::zz",
+            "203.0.113",
+            "999.1.1.1",
+            "203.0.113.7:8080",
+            "[2001:db8::1]",
+            "fe80::1%eth0",
+            "\0",
+            &"9".repeat(10_000),
+        ] {
+            assert_eq!(group(text), text);
+        }
+    }
+
+    #[tokio::test]
+    async fn addresses_in_one_64_share_the_budget_of_requests_without_a_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce","advanced":{"address_calls_per_minute":1}"#);
+        let from = |client: &'static str, query: &'static str| RequestFacts {
+            client,
+            ..get("/login", Some(query), None, 1_000)
+        };
+        assert!(
+            judge
+                .judge(&site, &from("2001:db8:1:2::1", "user=zed1x"))
+                .await
+                .forward
+        );
+        // Another address of the same /64 spends the same budget.
+        assert_call_limited(
+            &judge
+                .judge(&site, &from("2001:db8:1:2:f::2", "user=zed2x"))
+                .await,
+        );
+        // Another /64, and an IPv4 address, have their own.
+        assert!(
+            judge
+                .judge(&site, &from("2001:db8:1:3::1", "user=zed3x"))
+                .await
+                .forward
+        );
+        assert!(
+            judge
+                .judge(&site, &from("10.0.0.5", "user=zed4x"))
+                .await
+                .forward
+        );
+        assert_eq!(fake.calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn the_sessions_of_one_address_share_ten_times_the_session_limit() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        // Each session may call twice a minute, so the sessions of one address may call twenty
+        // times together.
+        let site = site(r#","mode":"enforce","advanced":{"session_calls_per_minute":2}"#);
+        // The sessions were created from 10.0.0.1 and their requests come from 10.0.0.9: the
+        // total follows the address that created them.
+        for index in 0..11 {
+            confirm_from(&judge, &site, &format!("forged-{index}"), "10.0.0.1");
+        }
+        confirm_from(&judge, &site, "neighbour", "10.0.0.2");
+        for index in 0..10 {
+            for call in 0..2 {
+                let credential = format!("forged-{index}");
+                let tag = format!("s{index}c{call}");
+                assert!(ask(&judge, &site, &credential, &tag, 1_000).await.forward);
+            }
+        }
+        assert_eq!(fake.calls(), 20);
+        // The eleventh session has not used its own two calls, and is refused all the same.
+        assert_call_limited(&ask(&judge, &site, "forged-10", "s10c0", 2_000).await);
+        assert_eq!(fake.calls(), 20, "no Jev call was made for it");
+        // A session of another address is not affected.
+        assert!(ask(&judge, &site, "neighbour", "n0", 2_000).await.forward);
+        assert_eq!(fake.calls(), 21);
+        // The minute runs out and the address's budget starts again.
+        assert!(
+            ask(&judge, &site, "forged-10", "s10c1", 62_000)
+                .await
+                .forward
+        );
+        assert_eq!(fake.calls(), 22);
+    }
+
+    #[tokio::test]
+    async fn a_session_over_its_own_limit_does_not_use_up_its_addresses_total() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce","advanced":{"session_calls_per_minute":2}"#);
+        for index in 0..11 {
+            confirm_from(&judge, &site, &format!("forged-{index}"), "10.0.0.1");
+        }
+        for call in 0..2 {
+            assert!(
+                ask(&judge, &site, "forged-0", &format!("a{call}"), 1_000)
+                    .await
+                    .forward
+            );
+        }
+        // The first session goes on asking: each of these is refused by its own limit.
+        for call in 2..7 {
+            assert_call_limited(&ask(&judge, &site, "forged-0", &format!("a{call}"), 1_500).await);
+        }
+        // So the nine others can still make their two calls each, which is all that is left of
+        // twenty, and the eleventh session finds the total spent.
+        for index in 1..10 {
+            for call in 0..2 {
+                let credential = format!("forged-{index}");
+                let tag = format!("s{index}c{call}");
+                assert!(ask(&judge, &site, &credential, &tag, 2_000).await.forward);
+            }
+        }
+        assert_eq!(fake.calls(), 20);
+        assert_call_limited(&ask(&judge, &site, "forged-10", "s10c0", 3_000).await);
+        assert_eq!(fake.calls(), 20);
+    }
+
+    #[tokio::test]
+    async fn the_budget_of_an_address_without_a_session_and_the_total_of_its_sessions_are_apart() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"enforce","advanced":{"session_calls_per_minute":2,"address_calls_per_minute":3}"#,
+        );
+        let login = |client: &'static str, index: usize, now_ms: u64| {
+            let query = format!("user=zed{index}x");
+            let judge = &judge;
+            let site = &site;
+            async move {
+                judge
+                    .judge(
+                        site,
+                        &RequestFacts {
+                            client,
+                            ..get("/login", Some(&query), None, now_ms)
+                        },
+                    )
+                    .await
+            }
+        };
+        // 10.0.0.1: the sessions spend the whole total of twenty, and requests without a session
+        // still have their three calls.
+        for index in 0..10 {
+            confirm_from(&judge, &site, &format!("forged-{index}"), "10.0.0.1");
+        }
+        for index in 0..10 {
+            for call in 0..2 {
+                let credential = format!("forged-{index}");
+                let tag = format!("s{index}c{call}");
+                assert!(ask(&judge, &site, &credential, &tag, 1_000).await.forward);
+            }
+        }
+        for index in 0..3 {
+            assert!(login("10.0.0.1", index, 1_000).await.forward);
+        }
+        assert_call_limited(&login("10.0.0.1", 3, 1_000).await);
+        // 10.0.0.3: requests without a session spend their three calls, and its sessions still
+        // have the whole total.
+        for index in 10..13 {
+            assert!(login("10.0.0.3", index, 1_000).await.forward);
+        }
+        assert_call_limited(&login("10.0.0.3", 13, 1_000).await);
+        confirm_from(&judge, &site, "late", "10.0.0.3");
+        for call in 0..2 {
+            assert!(
+                ask(&judge, &site, "late", &format!("l{call}"), 1_000)
+                    .await
+                    .forward
+            );
+        }
+        assert_call_limited(&ask(&judge, &site, "late", "l2", 1_000).await);
+    }
+
+    #[tokio::test]
+    async fn forged_credentials_that_a_public_page_answers_start_sessions_of_their_address() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce","advanced":{"session_calls_per_minute":2}"#);
+        // The origin answers `GET /login` with 200 whatever the credential: the sessions start,
+        // as they have always done, without a Jev call.
+        for index in 0..11 {
+            let credential = format!("forged-{index}");
+            let request = RequestFacts {
+                client: "10.0.0.1",
+                ..get("/login", None, Some(&credential), 1_000)
+            };
+            let verdict = judge.judge(&site, &request).await;
+            assert!(verdict.forward);
+            judge.observe(
+                &site,
+                &Observation {
+                    path: "/login",
+                    status: 200,
+                    content_type: Some("text/html"),
+                    body: b"<html></html>",
+                    now_ms: 1_001,
+                    ..list_response(&credential, 0)
+                },
+            );
+        }
+        assert_eq!(fake.calls(), 0);
+        assert_eq!(judge.session_count(), 11);
+        // They are all recorded as made from that one address, so the calls they make together
+        // stop at twenty.
+        for index in 0..10 {
+            for call in 0..2 {
+                let credential = format!("forged-{index}");
+                let tag = format!("s{index}c{call}");
+                assert!(ask(&judge, &site, &credential, &tag, 2_000).await.forward);
+            }
+        }
+        assert_call_limited(&ask(&judge, &site, "forged-10", "s10c0", 2_000).await);
+        assert_eq!(fake.calls(), 20);
+    }
+
     /// The objects of a site: its classes and slots (the home page names the role, the patient path is
     /// an object), then `tail`, which is empty or a comma and the members that follow the slots.
     fn objects_with(tail: &str) -> String {
@@ -7190,6 +7890,81 @@ mod tests {
                 index + 1
             );
         }
+    }
+
+    /// The scripted model of the lab (tests/security-lab/fake_jev.py, plan 3.5): a batch whose values
+    /// carry no verified id at the path position is denied, since the id has no evidence in it.
+    fn id_unshown_in_a_batch(body: &str) -> Option<(&'static str, &'static str)> {
+        let document: serde_json::Value = serde_json::from_str(body).ok()?;
+        let carried = document["state"]["request"]["values"]
+            .as_array()?
+            .iter()
+            .any(|value| value["at"] == "path[2]" && value["verified"] == true);
+        (!carried).then_some(("DENY", "BENIGN"))
+    }
+
+    /// A note of 24 fields of 420 characters and one of 1,500 (docs/02 section 2.4), as a JSON object:
+    /// its state is cut into two batches or more.
+    fn long_note() -> String {
+        let fields: Vec<String> = (0..24)
+            .map(|index| format!(r#""field{index:02}":"{}""#, "正常的文字".repeat(84)))
+            .collect();
+        format!(
+            r#"{{{},"remark":"{}"}}"#,
+            fields.join(","),
+            "正常的文字".repeat(300)
+        )
+    }
+
+    #[tokio::test]
+    async fn every_batch_of_a_note_on_an_id_route_carries_the_verified_id() {
+        // The public search showed patient 7005 to the session, and a note takes that sighting. The note
+        // is cut into batches (docs/02 section 2.4) and each one names the id in its path, so each one
+        // must carry the id with its verification, not only the first.
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        fake.answer_by(id_unshown_in_a_batch);
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let body = long_note();
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get("/api/patients/7005/notes", None, Some("alice"), 1_000)
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(verdict.forward, "{:?}", verdict.record.decision_path);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        let batches = verdict
+            .record
+            .jev
+            .as_ref()
+            .and_then(|jev| jev.batches)
+            .unwrap_or(0);
+        assert!(batches >= 2, "{batches} batches");
+        assert_eq!(fake.calls(), usize::from(batches));
+    }
+
+    #[tokio::test]
+    async fn the_same_note_on_a_patient_the_session_was_never_shown_is_refused() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        fake.answer_by(id_unshown_in_a_batch);
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let body = long_note();
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get("/api/patients/7006/notes", None, Some("alice"), 1_000)
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
     }
 
     #[tokio::test]
@@ -8199,5 +8974,46 @@ mod tests {
             assert!(left["trace"].get("function").is_none());
             assert!(right["trace"].get("function").is_none());
         }
+    }
+
+    #[test]
+    fn a_session_that_a_refused_response_issues_records_the_address_that_created_it() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        // The response observe mode would refuse issues a credential: the session it creates
+        // takes no value from the response, but is recorded under the address it was made from.
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                route: None,
+                request_id: RID,
+                unread: None,
+                would_block: true,
+                credential: None,
+                client: "2001:db8:1:2::9",
+                issued_credential: Some("fresh"),
+                method: "POST",
+                path: "/login",
+                status: 200,
+                content_type: Some("application/json"),
+                body: b"{}",
+                now_ms: 1_001,
+                sent: &[],
+                echo: &[],
+            },
+        );
+        assert_eq!(observed.skip, Some(Skip::WouldBlock));
+        let id = judge.session_key(site.name(), "fresh");
+        let inner = judge.lock();
+        // Any address of the same /64 is the same origin; another /64 is not.
+        assert_eq!(
+            inner.store.origin_of(&id, 1_001),
+            Some(judge.origin_key("2001:db8:1:2:f::1"))
+        );
+        assert_ne!(
+            inner.store.origin_of(&id, 1_001),
+            Some(judge.origin_key("2001:db8:1:3::9"))
+        );
     }
 }
