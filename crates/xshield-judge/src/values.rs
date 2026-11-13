@@ -77,6 +77,10 @@ pub struct ExtractedRequest {
     /// multipart part carries a file whose content is not extracted, or a part could not be read
     /// into its parts. The values then do not cover every byte the origin may echo.
     pub truncated: bool,
+    /// The body, or a part of it, was read as one text, or as JSON under a type that is not JSON, and its
+    /// bytes hold `_method` once percent-decoded: the request may name a method this reader did not read
+    /// (docs/07 section 7.9.18).
+    pub method_field_unread: bool,
 }
 
 /// What a successful response teaches: its scalars with their positions, and
@@ -342,15 +346,18 @@ pub fn extract_request(
         return out;
     }
     let kind = content_type.map(media_kind).unwrap_or_default();
-    // A body whose text starts like a JSON object or array, and parses as one, is read as JSON
-    // whatever its type. It is also read as its type says, so one body can be both (docs/01 section
-    // 1.3).
+    // A body whose text starts like a JSON object or array, and parses as one, is read as JSON whatever
+    // its type. It is also read as its type says, so one body can be both (docs/01 section 1.3).
     let text = body.trim_ascii();
     let json = matches!(text.first(), Some(b'{' | b'[')) && walk_json(&mut out, text, "body", None);
+    // JSON read under a type that is not JSON: the origin may read the same bytes as its own type
+    // says, so they are checked for `_method` (docs/07 section 7.9.18).
+    let json_only = json && !is_json_media(&kind);
     let lossy = String::from_utf8_lossy(body);
     if kind == "application/x-www-form-urlencoded" {
         // A form-typed body is read as its fields, every one of them.
         pairs(&mut out, "body", &lossy);
+        out.method_field_unread = unread_method(&out, body, json_only);
         return out;
     }
     if kind.is_empty() {
@@ -365,12 +372,15 @@ pub fn extract_request(
         } else {
             loose_pairs(&mut out, &lossy);
         }
-        if !json && !form {
+        let text_read = !json && !form;
+        if text_read {
             whole_body(&mut out, body);
         }
+        out.method_field_unread = unread_method(&out, body, text_read || json_only);
         return out;
     }
     if json {
+        out.method_field_unread = unread_method(&out, body, json_only);
         return out;
     }
     // The body is read as its media type says (docs/01 section 1.3). A body that does not read as
@@ -383,10 +393,39 @@ pub fn extract_request(
         kind if is_json_media(kind) => walk_json(&mut out, body, "body", None),
         _ => false,
     };
+    // A body of a type this reader does not read as data (`text/plain`, ...) is one text.
     if !read {
         whole_body(&mut out, body);
     }
+    // A multipart part without a field name is read as one text as well. The origin may read a `_method`
+    // in one of those bytes as a field, so such a part is flagged when its bytes name `_method`
+    // (docs/07 section 7.9.18).
+    let unnamed_part = kind.starts_with("multipart/")
+        && out
+            .values
+            .iter()
+            .any(|value| value.at == "body" && value.key.is_none());
+    out.method_field_unread =
+        (unnamed_part && names_method_field(body)) || unread_method(&out, body, !read);
     out
+}
+
+/// Whether a body's bytes name `_method` once they are percent-decoded, one time: a field name may spell
+/// any of its letters as `%XX`, and the origin decodes it. The decoding is not repeated, so `%255Fmethod`
+/// does not name it (docs/07 section 7.9.18).
+fn names_method_field(body: &[u8]) -> bool {
+    percent_decode(&String::from_utf8_lossy(body), false).contains("_method")
+}
+
+/// Whether a body read as text (or as JSON under a type that is not JSON) names `_method` in its bytes
+/// and the reader did not read a `_method` as a named field: the origin may then read it as a field, which
+/// the table judges by the method it names only when the reader read it (docs/07 section 7.9.18).
+fn unread_method(out: &ExtractedRequest, body: &[u8], as_text: bool) -> bool {
+    let named = out
+        .values
+        .iter()
+        .any(|value| value.at.starts_with("body.") && value.key.as_deref() == Some("_method"));
+    as_text && !named && names_method_field(body)
 }
 
 /// A body read as one text: its bytes decoded leniently, as one value at `body` with no key. The
@@ -2282,6 +2321,196 @@ mod tests {
             b"a=1&b=%3Cx%3E",
         );
         assert!(values(&request).contains(&("body.b", "<x>", false)));
+    }
+
+    #[test]
+    fn a_body_read_as_one_text_that_names_a_method_field_is_flagged() {
+        // A body read as one text (no type and not the shape of a form: a `;` may split its fields at
+        // the origin too), a part without a field name, and a type the reader does not read as data: the
+        // origin may read a `_method` in those bytes, so they are flagged.
+        let semicolon: &[u8] = b"note=x;_method=DELETE";
+        assert!(extract_request("/api/users/5", None, None, semicolon).method_field_unread);
+        // A letter of the name spelled as `%XX` is decoded by the origin, so the name is `_method`. The
+        // decoding is made once: a doubly encoded underscore is not.
+        let spelled: &[u8] = b"note=x;%5Fm%65thod=DELETE";
+        assert!(extract_request("/api/users/5", None, None, spelled).method_field_unread);
+        let doubled: &[u8] = b"note=x;%255Fmethod=DELETE";
+        assert!(!extract_request("/api/users/5", None, None, doubled).method_field_unread);
+        let encoded: &[u8] = b"%5Fmethod=DELETE";
+        assert!(
+            extract_request("/api/users/5", None, Some("text/plain"), encoded).method_field_unread
+        );
+        let plain_text: &[u8] = b"a=1&_method=DELETE";
+        assert!(
+            extract_request("/api/users/5", None, Some("text/plain"), plain_text)
+                .method_field_unread
+        );
+        let mixed: &[u8] = b"--b\r\nContent-Type: text/plain\r\n\r\n_method=DELETE\r\n--b--\r\n";
+        assert!(
+            extract_request(
+                "/api/users/5",
+                None,
+                Some("multipart/mixed; boundary=b"),
+                mixed
+            )
+            .method_field_unread
+        );
+        let unnamed: &[u8] =
+            b"--b\r\nContent-Disposition: form-data\r\n\r\n_method=DELETE\r\n--b--\r\n";
+        assert!(
+            extract_request(
+                "/api/users/5",
+                None,
+                Some("multipart/form-data; boundary=b"),
+                unnamed
+            )
+            .method_field_unread
+        );
+        // Without `_method` in its bytes, the same text is not flagged.
+        let plain: &[u8] = b"a=1;b=2";
+        assert!(!extract_request("/api/users/5", None, None, plain).method_field_unread);
+    }
+
+    #[test]
+    fn a_method_field_read_as_a_named_field_is_not_flagged() {
+        // A `_method` the reader reads as a named field is judged by the method it names, not by the table:
+        // an untyped body with a raw space, an empty segment or a trailing `&` is read by its fields, and so
+        // are an escaped name and an RFC 2231 name in a multipart part.
+        for body in [
+            &b"note=hello world&_method=DELETE"[..],
+            &b"a=1&&_method=DELETE"[..],
+            &b"_method=DELETE&"[..],
+            &b"note=hello world&%5Fm%65thod=DELETE"[..],
+        ] {
+            let read = extract_request("/api/users/5", None, None, body);
+            assert!(
+                !read.method_field_unread,
+                "{:?}",
+                String::from_utf8_lossy(body)
+            );
+            assert!(
+                read.values
+                    .iter()
+                    .any(|value| value.at == "body._method" && value.value == "DELETE")
+            );
+        }
+        let star: &[u8] =
+            b"--b\r\nContent-Disposition: form-data; name*=utf-8''_method\r\n\r\nDELETE\r\n--b--\r\n";
+        let read = extract_request(
+            "/api/users/5",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            star,
+        );
+        assert!(!read.method_field_unread);
+        assert!(
+            read.values
+                .iter()
+                .any(|value| value.at == "body._method" && value.value == "DELETE")
+        );
+    }
+
+    #[test]
+    fn a_json_looking_body_of_a_type_that_is_not_json_names_a_method_field() {
+        // A body that parses as JSON is read as JSON whatever its type, and the origin may read the same
+        // bytes as a form. A form-typed or untyped body that names `_method` there is read as its field, so
+        // it is judged by the method it names. A text type keeps only the JSON reading, so it is flagged.
+        let form = extract_request(
+            "/api/users/5",
+            None,
+            Some("application/x-www-form-urlencoded"),
+            br#"{"a":"&_method=DELETE&b="}"#,
+        );
+        assert!(!form.method_field_unread);
+        assert!(
+            form.values
+                .iter()
+                .any(|value| value.at == "body._method" && value.value == "DELETE")
+        );
+        // A form-typed body that parses as JSON, whose form reading does not name `_method` (the `;` keeps it
+        // inside a value), still holds `_method` in its bytes: it is flagged, and nothing is read as a field.
+        let form_semicolon = extract_request(
+            "/api/users/5",
+            None,
+            Some("application/x-www-form-urlencoded"),
+            br#"{"a":"x;_method=DELETE"}"#,
+        );
+        assert!(form_semicolon.method_field_unread);
+        assert!(
+            !form_semicolon
+                .values
+                .iter()
+                .any(|value| value.at == "body._method")
+        );
+        let untyped = extract_request(
+            "/api/users/5",
+            None,
+            None,
+            br#"{"a=":"&_method=DELETE&b="}"#,
+        );
+        assert!(!untyped.method_field_unread);
+        assert!(
+            untyped
+                .values
+                .iter()
+                .any(|value| value.at == "body._method" && value.value == "DELETE")
+        );
+        let spaced = extract_request(
+            "/api/users/5",
+            None,
+            None,
+            br#"{"a": "x y&_method=DELETE&b="}"#,
+        );
+        assert!(!spaced.method_field_unread);
+        assert!(
+            spaced
+                .values
+                .iter()
+                .any(|value| value.at == "body._method" && value.value == "DELETE")
+        );
+        let text = extract_request(
+            "/api/users/5",
+            None,
+            Some("text/plain"),
+            br#"{"a":"&_method=DELETE&b="}"#,
+        );
+        assert!(text.method_field_unread);
+        // Under a JSON type the origin reads the same JSON, so nothing is flagged.
+        let json = extract_request(
+            "/",
+            None,
+            Some("application/json"),
+            br#"{"note":"about _method"}"#,
+        );
+        assert!(!json.method_field_unread);
+    }
+
+    #[test]
+    fn a_method_field_read_from_a_body_read_as_fields_is_not_flagged() {
+        // A body with no type that is the shape of a form is read as its fields: its `_method` is a value,
+        // and a field the reader read is judged by the method it names, not by the function table's.
+        let form = extract_request("/api/users/5", None, None, b"_method=PUT&a=1");
+        assert!(!form.method_field_unread);
+        assert!(
+            form.values
+                .iter()
+                .any(|value| value.at == "body._method" && value.value == "PUT")
+        );
+        // A named part of a multipart type other than form-data is read by its parts, so it is not flagged.
+        let mixed: &[u8] =
+            b"--b\r\nContent-Disposition: form-data; name=\"_method\"\r\n\r\nPUT\r\n--b--\r\n";
+        let read = extract_request(
+            "/api/users/5",
+            None,
+            Some("multipart/mixed; boundary=b"),
+            mixed,
+        );
+        assert!(!read.method_field_unread);
+        assert!(
+            read.values
+                .iter()
+                .any(|value| value.at == "body._method" && value.value == "PUT")
+        );
     }
 
     #[test]

@@ -149,6 +149,14 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | F13 | 观察模式的功能表站点：医生 `POST /api/admin/export`、`GET /metrics` | 都转发（源站收到），记为本应拦截 |
 | F14 | 基线站点（开关为真，功能表有 `GET /api/patients/{id}`）的医生 `GET /api/patients/export-all`（路由词，不被 `{id}` 覆盖） | 交 Jev：`function.known` 为 `false`，Jev 判 DENY（假 Jev 的 `export-all` 规则），拦截，源站没收到；有效性回归 `p0-3-function-route-word` 的同一请求 |
 | F15 | 基线站点（有角色身份位置，开关为真）的管理员 `admin_root` 登录、访问首页后 `GET /metrics` | 放行（源站答 404），不交 Jev，判定记录没有 `trace.function`：管理员会话不判未知功能 |
+| F16 | 医生 `POST` 自己新建的患者，查询串排在 200 个值之后（第 231 个）是 `_method=DELETE` | 拦截，判定记录的 `trace.function.attempt` 为 `over_privilege`，源站不收到请求 |
+| F17 | 医生 `POST` 自己新建的患者，`multipart/form-data` 的文本字段 `_method` 为 `DELETE` | 同 F16 |
+| F18 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，网关按字段读到 `_method`） | 同 F16 |
+| F19 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x&_method=DELETE`（像表单，网关按字段读） | 同 F16 |
+| F20 | 医生 `POST` 自己新建的患者，表单类型，请求体 `{"a":"&_method=DELETE&b="}`（能解析成 JSON，网关按 JSON 读，源站可能按表单读到 `_method`） | 同 F16 |
+| F21 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x;%5Fm%65thod=DELETE`（带分号，按文字读，`_method` 的一个字母做了百分号编码，解码一遍后是 `_method`） | 同 F16 |
+| F22 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x;_method=DELETE`（带分号，不像表单，网关按文字读） | 同 F16 |
+| F23 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&%5Fm%65thod=DELETE`（带空格，网关按字段读到解码后的 `_method`） | 同 F16 |
 
 靶场的站点把地址限额设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。会话合计的总额度按来源地址算（[02](02-jev.md) 2.5），所以 `limit.lab` 上的 C5、C9 各自从回环的另一个地址（127.0.0.2、127.0.0.3、127.0.0.4）发请求，其他场景的会话不占它们的总额度。
 
