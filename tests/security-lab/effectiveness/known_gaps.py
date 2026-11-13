@@ -14,7 +14,8 @@ An entry says what the problem is, where it was measured, and which batch of the
 
 Rules, applied by `apply`:
 
-- A listed problem does not fail a gate. An unlisted one does.
+- A listed problem does not fail a gate. An unlisted "wrong" or "unmodeled" fails the learning gates. An unlisted
+  "miss" or "failure" does not: the learning gates do not count those kinds, and the baseline comparison holds them.
 - An entry that matches nothing is stale: the problem is gone, so the entry must be deleted in the same change that
   fixed it (the fix that makes the case pass). A stale entry fails the gate that checks the list.
 - The list is checked only when the learning segment ran and every probe ran. Otherwise nothing can be called

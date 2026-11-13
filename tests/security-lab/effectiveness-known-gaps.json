@@ -85,8 +85,8 @@
       "pattern": "GET /share/… patient.id",
       "learned": "patient",
       "ref": "学习质量设计稿 2.4",
-      "lq": "LQ-6",
-      "note": "分享码下的响应位置没有模板化；LQ-1、LQ-2 之后仍在，等 LQ-6"
+      "lq": "LQ-2",
+      "note": "分享码下的响应位置没有模板化；LQ-2 之后消失，不必等 LQ-6"
     },
     {
       "id": "miss-visits-path-suspended",
@@ -159,9 +159,9 @@
       "case": "train/ADM-1/1/admin-delete",
       "config": "learned",
       "learned": "",
-      "ref": "学习质量设计稿 2.2",
-      "lq": "LQ-1",
-      "note": "良性训练流程（管理员删除）被学到的配置拦下，拆分给出了拒绝的依据"
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
+      "note": "良性训练流程（管理员删除）被学到的配置拦下；LQ-1 之后仍在，LQ-2 之后消失"
     },
     {
       "id": "fail-benign-admin-delete-adm2",
@@ -169,8 +169,8 @@
       "case": "train/ADM-2/1/admin-delete",
       "config": "learned",
       "learned": "",
-      "ref": "学习质量设计稿 2.2",
-      "lq": "LQ-1",
+      "ref": "学习质量设计稿 2.1",
+      "lq": "LQ-2",
       "note": "同上（第二位管理员）"
     },
     {
@@ -179,9 +179,9 @@
       "case": "idor_public_source/delete",
       "config": "learned",
       "learned": "",
-      "ref": "学习质量设计稿 2.5",
-      "lq": "LQ-4a",
-      "note": "搜到别人的患者后删除：搜索结果的响应位置没有类别，判定只能放行，应该拦"
+      "ref": "学习质量设计稿 2.5、2.6",
+      "lq": "LQ-4b",
+      "note": "搜到别人的患者后删除：搜索结果的响应位置没有类别，判定只能放行，应该拦（依赖 LQ-4a，由 LQ-4b 修好）"
     },
     {
       "id": "fail-public-source-update",
@@ -189,8 +189,8 @@
       "case": "idor_public_source/update",
       "config": "learned",
       "learned": "",
-      "ref": "学习质量设计稿 2.5",
-      "lq": "LQ-4a",
+      "ref": "学习质量设计稿 2.5、2.6",
+      "lq": "LQ-4b",
       "note": "搜到别人的患者后修改：同上"
     },
     {
@@ -199,9 +199,9 @@
       "case": "admin_tier/public-source",
       "config": "learned",
       "learned": "",
-      "ref": "学习质量设计稿 2.1",
-      "lq": "LQ-2",
-      "note": "管理档的位置被起成 admin 和 export，管理档不成立，判定放行，应该拦"
+      "ref": "学习质量设计稿 2.6",
+      "lq": "LQ-4b",
+      "note": "管理档的位置判定放行，应该拦；起名修好（LQ-2）之后仍在：接受公共来源只到 medium，到不了 high（由 LQ-4b 修好）"
     }
   ]
 }
