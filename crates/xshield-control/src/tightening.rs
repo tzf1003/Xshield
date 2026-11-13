@@ -210,6 +210,7 @@ pub fn apply(map: &ObjectMap, splits: &[Split]) -> Option<ObjectMap> {
     let mut dto = ObjectMapDto {
         classes: map.classes().to_vec(),
         slots: map.slots().to_vec(),
+        functions: map.functions().to_vec(),
         learning: *map.learning(),
     };
     for split in splits {
@@ -285,6 +286,7 @@ mod tests {
                 })
                 .collect(),
             slots,
+            functions: Vec::new(),
             learning: LearningSettings::default(),
         })
         .expect("a valid test map")
@@ -436,5 +438,23 @@ mod tests {
     fn an_empty_split_list_gives_back_the_same_map() {
         let (map, _) = two_kinds();
         assert_eq!(apply(&map, &[]), Some(map));
+    }
+
+    #[test]
+    fn a_split_keeps_the_function_table() {
+        let (map, votes) = two_kinds();
+        // The function table is added through the written form: the map has no writer for it.
+        let mut section = serde_json::to_value(&map).expect("the map writes");
+        section["functions"] = serde_json::json!([
+            {"key": "POST /api/admin/export", "source": "rule", "tier": "admin", "reliability": "high"},
+            {"key": "GET /doctor/{id}", "source": "admin"}
+        ]);
+        let with_functions: ObjectMap = serde_json::from_value(section).expect("a valid map");
+        let splits = plan_splits(&with_functions, &votes, &word);
+        assert!(!splits.is_empty(), "the test needs a split to apply");
+        let after = apply(&with_functions, &splits).expect("the split is a valid map");
+        assert_ne!(after.class_of(DOCTOR), after.class_of(DOCUMENT));
+        assert_eq!(after.functions(), with_functions.functions());
+        assert!(after.admin_only("POST", "/api/admin/export"));
     }
 }
