@@ -490,8 +490,8 @@ def _consistency_line(p6: dict[str, Any] | None) -> list[str]:
     """P6 (plan 3.3, full mode): the number of requests on which the two modes disagree. A gate of the full mode: 0."""
     if p6 is None or not p6["den"]:
         return []
-    return [f"- P6 观察与拦截一致性：同一批 {p6['den']} 个请求里，观察模式的“本应拦截”与拦截模式的“已拦截”"
-            f"不一致的有 {p6['num']} 个（完整模式门槛，必须为 0）"]
+    return [f"- P6 观察与拦截一致性：两个站点各自从全新的源站开始、跑同一批请求，比较的请求有 {p6['den']} 个；"
+            f"观察模式的“本应拦截”与拦截模式的“已拦截”不一致的有 {p6['num']} 个（完整模式门槛，必须为 0）"]
 
 
 def _two_pass_line(two_pass: dict[str, Any] | None) -> str | None:

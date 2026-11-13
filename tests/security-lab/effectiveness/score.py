@@ -41,6 +41,9 @@ HIT_OUTCOMES = frozenset({"blocked", "would_block"})
 # The rows of the full mode's observation-mode batch (plan 3.3, P6). They are scored by P6 alone: a would-block answer
 # in observation mode is not a block, so they stay out of every other metric.
 CONSISTENCY_GROUP = "consistency"
+# The enforcement half of the same batch (P6): the rows an observation row is compared with. They stay out of every other
+# metric as well, so a batch that runs twice is not counted twice.
+CONSISTENCY_ENFORCE_GROUP = "consistency-enforce"
 # Positions whose proposals count for learning: a retired, suspended or ambiguous position is not one.
 ACTIVE_STATES = frozenset({"proposed", "confirmed"})
 LOWER_IS_BETTER = frozenset({"P2", "P4", "P5"})
@@ -96,6 +99,7 @@ def score(
     records = {record["request_id"]: record for record in decisions}
     pairs: list[Pair] = []
     observed: list[Pair] = []  # the consistency rows (P6), kept apart from everything else
+    enforced: list[Pair] = []  # the enforcement half of the same batch (P6), kept apart the same way
     missing: list[dict[str, Any]] = []
     for row in observations:
         record = records.get(row["request_id"])
@@ -104,7 +108,12 @@ def score(
             continue
         suspicious, bypass = _label_flags(row, record, records, probe_values_from_record)
         pair = Pair(row, record, suspicious, bypass)
-        (observed if row["group"] == CONSISTENCY_GROUP else pairs).append(pair)
+        if row["group"] == CONSISTENCY_GROUP:
+            observed.append(pair)
+        elif row["group"] == CONSISTENCY_ENFORCE_GROUP:
+            enforced.append(pair)
+        else:
+            pairs.append(pair)
 
     active = [pair for pair in pairs if not _known_gap(pair.row)]
     caps = _capabilities(truth, learned)
@@ -113,7 +122,7 @@ def score(
     metrics: dict[str, Any] = {}
     metrics.update(_session_metrics(active))
     metrics.update(_defense_metrics(defend, active, pairs, caps))
-    metrics["P6"] = _consistency(observed, pairs)
+    metrics["P6"] = _consistency(observed, enforced)
     failures, known_gaps = _failures(pairs, missing, caps, exclude_suspicious)
     learning_decisions = decisions if training is None else training  # the learning saw the training segment only
     learning, skip_reason = _learning(truth, learned, learning_decisions, gap_entries, failures, check_gaps)
@@ -492,14 +501,14 @@ def _defense_metrics(defend: list[Pair], active: list[Pair], pairs: list[Pair],
     }
 
 
-def _consistency(observed: list[Pair], pairs: list[Pair]) -> dict[str, Any]:
-    """P6 (plan 3.3, report only): the requests whose observation-mode answer is would_block and the requests whose
-    enforcement-mode answer is blocked, compared as sets. The count is the symmetric difference. A consistency row
+def _consistency(observed: list[Pair], enforced: list[Pair]) -> dict[str, Any]:
+    """P6 (plan 3.3, a gate of the full mode): the requests whose observation-mode answer is would_block and the requests
+    whose enforcement-mode answer is blocked, compared as sets. The count is the symmetric difference. A consistency row
     names the enforcement site it is compared with (`counterpart`), and the case and run must match too."""
-    enforced = {(pair.row["site"], pair.row["case"], pair.row["run"]): pair for pair in pairs}
+    by_key = {(pair.row["site"], pair.row["case"], pair.row["run"]): pair for pair in enforced}
     compared = differing = 0
     for pair in observed:
-        other = enforced.get((pair.row.get("counterpart"), pair.row["case"], pair.row["run"]))
+        other = by_key.get((pair.row.get("counterpart"), pair.row["case"], pair.row["run"]))
         if other is None:
             continue
         compared += 1
