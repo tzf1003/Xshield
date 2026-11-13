@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 体检小问题修复：站点配置校验失败时，每个出错的版本只记一次日志（此前每 5 秒重复一行，直到管理员改好为止；失败状态照常显示在状态灯和站点页）。分区删除被打断、留下“待分离”的分区时，下一次维护先完成分离再删除（[docs/07](docs/07-console-architecture.md#782-分区与保留) 7.8.2），不再每小时报错，也不再挡住之后的分区。导入改为逐批读取和写入，峰值内存不再随文件成倍增长；导入不在一个事务里，中途失败时已写入的行保留，重新导入同一文件即可（[docs/07](docs/07-console-architecture.md#799-导入与导出) 7.9.9）。
 - 体检修复：README、[docs/00](docs/00-overview.md)、[docs/03](docs/03-admin-config-audit.md)、[docs/04](docs/04-deployment-testing.md)、[docs/05](docs/05-v3-removal.md) 不再写“代码仍是 v3”，环境变量表与代码实际读取的一致（补上 `XSHIELD_CONTROL_CONSOLE_ORIGIN` 和 `XSHIELD_CONTROL_LISTEN` 的默认值，标明三个没有实现的 v3 保留项）；`scripts/package_release.sh` 不再打包不存在的 `xshield-build`（此前脚本必然失败）；`./dev.sh` 没有 Jev 密钥时改为提示而不是拒绝启动，与网关的行为一致；内置脱敏词只保留判定引擎里的一份，心跳和控制台直接引用；脚本、Dockerfile 和工作流注释里指向 v3 文档编号的引用改为现有章节。
 - 判定按声明位置覆盖请求值的其他写法：在有接受公共来源设定的站点上，对象表里 `{id}` 段覆盖任意一个非空段，所以 `DELETE /api/patients/PT-7004`、带分号参数的写法与编码斜杠（`%2F`）的同一位置，按声明位置的档位判定，只由公共响应展示过的值变为尝试越权，交 Jev 要求 DENY（[docs/07](docs/07-console-architecture.md#747-档位在判定中的使用) 7.4.7）。请求路径无法化为规范拼写（不是绝对路径、百分号编码不完整，或规范拼写超过 256 字节）时，在有接受公共来源设定的站点上不快速放行，没有声明覆盖的值标为 `unplaced` 交 Jev（`values[].unplaced`）；这种值不判为尝试越权。
 - 靶场新增慢速 id 场景 A12（[docs/04](docs/04-deployment-testing.md) 4.3）：搜索到的患者 id `PT-7004` 不是数字，删除按声明的 `DELETE /api/patients/{id}` 位置判定，交 Jev 判 DENY，源站不收到请求。
