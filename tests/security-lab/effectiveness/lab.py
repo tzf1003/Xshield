@@ -114,6 +114,16 @@ def _live_settings(mode: str) -> Live | None:
     return endpoint, key
 
 
+def _recording_incomplete(relay: jev_relay.JevRelay | None) -> bool:
+    """True, with a message on stderr, when a record got a reply it could not keep (see jev_relay), whether the run
+    finished or an error cut it short."""
+    if relay is None or not relay.failures:
+        return False
+    print(f"error: 录制不完整：{relay.failures} 次调用没有得到可用的应答（或应答里带有密钥），"
+          "录制文件不能用于回放，不要入库", file=sys.stderr)
+    return True
+
+
 def execute(options: Options, *, live: Live | None = None) -> int:
     started = time.monotonic()
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -153,13 +163,12 @@ def execute(options: Options, *, live: Live | None = None) -> int:
         (out / "report.md").write_text(render_markdown(result, meta), encoding="utf-8")
         print(render_terminal(result, meta))
         print(f"报告：{out / 'report.md'}")
-        if relay is not None and relay.failures:
-            print(f"error: 录制不完整：{relay.failures} 次调用没有得到可用的应答（或应答里带有密钥），"
-                  "录制文件不能用于回放，不要入库", file=sys.stderr)
+        if _recording_incomplete(relay):
             return 2
         return 0 if result["passed"] else 1
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"error: {error}", file=sys.stderr)
+        _recording_incomplete(relay)  # a run cut short by an error still says that its recording is incomplete
         return 2
     finally:
         ideal.stop()

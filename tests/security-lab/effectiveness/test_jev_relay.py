@@ -7,6 +7,8 @@ tripwire on every outbound call; it is skipped when xshield-edge is not built (c
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -342,6 +344,30 @@ class RecordThenReplayTests(unittest.TestCase):
         self.assertIn("### 置信度门槛扫描（3.4）", replay_text)
         self.assertIn("- 回放未命中率：0 / ", replay_text)
         self.assertIn("- 录制：", record_text)
+
+
+class RecordAbortTests(unittest.TestCase):
+    """A record that an error cuts short still says that its recording is incomplete (acceptance, batch 9)."""
+
+    def test_an_error_that_cuts_a_record_short_still_says_the_recording_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            relay = jev_relay.JevRelay(jev_relay.RECORD, recording=root / lab.RECORDING_NAME,
+                                       endpoint="https://real.example/judge", key=RECORD_KEY,
+                                       sender=lambda url, body, headers: (429, b'{"error":"limit"}'))
+            relay.answer(judgement(), {})  # the real Jev limits this judgement: a failure, and nothing is written
+            options = lab.Options(seed=DEFAULT_SEED, users=3, logins=1, only=frozenset({"no_session"}),
+                                  out=root / "record", jev="record")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with mock.patch.object(lab, "_open_relay", return_value=relay), \
+                    mock.patch.object(labkit, "build_edge"), \
+                    mock.patch.object(lab, "_training", side_effect=RuntimeError("the public search for 外科 failed")), \
+                    contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = lab.execute(options, live=("https://real.example/judge", RECORD_KEY))
+        self.assertEqual(code, 2)
+        self.assertIn("error: the public search for 外科 failed", stderr.getvalue())
+        self.assertIn("录制不完整：1 次调用没有得到可用的应答", stderr.getvalue())
+        self.assertNotIn(RECORD_KEY, stderr.getvalue())
 
 
 def _without_ids(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
