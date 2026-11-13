@@ -481,6 +481,17 @@ impl SessionContext {
         }
     }
 
+    /// The view of a credential that has no session yet: nothing seen, nothing sent. A session is
+    /// kept only once the origin has answered the credential, so a request with a credential the
+    /// store does not know is judged against this and leaves nothing behind. `unbound` is why no
+    /// held login could start the session, when one was looked for.
+    #[must_use]
+    pub fn unconfirmed(now_ms: u64, unbound: Option<LoginUnbound>) -> Self {
+        let mut session = Self::new(now_ms);
+        session.login_unbound = unbound;
+        session
+    }
+
     /// The login response this session took its values from, when its credential set it up.
     #[must_use]
     pub fn login_request(&self) -> Option<u128> {
@@ -877,6 +888,16 @@ impl ContextStore {
         session
     }
 
+    /// The live session for `id`, marked as active now, or `None`: nothing is created.
+    pub fn existing(&mut self, id: Digest16, now_ms: u64) -> Option<&mut SessionContext> {
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .filter(|session| now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS)?;
+        session.last_ms = now_ms;
+        Some(session)
+    }
+
     /// Whether a live session exists for `id`.
     #[must_use]
     pub fn contains(&self, id: &Digest16, now_ms: u64) -> bool {
@@ -917,6 +938,29 @@ impl ContextStore {
         match claim {
             Ok(login) => session.take_login(&token, login),
             Err(reason) => session.refuse_login(reason),
+        }
+    }
+
+    /// Starts the session `id` of `site` from the held login that issued its credential, as
+    /// [`ContextStore::start_session`] does, but only then: the login response is the origin's
+    /// word that the credential is real. When no held login can start it, nothing is created and
+    /// the reason is returned. `None` when the session is live or was started.
+    pub fn start_from_login(
+        &mut self,
+        site: &str,
+        id: Digest16,
+        token: Digest16,
+        now_ms: u64,
+    ) -> Option<LoginUnbound> {
+        if self.contains(&id, now_ms) {
+            return None;
+        }
+        match self.held.claim(site, &token, now_ms) {
+            Ok(login) => {
+                self.session(id, now_ms).take_login(&token, login);
+                None
+            }
+            Err(reason) => Some(reason),
         }
     }
 
