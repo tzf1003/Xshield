@@ -18,14 +18,17 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use xshield_core::context::learning::{
-    Evidence, KEEP_RETIRED_DAYS, RETIRE_DAYS, Thresholds, WINDOW_DAYS, contradicts, day_of,
-    judge_accepts_public, judge_tier, kind_share, observe, observe_tiers, propose, response_stats,
+    DecisionFacts, Evidence, FUNCTION_KEYS_MAX, KEEP_RETIRED_DAYS, RETIRE_DAYS, Thresholds,
+    WINDOW_DAYS, contradicts, day_of, judge_accepts_public, judge_function, judge_tier, kind_share,
+    merge_functions, observe, observe_functions, observe_tiers, propose, response_stats,
 };
+use xshield_core::context::objects::KEY_MAX;
 use xshield_core::context::position::PositionState;
-use xshield_core::context::{IdentityRole, LearningSettings, ObjectMap, SiteSpec};
+use xshield_core::context::{IdentityRole, LearningSettings, ObjectMap, SiteSpec, Tier};
 use xshield_core::kind::Rules;
 use xshield_postgres::key_seal::KeySealer;
 use xshield_postgres::object_agent_store::{self as runs, CALLS_KEEP_DAYS, Trigger};
+use xshield_postgres::object_function_store as function_store;
 use xshield_postgres::object_judgement_store::{self as judgements, Proposal};
 use xshield_postgres::object_learning_store::{
     self as store, Cursor, Judgement, LearnedState, Source,
@@ -197,24 +200,7 @@ async fn learn_site(
         let batch = store::read_batch(pool, site, after, horizon, BATCH_ROWS).await?;
         let complete = batch.rows < usize::try_from(BATCH_ROWS).unwrap_or(usize::MAX);
         let next = next_cursor(after, end, complete, batch.newest);
-        let mut votes = Vec::new();
-        let mut denials = Vec::new();
-        let mut tiers = Vec::new();
-        for facts in &batch.facts {
-            let observed = observe(facts);
-            votes.extend(observed.votes);
-            denials.extend(observed.denials);
-            tiers.extend(observe_tiers(facts, identified));
-        }
-        store::record_evidence(pool, site, generation, &votes, &denials).await?;
-        tier_store::record_tier_facts(pool, site, generation, &tiers).await?;
-        let slots: Vec<String> = votes
-            .iter()
-            .map(|vote| vote.slot.clone())
-            .chain(denials.iter().map(|denial| denial.slot.clone()))
-            .collect::<BTreeSet<String>>()
-            .into_iter()
-            .collect();
+        let slots = record_batch(pool, site, generation, &batch.facts, identified).await?;
         if !slots.is_empty() {
             let evidence = store::load_evidence(pool, site, &slots, oldest_day).await?;
             for slot in &slots {
@@ -262,9 +248,51 @@ async fn learn_site(
     tighten_split(run, pool, site, generation, oldest_day).await?;
     judge_accepts(pool, site, generation, oldest_day, now_millis).await?;
     judge_tiers(pool, site, generation, oldest_day, now_millis).await?;
+    judge_functions(
+        pool,
+        site,
+        generation,
+        oldest_day,
+        FUNCTION_KEYS_MAX,
+        now_millis,
+    )
+    .await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
     store::prune_retired(pool, site, today.saturating_sub(KEEP_RETIRED_DAYS)).await?;
     Ok(())
+}
+
+/// Records the evidence of one batch of decision rows: the votes and refusals of the request positions, the
+/// tier facts of the response positions (docs/07 section 7.9.16) and the function facts (section 7.9.19).
+/// Returns the request positions the votes and refusals name, in key order.
+async fn record_batch(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    facts: &[DecisionFacts],
+    identified: bool,
+) -> Result<Vec<String>, store::LearningStoreError> {
+    let mut votes = Vec::new();
+    let mut denials = Vec::new();
+    let mut tiers = Vec::new();
+    let mut functions = Vec::new();
+    for record in facts {
+        let observed = observe(record);
+        votes.extend(observed.votes);
+        denials.extend(observed.denials);
+        tiers.extend(observe_tiers(record, identified));
+        functions.extend(observe_functions(record, identified));
+    }
+    store::record_evidence(pool, site, generation, &votes, &denials).await?;
+    tier_store::record_tier_facts(pool, site, generation, &tiers).await?;
+    function_store::record_function_facts(pool, site, generation, &functions).await?;
+    Ok(votes
+        .iter()
+        .map(|vote| vote.slot.clone())
+        .chain(denials.iter().map(|denial| denial.slot.clone()))
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect())
 }
 
 /// Settles one position: the learning agent first, when the rules cannot decide it, and
@@ -646,6 +674,76 @@ async fn judge_tiers(
             None => tier_judgements::withdraw(pool, site, generation, slot, None).await?,
         }
     }
+    Ok(())
+}
+
+/// Judges which functions only administrators use, from the function evidence of the window, and proposes
+/// each as an administrator function (docs/07 section 7.9.19). Functions the pass merges (`merge_functions`)
+/// are judged under their merged key. A proposal waits for an administrator, as a tier proposal does. A
+/// proposal the rules no longer make is withdrawn, and a dismissed one stays. The writes read the configuration
+/// the site holds now and name its generation, as `judge_tiers` does, so a site deleted meanwhile gets none.
+/// Nothing here changes the configuration.
+///
+/// The pass reads the `keys_max` keys used by the most units. When more keys have evidence, the pass judges
+/// nothing and writes nothing: a key past the limit would look unused, and its proposal would be withdrawn.
+async fn judge_functions(
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    oldest_day: u64,
+    keys_max: usize,
+    now_millis: i64,
+) -> Result<(), store::LearningStoreError> {
+    let record = match site_spec_store::get(pool, site).await {
+        Ok(Some(record)) if record.created_at == generation => record,
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            eprintln!("xshield-control: function judgement skipped for site {site}, {error}");
+            return Ok(());
+        }
+    };
+    let map = record.spec.objects();
+    let thresholds = thresholds_of(map.learning());
+    let identified = identified_by(map);
+    let (uses, more) = function_store::function_keys(pool, site, oldest_day, keys_max).await?;
+    if more {
+        eprintln!(
+            "xshield-control: function judgement skipped for site {site}, more than {keys_max} function keys have evidence"
+        );
+        return Ok(());
+    }
+    let named_under: Vec<String> = record
+        .spec
+        .routes()
+        .iter()
+        .map(|route| route.path().stem().trim_end_matches('/').to_owned())
+        .collect();
+    let mapping = merge_functions(&uses, thresholds, &named_under);
+    let evidence = function_store::function_evidence(pool, site, oldest_day, &mapping).await?;
+    let ordinary_units = function_store::site_ordinary_units(pool, site, oldest_day).await?;
+    let mut judged = Vec::new();
+    for (function, evidence) in &evidence {
+        // A key longer than a position key is one the configuration cannot hold, so it is not proposed.
+        if function.len() > KEY_MAX {
+            continue;
+        }
+        let Some(reliability) = judge_function(evidence, ordinary_units, identified, thresholds)
+        else {
+            continue;
+        };
+        let proposal = TierProposal {
+            slot: function.clone(),
+            tier: Tier::Admin,
+            reliability,
+            units: evidence.admin_units,
+            seen_values: 0,
+            agreement_per_mille: 0,
+            last_day: evidence.last_day,
+        };
+        tier_judgements::put(pool, site, generation, &proposal, now_millis).await?;
+        judged.push(function.clone());
+    }
+    tier_judgements::retain_functions(pool, site, generation, &judged).await?;
     Ok(())
 }
 
@@ -2230,6 +2328,608 @@ mod tier_pass_tests {
                 .expect("read the proposal")
                 .is_none(),
             "a proposal whose evidence aged out is withdrawn"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+}
+
+#[cfg(test)]
+mod function_pass_tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+    use xshield_core::context::learning::{FUNCTION_KEYS_MAX, FunctionFact, WINDOW_DAYS, day_of};
+    use xshield_core::context::{Reliability, SiteSpec, Tier};
+    use xshield_postgres::{
+        object_function_store as function_store, object_tier_judgement_store as tier_judgements,
+        site_spec_store,
+    };
+
+    use super::pass_tests::{drop_scratch, partitions, scratch};
+    use super::{judge_functions, learn_once};
+    use crate::params::DAY_MILLIS;
+
+    /// The function the administrator alone uses in most tests.
+    const SEARCH: &str = "GET /api/admin/search";
+    /// Another function only administrators use, in the test that reads one key at a time.
+    const EXPORT: &str = "GET /api/admin/export";
+    /// The function ordinary users use.
+    const FEED: &str = "GET /api/feed";
+    /// A response position that the ordinary users all see the same values at.
+    const SHARED: &str = "GET /api/search [].id";
+
+    /// A clinic that declares a user and a role identity and the response position `SHARED`, with the
+    /// learning settings `learning`.
+    fn clinic(learning: &Value) -> SiteSpec {
+        let spec = json!({
+            "name": "clinic",
+            "hosts": ["clinic.example.com"],
+            "origin": "http://10.0.0.5:8080",
+            "session": {"cookie": "SESSIONID"},
+            "entries": ["/login"],
+            "objects": {
+                "classes": [{"id": "patient", "name": "患者"}],
+                "slots": [
+                    {"key": "GET /api/me user.id", "class": "patient", "source": "admin", "identity": "user"},
+                    {"key": "GET /api/me role", "class": "patient", "source": "admin", "identity": "role"},
+                    {"key": SHARED, "class": "patient", "source": "admin"}
+                ],
+                "learning": learning
+            }
+        });
+        SiteSpec::from_json(&spec.to_string()).expect("test spec")
+    }
+
+    /// One allowed request as the gateway logs it: the session that made it, the identity the session
+    /// showed, and what it asked.
+    struct Call<'a> {
+        session: &'a str,
+        user: Option<&'a str>,
+        role: Option<&'a str>,
+        method: &'a str,
+        path: &'a str,
+        entry: bool,
+    }
+
+    /// A row id of its own, unique across the tests of the process.
+    fn next_request_id() -> String {
+        static NEXT: AtomicI64 = AtomicI64::new(0);
+        format!("fn_{:08}", NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Inserts one allowed decision row of `method path` made by `session` at `at_millis`, with `trace`.
+    async fn insert(
+        pool: &PgPool,
+        at_millis: i64,
+        session: &str,
+        method: &str,
+        path: &str,
+        trace: Value,
+    ) {
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace)
+             VALUES ($1, $2, 'clinic', 'edge-1', 'clinic.example.com', '10.0.0.1', $3,
+                $4, $5, 200, 'fast_allow', 'allowed', $6)",
+        )
+        .bind(at_millis)
+        .bind(next_request_id())
+        .bind(session)
+        .bind(method)
+        .bind(path)
+        .bind(trace)
+        .execute(pool)
+        .await
+        .expect("insert a decision row");
+    }
+
+    /// Logs `call` as made at `at_millis`, by a request the origin answered 200 and the gateway allowed.
+    async fn log(pool: &PgPool, at_millis: i64, call: &Call<'_>) {
+        let mut trace = json!({
+            "v": 1,
+            "values_truncated": false,
+            "values": [],
+            "timing": {"judge_ms": 1},
+            "session": {
+                "age_seconds": 1,
+                "known_values": 0,
+                "identity": {"user": call.user, "role": call.role}
+            }
+        });
+        if call.entry {
+            trace["entry"] = json!("/login");
+        }
+        insert(pool, at_millis, call.session, call.method, call.path, trace).await;
+    }
+
+    /// The administrator `root` makes `function` (`METHOD path`) on two days, on an entry when `entry` is set.
+    async fn admin_uses(pool: &PgPool, now: i64, function: &str, entry: bool) {
+        let (method, path) = function
+            .split_once(' ')
+            .expect("a function is `METHOD path`");
+        for days in [2_i64, 3] {
+            let call = Call {
+                session: "adm",
+                user: Some("root"),
+                role: Some("admin"),
+                method,
+                path,
+                entry,
+            };
+            log(pool, now - days * DAY_MILLIS, &call).await;
+        }
+    }
+
+    /// Ten ordinary users each use `FEED` once, so the window holds ten ordinary units.
+    async fn ten_users_use_feed(pool: &PgPool, now: i64) {
+        for user in 0..10_i64 {
+            let name = format!("u{user}");
+            let session = format!("s{user}");
+            let call = Call {
+                session: &session,
+                user: Some(&name),
+                role: Some("user"),
+                method: "GET",
+                path: "/api/feed",
+                entry: false,
+            };
+            log(pool, now - 2 * DAY_MILLIS, &call).await;
+        }
+    }
+
+    /// One request of ordinary user `user` at `at_millis`, whose response showed `values` at `SHARED`.
+    async fn shown_to(pool: &PgPool, at_millis: i64, user: i64, values: &[String]) {
+        let name = format!("u{user}");
+        let trace = json!({
+            "v": 1,
+            "values_truncated": false,
+            "values": [],
+            "timing": {"judge_ms": 1},
+            "session": {
+                "age_seconds": 1,
+                "known_values": 0,
+                "identity": {"user": name, "role": "user"}
+            },
+            "response": {
+                "bytes": 64,
+                "observed": "json",
+                "values": values.len(),
+                "new_values": 0,
+                "fields": [],
+                "entry_passed": false,
+                "after_would_block": false,
+                "fingerprints": {SHARED: values}
+            }
+        });
+        insert(
+            pool,
+            at_millis,
+            &format!("s{user}"),
+            "GET",
+            "/api/search",
+            trace,
+        )
+        .await;
+    }
+
+    /// Ten ordinary users each see the same 25 values at `SHARED`, five per request, on two days, so the tier
+    /// pass proposes the position.
+    async fn shared_position(pool: &PgPool, now: i64) {
+        let values: Vec<String> = (0..25).map(|index| format!("shared-{index}")).collect();
+        for user in 0..10_i64 {
+            for request in 0..5_usize {
+                let chunk = &values[request * 5..request * 5 + 5];
+                shown_to(pool, now - 2 * DAY_MILLIS, user, chunk).await;
+            }
+        }
+    }
+
+    /// Whether the site carries an open proposal for `key`.
+    async fn proposed(pool: &PgPool, key: &str) -> bool {
+        tier_judgements::proposal(pool, "clinic", key)
+            .await
+            .expect("read the proposal")
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn a_function_only_admins_use_is_proposed_as_admin() {
+        let Some((admin, pool, name)) = scratch("function_admin").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        ten_users_use_feed(&pool, now).await;
+        learn_once(&pool, None, now).await;
+
+        let proposal = tier_judgements::proposal(&pool, "clinic", SEARCH)
+            .await
+            .expect("read the proposal")
+            .expect("the function only the administrator uses is proposed");
+        assert_eq!(proposal.tier, Tier::Admin);
+        assert_eq!(proposal.reliability, Reliability::High);
+        assert_eq!(proposal.units, 1);
+        assert!(
+            tier_judgements::proposal(&pool, "clinic", FEED)
+                .await
+                .expect("read the proposal")
+                .is_none(),
+            "a function ordinary users use is not proposed"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_function_an_ordinary_user_uses_is_not_proposed() {
+        let Some((admin, pool, name)) = scratch("function_ordinary").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        ten_users_use_feed(&pool, now).await;
+        // One ordinary user also uses the administrator's function.
+        let user = Call {
+            session: "s0",
+            user: Some("u0"),
+            role: Some("user"),
+            method: "GET",
+            path: "/api/admin/search",
+            entry: false,
+        };
+        log(&pool, now - 2 * DAY_MILLIS, &user).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            tier_judgements::proposal(&pool, "clinic", SEARCH)
+                .await
+                .expect("read the proposal")
+                .is_none(),
+            "a function an ordinary unit uses is not proposed"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn an_entry_is_never_proposed() {
+        let Some((admin, pool, name)) = scratch("function_entry").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, true).await;
+        ten_users_use_feed(&pool, now).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            tier_judgements::proposal(&pool, "clinic", SEARCH)
+                .await
+                .expect("read the proposal")
+                .is_none(),
+            "a function used on an entry is never proposed"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn slug_paths_are_judged_as_one_function() {
+        let Some((admin, pool, name)) = scratch("function_slugs").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        for index in 0..12 {
+            admin_uses(
+                &pool,
+                now,
+                &format!("POST /admin/users/member{index}/ban"),
+                false,
+            )
+            .await;
+        }
+        ten_users_use_feed(&pool, now).await;
+        learn_once(&pool, None, now).await;
+
+        let proposed: Vec<String> = tier_judgements::proposals(&pool, "clinic")
+            .await
+            .expect("list the proposals")
+            .into_iter()
+            .map(|proposal| proposal.slot)
+            .filter(|slot| slot.starts_with("POST "))
+            .collect();
+        assert_eq!(proposed, vec!["POST /admin/users/{id}/ban".to_owned()]);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_function_proposal_is_withdrawn_when_its_evidence_ages_out() {
+        let Some((admin, pool, name)) = scratch("function_aged").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        ten_users_use_feed(&pool, now).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            proposed(&pool, SEARCH).await,
+            "the function is proposed first"
+        );
+
+        // Eight days on, the evidence is outside the window: the rules judge nothing, and the proposal goes.
+        learn_once(&pool, None, now + 8 * DAY_MILLIS).await;
+        assert!(
+            !proposed(&pool, SEARCH).await,
+            "a proposal whose evidence aged out is withdrawn"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_dismissed_function_proposal_stays_dismissed() {
+        let Some((admin, pool, name)) = scratch("function_dismissed").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        let record = site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        ten_users_use_feed(&pool, now).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            tier_judgements::dismiss(&pool, "clinic", record.created_at, SEARCH, now)
+                .await
+                .expect("dismiss the proposal"),
+            "the proposal is dismissed"
+        );
+
+        learn_once(&pool, None, now).await;
+        assert!(
+            !proposed(&pool, SEARCH).await,
+            "a dismissed function is not proposed again"
+        );
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM object_tier_judgements WHERE site = 'clinic' AND slot = $1",
+        )
+        .bind(SEARCH)
+        .fetch_one(&pool)
+        .await
+        .expect("count the rows");
+        assert_eq!(rows, 1, "the dismissed row stays");
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn tier_proposals_of_positions_survive_the_function_pass_and_the_other_way_round() {
+        let Some((admin, pool, name)) = scratch("function_and_tiers").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        ten_users_use_feed(&pool, now).await;
+        shared_position(&pool, now).await;
+        learn_once(&pool, None, now).await;
+        learn_once(&pool, None, now).await;
+
+        assert!(
+            proposed(&pool, SEARCH).await,
+            "the function proposal survives the tier pass"
+        );
+        assert!(
+            tier_judgements::proposal(&pool, "clinic", SHARED)
+                .await
+                .expect("read the proposal")
+                .is_some(),
+            "the position proposal survives the function pass"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_site_with_learning_off_keeps_no_function_evidence() {
+        let Some((admin, pool, name)) = scratch("function_off").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_learn": false, "auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        ten_users_use_feed(&pool, now).await;
+        learn_once(&pool, None, now).await;
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM object_response_evidence
+             WHERE site = 'clinic' AND kind LIKE 'function%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count the rows");
+        assert_eq!(rows, 0, "no function evidence is kept");
+        assert!(!proposed(&pool, SEARCH).await);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    /// Each of `users`, an administrator, logs in once two days ago. A login is an entry request: the function
+    /// evidence counts it as an ordinary use of the entry, and as the administrator's use of it.
+    async fn admin_logins(pool: &PgPool, now: i64, users: &[&str]) {
+        for &user in users {
+            let session = format!("login-{user}");
+            let call = Call {
+                session: &session,
+                user: Some(user),
+                role: Some("admin"),
+                method: "POST",
+                path: "/login",
+                entry: true,
+            };
+            log(pool, now - 2 * DAY_MILLIS, &call).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn administrators_on_entries_are_no_ordinary_bystanders() {
+        let Some((admin, pool, name)) = scratch("function_entries").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        // Six administrators: `root` uses the administrator's function on two days, and the other five only log
+        // in. There is no ordinary user. A login counts as an administrator's use too, so none of the six is a
+        // bystander: neither the function nor the entry is proposed.
+        admin_logins(&pool, now, &["root2", "root3", "root4", "root5", "root6"]).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            !proposed(&pool, SEARCH).await,
+            "an administrator who uses the function is no ordinary bystander"
+        );
+        assert!(
+            !proposed(&pool, "POST /login").await,
+            "an entry is never proposed, even when only administrators log in"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_site_with_more_function_keys_than_one_pass_reads_is_not_judged() {
+        let Some((admin, pool, name)) = scratch("function_more").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        ten_users_use_feed(&pool, now).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            proposed(&pool, SEARCH).await,
+            "the first pass proposes the function only the administrator uses"
+        );
+
+        // A second administrator function that two administrators use, so it has more units and sorts first.
+        // A limit of one reads it alone. A pass that judged that key would withdraw SEARCH, which it does not read.
+        let site = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        let today = day_of(u64::try_from(now).unwrap_or(0));
+        let mut facts = Vec::new();
+        for unit in ["root", "root2"] {
+            for back in [2_u64, 3] {
+                facts.push(FunctionFact::Admin {
+                    function: EXPORT.to_owned(),
+                    unit: unit.to_owned(),
+                    day: today - back,
+                });
+            }
+        }
+        function_store::record_function_facts(&pool, "clinic", site.created_at, &facts)
+            .await
+            .expect("record the facts");
+        let oldest_day = today.saturating_sub(WINDOW_DAYS - 1);
+        let (_, more) = function_store::function_keys(&pool, "clinic", oldest_day, 1)
+            .await
+            .expect("list the keys");
+        assert!(
+            more,
+            "two function keys have evidence and one pass reads one"
+        );
+
+        judge_functions(&pool, "clinic", site.created_at, oldest_day, 1, now)
+            .await
+            .expect("judge the functions");
+        assert!(
+            proposed(&pool, SEARCH).await,
+            "a pass that does not read every key keeps the proposal it does not read"
+        );
+        assert!(
+            !proposed(&pool, EXPORT).await,
+            "a pass that does not read every key proposes nothing"
+        );
+
+        // Read every key, and the same evidence proposes both functions.
+        judge_functions(
+            &pool,
+            "clinic",
+            site.created_at,
+            oldest_day,
+            FUNCTION_KEYS_MAX,
+            now,
+        )
+        .await
+        .expect("judge the functions");
+        assert!(proposed(&pool, SEARCH).await);
+        assert!(
+            proposed(&pool, EXPORT).await,
+            "with every key read, the second function is proposed"
         );
         drop_scratch(admin, pool, name).await;
     }

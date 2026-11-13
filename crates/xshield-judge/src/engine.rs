@@ -33,8 +33,8 @@ use crate::state::{
 use crate::tiers;
 use crate::trace::{Place, entry_trace, recent_trace, redacted_path, redacted_query, value_entry};
 use crate::values::{
-    ExtractedRequest, ResponseValue, extract_request, extract_response_facts, json_unescape,
-    path_segment, percent_decode,
+    ExtractedRequest, ResponseFacts, ResponseValue, extract_request, extract_response_facts,
+    json_unescape, path_segment, percent_decode,
 };
 
 /// Jev calls allowed per session per minute (docs/02 section 2.5).
@@ -935,10 +935,14 @@ impl<J: JevPort> Judge<J> {
         if !(success || issuing_redirect) {
             return summary;
         }
-        let (mut values, shape) = if success {
+        let ResponseFacts {
+            mut values,
+            credentials,
+            shape,
+        } = if success {
             read_body(&mut summary, observation)
         } else {
-            (Vec::new(), None)
+            ResponseFacts::default()
         };
         self.count_values(site, observation, resolved, &values, &mut summary);
         // The exposure alert reads the response as the origin sent it, echo included: an origin
@@ -980,7 +984,8 @@ impl<J: JevPort> Judge<J> {
         }
         // A JSON login answered to a client with no credential is held until the credential it
         // issues starts a session (docs/01 section 1.7). Values the request sent are left out, as
-        // an echo teaches nothing. Only a login with a candidate credential is worth holding.
+        // an echo teaches nothing. Only a login with a candidate credential is worth holding. A
+        // long candidate is a credential too, but no value: it is held by its keyed hash only.
         if success
             && entry
             && seeded.is_none()
@@ -999,8 +1004,13 @@ impl<J: JevPort> Judge<J> {
                     })
                 })
                 .collect();
-            if held.iter().any(|value| value.candidate) {
-                summary.pending_values = Some(held.len());
+            let long: Vec<Digest16> = credentials
+                .iter()
+                .map(|candidate| self.key.mac("value", candidate.value.as_bytes()))
+                .filter(|digest| !observation.sent.contains(digest))
+                .collect();
+            if held.iter().any(|value| value.candidate) || !long.is_empty() {
+                summary.pending_values = Some(held.len() + long.len());
                 // The identity the response declares is held as the values are: keyed, and without
                 // what the request sent, which says nothing about who answers.
                 let shown: Vec<_> = claims
@@ -1013,9 +1023,14 @@ impl<J: JevPort> Judge<J> {
                     })
                     .collect();
                 let identity = SessionIdentity::declared(&self.key, &shown);
-                inner
-                    .store
-                    .hold_login(site.name(), request_id, observation.now_ms, held, identity);
+                inner.store.hold_login(
+                    site.name(),
+                    request_id,
+                    observation.now_ms,
+                    held,
+                    long,
+                    identity,
+                );
             }
         }
         // The new-value count is the one of the first context the response
@@ -1098,11 +1113,11 @@ impl<J: JevPort> Judge<J> {
         }
     }
 
-    /// Stops the session that `context` names from learning from responses.
+    /// Stops the session that `context` names from learning from responses. A credential with no
+    /// session yet keeps the stop for the session it starts, so judging a request creates none.
     fn stop_learning(&self, context: Option<Digest16>, now_ms: u64) {
         if let Some(context) = context {
-            let mut inner = self.lock();
-            inner.store.session(context, now_ms).stop_learning();
+            self.lock().store.stop_learning(context, now_ms);
         }
     }
 
@@ -1142,24 +1157,30 @@ impl<J: JevPort> Judge<J> {
     }
 
     /// Records the values the request sent in the context it was judged in on `site`: the session
-    /// of its credential, or the address's context when it had none. When the response issues a
-    /// credential, returns what that context sent, for the new session to inherit.
+    /// of its credential, or the address's context when it had none. A credential's values wait for
+    /// its session, which only an answer that accepts the credential starts (see `observe`), so a
+    /// refused request starts no session. When the response issues a credential, returns what that
+    /// context sent, for the new session to inherit.
     fn note_request_sent(
         &self,
         site: &str,
         observation: &Observation<'_>,
         issuing: bool,
     ) -> Option<SentRecord> {
-        let request_context = match observation
+        let credential = observation
             .credential
-            .filter(|credential| !credential.is_empty())
-        {
+            .filter(|credential| !credential.is_empty());
+        let request_context = match credential {
             Some(credential) => self.session_key(site, credential),
             None => self.address_key(site, observation.client),
         };
         let mut inner = self.lock();
         let inherited = issuing.then(|| inner.store.sent_record(&request_context));
-        if !observation.sent.is_empty() {
+        if credential.is_some() {
+            inner
+                .store
+                .note_sent(request_context, observation.now_ms, observation.sent);
+        } else if !observation.sent.is_empty() {
             inner
                 .store
                 .session(request_context, observation.now_ms)
@@ -1405,22 +1426,18 @@ fn response_kind(content_type: Option<&str>) -> Option<Observed> {
     }
 }
 
-/// Reads the body of a successful response: its values and, for a JSON document
-/// that parsed, its structure. Says in `summary` why a body was not read.
-fn read_body(
-    summary: &mut ObservationSummary,
-    observation: &Observation<'_>,
-) -> (Vec<ResponseValue>, Option<Vec<ShapeField>>) {
+/// Reads the body of a successful response: its values, its long credential candidates and, for a
+/// JSON document that parsed, its structure. Says in `summary` why a body was not read.
+fn read_body(summary: &mut ObservationSummary, observation: &Observation<'_>) -> ResponseFacts {
     match (observation.unread, response_kind(observation.content_type)) {
         (Some(reason), _) => summary.skip = Some(reason),
         (None, Some(kind)) => {
             summary.observed = kind;
-            let facts = extract_response_facts(observation.content_type, observation.body);
-            return (facts.values, facts.shape);
+            return extract_response_facts(observation.content_type, observation.body);
         }
         (None, None) => summary.skip = Some(Skip::ContentType),
     }
-    (Vec::new(), None)
+    ResponseFacts::default()
 }
 
 /// The structure to report for a route of a site: `Some` when it is new or
@@ -3773,6 +3790,227 @@ mod tests {
         assert_eq!(traced.login_request_id.as_deref(), Some(RID));
     }
 
+    /// A credential of the length a JWT has (over 128 characters, docs/01 section 1.7): a standard
+    /// header and two base64url-looking segments generated from `seed`, about 740 characters in
+    /// all. It is built here, so that no real token is kept in the repository.
+    fn long_login_token(seed: usize) -> String {
+        const BASE64URL: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let segment = |offset: usize| -> String {
+            (0..350)
+                .map(|index| char::from(BASE64URL[(index * 7 + offset) % BASE64URL.len()]))
+                .collect()
+        };
+        format!(
+            "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.{}.{}",
+            segment(seed),
+            segment(seed + 13)
+        )
+    }
+
+    #[tokio::test]
+    async fn a_json_login_with_a_long_token_binds_its_session() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        let token = long_login_token(1);
+        let login = judge.observe(
+            &site,
+            &json_login(login_body(&token, 6).as_bytes(), "10.0.0.1", 0),
+        );
+        assert_eq!(
+            login.pending_values,
+            Some(2),
+            "the long token and the basket id are held"
+        );
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(token.as_str()), 1))
+            .await;
+        assert!(entry.forward);
+        let traced = entry.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
+        assert_eq!(traced.login_unbound, None);
+        // The user's own basket is known to the session, so it is read without Jev.
+        let own = judge
+            .judge(&site, &get("/rest/basket/6", None, Some(token.as_str()), 2))
+            .await;
+        assert!(own.forward);
+        assert_eq!(own.record.decision_path, DecisionPath::FastAllow);
+        // Another basket was never shown to the session: it goes to Jev.
+        let other = judge
+            .judge(&site, &get("/rest/basket/7", None, Some(token.as_str()), 3))
+            .await;
+        assert!(!other.forward);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_long_token_is_never_a_seen_value() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        let token = long_login_token(1);
+        judge.observe(
+            &site,
+            &json_login(login_body(&token, 6).as_bytes(), "10.0.0.1", 0),
+        );
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(token.as_str()), 1))
+            .await;
+        let traced = entry.record.trace.session.expect("the session is traced");
+        assert_eq!(
+            traced.known_values, 1,
+            "only the basket id is a value the session has seen"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_token_beside_the_credential_is_held_but_not_learned() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = basket_site();
+        let access = long_login_token(1);
+        let refresh = long_login_token(2);
+        let body =
+            format!(r#"{{"authentication":{{"token":"{access}","refresh":"{refresh}","bid":6}}}}"#);
+        let login = judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        assert_eq!(
+            login.pending_values,
+            Some(3),
+            "the access token, the refresh token and the basket id are held"
+        );
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(access.as_str()), 1))
+            .await;
+        let traced = entry.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
+        assert_eq!(traced.login_unbound, None);
+        assert_eq!(
+            traced.known_values, 1,
+            "the refresh token is not learned as a value"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_login_whose_only_candidate_is_long_is_still_held() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        // Plain site: no basket declared, and the single-digit id is no candidate at all.
+        let site = site(r#","mode":"enforce""#);
+        let token = long_login_token(1);
+        let login = judge.observe(
+            &site,
+            &json_login(login_body(&token, 6).as_bytes(), "10.0.0.1", 0),
+        );
+        assert_eq!(
+            login.pending_values,
+            Some(2),
+            "held although the long token is the only candidate"
+        );
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(token.as_str()), 1))
+            .await;
+        let traced = entry.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
+    }
+
+    #[tokio::test]
+    async fn a_long_token_the_request_sent_is_not_held() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = basket_site();
+        let token = long_login_token(1);
+        let body = login_body(&token, 6);
+        // The login request goes through judgement, as it does on the real path. Its verdict
+        // hands back the digests of the values it sent, and the origin's echo is checked
+        // against them.
+        let request = RequestFacts {
+            route: None,
+            request_headers: &[],
+            request_id: RID,
+            method: "POST",
+            path: "/login",
+            query: None,
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            credential: None,
+            client: "10.0.0.1",
+            now_ms: 0,
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(
+            verdict.forward,
+            "the login is forwarded, so its values are sent"
+        );
+        assert!(
+            verdict
+                .sent
+                .contains(&judge.key.mac("value", token.as_bytes())),
+            "the token the login sent is among the digests the verdict hands back"
+        );
+        let login = judge.observe(
+            &site,
+            &Observation {
+                sent: verdict.sent.as_slice(),
+                echo: verdict.echo.as_slice(),
+                ..json_login(body.as_bytes(), "10.0.0.1", 0)
+            },
+        );
+        assert_eq!(
+            login.pending_values, None,
+            "the echoed token is no candidate, so nothing is held"
+        );
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(token.as_str()), 1))
+            .await;
+        let traced = entry.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_unbound, Some(LoginUnbound::Unmatched));
+        assert_eq!(traced.login_request_id, None);
+    }
+
+    #[tokio::test]
+    async fn a_bearer_scheme_is_removed_before_a_long_token_is_matched() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = SiteSpec::from_json(
+            r#"{"name":"emr","hosts":["emr.test"],"origin":"http://o:1","session":{"header":"Authorization"},
+               "entries":["/login","/api/home"],"mode":"enforce"}"#,
+        )
+        .expect("the test site is valid");
+        let token = long_login_token(1);
+        judge.observe(
+            &site,
+            &json_login(login_body(&token, 6).as_bytes(), "10.0.0.1", 0),
+        );
+        let bearer = format!("Bearer {token}");
+        let verdict = judge
+            .judge(&site, &get("/api/home", None, Some(bearer.as_str()), 1))
+            .await;
+        let traced = verdict.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
+    }
+
+    #[tokio::test]
+    async fn two_held_logins_issuing_one_long_credential_take_nothing() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = basket_site();
+        let token = long_login_token(1);
+        let body = login_body(&token, 6);
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.1", 0));
+        judge.observe(&site, &json_login(body.as_bytes(), "10.0.0.2", 1));
+        let verdict = judge
+            .judge(&site, &get("/api/home", None, Some(token.as_str()), 2))
+            .await;
+        let traced = verdict.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_unbound, Some(LoginUnbound::Ambiguous));
+        assert_eq!(traced.login_request_id, None);
+    }
+
     #[tokio::test]
     async fn failed_origin_responses_teach_nothing() {
         let fake = FakeJev::new();
@@ -3896,6 +4134,103 @@ mod tests {
         // The origin answers one of them: that one has a session from then on.
         confirm(&judge, &site, "made-up-7");
         assert_eq!(judge.lock().store.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_forged_credential_the_origin_refuses_starts_no_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce","advanced":{"address_calls_per_minute":1}"#);
+        // The request carries a made-up credential and a value the origin has not shown. Jev
+        // allows it, it is forwarded, and the origin refuses it with 401.
+        let forged = judge
+            .judge(
+                &site,
+                &get(
+                    "/api/search",
+                    Some("q=hello%20world"),
+                    Some("forged-credential-1"),
+                    1_000,
+                ),
+            )
+            .await;
+        assert!(forged.forward);
+        judge.observe(
+            &site,
+            &Observation {
+                path: "/api/search",
+                status: 401,
+                content_type: None,
+                body: b"",
+                now_ms: 1_001,
+                sent: &forged.sent,
+                echo: &forged.echo,
+                ..list_response("forged-credential-1", 0)
+            },
+        );
+        assert_eq!(
+            judge.session_count(),
+            0,
+            "a refused credential gets no session"
+        );
+        // With no session the next request still draws on its address's one call, which is spent.
+        let again = judge
+            .judge(
+                &site,
+                &get(
+                    "/api/search",
+                    Some("q=hello%20world"),
+                    Some("forged-credential-1"),
+                    2_000,
+                ),
+            )
+            .await;
+        assert!(!again.forward);
+        assert_eq!(again.refuse_status, 429);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_forged_credential_whose_long_request_the_origin_refuses_starts_no_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        // More distinct tokens than a session may hold, so the request's values cannot all be
+        // recorded and the session it would start stops learning.
+        let body = (0..=SENT_MAX)
+            .map(|index| format!("t{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let upload = RequestFacts {
+            route: None,
+            request_headers: &[],
+            method: "POST",
+            content_type: Some("text/plain"),
+            body: body.as_bytes(),
+            ..get("/api/import", None, Some("forged-credential-2"), 1_000)
+        };
+        let forged = judge.judge(&site, &upload).await;
+        assert!(forged.forward);
+        assert_eq!(
+            judge.session_count(),
+            0,
+            "judging a forwarded request starts no session"
+        );
+        judge.observe(
+            &site,
+            &Observation {
+                method: "POST",
+                path: "/api/import",
+                status: 401,
+                content_type: None,
+                body: b"",
+                now_ms: 1_001,
+                sent: &forged.sent,
+                echo: &forged.echo,
+                ..list_response("forged-credential-2", 0)
+            },
+        );
+        assert_eq!(judge.session_count(), 0);
     }
 
     #[tokio::test]

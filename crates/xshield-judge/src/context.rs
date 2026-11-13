@@ -45,6 +45,11 @@ pub const HELD_LOGINS_MAX: usize = 1_000;
 pub const HELD_VALUES_MAX: usize = 20_000;
 /// How long a held login waits for its credential, in milliseconds (docs/01 section 1.7).
 pub const HELD_LOGIN_MS: u64 = 5 * 60 * 1000;
+/// Most credentials whose requests' values are kept while the origin has not accepted them (see
+/// [`PendingSent`]). Past it the oldest goes.
+const PENDING_MAX: usize = 1_000;
+/// Most values all of them keep together. Past it the oldest goes.
+const PENDING_VALUES_MAX: usize = 20_000;
 /// The shortest value a login response may carry as the session credential (docs/01 section 1.7).
 pub const LOGIN_CREDENTIAL_CHARS: usize = 16;
 /// The source a value taken from a login response is shown under (docs/01 section 1.7).
@@ -650,6 +655,11 @@ impl SessionContext {
         self.sent.clear();
     }
 
+    /// How many values the session sent that the origin had not shown it.
+    fn sent_len(&self) -> usize {
+        self.sent.len()
+    }
+
     /// What the session sent, for a session that a response is about to issue a
     /// credential to.
     #[must_use]
@@ -767,37 +777,48 @@ struct HeldLogin {
     request_id: u128,
     at_ms: u64,
     values: Vec<HeldValue>,
+    /// The keyed hashes of its long credential candidates (see
+    /// [`ResponseFacts::credentials`](crate::values::ResponseFacts::credentials)). They are no
+    /// values: the credential that takes the login is not learned, and the rest go with the login.
+    credentials: Vec<Digest16>,
     /// The identity the response declares, in the form the session keeps it: keyed hashes and
     /// role labels only, with the values the request sent left out.
     identity: SessionIdentity,
+}
+
+impl HeldLogin {
+    /// What the login counts for under [`HELD_VALUES_MAX`]: its values and its long candidates.
+    fn weight(&self) -> usize {
+        self.values.len() + self.credentials.len()
+    }
 }
 
 /// The held login responses, oldest first. Memory only: a restart loses them.
 #[derive(Debug, Default)]
 struct HeldLogins {
     logins: VecDeque<HeldLogin>,
-    /// The values of all the held logins together, kept under [`HELD_VALUES_MAX`].
+    /// The weight of all the held logins together, kept under [`HELD_VALUES_MAX`].
     values: usize,
 }
 
 impl HeldLogins {
     fn hold(&mut self, login: HeldLogin) {
-        if login.values.len() > HELD_VALUES_MAX {
+        let weight = login.weight();
+        if weight > HELD_VALUES_MAX {
             return;
         }
         while !self.logins.is_empty()
-            && (self.logins.len() >= HELD_LOGINS_MAX
-                || self.values + login.values.len() > HELD_VALUES_MAX)
+            && (self.logins.len() >= HELD_LOGINS_MAX || self.values + weight > HELD_VALUES_MAX)
         {
             self.forget_oldest();
         }
-        self.values += login.values.len();
+        self.values += weight;
         self.logins.push_back(login);
     }
 
     fn forget_oldest(&mut self) {
         if let Some(oldest) = self.logins.pop_front() {
-            self.values -= oldest.values.len();
+            self.values -= oldest.weight();
         }
     }
 
@@ -822,7 +843,7 @@ impl HeldLogins {
         match live.as_slice() {
             [index] => {
                 let login = self.logins.remove(*index).ok_or(LoginUnbound::Unmatched)?;
-                self.values -= login.values.len();
+                self.values -= login.weight();
                 Ok(login)
             }
             [] if self.logins.iter().any(|login| carries(login, site, token)) => {
@@ -834,13 +855,93 @@ impl HeldLogins {
     }
 }
 
-/// Whether a held login of `site` offers `token` as a candidate credential.
+/// Whether a held login of `site` offers `token` as a candidate credential: a short candidate
+/// value, or a long one.
 fn carries(login: &HeldLogin, site: &str, token: &Digest16) -> bool {
     login.site == site
-        && login
-            .values
+        && (login.credentials.contains(token)
+            || login
+                .values
+                .iter()
+                .any(|value| value.candidate && value.digest == *token))
+}
+
+/// What the requests of a credential sent before the origin accepted the credential. Such a
+/// credential has no session (docs/01 section 1.2), yet a refused request's values must not teach
+/// the session that the credential starts later: their echo in a later response, such as a list of
+/// recent attempts, is not learned. So they are kept here, apart from the sessions, and the session
+/// takes them when it starts. They count against neither the session table nor any budget. Bounded
+/// by [`PENDING_MAX`] credentials and [`PENDING_VALUES_MAX`] values, the oldest going first, and
+/// dropped after [`IDLE_MAX_MS`]. Memory only: a restart loses them.
+#[derive(Debug, Default)]
+struct PendingSent {
+    /// Oldest first.
+    records: VecDeque<PendingRecord>,
+}
+
+/// The record of one credential in [`PendingSent`]: a session with no values but what it sent.
+#[derive(Debug)]
+struct PendingRecord {
+    id: Digest16,
+    at_ms: u64,
+    sent: SessionContext,
+}
+
+impl PendingSent {
+    /// Applies `change` to the record of `id`, created when absent. Records are dropped to make
+    /// room, never the one being changed.
+    fn with(&mut self, id: Digest16, now_ms: u64, change: impl FnOnce(&mut SessionContext)) {
+        while self
+            .records
+            .front()
+            .is_some_and(|front| now_ms.saturating_sub(front.at_ms) > IDLE_MAX_MS)
+        {
+            self.records.pop_front();
+        }
+        if !self.records.iter().any(|record| record.id == id) {
+            while self.records.len() >= PENDING_MAX {
+                self.records.pop_front();
+            }
+            self.records.push_back(PendingRecord {
+                id,
+                at_ms: now_ms,
+                sent: SessionContext::new(now_ms),
+            });
+        }
+        if let Some(record) = self.records.iter_mut().find(|record| record.id == id) {
+            change(&mut record.sent);
+        }
+        while self.values() > PENDING_VALUES_MAX {
+            let Some(oldest) = self.records.iter().position(|record| record.id != id) else {
+                break;
+            };
+            self.records.remove(oldest);
+        }
+    }
+
+    /// The values all the records keep together.
+    fn values(&self) -> usize {
+        self.records
             .iter()
-            .any(|value| value.candidate && value.digest == *token)
+            .map(|record| record.sent.sent_len())
+            .sum()
+    }
+
+    /// What the record of `id` sent, if it has one.
+    fn sent_record(&self, id: &Digest16) -> Option<SentRecord> {
+        self.records
+            .iter()
+            .find(|record| record.id == *id)
+            .map(|record| record.sent.sent_record())
+    }
+
+    /// Takes the record of `id`, for the session that starts with it.
+    fn take(&mut self, id: &Digest16) -> Option<SentRecord> {
+        let index = self.records.iter().position(|record| record.id == *id)?;
+        self.records
+            .remove(index)
+            .map(|record| record.sent.sent_record())
+    }
 }
 
 /// All sessions of one gateway process, and the JSON login responses held for their credentials.
@@ -848,6 +949,7 @@ fn carries(login: &HeldLogin, site: &str, token: &Digest16) -> bool {
 pub struct ContextStore {
     sessions: HashMap<Digest16, SessionContext>,
     held: HeldLogins,
+    pending: PendingSent,
 }
 
 impl ContextStore {
@@ -880,12 +982,46 @@ impl ContextStore {
                 self.sessions.remove(&oldest);
             }
         }
+        // A session that starts here takes what its credential's requests sent before the origin
+        // accepted it (see `PendingSent`).
+        let pending = if self.sessions.contains_key(&id) {
+            None
+        } else {
+            self.pending.take(&id)
+        };
         let session = self
             .sessions
             .entry(id)
             .or_insert_with(|| SessionContext::new(now_ms));
+        if let Some(record) = pending {
+            session.inherit_sent(&record);
+        }
         session.last_ms = now_ms;
         session
+    }
+
+    /// Notes values a request sent in the session `id` has or, while it has none, for the session
+    /// it starts (see `PendingSent`). Nothing is kept for an empty list.
+    pub fn note_sent(&mut self, id: Digest16, now_ms: u64, digests: &[Digest16]) {
+        if digests.is_empty() {
+            return;
+        }
+        if let Some(session) = self.existing(id, now_ms) {
+            session.note_sent(digests);
+        } else {
+            self.pending
+                .with(id, now_ms, |session| session.note_sent(digests));
+        }
+    }
+
+    /// Stops the session `id` from learning from responses. While it has none, the stop waits for
+    /// the session it starts (see `PendingSent`).
+    pub fn stop_learning(&mut self, id: Digest16, now_ms: u64) {
+        if let Some(session) = self.existing(id, now_ms) {
+            session.stop_learning();
+        } else {
+            self.pending.with(id, now_ms, SessionContext::stop_learning);
+        }
     }
 
     /// The live session for `id`, marked as active now, or `None`: nothing is created.
@@ -907,14 +1043,15 @@ impl ContextStore {
     }
 
     /// Holds a JSON login response of `site` until the credential it issues starts a session (docs/01
-    /// section 1.7). Only the keyed hashes and field names of its values are kept, and the identity
-    /// it declares in the same keyed form.
+    /// section 1.7). Only the keyed hashes and field names of its values are kept, the keyed hashes
+    /// of its long credential candidates, and the identity it declares in the same keyed form.
     pub fn hold_login(
         &mut self,
         site: &str,
         request_id: u128,
         at_ms: u64,
         values: Vec<HeldValue>,
+        credentials: Vec<Digest16>,
         identity: SessionIdentity,
     ) {
         self.held.hold(HeldLogin {
@@ -922,6 +1059,7 @@ impl ContextStore {
             request_id,
             at_ms,
             values,
+            credentials,
             identity,
         });
     }
@@ -965,12 +1103,14 @@ impl ContextStore {
     }
 
     /// What the session sent, for a session a response is about to issue a
-    /// credential to. Creates nothing.
+    /// credential to, or what its requests sent before it was accepted. Creates nothing.
     #[must_use]
     pub fn sent_record(&self, id: &Digest16) -> SentRecord {
         self.sessions
             .get(id)
-            .map_or_else(SentRecord::default, SessionContext::sent_record)
+            .map(SessionContext::sent_record)
+            .or_else(|| self.pending.sent_record(id))
+            .unwrap_or_default()
     }
 
     /// Number of sessions held.
@@ -1051,6 +1191,64 @@ mod tests {
             ContextKey::new(vec![8; 32]).mac("value", b"x")
         );
         assert_eq!(a.mac("value", b"x"), a.mac("value", b"x"));
+    }
+
+    #[test]
+    fn a_session_takes_what_its_credential_sent_before_the_origin_accepted_it() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let id = key.mac("session", b"late");
+        // A refused request sent 7; the origin accepts the credential on a later answer.
+        store.note_sent(id, 0, &[key.mac("value", b"7")]);
+        assert_eq!(store.len(), 0, "a refused credential starts no session");
+        let session = store.session(id, 1);
+        // The echo of what the session sent is not learned.
+        assert_eq!(
+            session.remember(&key, &at("GET /api/home"), &[response("id", "7")]),
+            0
+        );
+    }
+
+    #[test]
+    fn a_session_that_starts_after_a_stop_learns_nothing_from_responses() {
+        let key = key();
+        let mut store = ContextStore::new();
+        let id = key.mac("session", b"late");
+        store.stop_learning(id, 0);
+        assert_eq!(store.len(), 0, "judging a request starts no session");
+        let session = store.session(id, 1);
+        assert_eq!(
+            session.remember(&key, &at("GET /api/home"), &[response("id", "7")]),
+            0
+        );
+    }
+
+    #[test]
+    fn pending_records_are_bounded_and_drop_when_idle() {
+        let key = key();
+        let mut store = ContextStore::new();
+        for index in 0..(PENDING_MAX + 50) {
+            let id = key.mac("session", format!("made-up-{index}").as_bytes());
+            store.note_sent(id, 0, &[key.mac("value", b"7")]);
+        }
+        assert_eq!(store.pending.records.len(), PENDING_MAX);
+        // Their values are bounded too: each credential sends the most a session may hold.
+        let mut big = ContextStore::new();
+        for index in 0..10 {
+            let id = key.mac("session", format!("big-{index}").as_bytes());
+            let digests: Vec<Digest16> = (0..SENT_MAX)
+                .map(|n| key.mac("value", format!("{index}-{n}").as_bytes()))
+                .collect();
+            big.note_sent(id, 0, &digests);
+        }
+        assert!(big.pending.values() <= PENDING_VALUES_MAX);
+        // A record idle for longer than a session lives is dropped by the next one.
+        store.note_sent(
+            key.mac("session", b"next"),
+            IDLE_MAX_MS + 1,
+            &[key.mac("value", b"7")],
+        );
+        assert_eq!(store.pending.records.len(), 1);
     }
 
     #[test]
@@ -1538,6 +1736,7 @@ mod tests {
             7,
             0,
             vec![held(&key, token, "token"), held(&key, "6", "bid")],
+            Vec::new(),
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
@@ -1568,7 +1767,14 @@ mod tests {
         let mut store = ContextStore::new();
         let token = "credential-token-0001";
         let identity = SessionIdentity::declared(&key, &[(IdentityRole::User, "alice-0042")]);
-        store.hold_login(SITE, 7, 0, vec![held(&key, token, "token")], identity);
+        store.hold_login(
+            SITE,
+            7,
+            0,
+            vec![held(&key, token, "token")],
+            Vec::new(),
+            identity,
+        );
         let id = key.mac("session", token.as_bytes());
         store.start_session(SITE, id, key.mac("value", token.as_bytes()), 1);
         assert!(
@@ -1606,6 +1812,7 @@ mod tests {
             7,
             0,
             vec![held(&key, short, "code")],
+            Vec::new(),
             SessionIdentity::default(),
         );
         let id = key.mac("session", short.as_bytes());
@@ -1631,6 +1838,7 @@ mod tests {
             1,
             0,
             vec![held(&key, token, "token")],
+            Vec::new(),
             SessionIdentity::default(),
         );
         store.hold_login(
@@ -1638,6 +1846,7 @@ mod tests {
             2,
             10,
             vec![held(&key, token, "token")],
+            Vec::new(),
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
@@ -1658,6 +1867,7 @@ mod tests {
             1,
             0,
             vec![held(&key, token, "token")],
+            Vec::new(),
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
@@ -1680,6 +1890,7 @@ mod tests {
                 index as u128 + 1,
                 0,
                 vec![held(&key, &token(index), "token")],
+                Vec::new(),
                 SessionIdentity::default(),
             );
         }
@@ -1711,6 +1922,7 @@ mod tests {
             7,
             0,
             vec![held(&key, token, "token")],
+            Vec::new(),
             SessionIdentity::default(),
         );
         let id = key.mac("session", token.as_bytes());
@@ -1748,6 +1960,7 @@ mod tests {
                 index as u128 + 1,
                 0,
                 values,
+                Vec::new(),
                 SessionIdentity::default(),
             );
         }
@@ -1768,5 +1981,50 @@ mod tests {
             counted, store.held.values,
             "the count tracks the held values"
         );
+    }
+
+    #[test]
+    fn long_candidates_count_toward_the_held_total() {
+        let key = key();
+        let mut store = ContextStore::new();
+        // Each login holds one short value and thirty-nine long candidates: forty items in all.
+        let per_login = 40;
+        let logins = HELD_VALUES_MAX / per_login + 10;
+        let long = |login: usize, slot: usize| {
+            format!("long-candidate-{login:04}-{slot:02}-{}", "Z".repeat(160))
+        };
+        for login in 0..logins {
+            let values = vec![held(&key, &format!("value-{login:04}"), "field")];
+            let credentials = (0..per_login - 1)
+                .map(|slot| key.mac("value", long(login, slot).as_bytes()))
+                .collect();
+            store.hold_login(
+                SITE,
+                login as u128 + 1,
+                0,
+                values,
+                credentials,
+                SessionIdentity::default(),
+            );
+        }
+        assert!(store.held.values <= HELD_VALUES_MAX);
+        assert_eq!(store.held.logins.len(), HELD_VALUES_MAX / per_login);
+        assert_eq!(
+            store.held.logins.front().map(|login| login.request_id),
+            Some(11),
+            "the oldest ten went first"
+        );
+        let counted: usize = store.held.logins.iter().map(HeldLogin::weight).sum();
+        assert_eq!(
+            counted, store.held.values,
+            "the long candidates count toward the total too"
+        );
+        // A login taken by one of its long candidates gives its whole weight back.
+        let before = store.held.values;
+        let newest = long(logins - 1, 0);
+        let id = key.mac("session", newest.as_bytes());
+        store.start_session(SITE, id, key.mac("value", newest.as_bytes()), 1);
+        assert_eq!(store.session(id, 1).login_request(), Some(logins as u128));
+        assert_eq!(store.held.values, before - per_login);
     }
 }
