@@ -1486,7 +1486,7 @@ mod tests {
         // Path-only attack probes come back near BENIGN 0.58 on the current prompt. A DENY on access
         // denies whatever the other question says: the low attack must not make it undecidable.
         let answers = parse_response(&response(
-            ("DENY", [0.9, 0.05, 0.05]),
+            ("DENY", [0.05, 0.9, 0.05]),
             ("BENIGN", [0.58, 0.40, 0.02]),
         ))
         .unwrap();
