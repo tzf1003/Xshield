@@ -4,8 +4,9 @@
 //! functions the learning saw that the table does not name (the candidates), the administrator proposals that
 //! wait, and the traffic of the last day that neither names. `POST …/objects/functions/changes` applies one batch
 //! of the administrator's changes to the table as one new configuration version, and
-//! `POST …/objects/functions/proposals/dismiss` dismisses one proposal. Nothing here changes a judgement: the
-//! judge does not read the table yet, and every change to it waits for an administrator.
+//! `POST …/objects/functions/proposals/dismiss` dismisses one proposal. These handlers make no judgement themselves:
+//! they read the store and write the configuration, and every write waits for an administrator. How the table takes
+//! part in judging is docs/07 section 7.9.18.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -45,7 +46,8 @@ const UNLEARNED_TOP: usize = 50;
 
 /// Words that mark a template as an operations or administration path. A candidate whose template holds one is
 /// `sensitive`, which reminds the administrator not to add it to the baseline by accident (docs/07 section 7.9.20).
-/// Matched in lower case.
+/// Matched in lower case. The list is the one the judge's instructions give for privileged and operations functions
+/// (docs/02 section 2.2); change the two together.
 const SENSITIVE_WORDS: [&str; 15] = [
     "admin",
     "manage",
@@ -142,7 +144,8 @@ pub struct CandidateRow {
     pub last_seen: Option<String>,
     /// The requests of the last day the gateway allowed to this function without Jev.
     pub requests_24h: u64,
-    /// Whether the candidate has as many units as the threshold, so the console selects it by default.
+    /// Whether the candidate has as many units as the threshold. The console selects by default the candidates that
+    /// are suggested and not sensitive (docs/07 section 7.9.20).
     pub suggested: bool,
     /// Whether the template holds a word that marks an operations path (`SENSITIVE_WORDS`).
     pub sensitive: bool,

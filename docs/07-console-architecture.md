@@ -1141,7 +1141,7 @@ objects:
 
 ### 7.9.20 功能表的读取、确认与驳回
 
-功能表页背后的三个接口（页面是后续工作）。它们挂在登录检查之内，未登录返回 401 `UNAUTHENTICATED`；写接口要求 `Content-Type: application/json`（7.9.1）。它们只读写功能表和功能的提议，不改判定；判定使用功能表是后续的改动。
+功能表页背后的三个接口（页面是后续工作）。它们挂在登录检查之内，未登录返回 401 `UNAUTHENTICATED`；写接口要求 `Content-Type: application/json`（7.9.1）。这三个接口自己不做判定：只读库和写配置，每次写入都要管理员确认。功能表怎样参与判定见 7.9.18。
 
 **`GET /api/sites/{name}/objects/functions`** 读出功能表的当前状态：配置里的功能、学习窗口里的证据、没有进表的候选、管理档提议，以及最近一天没有学到的流量。响应示例（每类只列一行）：
 
@@ -1186,8 +1186,8 @@ objects:
 `candidates` 是窗口里有证据、配置不认识的功能：
 
 - 只列合并后的键（见 7.9.19 的路径段合并）。对象表在同一路由上声明过位置的功能已算已知，不列。超过 256 字节的键不列。
-- `suggested`：普通单位数加管理员单位数不少于 `threshold_units`。控制台默认只勾选它们。
-- `sensitive`：模板转小写后含有下列任一词：`admin`、`manage`、`audit`、`metrics`、`actuator`、`server-status`、`debug`、`swagger`、`console`、`phpinfo`、`internal`、`config`、`backup`、`ftp`、`export`。这些多是运维或管理路径。它只提醒管理员别把这类路径顺手勾进基线，与 `suggested` 无关。
+- `suggested`：普通单位数加管理员单位数不少于 `threshold_units`。控制台默认勾选的是 `suggested` 为真且 `sensitive` 为假的候选。
+- `sensitive`：模板转小写后含有下列任一词：`admin`、`manage`、`audit`、`metrics`、`actuator`、`server-status`、`debug`、`swagger`、`console`、`phpinfo`、`internal`、`config`、`backup`、`ftp`、`export`。这些多是运维或管理路径。它不改变 `suggested`，控制台也不默认勾选它，以此提醒管理员别把这类路径顺手勾进基线。
 - `requests_24h`：最近 24 小时里，这个功能键上以 `fast_allow` 或 `cached_allow` 放行的请求数。
 - 排序：普通单位数加管理员单位数从少到多，相同按键。少的排前面，让可疑的先被看到。
 
