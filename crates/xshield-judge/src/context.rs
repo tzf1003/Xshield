@@ -1044,33 +1044,43 @@ impl ContextStore {
             return;
         }
         let most = self.origins.values().copied().max().unwrap_or(0);
-        let largest: Vec<Digest16> = self
-            .origins
-            .iter()
-            .filter(|(_, count)| **count == most)
-            .map(|(origin, _)| *origin)
-            .collect();
-        // The session id is the last tie-break, so the choice does not depend on the map's order.
-        let oldest_of = |wanted: &dyn Fn(&Digest16) -> bool| {
-            self.sessions
-                .iter()
-                .filter(|(_, session)| wanted(&session.origin))
-                .map(|(id, session)| (session.last_ms, *id))
-                .min()
-                .map(|(_, id)| id)
-        };
-        let victim = if let [only] = largest.as_slice() {
-            oldest_of(&|origin| origin == only)
-        } else if largest.len() == self.origins.len() {
-            // Every origin has as many sessions as the largest: the oldest session of the table.
-            oldest_of(&|_| true)
+        let victim = if most <= 1 {
+            // One session each: every origin is as large as the largest.
+            self.oldest_session(|_| true)
         } else {
-            let tied: HashSet<Digest16> = largest.iter().copied().collect();
-            oldest_of(&|origin| tied.contains(origin))
+            let largest: Vec<Digest16> = self
+                .origins
+                .iter()
+                .filter(|(_, count)| **count == most)
+                .map(|(origin, _)| *origin)
+                .collect();
+            if let [only] = largest.as_slice() {
+                self.oldest_session(|origin| origin == only)
+            } else {
+                let tied: HashSet<Digest16> = largest.into_iter().collect();
+                self.oldest_session(|origin| tied.contains(origin))
+            }
         };
         if let Some(victim) = victim {
             self.remove_session(&victim);
         }
+    }
+
+    /// The least recently active session whose origin `wanted` accepts. The session id is the
+    /// last tie-break, so the choice does not depend on the map's order.
+    fn oldest_session(&self, wanted: impl Fn(&Digest16) -> bool) -> Option<Digest16> {
+        let mut oldest: Option<(u64, Digest16)> = None;
+        for (id, session) in &self.sessions {
+            // Most sessions are younger than the best so far: say so before anything else.
+            if oldest.is_some_and(|(last_ms, _)| session.last_ms > last_ms) {
+                continue;
+            }
+            let candidate = (session.last_ms, *id);
+            if oldest.is_none_or(|best| candidate < best) && wanted(&session.origin) {
+                oldest = Some(candidate);
+            }
+        }
+        oldest.map(|(_, id)| id)
     }
 
     /// The origin the live session `id` was created from, or `None` when there is no such session.
