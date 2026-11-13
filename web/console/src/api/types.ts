@@ -1101,7 +1101,6 @@ export interface FixedParams {
   state_bytes_max: number;
   request_body_max: number;
   response_parse_max: number;
-  request_values_max: number;
 }
 
 export interface SystemInfo {

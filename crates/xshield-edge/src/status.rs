@@ -18,7 +18,7 @@ use xshield_judge::engine::{ADDRESS_CALLS_PER_MINUTE, Judge, SESSION_CALLS_PER_M
 use xshield_judge::jev::JevPort;
 use xshield_judge::slot::Source;
 use xshield_judge::state::{Prompt, SECRET_WORDS, STATE_BYTES_MAX};
-use xshield_judge::values::{REQUEST_VALUES_MAX, RESPONSE_PARSE_MAX};
+use xshield_judge::values::RESPONSE_PARSE_MAX;
 
 use crate::jev_settings::{JevLoader, JevReport};
 use crate::proxy::REQUEST_BODY_MAX;
@@ -234,7 +234,6 @@ fn params(default_timeout: Duration) -> serde_json::Value {
             "state_bytes_max": STATE_BYTES_MAX,
             "request_body_max": REQUEST_BODY_MAX,
             "response_parse_max": RESPONSE_PARSE_MAX,
-            "request_values_max": REQUEST_VALUES_MAX,
             "queue_capacity": QUEUE_CAPACITY,
         },
     })

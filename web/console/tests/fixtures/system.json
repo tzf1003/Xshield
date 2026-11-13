@@ -194,7 +194,6 @@
       "state_bytes_max": 8192,
       "request_body_max": 49152,
       "response_parse_max": 1048576,
-      "request_values_max": 200,
       "queue_capacity": 10000
     }
   }

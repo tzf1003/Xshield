@@ -3003,6 +3003,9 @@ mod tests {
             ..get("/api/import", None, Some("alice"), 1_000)
         };
         assert!(judge.judge(&site, &upload).await.forward);
+        // The upload is one text of every token, now read whole (docs/01 section 1.3), so it takes
+        // several batches; only the object request after it is counted here.
+        let upload_calls = fake.calls();
         judge.observe(
             &site,
             &shown(
@@ -3019,7 +3022,7 @@ mod tests {
             )
             .await;
         assert!(!object.forward);
-        assert_eq!(fake.calls(), 2);
+        assert_eq!(fake.calls(), upload_calls + 1);
     }
 
     #[tokio::test]
@@ -4405,29 +4408,450 @@ mod tests {
         assert_eq!(fake.calls(), calls);
     }
 
+    /// The `request.values` of one prompt sent to Jev, as JSON.
+    fn sent_values(sent: &str) -> Vec<serde_json::Value> {
+        let body: serde_json::Value = serde_json::from_str(sent).expect("the prompt is JSON");
+        body["state"]["request"]["values"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
     #[tokio::test]
-    async fn the_largest_body_of_distinct_short_numbers_is_judged_in_batches() {
+    async fn the_largest_body_of_distinct_short_numbers_takes_sixteen_batches_and_leaves_the_rest_out()
+     {
         let fake = FakeJev::new();
         let judge = judge(&fake);
         let enforced = site(r#","mode":"enforce""#);
         confirm(&judge, &enforced, "alice");
-        let numbers: Vec<String> = (0..8_000).map(|n| n.to_string()).collect();
+        // Ten thousand distinct numbers, about 47.7 KiB: every number is a value of its own.
+        let numbers: Vec<String> = (0..10_000).map(|n| n.to_string()).collect();
         let body = format!("[{}]", numbers.join(","));
         assert!(body.len() <= 48 * 1024, "{} bytes", body.len());
         let verdict = judge
             .judge(&enforced, &survey_request(body.as_bytes(), 1_000))
             .await;
+        // The 16-batch budget (docs/02 section 2.4) judges the first sixteen batches. The rest is
+        // left out: the request is allowed, but the allow is not kept for the cache.
         assert!(verdict.forward, "{:?}", verdict.record.decision_path);
-        let batches = verdict
-            .record
-            .jev
-            .as_ref()
-            .and_then(|jev| jev.batches)
-            .map_or(1, usize::from);
-        assert_eq!(fake.calls(), batches);
-        // The 200-value cap (REQUEST_VALUES_MAX) keeps this body to two batches. That is not the worst
-        // case: without the cap the same body takes JEV_BATCHES_MAX calls, and the rest is left out.
-        assert_eq!(batches, 2);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        let jev = verdict.record.jev.as_ref().expect("the request was judged");
+        assert_eq!(
+            jev.batches,
+            u16::try_from(crate::state::JEV_BATCHES_MAX).ok()
+        );
+        assert_eq!(fake.calls(), crate::state::JEV_BATCHES_MAX);
+        assert!(jev.left_out.is_some_and(|left| left > 0));
+        let calls = fake.calls();
+        let again = judge
+            .judge(&enforced, &survey_request(body.as_bytes(), 1_500))
+            .await;
+        assert!(again.forward);
+        assert_eq!(
+            fake.calls(),
+            2 * calls,
+            "a partly judged request is judged again"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_thousand_five_hundred_unseen_references_are_refused_before_any_call() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // Each id is a reference the session never saw. Sixteen batches cannot hold them all, so the
+        // request is refused with 403 and nothing is sent (docs/02 section 2.4).
+        let query = (0..2_500)
+            .map(|n| format!("patient_id={}", 1_000 + n))
+            .collect::<Vec<_>>()
+            .join("&");
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/records", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 403);
+        assert_eq!(
+            verdict
+                .record
+                .jev
+                .as_ref()
+                .and_then(|jev| jev.failure.as_deref()),
+            Some("JEV_STATE_TOO_LARGE")
+        );
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unseen_reference_behind_ten_thousand_short_parameters_is_sent_first_and_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let mut pairs: Vec<String> = (0..10_000).map(|n| format!("k{n}=v{n}")).collect();
+        pairs.push("patient_id=8".to_owned());
+        let query = pairs.join("&");
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/records", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        // The reference is a value Jev must judge, so it leads the batches, and it is in the first.
+        let first = fake.sent().into_iter().next().unwrap_or_default();
+        assert!(sent_values(&first).iter().any(|item| {
+            item["at"] == "query.patient_id" && item["kind"] == "reference" && item["value"] == "8"
+        }));
+    }
+
+    #[tokio::test]
+    async fn probe_e3_an_unseen_id_behind_two_hundred_inert_parameters_is_sent_and_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The padding is inert and is not sent; the id and the injection behind it are.
+        let padding: String = (0..200)
+            .map(|n| format!("f{n}=x&"))
+            .collect::<Vec<_>>()
+            .concat();
+        let query = format!("{padding}patient_id=8&q=%27%20OR%201%3D1--");
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/records", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "query.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+        assert!(sent.iter().any(|body| body.contains("OR 1=1")));
+    }
+
+    #[tokio::test]
+    async fn probe_e4_a_multipart_form_sends_its_fields_as_values_and_is_not_truncated() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let filler = "A".repeat(600);
+        let body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n{filler}\r\n\
+             --b\r\nContent-Disposition: form-data; name=\"patient_id\"\r\n\r\n8\r\n\
+             --b\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n' OR 1=1--\r\n--b--\r\n"
+        );
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("multipart/form-data; boundary=b"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body)
+                .iter()
+                .any(|item| item["at"] == "body.patient_id" && item["value"] == "8")
+        }));
+        assert!(sent.iter().any(|body| {
+            sent_values(body)
+                .iter()
+                .any(|item| item["value"] == "' OR 1=1--")
+        }));
+        for body in &sent {
+            let prompt: serde_json::Value = serde_json::from_str(body).expect("the prompt is JSON");
+            assert_eq!(prompt["state"]["request"]["truncated"], json!(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_e4_a_text_plain_json_body_sends_its_id_as_a_reference() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("text/plain"),
+                    body: br#"{"patient_id":8}"#,
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert!(fake.sent().iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn a_body_with_no_type_that_is_a_form_sends_its_id_and_the_unseen_id_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The id comes after 600 characters of a value. Read as fields, it is a reference of its own,
+        // not a piece of a long input (docs/01 section 1.3).
+        let body = format!("note={}&patient_id=8", "A".repeat(600));
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: None,
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+        for body in &sent {
+            let prompt: serde_json::Value = serde_json::from_str(body).expect("the prompt is JSON");
+            assert_eq!(prompt["state"]["request"]["truncated"], json!(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_typeless_form_padded_with_blanks_sends_its_id_under_its_trimmed_name() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8 ""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The body has blanks at its ends, and its shape is that of a form once they are gone. An
+        // origin that takes the blanks off the name reads the id as patient_id, so it is a reference
+        // there. The value keeps its blank, as it is in the body.
+        let body = " patient_id=8 ";
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: None,
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert!(fake.sent().iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8 "
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn a_multipart_mixed_body_sends_its_id_and_the_unseen_id_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n{}\r\n\
+             --b\r\nContent-Disposition: form-data; name=\"patient_id\"\r\n\r\n8\r\n--b--\r\n",
+            "A".repeat(600)
+        );
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("multipart/mixed; boundary=b"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+        for body in &sent {
+            let prompt: serde_json::Value = serde_json::from_str(body).expect("the prompt is JSON");
+            assert_eq!(prompt["state"]["request"]["truncated"], json!(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_form_typed_body_that_is_also_json_sends_its_id_and_the_unseen_id_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The body is JSON and a form at once. The origin reads the form, so `patient_id=8` is a
+        // field.
+        let body = r#"{"a=":"&patient_id=8&b="}"#;
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("application/x-www-form-urlencoded"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+        for body in &sent {
+            let prompt: serde_json::Value = serde_json::from_str(body).expect("the prompt is JSON");
+            assert_eq!(prompt["state"]["request"]["truncated"], json!(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_rfc_2231_field_name_sends_its_id_and_the_unseen_id_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The name is written as `name*=UTF-8''patient_id`. The origin reads it as `patient_id`, so
+        // the 8 is that field's reference, not an input of a field with no name.
+        let body =
+            "--b\r\nContent-Disposition: form-data; name*=UTF-8''patient_id\r\n\r\n8\r\n--b--\r\n";
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("multipart/form-data; boundary=b"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let sent = fake.sent();
+        assert!(sent.iter().any(|body| {
+            sent_values(body).iter().any(|item| {
+                item["at"] == "body.patient_id"
+                    && item["kind"] == "reference"
+                    && item["value"] == "8"
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn a_base64_field_sends_its_decoded_injection_and_the_request_is_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        // The note is base64 for `' OR 1=1--`. The origin decodes it, so the decoded text is judged too.
+        let body = "--b\r\nContent-Disposition: form-data; name=\"note\"\r\n\
+            Content-Transfer-Encoding: base64\r\n\r\nJyBPUiAxPTEtLQ==\r\n--b--\r\n";
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("multipart/form-data; boundary=b"),
+                    body: body.as_bytes(),
+                    ..get("/api/records", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert!(fake.sent().iter().any(|body| {
+            sent_values(body)
+                .iter()
+                .any(|item| item["at"] == "body.note" && item["value"] == "' OR 1=1--")
+        }));
+    }
+
+    #[tokio::test]
+    async fn three_hundred_ids_the_session_saw_as_their_own_kind_are_fast_allowed() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        let ids: Vec<String> = (0..300)
+            .map(|n| format!(r#"{{"id":"{}"}}"#, 1_000 + n))
+            .collect();
+        let listing = format!(r#"{{"items":[{}]}}"#, ids.join(","));
+        judge.observe(
+            &enforced,
+            &shown("/api/patients", listing.as_bytes(), "alice"),
+        );
+        let request_body = format!(r#"{{"items":[{}]}}"#, ids.join(","));
+        let verdict = judge
+            .judge(
+                &enforced,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("application/json"),
+                    body: request_body.as_bytes(),
+                    ..get("/api/patients", None, Some("alice"), 1_000)
+                },
+            )
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
     }
 
     #[tokio::test]
