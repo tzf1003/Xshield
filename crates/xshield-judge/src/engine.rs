@@ -258,6 +258,8 @@ struct Turn<'a> {
     resolved: &'a Resolved,
     entry: bool,
     session_id: Option<Digest16>,
+    /// What the request is judged against while its credential has no session.
+    unconfirmed: &'a SessionContext,
     extracted: &'a ExtractedRequest,
     cache_key: &'a Digest16,
     tuning: &'a Tuning<'a>,
@@ -332,17 +334,24 @@ impl<J: JevPort> Judge<J> {
             .map(|credential| self.key.mac("session", credential.as_bytes()));
         // A credential that no session holds yet starts its session from the JSON login response
         // that issued it, when one is held (docs/01 section 1.7). Only an entry starts it: after a
-        // login the first request lands on an entry, so a credential first seen anywhere else
-        // starts a session that knows no login. This runs before anything reads the session, so a
-        // session that does start is created already knowing what the login returned.
+        // login the first request lands on an entry. This runs before anything reads the session,
+        // so a session that does start is created already knowing what the login returned.
+        //
+        // Any other credential without a session gets none here: a session is kept once the
+        // origin has answered the credential (see `observe`), so a made-up credential cannot push
+        // real sessions out of the store or draw a Jev budget of its own. Such a request is judged
+        // against an empty view.
+        let mut unbound = None;
         if let (Some(id), Some(credential), Some(_)) = (session_id, request.credential, entry) {
             let token = self
                 .key
                 .mac("value", credential_token(site, credential).as_bytes());
-            self.lock()
+            unbound = self
+                .lock()
                 .store
-                .start_session(site.name(), id, token, request.now_ms);
+                .start_from_login(site.name(), id, token, request.now_ms);
         }
+        let unconfirmed = SessionContext::unconfirmed(request.now_ms, unbound);
         let mut extracted = extract_request(
             request.path,
             request.query,
@@ -366,6 +375,7 @@ impl<J: JevPort> Judge<J> {
             resolved,
             entry: entry.is_some(),
             session_id,
+            unconfirmed: &unconfirmed,
             extracted: &extracted,
             cache_key: &cache_key,
             tuning: &tuning,
@@ -442,13 +452,20 @@ impl<J: JevPort> Judge<J> {
         // step). Its context is the client address: what the origin showed
         // that address earlier (a new user's id, the security questions) is
         // the only evidence that the next sign-up request names its own data.
-        let session_id = match turn.session_id {
-            Some(id) => id,
-            None if turn.entry => self.key.mac("address", request.client.as_bytes()),
-            None => return Plan::Done(Verdict::Unsafe(DecisionPath::NoSession)),
-        };
+        if turn.session_id.is_none() && !turn.entry {
+            return Plan::Done(Verdict::Unsafe(DecisionPath::NoSession));
+        }
+        let address = self.key.mac("address", request.client.as_bytes());
         let mut inner = self.lock();
-        let session = inner.store.session(session_id, request.now_ms);
+        // A credential without a session is judged against the empty view, and a Jev call for it
+        // is counted against the client address like a request without a credential.
+        let (session, limit_key): (&SessionContext, Digest16) = match turn.session_id {
+            Some(id) => match inner.store.existing(id, request.now_ms) {
+                Some(session) => (session, id),
+                None => (turn.unconfirmed, address),
+            },
+            None => (inner.store.session(address, request.now_ms), address),
+        };
         let PlannedValues {
             values,
             shown,
@@ -485,10 +502,7 @@ impl<J: JevPort> Judge<J> {
             trace.cache_source = request_text(source);
             return Plan::Done(Verdict::Safe(DecisionPath::CachedAllow));
         }
-        Plan::Ask {
-            limit_key: session_id,
-            values,
-        }
+        Plan::Ask { limit_key, values }
     }
 
     /// Settles each value of the request against what the session saw: fills the
@@ -703,15 +717,20 @@ impl<J: JevPort> Judge<J> {
         let verdict = match conclusion {
             Conclusion::Allow => {
                 if tuning.cache_ms > 0 && !turn.resolved.is_unknown() && !turn.extracted.truncated {
-                    self.lock()
-                        .store
-                        .session(turn.session_id.unwrap_or(limit_key), request.now_ms)
-                        .cache_allow(
+                    // A credential without a session has nowhere to keep the allow.
+                    let mut inner = self.lock();
+                    let session = match turn.session_id {
+                        Some(id) => inner.store.existing(id, request.now_ms),
+                        None => Some(inner.store.session(limit_key, request.now_ms)),
+                    };
+                    if let Some(session) = session {
+                        session.cache_allow(
                             *turn.cache_key,
                             request.now_ms,
                             tuning.cache_ms,
                             request_number(request.request_id),
                         );
+                    }
                 }
                 Verdict::Safe(DecisionPath::JevAllow)
             }
@@ -732,6 +751,9 @@ impl<J: JevPort> Judge<J> {
         tuning: &Tuning<'_>,
     ) -> Result<Snapshot, &'static str> {
         let mut inner = self.lock();
+        // The session's budget is for a session the store holds; a credential without one
+        // spends the budget of its address (`limit_key` is then the address).
+        let session_id = session_id.filter(|id| inner.store.contains(id, request.now_ms));
         let limit = if session_id.is_some() {
             tuning.session_calls
         } else {
@@ -740,10 +762,10 @@ impl<J: JevPort> Judge<J> {
         if !inner.limiter.allow(limit_key, limit, request.now_ms) {
             return Err("JEV_CALL_LIMIT");
         }
-        let Some(id) = session_id else {
+        let Some(session) = session_id.and_then(|id| inner.store.existing(id, request.now_ms))
+        else {
             return Ok(Snapshot::default());
         };
-        let session = inner.store.session(id, request.now_ms);
         Ok(Snapshot {
             age: session.age_seconds(request.now_ms),
             entries: session.entries_passed().to_vec(),
@@ -758,7 +780,12 @@ impl<J: JevPort> Judge<J> {
     /// Whether the session is an administrator's: its declared role is the administrator's
     /// (docs/07 section 7.4.7). A request without a session is not.
     fn is_administrator(&self, session_id: Option<Digest16>, now_ms: u64) -> bool {
-        session_id.is_some_and(|id| self.lock().store.session(id, now_ms).identity().is_admin())
+        session_id.is_some_and(|id| {
+            self.lock()
+                .store
+                .existing(id, now_ms)
+                .is_some_and(|session| session.identity().is_admin())
+        })
     }
 
     /// The allow cache key: the method, the logical path and the request values.
@@ -824,11 +851,29 @@ impl<J: JevPort> Judge<J> {
             summary.skip = Some(Skip::Bypass);
             return summary;
         }
+        let success = (200..300).contains(&observation.status);
+        // The origin accepted a credential that has no session yet, on an entry: the session
+        // starts here, with the reason no held login set it up (docs/01 section 1.7). The judge
+        // starts a session only from the login that issued its credential.
+        if let Some(credential) = observation
+            .credential
+            .filter(|credential| success && !credential.is_empty())
+            && logical.is_some_and(|path| site.is_entry(path))
+        {
+            let token = self
+                .key
+                .mac("value", credential_token(site, credential).as_bytes());
+            self.lock().store.start_session(
+                site.name(),
+                self.key.mac("session", credential.as_bytes()),
+                token,
+                observation.now_ms,
+            );
+        }
         // The origin answered the request, so an echo of what it sent teaches
         // nothing, whatever the status: a refused request's values can still come
         // back in a later response, such as a list of recent attempts.
         let inherited = self.note_request_sent(observation, issued.is_some());
-        let success = (200..300).contains(&observation.status);
         let issuing_redirect = (300..400).contains(&observation.status) && issued.is_some();
         if !success {
             summary.skip = Some(Skip::Status);
@@ -1583,6 +1628,19 @@ mod tests {
             client: "10.0.0.9",
             now_ms,
         }
+    }
+
+    /// The origin answers a request of `credential` with nothing to learn, which is what gives the
+    /// credential a session: until then it is judged against an empty view, on its address's budget.
+    fn confirm(judge: &Judge<FakeJev>, site: &SiteSpec, credential: &str) {
+        judge.observe(
+            site,
+            &Observation {
+                path: "/api/ping",
+                body: b"{}",
+                ..list_response(credential, 0)
+            },
+        );
     }
 
     fn list_response(credential: &str, now_ms: u64) -> Observation<'_> {
@@ -2717,6 +2775,7 @@ mod tests {
         let fake = FakeJev::new();
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
+        confirm(&judge, &site, "alice");
         let first = judge
             .judge(
                 &site,
@@ -2952,6 +3011,7 @@ mod tests {
         let fake = FakeJev::new();
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
+        confirm(&judge, &site, "alice");
         for index in 0..SESSION_CALLS_PER_MINUTE {
             let query = format!("q=v{index}x");
             assert!(
@@ -3316,7 +3376,16 @@ mod tests {
         let traced = first.record.trace.session.expect("the session is traced");
         assert_eq!(traced.login_request_id, None);
         assert_eq!(traced.login_unbound, None, "the login was not tried");
-        // The session exists now, so the entry after it does not take the login either.
+        // Once the origin has answered that request the session exists, so the entry after it
+        // does not take the login either.
+        judge.observe(
+            &site,
+            &Observation {
+                path: "/rest/basket/6",
+                body: b"{}",
+                ..list_response(LOGIN_TOKEN, 1)
+            },
+        );
         let entry = judge
             .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 2))
             .await;
@@ -3506,6 +3575,7 @@ mod tests {
         let fake = FakeJev::new();
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce","advanced":{"session_calls_per_minute":2}"#);
+        confirm(&judge, &site, "alice");
         for index in 0..2 {
             let query = format!("q=v{index}x");
             let verdict = judge
@@ -3528,6 +3598,75 @@ mod tests {
             Some("JEV_CALL_LIMIT")
         );
         assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_credential_the_origin_has_not_answered_starts_no_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce""#);
+        confirm(&judge, &site, "alice");
+        assert_eq!(judge.lock().store.len(), 1);
+        // Made-up credentials: on a page without values, on an entry, and with a value for Jev.
+        for index in 0..50 {
+            let credential = format!("made-up-{index}");
+            for (path, query) in [
+                ("/api/home", None),
+                ("/login", None),
+                ("/api/search", Some("q=word1x")),
+            ] {
+                judge
+                    .judge(&site, &get(path, query, Some(&credential), 1_000))
+                    .await;
+            }
+        }
+        assert_eq!(
+            judge.lock().store.len(),
+            1,
+            "only the answered session is kept"
+        );
+        // The origin answers one of them: that one has a session from then on.
+        confirm(&judge, &site, "made-up-7");
+        assert_eq!(judge.lock().store.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_credential_without_a_session_spends_the_budget_of_its_address() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"enforce","advanced":{"address_calls_per_minute":2}"#);
+        // Each request names a new credential; without a session they share the address's calls.
+        for index in 0..2 {
+            let credential = format!("made-up-{index}");
+            let verdict = judge
+                .judge(
+                    &site,
+                    &get("/api/search", Some("q=word1x"), Some(&credential), 1_000),
+                )
+                .await;
+            assert!(verdict.forward);
+        }
+        let over = judge
+            .judge(
+                &site,
+                &get("/api/search", Some("q=word1x"), Some("made-up-2"), 2_000),
+            )
+            .await;
+        assert!(!over.forward);
+        assert_eq!(
+            over.record.jev.unwrap().failure.as_deref(),
+            Some("JEV_CALL_LIMIT")
+        );
+        assert_eq!(fake.calls(), 2);
+        // A session the origin answered keeps its own budget.
+        confirm(&judge, &site, "alice");
+        let own = judge
+            .judge(
+                &site,
+                &get("/api/search", Some("q=word1x"), Some("alice"), 3_000),
+            )
+            .await;
+        assert!(own.forward);
     }
 
     #[tokio::test]
@@ -3845,6 +3984,7 @@ mod tests {
         let fake = FakeJev::new();
         let judge = judge(&fake);
         let site = site(r#","mode":"enforce""#);
+        confirm(&judge, &site, "alice");
         let first = judge
             .judge(
                 &site,
