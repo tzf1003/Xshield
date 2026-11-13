@@ -218,26 +218,24 @@ export type BootstrapChoice = {
   changed: boolean;
 };
 
-/** What the cold start writes: the field declarations, the path positions, and the classes they need that the map lacks. */
+/** What the cold start writes: an object slot per chosen position, and the classes they need that the map lacks. */
 export type BootstrapPlan = {
-  declarations: FieldKindDeclaration[];
   slots: ObjectSlotEntry[];
   classes: ObjectClassEntry[];
 };
 
 /**
- * The entries a cold start selection writes (console design 1.6): field positions become field declarations, the others
- * object slots, and a class that neither the map nor the site has yet is added with its name.
+ * The entries a cold start selection writes (console design 1.6): every position becomes an object slot under its key,
+ * and a class that neither the map nor the site has yet is added with its name. Field declarations are not written here;
+ * they stay the hand-made tool of the advanced section.
  */
 export function planBootstrap(
   choices: readonly BootstrapChoice[],
   known: readonly ObjectClass[],
   existing: ObjectsSpec | undefined,
 ): BootstrapPlan {
-  const declarations: FieldKindDeclaration[] = [];
   const slots: ObjectSlotEntry[] = [];
   const classes: ObjectClassEntry[] = [];
-  const seenDeclarations = new Set<string>();
   const seenSlots = new Set<string>();
   const haveClass = new Set([
     ...(existing?.classes ?? []).map((item) => item.id),
@@ -245,19 +243,7 @@ export function planBootstrap(
   ]);
   for (const choice of choices) {
     const { candidate, kind, name } = choice;
-    const field = fieldOfKey(candidate.key);
-    if (field !== null) {
-      const declaration: FieldKindDeclaration = {
-        field,
-        kind,
-        in: [scopeOfKey(candidate.key)],
-      };
-      const id = declarationKey(declaration);
-      if (!seenDeclarations.has(id)) {
-        seenDeclarations.add(id);
-        declarations.push(declaration);
-      }
-    } else if (!seenSlots.has(candidate.key)) {
+    if (!seenSlots.has(candidate.key)) {
       seenSlots.add(candidate.key);
       slots.push(slotEntryFor(candidate, kind, choice.changed ? "admin" : "rule"));
     }
@@ -266,13 +252,12 @@ export function planBootstrap(
       classes.push({ id: kind, name });
     }
   }
-  return { declarations, slots, classes };
+  return { slots, classes };
 }
 
-/** The configuration with a cold start plan written in: declarations, slots and the classes they need. */
+/** The configuration with a cold start plan written in: the classes they need, then the slots. */
 export function withPlan(spec: SiteSpec, plan: BootstrapPlan): SiteSpec {
   let next = withClasses(spec, plan.classes);
-  next = withDeclarations(next, plan.declarations);
   for (const slot of plan.slots) next = withSlot(next, slot);
   return next;
 }

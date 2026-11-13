@@ -1141,8 +1141,8 @@ export const OBJECT_TEXT = {
     skipped: "对象表还是空的，学习照常进行。",
     errorHint: "跳过不影响站点，之后可以在对象表里确认同一份列表。",
     confirm: (count: number) => `确认 ${count} 个位置…`,
-    summary: (fields: number, slots: number, classes: number, names: string) =>
-      `确认后：字段归类 ＋${fields} 条 · 对象表位置 ＋${slots} 条 · 新类别 ${classes} 个${names === "" ? "" : `（${names}）`}`,
+    summary: (slots: number, classes: number, names: string) =>
+      `确认后：对象表位置 ＋${slots} 条 · 新类别 ${classes} 个${names === "" ? "" : `（${names}）`}`,
     changed: "已改",
     changedFrom: (proposal: string) => `系统提议：${proposal}`,
     note: "名字推断的规则，与判定时相同",
