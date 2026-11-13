@@ -3103,6 +3103,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_json_login_is_not_held_and_its_token_learns_nothing() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"observe","advanced":{"field_kinds":[{"field":"bid","kind":"basket"}]}"#,
+        );
+        let body = login_body(LOGIN_TOKEN, 6);
+        let login = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                ..json_login(body.as_bytes(), "10.0.0.1", 0)
+            },
+        );
+        assert_eq!(login.pending_values, None);
+        assert_eq!(login.skip, Some(Skip::WouldBlock));
+        assert_eq!(login.new_values, 0);
+        // The token's session was not set up from the values of the refused login.
+        let entry = judge
+            .judge(&site, &get("/api/home", None, Some(LOGIN_TOKEN), 1))
+            .await;
+        assert!(
+            entry
+                .record
+                .trace
+                .session
+                .as_ref()
+                .is_none_or(|session| session.login_request_id.is_none())
+        );
+        let own = judge
+            .judge(&site, &get("/rest/basket/6", None, Some(LOGIN_TOKEN), 2))
+            .await;
+        assert_ne!(own.record.decision_path, DecisionPath::FastAllow);
+        // The address context learned nothing from it either.
+        let anon = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    client: "10.0.0.1",
+                    ..get("/api/patients", Some("id=6"), None, 3)
+                },
+            )
+            .await;
+        assert_ne!(anon.record.decision_path, DecisionPath::FastAllow);
+    }
+
+    #[tokio::test]
+    async fn a_refused_response_leaves_no_trace_in_a_live_session() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        confirm(&judge, &site, "alice");
+        let refused = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                path: "/api/home",
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert!(!refused.entry_passed);
+        assert_eq!(refused.new_values, 0);
+        assert_eq!(refused.values, 0);
+        assert!(refused.fingerprints.is_empty());
+        assert!(refused.shape.is_none());
+        assert!(refused.exposure.is_none());
+        // The same response, not refused, passes the entry for the first time: the refused one kept
+        // nothing.
+        let learned = judge.observe(
+            &site,
+            &Observation {
+                path: "/api/home",
+                ..list_response("alice", 2_000)
+            },
+        );
+        assert!(learned.entry_passed);
+        assert!(learned.new_values > 0);
+    }
+
+    #[tokio::test]
+    async fn a_refused_redirect_and_bypass_keep_their_skip_reasons() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        let redirect = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                credential: None,
+                issued_credential: Some("fresh"),
+                status: 302,
+                path: "/login",
+                ..list_response("x", 1_000)
+            },
+        );
+        assert_eq!(redirect.skip, Some(Skip::Status));
+        assert!(redirect.issued_session.is_some());
+        let bypass = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                path: "/static/app.js",
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert_eq!(bypass.skip, Some(Skip::Bypass));
+        let failed = judge.observe(
+            &site,
+            &Observation {
+                would_block: true,
+                status: 500,
+                ..list_response("alice", 1_000)
+            },
+        );
+        assert_eq!(failed.skip, Some(Skip::Status));
+    }
+
+    #[tokio::test]
     async fn c4_secrets_never_reach_jev() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
