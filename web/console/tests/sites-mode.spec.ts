@@ -10,6 +10,7 @@ import {
   expectDialogNoAxeViolations,
   freezeClock,
   impactWith,
+  untilModalSettled,
 } from "./helpers/sites-flow.ts";
 
 /** juice goes to enforce: the 14 requests that observation would have blocked are blocked from now on. */
@@ -27,6 +28,7 @@ test("switching an observing site to enforce shows its readiness and waits for t
   await page.goto("/sites/juice");
   await page.getByRole("button", { name: "切换到拦截模式…" }).click();
 
+  await untilModalSettled(page, ENFORCE_TITLE);
   const dialog = page.getByRole("dialog", { name: ENFORCE_TITLE });
   const readiness = dialog.getByRole("list", { name: "就绪检查" });
   await expect(readiness).toContainText("已观察 6 天 4 小时");
@@ -58,6 +60,7 @@ test("switching an enforcing site back to observe needs no confirmation", async 
   await page.goto("/sites/emr");
   await page.getByRole("button", { name: "切回观察模式…" }).click();
 
+  await untilModalSettled(page, "把 emr 切回观察模式");
   const dialog = page.getByRole("dialog", { name: "把 emr 切回观察模式" });
   await expect(dialog).toContainText("切回观察后不再拦截任何请求，只记录本应拦截。");
   await expect(dialog.getByRole("checkbox")).toHaveCount(0);
