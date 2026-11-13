@@ -60,7 +60,7 @@
         "entry": {"type": ["string", "null"], "description": "覆盖该路径的入口模式，原样记录。"},
         "bypass": {"type": ["string", "null"], "description": "覆盖该路径的绕过模式，原样记录。"},
         "refused": {"type": ["string", "null"], "enum": ["unauthenticated", "forbidden", "rate_limited", "body_not_inspectable", "unknown_site", null], "description": "网关自己给出的拒绝原因。rate_limited 表示 Jev 调用限额用完，回 429（不论 on_jev_unavailable）。"},
-        "values_truncated": {"type": "boolean", "description": "请求没有被完整拆成请求值（请求体不是结构化数据，或超过上限）。"},
+        "values_truncated": {"type": "boolean", "description": "请求没有被完整拆成请求值（请求体不是结构化数据，整段作为一个文本判定；或 multipart 含文件部分，文件内容不拆值）。"},
         "values": {"type": "array", "items": {"$ref": "#/$defs/trace_value"}, "description": "请求拆出的全部请求值，按提取顺序，包括惰性值。"},
         "session": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/trace_session"}]},
         "cache_source": {"type": ["string", "null"], "description": "放行缓存命中时，复用的那次 Jev 放行所对应的请求 ID。"},

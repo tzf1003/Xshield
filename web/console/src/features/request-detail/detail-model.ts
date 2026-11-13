@@ -250,7 +250,7 @@ export function valuesNotice(trace: Trace): string | null {
     );
   }
   if (trace.values_truncated === true && !cleared) {
-    notes.push("请求体未结构化或值数达到上限，只拆出了部分值");
+    notes.push("请求体不是结构化数据，或含有文件部分（文件内容不拆值），拆出的值没有覆盖全部内容");
   }
   return notes.length === 0 ? null : `${notes.join("。")}。`;
 }

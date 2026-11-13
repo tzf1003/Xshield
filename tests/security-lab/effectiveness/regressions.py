@@ -220,7 +220,7 @@ def method_override(p: Prober) -> None:
 
 
 CASES: tuple[Case, ...] = (
-    Case("p0-1-pad-200", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, pad_200,
+    Case("p0-1-pad-200", "P0-1", "must", "block", "attack", SITE_TRUTH, pad_200,
          note="injection after 200 query values"),
     Case("p0-1-multipart", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, multipart,
          note="injection in multipart/form-data after 600 bytes of filler"),

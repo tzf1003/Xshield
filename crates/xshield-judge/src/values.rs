@@ -26,13 +26,13 @@ pub const CREDENTIAL_MAX_BYTES: usize = 8 * 1024;
 pub const CREDENTIAL_CANDIDATES_MAX: usize = 16;
 /// Most values taken from one response.
 pub const RESPONSE_VALUES_MAX: usize = 2_000;
-/// Most values taken from one request.
-pub const REQUEST_VALUES_MAX: usize = 200;
-/// Largest request body parsed for values.
-pub const BODY_PARSE_MAX: usize = 64 * 1024;
 /// Largest response body parsed for values (docs/01 section 1.2).
 pub const RESPONSE_PARSE_MAX: usize = 1024 * 1024;
+/// Deepest JSON container walked member by member. A container below it is one value: its JSON
+/// text (docs/01 section 1.3).
 const JSON_DEPTH_MAX: usize = 16;
+/// A field name longer than this is judged as a name that carries syntax (docs/01 section 1.3).
+const KEY_CHARS_MAX: usize = 64;
 const FIELD_MAX: usize = 32;
 
 /// One scalar found in a request.
@@ -65,12 +65,14 @@ pub struct ResponseValue {
     pub at: String,
 }
 
-/// Request values plus whether the body had to be summarised.
+/// Request values plus whether they cover the whole request.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ExtractedRequest {
     /// Values in request order.
     pub values: Vec<RequestValue>,
-    /// The body was not structured, too large, or the value cap was reached.
+    /// The body is not structured data and was judged as one text (docs/01 section 1.3), or a
+    /// multipart part carries a file whose content is not extracted, or a part could not be read
+    /// into its parts. The values then do not cover every byte the origin may echo.
     pub truncated: bool,
 }
 
@@ -284,10 +286,6 @@ fn push(out: &mut ExtractedRequest, at: String, key: Option<String>, value: Stri
     if value.is_empty() {
         return;
     }
-    if out.values.len() >= REQUEST_VALUES_MAX {
-        out.truncated = true;
-        return;
-    }
     let inert = inert_value(key.as_deref(), &value);
     out.values.push(RequestValue {
         at,
@@ -341,38 +339,280 @@ pub fn extract_request(
         return out;
     }
     let kind = content_type.map(media_kind).unwrap_or_default();
-    if body.len() > BODY_PARSE_MAX {
-        out.truncated = true;
-    }
-    let parsed = body.len() <= BODY_PARSE_MAX
-        && match kind.as_str() {
-            "application/x-www-form-urlencoded" => {
-                pairs(&mut out, "body", &String::from_utf8_lossy(body));
-                true
-            }
-            kind if is_json_media(kind) => serde_json::from_slice::<Json>(body).is_ok_and(|json| {
-                walk_request(&mut out, &json, "body", None, 0);
-                true
-            }),
-            _ => false,
-        };
-    if !parsed {
-        out.truncated = true;
-        let head = &body[..body.len().min(2048)];
-        push(
-            &mut out,
-            "body".to_owned(),
-            None,
-            String::from_utf8_lossy(head).into_owned(),
-        );
+    // The body is read as its media type says (docs/01 section 1.3). A body that does not read as
+    // structured data is judged as one text.
+    let read = match kind.as_str() {
+        "application/x-www-form-urlencoded" => {
+            pairs(&mut out, "body", &String::from_utf8_lossy(body));
+            true
+        }
+        "multipart/form-data" => content_type
+            .and_then(boundary_of)
+            .is_some_and(|boundary| multipart_body(&mut out, body, &boundary)),
+        kind if is_json_media(kind) => walk_json(&mut out, body, "body", None),
+        // Any other type, or none: a body that starts like a JSON object or array, once its blanks
+        // are skipped, and parses as one is read as JSON.
+        _ => {
+            let text = body.trim_ascii();
+            matches!(text.first(), Some(b'{' | b'[')) && walk_json(&mut out, text, "body", None)
+        }
+    };
+    if !read {
+        whole_body(&mut out, body);
     }
     out
 }
 
+/// A body read as one text: its bytes decoded leniently, as one value at `body` with no key. The
+/// body is not structured data, so the request is flagged truncated (docs/01 section 1.3).
+fn whole_body(out: &mut ExtractedRequest, body: &[u8]) {
+    out.truncated = true;
+    push(
+        out,
+        "body".to_owned(),
+        None,
+        String::from_utf8_lossy(body).into_owned(),
+    );
+}
+
+/// Walks `bytes` as a JSON document into values at `at`. Returns false, having read nothing, when
+/// the bytes are not JSON.
+fn walk_json(out: &mut ExtractedRequest, bytes: &[u8], at: &str, key: Option<&str>) -> bool {
+    match serde_json::from_slice::<Json>(bytes) {
+        Ok(json) => {
+            walk_request(out, &json, at, key, 0);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The parameters of a header value after its first part, such as `form-data; name="a"`. Names are
+/// lower case and quotes are taken off the values; a quoted value may hold `;` and a backslash
+/// escapes the next character (docs/01 section 1.3).
+fn parameters(value: &str) -> Vec<(String, String)> {
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for c in value.chars() {
+        if escaped {
+            piece.push(c);
+            escaped = false;
+        } else if quoted && c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            quoted = !quoted;
+        } else if c == ';' && !quoted {
+            pieces.push(std::mem::take(&mut piece));
+        } else {
+            piece.push(c);
+        }
+    }
+    pieces.push(piece);
+    pieces
+        .iter()
+        .skip(1)
+        .filter_map(|piece| {
+            let (name, value) = piece.split_once('=')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        })
+        .collect()
+}
+
+/// The boundary of a multipart body: the `boundary` parameter of its `Content-Type`.
+fn boundary_of(content_type: &str) -> Option<String> {
+    parameters(content_type)
+        .into_iter()
+        .find(|(name, _)| name == "boundary")
+        .map(|(_, value)| value)
+        .filter(|value| !value.is_empty())
+}
+
+/// The file name of an RFC 5987 `filename*` value, `charset'language'percent-encoded`. A value of
+/// another form is taken as it is.
+fn filename_star(value: &str) -> String {
+    let text = value.split_once("''").map_or(value, |(_, text)| text);
+    percent_decode(text, false)
+}
+
+/// The first position at or after `from` where `needle` starts in `haystack`.
+fn find(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|offset| from + offset)
+}
+
+/// The parts of a multipart body, as the bytes between one delimiter line and the next, without the
+/// line break that ends each part (docs/01 section 1.3). A delimiter line is `--boundary` at the
+/// start of the body or of a line, followed only by blanks; the close delimiter `--boundary--` ends
+/// the list. Text before the first delimiter line is no part, and neither is an empty block.
+fn multipart_parts<'b>(body: &'b [u8], boundary: &str) -> Vec<&'b [u8]> {
+    let delimiter = format!("--{boundary}");
+    let delimiter = delimiter.as_bytes();
+    // Each delimiter line as (where it starts, where its content starts, whether it closes).
+    let mut lines: Vec<(usize, usize, bool)> = Vec::new();
+    let mut from = 0;
+    while let Some(found) = find(body, delimiter, from) {
+        from = found + 1;
+        if found != 0 && body.get(found - 1) != Some(&b'\n') {
+            continue;
+        }
+        let after = found + delimiter.len();
+        let line_end = find(body, b"\n", after).unwrap_or(body.len());
+        let rest = body.get(after..line_end).unwrap_or_default();
+        let (close, blanks) = match rest.strip_prefix(b"--") {
+            Some(tail) => (true, tail),
+            None => (false, rest),
+        };
+        if !blanks.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let content = (line_end + 1).min(body.len());
+        lines.push((found, content, close));
+        if close {
+            break;
+        }
+    }
+    let mut parts = Vec::new();
+    for (index, &(_, content, close)) in lines.iter().enumerate() {
+        if close {
+            break;
+        }
+        let end = lines.get(index + 1).map_or(body.len(), |next| next.0);
+        let block = strip_line_break(body.get(content..end).unwrap_or_default());
+        if !block.is_empty() {
+            parts.push(block);
+        }
+    }
+    parts
+}
+
+/// The part without the line break that ends it: `\r\n` or `\n`.
+fn strip_line_break(block: &[u8]) -> &[u8] {
+    block
+        .strip_suffix(b"\r\n")
+        .or_else(|| block.strip_suffix(b"\n"))
+        .unwrap_or(block)
+}
+
+/// Splits a part at the blank line that ends its headers, `\r\n\r\n` or `\n\n`. A part whose first
+/// line is already blank has no headers. `None` when no blank line ends the headers.
+fn split_headers(block: &[u8]) -> Option<(&[u8], &[u8])> {
+    if let Some(content) = block.strip_prefix(b"\r\n") {
+        return Some((&b""[..], content));
+    }
+    if let Some(content) = block.strip_prefix(b"\n") {
+        return Some((&b""[..], content));
+    }
+    for (index, byte) in block.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        if block.get(index + 1) == Some(&b'\n') {
+            return Some((block.get(..index)?, block.get(index + 2..)?));
+        }
+        if block.get(index + 1..index + 3) == Some(&b"\r\n"[..]) {
+            return Some((block.get(..index)?, block.get(index + 3..)?));
+        }
+    }
+    None
+}
+
+/// Reads a multipart body part by part (docs/01 section 1.3). Returns false, having read nothing,
+/// when the body has no part, so that it is read as one text.
+fn multipart_body(out: &mut ExtractedRequest, body: &[u8], boundary: &str) -> bool {
+    let parts = multipart_parts(body, boundary);
+    if parts.is_empty() {
+        return false;
+    }
+    for part in parts {
+        multipart_part(out, part);
+    }
+    true
+}
+
+/// Reads one part of a multipart body (docs/01 section 1.3). A file part gives its file name only,
+/// as `body.<name>#filename` with no key, and its content is not read. A text part gives its content
+/// under its field name, as a form field does, or as the JSON it holds when its own type says JSON.
+/// A part whose headers never end is one text at `body`.
+fn multipart_part(out: &mut ExtractedRequest, block: &[u8]) {
+    let Some((head, content)) = split_headers(block) else {
+        out.truncated = true;
+        push(
+            out,
+            "body".to_owned(),
+            None,
+            String::from_utf8_lossy(block).into_owned(),
+        );
+        return;
+    };
+    let head = String::from_utf8_lossy(head);
+    let mut dispositions = Vec::new();
+    let mut content_type = None;
+    for line in head.split('\n') {
+        let Some((name, value)) = line.trim_end_matches('\r').split_once(':') else {
+            continue;
+        };
+        let name = name.trim().to_ascii_lowercase();
+        if name == "content-disposition" {
+            dispositions.push(value.trim().to_owned());
+        } else if name == "content-type" && content_type.is_none() {
+            content_type = Some(value.trim().to_owned());
+        }
+    }
+    let params: Vec<(String, String)> = dispositions
+        .iter()
+        .flat_map(|disposition| parameters(disposition))
+        .collect();
+    let name = params
+        .iter()
+        .find(|(param, _)| param == "name")
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty());
+    let at = match &name {
+        Some(name) => format!("body.{name}"),
+        None => "body".to_owned(),
+    };
+    if let Some(name) = &name {
+        push_unusual_key(out, &at, name);
+    }
+    let files: Vec<&(String, String)> = params
+        .iter()
+        .filter(|(param, _)| param == "filename" || param == "filename*")
+        .collect();
+    if !files.is_empty() {
+        // The content of a file is not extracted: the values do not cover it (docs/01 section 1.3).
+        out.truncated = true;
+        for (param, value) in files {
+            let file_name = if param == "filename*" {
+                filename_star(value)
+            } else {
+                value.clone()
+            };
+            push(out, format!("{at}#filename"), None, file_name);
+        }
+        return;
+    }
+    let is_json =
+        content_type.is_some_and(|content_type| is_json_media(&media_kind(&content_type)));
+    if is_json && walk_json(out, content, &at, name.as_deref()) {
+        return;
+    }
+    push(out, at, name, String::from_utf8_lossy(content).into_owned());
+}
+
 /// A field *name* that carries syntax (`$ne`, `a'b`, `x;y`) is itself input:
-/// `NoSQL` operators and key-based injections travel in names, not values.
+/// `NoSQL` operators and key-based injections travel in names, not values. So is a name longer
+/// than [`KEY_CHARS_MAX`] characters.
 fn push_unusual_key(out: &mut ExtractedRequest, at: &str, name: &str) {
     let unusual = name.starts_with('$')
+        || name.chars().count() > KEY_CHARS_MAX
         || name.chars().any(|c| {
             matches!(
                 c,
@@ -434,8 +674,9 @@ enum Json {
     Array(Vec<Json>),
     Text(String),
     Number(serde_json::Number),
-    /// `true`, `false` and `null` carry nothing to judge.
-    Other,
+    /// `true`, `false` or `null`, as its text: nothing to judge on its own, but part of a subtree's
+    /// text.
+    Other(&'static str),
 }
 
 impl<'de> Deserialize<'de> for Json {
@@ -453,8 +694,8 @@ impl<'de> Visitor<'de> for JsonVisitor {
         formatter.write_str("a JSON value")
     }
 
-    fn visit_bool<E>(self, _: bool) -> Result<Json, E> {
-        Ok(Json::Other)
+    fn visit_bool<E>(self, value: bool) -> Result<Json, E> {
+        Ok(Json::Other(if value { "true" } else { "false" }))
     }
 
     fn visit_i64<E>(self, number: i64) -> Result<Json, E> {
@@ -466,7 +707,7 @@ impl<'de> Visitor<'de> for JsonVisitor {
     }
 
     fn visit_f64<E>(self, number: f64) -> Result<Json, E> {
-        Ok(serde_json::Number::from_f64(number).map_or(Json::Other, Json::Number))
+        Ok(serde_json::Number::from_f64(number).map_or(Json::Other("null"), Json::Number))
     }
 
     fn visit_str<E>(self, text: &str) -> Result<Json, E> {
@@ -474,7 +715,7 @@ impl<'de> Visitor<'de> for JsonVisitor {
     }
 
     fn visit_unit<E>(self) -> Result<Json, E> {
-        Ok(Json::Other)
+        Ok(Json::Other("null"))
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Json, A::Error> {
@@ -504,11 +745,12 @@ fn walk_request(
     key: Option<&str>,
     depth: usize,
 ) {
-    if depth > JSON_DEPTH_MAX {
-        out.truncated = true;
-        return;
-    }
     match json {
+        // A container below the depth limit is one value at this position: its JSON text
+        // (docs/01 section 1.3). Scalars are values wherever they sit.
+        Json::Object(_) | Json::Array(_) if depth > JSON_DEPTH_MAX => {
+            push(out, at.to_owned(), key.map(str::to_owned), json_text(json));
+        }
         Json::Object(members) => {
             for (name, inner) in members {
                 push_unusual_key(out, &format!("{at}.{name}"), name);
@@ -528,8 +770,32 @@ fn walk_request(
             key.map(str::to_owned),
             number.to_string(),
         ),
-        Json::Other => {}
+        Json::Other(_) => {}
     }
+}
+
+/// The JSON text of a parsed subtree, with its members in the order the walk reads them.
+fn json_text(json: &Json) -> String {
+    match json {
+        Json::Object(members) => {
+            let inner: Vec<String> = members
+                .iter()
+                .map(|(name, value)| format!("{}:{}", json_string(name), json_text(value)))
+                .collect();
+            format!("{{{}}}", inner.join(","))
+        }
+        Json::Array(items) => {
+            let inner: Vec<String> = items.iter().map(json_text).collect();
+            format!("[{}]", inner.join(","))
+        }
+        Json::Text(text) => json_string(text),
+        Json::Number(number) => number.to_string(),
+        Json::Other(literal) => (*literal).to_owned(),
+    }
+}
+
+fn json_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_default()
 }
 
 /// Extracts the values of a successful response. Unparsed types yield none.
@@ -956,13 +1222,197 @@ mod tests {
     }
 
     #[test]
-    fn unstructured_or_oversized_bodies_are_summarised_and_flagged() {
+    fn unstructured_bodies_are_one_text_and_flagged() {
         let request = extract_request("/", None, Some("application/octet-stream"), b"abc");
         assert!(request.truncated);
         assert_eq!(request.values.last().unwrap().at, "body");
-        let big = vec![b'a'; BODY_PARSE_MAX + 1];
-        assert!(extract_request("/", None, Some("application/json"), &big).truncated);
+        // Whatever its size, the body is one value, not cut at 2048 bytes.
+        let big = format!("{}END-MARK", "a".repeat(5_000));
+        let request = extract_request("/", None, Some("application/octet-stream"), big.as_bytes());
+        assert_eq!(request.values.len(), 1);
+        assert_eq!(request.values[0].value, big);
+        assert!(request.values[0].key.is_none());
         assert!(extract_request("/", None, Some("application/json"), b"{broken").truncated);
+    }
+
+    #[test]
+    fn a_text_xml_body_is_one_value_holding_all_of_it() {
+        let xml = format!("<x>{}END-MARK</x>", "a".repeat(5_000));
+        let request = extract_request("/", None, Some("text/xml"), xml.as_bytes());
+        assert!(request.truncated);
+        assert_eq!(located(&request), [("body", xml.as_str())]);
+        assert!(request.values[0].value.contains("END-MARK"));
+    }
+
+    #[test]
+    fn a_json_body_that_does_not_parse_is_one_text() {
+        let request = extract_request("/", None, Some("application/json"), b"{\"a\": ");
+        assert!(request.truncated);
+        assert_eq!(located(&request), [("body", "{\"a\": ")]);
+    }
+
+    /// The `(at, value)` pairs of a request, in order.
+    fn located(extracted: &ExtractedRequest) -> Vec<(&str, &str)> {
+        extracted
+            .values
+            .iter()
+            .map(|value| (value.at.as_str(), value.value.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn text_plain_holding_a_json_object_is_read_as_json() {
+        let request = extract_request("/", None, Some("text/plain"), br#"{"patient_id":8}"#);
+        assert!(!request.truncated);
+        assert!(values(&request).contains(&("body.patient_id", "8", false)));
+        let bare = extract_request("/", None, None, b"  [{\"patient_id\":8}]  ");
+        assert!(!bare.truncated);
+        assert!(values(&bare).contains(&("body[].patient_id", "8", false)));
+        // Text that merely starts with a brace and does not parse is one text.
+        let broken = extract_request("/", None, Some("text/plain"), b"{ patient_id=8");
+        assert!(broken.truncated);
+        assert_eq!(located(&broken), [("body", "{ patient_id=8")]);
+    }
+
+    #[test]
+    fn multipart_text_fields_keep_their_names_and_a_file_gives_only_its_name() {
+        let body = "--b\r\nContent-Disposition: form-data; name=\"patient_id\"\r\n\r\n8\r\n\
+            --b\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nhello\r\n\
+            --b\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"me.png\"\r\n\
+            Content-Type: image/png\r\n\r\nSECRET-MARK\r\n--b--\r\n";
+        let request = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            body.as_bytes(),
+        );
+        assert_eq!(
+            located(&request),
+            [
+                ("body.patient_id", "8"),
+                ("body.note", "hello"),
+                ("body.avatar#filename", "me.png"),
+            ]
+        );
+        assert_eq!(request.values[0].key.as_deref(), Some("patient_id"));
+        assert_eq!(request.values[1].key.as_deref(), Some("note"));
+        assert!(
+            request
+                .values
+                .iter()
+                .all(|value| value.key.as_deref() != Some("avatar"))
+        );
+        assert!(
+            request
+                .values
+                .iter()
+                .all(|value| !value.value.contains("SECRET-MARK"))
+        );
+        // The content of a file is not judged, so the request is not whole.
+        assert!(request.truncated);
+    }
+
+    #[test]
+    fn multipart_variants_read_without_panicking() {
+        // A quoted boundary, with line feeds only.
+        let lf = "--bnd\nContent-Disposition: form-data; name=\"a\"\n\nvalA\n--bnd--\n";
+        let quoted = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; Boundary=\"bnd\""),
+            lf.as_bytes(),
+        );
+        assert_eq!(located(&quoted), [("body.a", "valA")]);
+        assert!(!quoted.truncated);
+        // An RFC 5987 file name.
+        let star = "--b\r\nContent-Disposition: form-data; name=\"f\"; filename*=UTF-8''na%20me.txt\r\n\r\nX\r\n--b--";
+        let star = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            star.as_bytes(),
+        );
+        assert_eq!(located(&star), [("body.f#filename", "na me.txt")]);
+        // A part with no name is a text at `body`, with no key.
+        let nameless = "--b\r\nContent-Type: text/plain\r\n\r\nfree text\r\n--b--";
+        let nameless = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            nameless.as_bytes(),
+        );
+        assert_eq!(located(&nameless), [("body", "free text")]);
+        assert!(nameless.values[0].key.is_none());
+        // A part that says JSON is read as JSON under its field name.
+        let json = "--b\r\nContent-Disposition: form-data; name=\"doc\"\r\nContent-Type: application/json\r\n\r\n{\"id\":5}\r\n--b--";
+        let json = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            json.as_bytes(),
+        );
+        assert!(values(&json).contains(&("body.doc.id", "5", false)));
+        // Without a boundary, or with no part in it, the body is one text.
+        let no_boundary = extract_request("/", None, Some("multipart/form-data"), b"--b\r\n\r\nx");
+        assert!(no_boundary.truncated);
+        assert_eq!(located(&no_boundary), [("body", "--b\r\n\r\nx")]);
+        let no_part = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            b"just text",
+        );
+        assert!(no_part.truncated);
+        assert_eq!(located(&no_part), [("body", "just text")]);
+        // A part whose headers never end is one text too, and the request is not whole.
+        let unended = extract_request(
+            "/",
+            None,
+            Some("multipart/form-data; boundary=b"),
+            b"--b\r\nContent-Disposition: form-data; name=\"x\"\r\n--b--",
+        );
+        assert!(unended.truncated);
+        assert_eq!(unended.values.len(), 1);
+    }
+
+    #[test]
+    fn a_json_document_nested_past_the_depth_limit_keeps_its_deepest_value() {
+        let mut body = String::from("\"MARKER-DEEP\"");
+        for _ in 0..20 {
+            body = format!("{{\"n\":{body}}}");
+        }
+        let request = extract_request("/", None, Some("application/json"), body.as_bytes());
+        assert!(!request.truncated);
+        assert!(
+            request
+                .values
+                .iter()
+                .any(|value| value.value.contains("MARKER-DEEP"))
+        );
+    }
+
+    #[test]
+    fn a_name_longer_than_sixty_four_characters_is_a_value() {
+        let name = "k".repeat(100);
+        let body = format!(r#"{{"{name}":"x"}}"#);
+        let request = extract_request("/", None, Some("application/json"), body.as_bytes());
+        assert!(
+            request
+                .values
+                .iter()
+                .any(|value| value.at.ends_with("#name") && value.value == name)
+        );
+    }
+
+    #[test]
+    fn every_query_value_is_extracted_however_many() {
+        let query = (0..5_000)
+            .map(|i| format!("k{i}=v{i}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let request = extract_request("/", Some(&query), None, b"");
+        assert_eq!(request.values.len(), 5_000);
+        assert!(!request.truncated);
     }
 
     #[test]
@@ -974,17 +1424,6 @@ mod tests {
             b"a=1&b=%3Cx%3E",
         );
         assert!(values(&request).contains(&("body.b", "<x>", false)));
-    }
-
-    #[test]
-    fn value_cap_sets_truncated() {
-        let query = (0..REQUEST_VALUES_MAX + 5)
-            .map(|i| format!("k{i}=v{i}"))
-            .collect::<Vec<_>>()
-            .join("&");
-        let request = extract_request("/", Some(&query), None, b"");
-        assert_eq!(request.values.len(), REQUEST_VALUES_MAX);
-        assert!(request.truncated);
     }
 
     #[test]

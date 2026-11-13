@@ -214,7 +214,7 @@ GET /api/patients ──响应里出现 id=7──┐
 |---|---|
 | `entry` / `bypass` | 命中的入口、绕过模式原文（不止是布尔值，界面要显示“命中 `/share/*`”） |
 | `refused` | 网关自己回的错误码：`unauthenticated`（401）、`forbidden`（403）、`rate_limited`（429，Jev 调用限额用完）、`body_not_inspectable`（413）、`unknown_site`（404） |
-| `values[]` | 请求里拆出的**全部**值，按提取顺序，含惰性值（`inert: true`）；最多 200 个（`REQUEST_VALUES_MAX`） |
+| `values[]` | 请求里拆出的**全部**值，按提取顺序，含惰性值（`inert: true`），不设数量上限（[01 §1.3](01-request-flow.md#13-请求值)）；记录写出前按 7.4.4 裁剪 |
 | `values[].kind` | `reference` / `route` / `input`，与 `state` 里的 `kind` 同一函数（`values::value_kind`） |
 | `values[].at`、`key`、`slot` | 位置、键名和位置标识超过 256 字节（`TRACE_NAME_BYTES_MAX`）时截到 256 字节，不切断字符；`values[].at_len` 记截断前的 `at` 长度（字节），只用于显示“已裁剪”，判定不看它。来源的字段名和请求不截，因为 `seen_as` 要逐字相同 |
 | `values[].seen` / `verified` | 会话里见过这个值 / 网关已按同类对象核验（快速放行的依据） |
@@ -223,7 +223,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `values[].attempt` | `over_privilege`：尝试越权。值只由公共档响应展示过，请求位置不接受公共来源，所以不快速放行、不查缓存，交 Jev 并要求 DENY（[01 1.4](01-request-flow.md#14-判定步骤) 第 4 步）。没有时不写 |
 | `values[].unplaced` | `true`：请求路径无法化为规范拼写（见 [7.4.7](#747-档位在判定中的使用)），且没有声明位置覆盖该值。这样的值不核验、不是尝试越权，请求交 Jev。没有时不写 |
 | `values[].sources[].tier` / `reliability` | 来源响应位置的档位和可靠性，与 `state` 里 `seen_as` 括号中的文字对应；位置没有标档位时不写 |
-| `values_truncated` | 请求体未结构化或值数到上限（即 `ExtractedRequest::truncated`），或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4）。网关只拆 48 KiB 以内的请求体（`REQUEST_BODY_MAX`）：更大的请求在网关直接 413 拒绝、不拆值，所以体积不是这里的原因 |
+| `values_truncated` | 请求体不是结构化数据、整段作为一个文本判定，或 multipart 含文件部分（文件内容不拆值，见 [01 §1.3](01-request-flow.md#13-请求值)），即 `ExtractedRequest::truncated`；或裁剪后仍超过 16 KiB 而清空了 `values`（见 7.4.4）。网关只拆 48 KiB 以内的请求体（`REQUEST_BODY_MAX`）：更大的请求在网关直接 413 拒绝、不拆值，所以体积不是这里的原因 |
 | `session` | 判定记录才有。`recent` 和 `entries_passed` 只在 Jev 记录里写（与 `state` 对应，最多 10 条和 16 条），其中的请求路径超过 256 字节时截到 256 字节（`TRACE_PATH_BYTES_MAX`）；`known_values` 是会话已见值数量 |
 | `session.identity` | 站点声明了身份位置且会话已见身份时才有：`user`、`org` 为键控哈希标签，`role` 为角色标签，规则见 [7.9.15](#7915-对象表的身份位置w1)。没有身份位置的站点不写这一段 |
 | `session.login_request_id` | JSON 凭证站点的会话由哪次登录建立时，那次登录请求的 ID。登录响应暂存的标量在那次绑定时记入会话（[01 1.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。没有时不写 |
@@ -799,7 +799,7 @@ CREATE TABLE jev_prompts (
     "fixed": {
       "seen_max": 5000, "sources_max": 6, "recent_max": 50, "idle_hours": 24, "sessions_max": 20000,
       "long_value_chars": 8, "state_bytes_max": 8192, "request_body_max": 49152,
-      "response_parse_max": 1048576, "request_values_max": 200, "queue_capacity": 10000
+      "response_parse_max": 1048576, "queue_capacity": 10000
     }
   }
 }
