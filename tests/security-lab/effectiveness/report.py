@@ -459,7 +459,7 @@ def _attack_request_lines(table: dict[str, dict[str, int]]) -> list[str]:
 
 def _natural_order_lines(natural: dict[str, Any] | None) -> list[str]:
     """The deletions in the order of the day (plan 10, batch 7): the search result under the two orders, beside each other,
-    with the tier and reliability each one learned and the consequence for the judge. Report only, no gate."""
+    with the tier and reliability each one learned. The natural order is a gate (natural_order_gate)."""
     if natural is None:
         return []
 
@@ -474,14 +474,15 @@ def _natural_order_lines(natural: dict[str, Any] | None) -> list[str]:
     ordered, in_order = natural["ordered"], natural["natural"]
     rows = [["删除排在最后（快速顺序）", learned(ordered), agreement(ordered)],
             ["删除穿插在别人的搜索之间（自然顺序）", learned(in_order), agreement(in_order)]]
-    lines = ["", "### 删除穿插在搜索之间（自然顺序，只报告）", "",
+    lines = ["", "### 删除穿插在搜索之间（自然顺序，门槛）", "",
              f"公共搜索结果 `{natural['key']}` 在两种顺序下学到的档位和可靠性，以及它的一致程度"
-             f"（high 要 {natural['threshold']}‰，不设门槛）：", "",
+             f"（自然顺序一侧必须学到 public、high）：", "",
              *_md_table(["顺序", "学到的档位与可靠性", "一致程度"], rows)]
-    reliability = in_order.get("reliability")
-    if in_order.get("tier") is not None and reliability != "high":
-        lines.append(f"- 后果：自然顺序下这个位置只学到 {reliability or '—'}，判定器只在 high 时收紧，"
-                     "这份配置不拦搜索后删除。")
+    if in_order.get("tier") == "public" and in_order.get("reliability") == "high":
+        lines.append("- 门槛通过：自然顺序下公共搜索结果学到 public、high。")
+    else:
+        found = "没有学到档位" if in_order.get("tier") is None else f"学到 {learned(in_order)}"
+        lines.append(f"- 门槛未通过：自然顺序下公共搜索结果{found}，不是 public、high。")
     return lines
 
 

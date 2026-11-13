@@ -8,8 +8,9 @@
   a hundred of all the sessions. Its wrong proposals are findings to report, not a gate. A position the clean run learned
   right and the polluted run did not learn, or learned with a lower reliability, is lost (report only). The attack
   requests are counted by category: how many the observation run would have blocked, and how many it let through.
-- The natural-order variant (plan 10, batch 7): the public agreement and the learned tier of the search result under the
-  two orders of the deletions, reported beside each other (no gate).
+- The natural-order variant (plan 10, batch 7; a gate since LQ-8): the learned tier of the public search result under the
+  two orders of the deletions, where the natural order must learn it public at high. The anti-pollution run must not learn
+  the search-then-delete position as accepting public sources (a gate).
 - P6, the observation against the enforcement (plan 3.3): computed by score.py from the consistency rows; here it becomes
   a gate of the full mode, which must find no difference and must compare at least one request.
 - The two-pass check: the whole full run is made twice in one command, and the deterministic part of the two reports
@@ -42,6 +43,10 @@ CONSISTENCY_GATE = "观察与拦截一致性（P6，必须为 0）"
 # The natural-order variant (plan 10, batch 2 note, batch 7): the public search result that a deletion before other
 # doctors' searches can cut short, and the agreement a public source needs to be reliability high.
 NATURAL_ORDER_KEY = "GET /api/search results[].id"
+NATURAL_ORDER_GATE = "自然顺序（删除穿插在搜索之间）：公共搜索结果学到 public、high"
+# The search-then-delete position of the anti-pollution run (plan 3.2, L5): it must not learn to accept public sources.
+POLLUTED_DELETE_KEY = "DELETE /api/patients/{id} path[2]"
+POLLUTED_DELETE_GATE = "抗污染段：搜索后删除的位置不学到接受公共来源"
 HIGH_AGREEMENT_PER_MILLE = 980
 ATTACK_OUTCOMES = ("would_block", "allowed")  # the other outcomes of an attack request are counted as "other"
 ATTACKER_SESSION_PREFIX = "attacker/"  # the session label of an attack session (clinic_traffic.py)
@@ -157,6 +162,8 @@ def pollution(clean: Mapping[str, Any], polluted: Mapping[str, Any], *, attacker
         "lost": sum(len(item["lost"]) for item in layers.values()),
         "weaker": sum(len(item["weaker"]) for item in layers.values()),
         "attack_requests": attack_summary(attack_requests),
+        "delete_accepts_public": ((polluted.get("conclusions") or {}).get(POLLUTED_DELETE_KEY)
+                                  or {}).get("accepts_public"),
     }
 
 
@@ -180,8 +187,9 @@ def _order_side(learned: Mapping[str, Any] | None, metrics: Mapping[str, Any] | 
 def natural_order(ordered: Mapping[str, Any] | None, natural: Mapping[str, Any] | None, *,
                   ordered_metrics: Mapping[str, Any] | None = None,
                   natural_metrics: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """The report-only comparison of the two orders of the deletions (no gate): for the search result, the public agreement
-    the control counted, and the tier and reliability it learned, under the ordered run and under the natural-order run."""
+    """The comparison of the two orders of the deletions, which natural_order_gate reads: for the search result, the public
+    agreement the control counted, and the tier and reliability it learned, under the ordered run and under the natural-order
+    run."""
     return {"key": NATURAL_ORDER_KEY, "threshold": HIGH_AGREEMENT_PER_MILLE,
             "ordered": _order_side(ordered, ordered_metrics), "natural": _order_side(natural, natural_metrics)}
 
@@ -193,6 +201,27 @@ def consistency_gate(p6: Mapping[str, Any] | None) -> dict[str, Any]:
     differing = (p6 or {}).get("num")
     return {"name": CONSISTENCY_GATE, "value": differing, "limit": "== 0，且至少比较一个请求",
             "ok": compared > 0 and differing == 0}
+
+
+def natural_order_gate(natural_order: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The natural-order variant as a gate of the full mode (LQ-8): the public search result, learned under the deletions
+    that land between other doctors' searches, must learn the public tier at high. A public list is high below the agreement
+    when few units hold a value only they saw (docs/07 7.9.16), so this is the case the gate protects. A missing comparison
+    fails it, since it proves nothing."""
+    natural = (natural_order or {}).get("natural") or {}
+    tier, reliability = natural.get("tier"), natural.get("reliability")
+    return {"name": NATURAL_ORDER_GATE, "value": f"{tier or '没有学到'}，{reliability or '—'}", "limit": "public，high",
+            "ok": tier == "public" and reliability == "high"}
+
+
+def polluted_delete_gate(pollution: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The anti-pollution run must not teach the search-then-delete position that it accepts public sources (plan 3.2, L5).
+    No conclusion and a refusal both pass; an acceptance fails. Without a pollution measure the gate fails, since it proves
+    nothing."""
+    accepts = (pollution or {}).get("delete_accepts_public")
+    label = "接受" if accepts is True else "不接受" if accepts is False else "没有结论"
+    return {"name": POLLUTED_DELETE_GATE, "value": label, "limit": "不是接受",
+            "ok": pollution is not None and accepts is not True}
 
 
 def comparable(result: Mapping[str, Any]) -> dict[str, Any]:
