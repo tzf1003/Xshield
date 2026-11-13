@@ -121,6 +121,16 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | W4c | 管理员在公共搜索里搜到医生 B 的患者后删除 | 拦截（公共档的见过不证明删除） |
 | W4d | 管理员在管理档搜索里搜到患者后写备注（POST 子路径） | 放行（备注位置接受公开来源） |
 | W6 | 站点声明身份，评论接口返回另一位医生的手机号与邮箱（[07.9.17](07-console-architecture.md#7917-属性越权告警w6)） | 放行；判定记录的 `trace.response.exposure` 记一条告警且不含值；读取本人资料、未声明身份的站点不告警 |
+| F5 | 医生登录后 `POST /api/admin/export`（功能表里的管理档功能） | 拦截，交 Jev 判为越权尝试（Jev 收到的 `function.attempt` 为 `over_privilege`），源站没收到；判定记录的 `trace.function` 带 `tier` 和 `attempt` |
+| F5b | 医生新建患者后 `POST /api/patients/{新编号}`，并带请求头 `X-HTTP-Method-Override: DELETE` | 拦截，按更严的 `DELETE /api/patients/{id}` 判为越权尝试；`trace.function.key` 仍是 `POST /api/patients/{id}` |
+| F6 | 管理员登录、访问首页后 `POST /api/admin/export` | 放行，快速放行，不交 Jev；`trace.function` 有 `tier`，没有 `attempt` |
+| F7 | 医生新建患者后 `DELETE` 它（编号在响应里见过） | 拦截：值已核验，但越权尝试不因此快速放行，交 Jev 判为越权尝试 |
+| F8 | 医生 `GET /api/admin/search`（管理档条目可靠性为中） | 与没有条目时相同：不收紧，Jev 收到的 `state` 没有 `function`，源站答 403，网关放行 |
+| F9 | 基线站点（开关为真）的医生 `GET /metrics`，功能表里没有它 | 拦截：交 Jev 判为未知功能（`function.known` 为 `false`），Jev 判 DENY |
+| F10 | 基线站点的医生 `GET /api/comments`，连续两次 | 第一次交 Jev 放行；第二次走放行缓存，不新增 Jev 调用 |
+| F11 | 不带凭证的 `DELETE /api/patients`（入口路径，基线里没有这个方法） | 交 Jev：`state.entry.matched` 为真，`function` 为 `{"known":false}`；Jev 放行，源站答 401 |
+| F12 | 没有功能表的站点：医生 `POST /api/admin/export`、`GET /metrics` | 都快速放行，不交 Jev，判定记录没有 `trace.function`（与 F5、F9 对照） |
+| F13 | 观察模式的功能表站点：医生 `POST /api/admin/export`、`GET /metrics` | 都转发（源站收到），记为本应拦截 |
 
 靶场的站点把地址限额设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。
 

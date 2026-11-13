@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use pingora::prelude::Opt;
 use serde_json::{Value, json};
 use xshield_core::context::trace::{TRACE_BYTES_MAX, TRACE_NAME_BYTES_MAX, TRACE_PATH_BYTES_MAX};
-use xshield_core::context::{DecisionPath, DecisionRecord, Outcome, SiteSpec, Skip};
+use xshield_core::context::{Attempt, DecisionPath, DecisionRecord, Outcome, SiteSpec, Skip};
 use xshield_edge::proxy::EdgeProxy;
 use xshield_edge::server::build_server;
 use xshield_edge::sink::DecisionSink;
@@ -76,7 +76,13 @@ impl JevPort for ScriptedJev {
                     && value["seen_as"].as_array().is_some_and(Vec::is_empty)
             })
         });
-        let access = if unseen_patient { "DENY" } else { "ALLOW" };
+        // An attempt on an administrator-only function is refused whatever else the request says (docs/02 2.2).
+        let attempt = request["function"]["attempt"].as_str() == Some("over_privilege");
+        let access = if unseen_patient || attempt {
+            "DENY"
+        } else {
+            "ALLOW"
+        };
         let attack = if text.contains("union select") {
             "ATTACK"
         } else {
@@ -257,6 +263,12 @@ fn harness() -> &'static Harness {
                 origin_port,
                 r#","mode":"enforce","on_jev_unavailable":"allow""#,
             ),
+            site(
+                "functions",
+                "functions.test",
+                origin_port,
+                r#","mode":"enforce","objects":{"functions":[{"key":"DELETE /api/patients","source":"rule","tier":"admin","reliability":"high"}]}"#,
+            ),
         ]);
         let (sink, mut rx) = DecisionSink::channel(1000);
         let records = Arc::new(Mutex::new(Vec::new()));
@@ -305,6 +317,18 @@ impl Reply {
 }
 
 fn call(host: &str, method: &str, target: &str, cookie: Option<&str>, body: &[u8]) -> Reply {
+    call_with(host, method, target, cookie, &[], body)
+}
+
+/// [`call`] with more request headers, each a name and a value, sent in the order given.
+fn call_with(
+    host: &str,
+    method: &str,
+    target: &str,
+    cookie: Option<&str>,
+    extra: &[(&str, &str)],
+    body: &[u8],
+) -> Reply {
     let mut stream = TcpStream::connect(("127.0.0.1", harness().edge_port)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -313,6 +337,9 @@ fn call(host: &str, method: &str, target: &str, cookie: Option<&str>, body: &[u8
         format!("{method} {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
     if let Some(cookie) = cookie {
         write!(request, "Cookie: SID={cookie}\r\n").unwrap();
+    }
+    for (name, value) in extra {
+        write!(request, "{name}: {value}\r\n").unwrap();
     }
     if method == "POST" {
         write!(
@@ -762,4 +789,61 @@ fn an_unreachable_origin_is_a_502_with_its_cause() {
     assert_eq!(row.status, Some(502));
     assert_eq!(row.trace.upstream_error.as_deref(), Some("connect_refused"));
     assert_eq!(row.outcome, Outcome::Allowed);
+}
+
+#[test]
+fn f1_a_method_named_in_a_header_is_judged_by_the_stricter_method() {
+    // A doctor's session names DELETE, which the site's function table makes administrator-only, in each
+    // header the origin may read a method from, and twice in one header. Each POST is refused at the edge.
+    get("functions.test", "/api/patients?who=f1", Some("s-f1"));
+    let named: [(&str, &[(&str, &str)]); 4] = [
+        (
+            "/api/patients?who=f1-a",
+            &[("X-HTTP-Method-Override", "DELETE")],
+        ),
+        ("/api/patients?who=f1-b", &[("X-HTTP-Method", "DELETE")]),
+        ("/api/patients?who=f1-c", &[("X-Method-Override", "DELETE")]),
+        (
+            "/api/patients?who=f1-d",
+            &[
+                ("X-HTTP-Method-Override", "GET"),
+                ("X-HTTP-Method-Override", "DELETE"),
+            ],
+        ),
+    ];
+    for (target, headers) in named {
+        let reply = call_with(
+            "functions.test",
+            "POST",
+            target,
+            Some("s-f1"),
+            headers,
+            b"{}",
+        );
+        assert_eq!(reply.status, 403, "{target}");
+        assert_eq!(origin_saw(target), 0, "{target} reached the origin");
+        let row = record(&reply);
+        assert_eq!(row.decision_path, DecisionPath::JevDeny, "{target}");
+        let function = row.trace.function.expect("the trace names the function");
+        assert_eq!(function.key, "POST /api/patients", "{target}");
+        assert_eq!(
+            function.entry.as_deref(),
+            Some("DELETE /api/patients"),
+            "{target}"
+        );
+        assert_eq!(function.attempt, Some(Attempt::OverPrivilege), "{target}");
+    }
+    // Without a method named in a header, the same POST is not an attempt and reaches the origin.
+    let plain = call_with(
+        "functions.test",
+        "POST",
+        "/api/patients?who=f1-e",
+        Some("s-f1"),
+        &[],
+        b"{}",
+    );
+    assert_eq!(plain.status, 404);
+    assert_eq!(origin_saw("/api/patients?who=f1-e"), 1);
+    let row = record(&plain);
+    assert!(row.trace.function.is_none());
 }
