@@ -36,8 +36,8 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 
 | Finding | Category | Effort | Risk of fix | Evidence |
 |---|---|---|---|---|
-| JSON request bodies with duplicate keys: the gateway judges the last one, an origin may use the first. | security | S | LOW | `crates/xshield-judge/src/values.rs:336`, cf. `crates/xshield-core/src/context/route.rs:623` |
-| Session and address contexts are not keyed by site, unlike held logins and shapes. | security | S | LOW | `engine.rs:325,439,912` |
+| ~~JSON request bodies with duplicate keys: the gateway judges the last one, an origin may use the first.~~ Fixed on 2026-11-13, see CHANGELOG.md. | security | S | LOW | ~~`crates/xshield-judge/src/values.rs:336`, cf. `crates/xshield-core/src/context/route.rs:623`~~ |
+| ~~Session and address contexts are not keyed by site, unlike held logins and shapes.~~ Fixed on 2026-11-13, see CHANGELOG.md. | security | S | LOW | ~~`engine.rs:325,439,912`~~ |
 | The requests and Jev lists reset to a skeleton every 30 s because the preset window moves with the clock and is part of the query key. | bug | S–M | MED | `web/console/src/app/scope.ts:18-24`, `src/api/queries.ts:114-121`, `src/features/requests/RequestsPage.tsx:116-120,458` |
 | Bulk acknowledge fires N mutations on one observer; earlier failures are lost and each fires three invalidations. | bug | S | LOW | `web/console/src/features/sites/objects/ObjectsBanner.tsx:91-93` |
 | Routes and `yaml` are imported eagerly although docs/07 §7.10.1/§7.10.7 require lazy loading; the request list is not virtualised although the doc says it is. | perf / docs | M | LOW–MED | `web/console/src/app/router.tsx:20-29`, `src/lib/yaml.ts:4`, `src/features/requests/RequestTable.tsx:137` |
