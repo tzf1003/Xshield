@@ -1276,6 +1276,7 @@ impl<J: JevPort> Judge<J> {
                 let mut inner = self.lock();
                 let session = inner.store.session(
                     self.session_key(site.name(), credential),
+                    origin,
                     observation.now_ms,
                 );
                 if let Some(record) = &inherited {
@@ -8225,5 +8226,46 @@ mod tests {
             assert!(left["trace"].get("function").is_none());
             assert!(right["trace"].get("function").is_none());
         }
+    }
+
+    #[test]
+    fn a_session_that_a_refused_response_issues_records_the_address_that_created_it() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(r#","mode":"observe""#);
+        // The response observe mode would refuse issues a credential: the session it creates
+        // takes no value from the response, but is recorded under the address it was made from.
+        let observed = judge.observe(
+            &site,
+            &Observation {
+                route: None,
+                request_id: RID,
+                unread: None,
+                would_block: true,
+                credential: None,
+                client: "2001:db8:1:2::9",
+                issued_credential: Some("fresh"),
+                method: "POST",
+                path: "/login",
+                status: 200,
+                content_type: Some("application/json"),
+                body: b"{}",
+                now_ms: 1_001,
+                sent: &[],
+                echo: &[],
+            },
+        );
+        assert_eq!(observed.skip, Some(Skip::WouldBlock));
+        let id = judge.session_key(site.name(), "fresh");
+        let inner = judge.lock();
+        // Any address of the same /64 is the same origin; another /64 is not.
+        assert_eq!(
+            inner.store.origin_of(&id, 1_001),
+            Some(judge.origin_key("2001:db8:1:2:f::1"))
+        );
+        assert_ne!(
+            inner.store.origin_of(&id, 1_001),
+            Some(judge.origin_key("2001:db8:1:3::9"))
+        );
     }
 }
