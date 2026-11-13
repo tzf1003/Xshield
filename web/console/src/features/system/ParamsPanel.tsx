@@ -84,12 +84,6 @@ const FIXED: Array<{
     value: sizeText,
     note: "超过的源站响应不解析，其中的值不会被学习",
   },
-  {
-    key: "request_values_max",
-    label: "每请求值数",
-    value: (n) => `${fmtInt(n)} 个`,
-    note: "一个请求最多提取的值数；超出时追溯里标注截断",
-  },
 ];
 
 export function ParamsPanel({ system }: { system: SystemInfo }) {
