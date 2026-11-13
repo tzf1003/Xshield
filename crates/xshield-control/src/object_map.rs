@@ -1484,7 +1484,9 @@ async fn automatic_events(
 ) -> ApiResult<Vec<AutomaticEvent>> {
     let name = record.spec.name();
     let since = now.saturating_sub(EVENTS_DAYS.saturating_mul(DAY_MILLIS));
-    let versions = site_spec_store::automatic_history(&state.pool, name, EVENTS_MAX).await?;
+    let versions =
+        site_spec_store::automatic_history(&state.pool, name, record.created_at, EVENTS_MAX)
+            .await?;
     let handled: BTreeMap<String, store::EventStatus> =
         store::event_statuses(&state.pool, name, record.created_at)
             .await?

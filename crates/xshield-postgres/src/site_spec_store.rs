@@ -556,23 +556,26 @@ pub async fn history(
 }
 
 /// Lists a site's automatic versions, newest first: the versions the learning task recorded, as
-/// [`Change::AutoTighten`] or [`Change::AutoPause`].
+/// [`Change::AutoTighten`] or [`Change::AutoPause`]. Only changes of the site created at `since`;
+/// a deleted site of the same name keeps its history, and none of it is listed here.
 ///
 /// # Errors
 /// Returns [`SiteSpecStoreError`] on a database or serialization failure.
 pub async fn automatic_history(
     pool: &PgPool,
     name: &str,
+    since: DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<HistoryEntry>, SiteSpecStoreError> {
     let limit = limit.clamp(1, 200);
     let rows = sqlx::query(
         "SELECT version, change, rollback_of, note, changed_at, spec
          FROM site_config_history
-         WHERE site = $1 AND change IN ('auto_tighten', 'auto_pause')
-         ORDER BY version DESC LIMIT $2",
+         WHERE site = $1 AND change IN ('auto_tighten', 'auto_pause') AND changed_at >= $2
+         ORDER BY version DESC LIMIT $3",
     )
     .bind(name)
+    .bind(since)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -711,6 +714,47 @@ mod tests {
         assert_eq!(entries[1].change, Change::Delete);
         assert!(entries[1].spec.is_none());
         assert_eq!(entries[3].note.as_deref(), Some("first"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_recreated_site_lists_none_of_the_automatic_changes_of_the_old_one() {
+        let pool = connect_test_pool().await;
+        let name = unique_name("generation");
+        let first = minimal_spec(&name, &["/login"]);
+        let old = create(&pool, &first, None).await.unwrap();
+        let paused = minimal_spec(&name, &["/login", "/api/home"]);
+        let WriteOutcome::Applied(_) = write(&pool, &name, &paused, 1, Change::AutoPause, None)
+            .await
+            .unwrap()
+        else {
+            panic!("the automatic change should apply at the expected version");
+        };
+        let listed = automatic_history(&pool, &name, old.created_at, 20)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].change, Change::AutoPause);
+
+        let DeleteOutcome::Deleted { .. } = delete(&pool, &name, 2, None).await.unwrap() else {
+            panic!("delete should apply at the expected version");
+        };
+        let recreated = create(&pool, &first, None).await.unwrap();
+        assert!(recreated.created_at > old.created_at);
+        assert!(
+            automatic_history(&pool, &name, recreated.created_at, 20)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // The old site's history is kept; only the new site's list leaves it out.
+        assert_eq!(
+            automatic_history(&pool, &name, old.created_at, 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
