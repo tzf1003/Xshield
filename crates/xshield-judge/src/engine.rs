@@ -5033,13 +5033,12 @@ mod tests {
             .find(|value| value.value == "7005")
             .expect("the id is recorded");
         assert_eq!(value.attempt, None, "the own listing is a source");
-        assert!(!value.verified, "a self sighting never allows on its own");
-        assert_eq!(fake.calls(), 2);
-        let sent = fake.sent.lock().unwrap()[1].clone();
-        assert!(
-            !state_of(&sent).contains(r#""attempt""#),
-            "the value is no attempt any more: {sent}"
-        );
+        // The own listing proves the value, as an untiered listing would, so the delete is a fast
+        // allow and Jev is not called a second time.
+        assert!(value.verified, "the own listing proves the value");
+        assert!(verdict.forward, "a verified delete is forwarded");
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1, "the second delete does not reach Jev");
     }
 
     /// A site whose admin listing shows its patients only to administrator sessions, and whose

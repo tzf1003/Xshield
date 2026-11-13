@@ -769,19 +769,19 @@ pub const ADMIN_ROLE: &str = "admin";
 /// Whether a response with this tier, and how sure the map is of it, proves a right to the object
 /// it shows, at a request position that is `closed` to public sources or not, for a session that
 /// is `admin` or not (docs/07 section 7.4.7). A response the map does not classify proves it, as
-/// every response did before tiers, and so does an org response. A public response the map is sure
-/// of proves it unless the position is closed; a public response the map is not sure of proves it,
-/// as before tiers. A self response never proves on its own: a learned self label only keeps a value
-/// from being tightened. An administrator's listing proves a value to an administrator session, as
-/// an ordinary response does, and to no other session: a role is not a reason to allow, so an
-/// object an administrator never saw is still blocked.
+/// every response did before tiers, and so do an own (`self`) response, which shows the session its
+/// own record, and an org response. A public response the map is sure of proves it unless the
+/// position is closed; a public response the map is not sure of proves it, as before tiers. An
+/// administrator's listing proves a value to an administrator session, as an ordinary response does,
+/// and to no other session: a role is not a reason to allow, so an object an administrator never saw
+/// is still blocked. A self label also keeps a value from being an attempt; that is judged in the
+/// judge's `tiers` module, not here.
 #[must_use]
 pub fn tier_proves(tier: Option<(Tier, Reliability)>, closed: bool, admin: bool) -> bool {
     match tier {
-        Some((Tier::Own, _)) => false,
         Some((Tier::Admin, _)) => admin,
         Some((Tier::Public, Reliability::High)) => !closed,
-        None | Some((Tier::Org | Tier::Public, _)) => true,
+        None | Some((Tier::Own | Tier::Org | Tier::Public, _)) => true,
     }
 }
 
@@ -1991,6 +1991,41 @@ mod tests {
             Some(ROLE_MAX)
         );
         assert_eq!(role_label(&"a".repeat(ROLE_MAX + 1)), None);
+    }
+
+    #[test]
+    fn a_response_proves_by_its_tier_as_section_7_4_7_says() {
+        for closed in [false, true] {
+            for admin in [false, true] {
+                // Own and org responses, and one the map does not classify, prove whatever the
+                // reliability, the position and the session: a self response shows the session
+                // its own record, so it is no less a sighting than an untiered one.
+                for reliability in [Reliability::Low, Reliability::Medium, Reliability::High] {
+                    assert!(tier_proves(Some((Tier::Own, reliability)), closed, admin));
+                    assert!(tier_proves(Some((Tier::Org, reliability)), closed, admin));
+                }
+                assert!(tier_proves(None, closed, admin));
+                // A public response proves unless the position is closed and the map is sure of it.
+                for reliability in [Reliability::Low, Reliability::Medium] {
+                    assert!(tier_proves(
+                        Some((Tier::Public, reliability)),
+                        closed,
+                        admin
+                    ));
+                }
+                assert_eq!(
+                    tier_proves(Some((Tier::Public, Reliability::High)), closed, admin),
+                    !closed
+                );
+                // An administrator's listing proves to an administrator session only.
+                for reliability in [Reliability::Low, Reliability::Medium, Reliability::High] {
+                    assert_eq!(
+                        tier_proves(Some((Tier::Admin, reliability)), closed, admin),
+                        admin
+                    );
+                }
+            }
+        }
     }
 
     /// Lower-case letters for a number, so that kind ids stay distinct.
