@@ -105,6 +105,8 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | A12 | 医生 A 搜到医生 B 的患者 D（慢速 id `PT-7004`）后按这个 id 删除 | 拦截（尝试越权，交 Jev 判 DENY） |
 | B1 | 搜索框、表单里输入正常中文和英文文本 | 放行 |
 | B2 | 参数里带注入、命令执行、路径穿越类内容 | 拦截 |
+| B3 | 医生 A 在搜到的自己新建患者上提交两批以上的长备注（路径里带编号） | 放行，判定记录 `batches` 不少于 2 |
+| B4 | 同样的长备注发给医生 B 的患者，医生 A 没见过这个编号 | 拦截 |
 | C1 | Jev 超时或不可用，`on_jev_unavailable=deny` | 拦截，日志注明 |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，日志注明"未经判定" |
 | C3 | 观察模式下的 A2 | 转发，日志记"本应拦截" |
@@ -113,6 +115,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | C6 | JSON 凭证站点：用户 A 登录后第一次进入入口，再读取自己的购物车（登录响应里的 `bid`） | 放行，登录响应的值已记入会话；读取他人购物车仍拦截 |
 | C7 | 同一地址的两个用户先后登录，两份登录响应的值不同，各自的请求只带各自的凭证 | 各自会话只记入自己的登录值，互不串值 |
 | C8 | 请求带的凭证没有对上任何待绑定登录（伪造，或登录来自别处） | 不绑定，判定日志注明 `login_unmatched`，之后的判定与现在相同 |
+| C9 | 同一来源地址的 11 个会话（站点设为每会话 2 次，合计 20 次）各调用 | 前 10 个会话各调用 2 次放行；第 11 个会话一次没用过也拒绝，回 429（`rate_limited`），Jev 没有被调用；另一个地址的会话不受影响 |
 | G1 | JSON 凭证站点（凭证为 `Authorization` 头）：登录响应里超过 128 字符的长令牌绑定会话；列表放行；登录响应和列表都没给过的患者 D 交 Jev | 登录放行；列表的 `login_request_id` 为该次登录，没有 `login_unbound`；患者 D 拦截，源站不收到请求 |
 | G2 | 同一站点：源站没发过的长令牌访问入口 | 放行到源站（源站答 401），判定记录的 `login_unbound` 为 `login_unmatched` |
 | W1 | 站点声明 `GET /api/home doctor.id` 为用户身份（[07.9.15](07-console-architecture.md#7915-对象表的身份位置w1)） | 判定记录带会话的用户标签，换账号标签不同；未声明的站点不写身份 |
@@ -135,7 +138,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | F12 | 没有功能表的站点：医生 `POST /api/admin/export`、`GET /metrics` | 都快速放行，不交 Jev，判定记录没有 `trace.function`（与 F5、F9 对照） |
 | F13 | 观察模式的功能表站点：医生 `POST /api/admin/export`、`GET /metrics` | 都转发（源站收到），记为本应拦截 |
 
-靶场的站点把地址限额设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。
+靶场的站点把地址限额设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。会话合计的总额度按来源地址算（[02](02-jev.md) 2.5），所以 `limit.lab` 上的 C5、C9 各自从回环的另一个地址（127.0.0.2、127.0.0.3、127.0.0.4）发请求，其他场景的会话不占它们的总额度。
 
 ## 4.4 测试方式
 

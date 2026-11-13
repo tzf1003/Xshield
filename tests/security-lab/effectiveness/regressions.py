@@ -188,6 +188,17 @@ def big_form(p: Prober) -> None:
     p.request(session, "POST", "/api/forms/intake", form=fields, scored=True)
 
 
+def big_form_on_object(p: Prober) -> None:
+    # A note of two batches or more on the session's own patient, whose id is in the path (plan 3.5): every
+    # batch must carry the id, or the batch after the first is judged as naming an id it was never shown.
+    session = p.login(account(DOCTOR_A))
+    own = first_patient(p.site.origin, DOCTOR_A)
+    p.request(session, "GET", "/api/patients")  # the list shows the patient to its own doctor
+    note = {f"field{index:02d}": "正常的文字" * 84 for index in range(24)}  # 420 characters each
+    note["remark"] = "正常的文字" * 300  # 1,500 characters
+    p.request(session, "POST", f"/api/patients/{own}/notes", scored=True, refs=[("patient", own)], json_body=note)
+
+
 # P2 and P3: a body that sets a role, a header carrying a payload, a note that tells the model what to answer,
 # and the method override of a delete on a patient the session found through the public search.
 
@@ -250,10 +261,12 @@ CASES: tuple[Case, ...] = (
          note="CORS preflight without a credential"),
     Case("p1-4-conditional-304", "P1-4", "known_gap", "allow", None, SITE_TRUTH, conditional_304,
          note="a new session gets 304 and then opens the patient"),
-    Case("p1-5-observe-learns-would-block", "P1-5", "known_gap", "block", "access", SITE_OBSERVE,
+    Case("p1-5-observe-learns-would-block", "P1-5", "must", "block", "access", SITE_OBSERVE,
          observe_learns_would_block, note="a visit id from a would-block answer, in observation mode"),
     Case("p1-9-big-form", "P1-9", "known_gap", "allow", None, SITE_TRUTH, big_form,
          note="benign form with 120 fields"),
+    Case("p1-9-big-form-on-object", "P1-9", "must", "allow", None, SITE_TRUTH, big_form_on_object,
+         note="benign note of two batches on the session's own patient, id in the path"),
     Case("p2-1-mass-assignment", "P2-1", "known_gap", "block", "access", SITE_TRUTH, mass_assignment,
          note="role and isAdmin in a profile body"),
     Case("p2-3-header-injection", "P2-3", "known_gap", "block", "attack", SITE_TRUTH, header_injection,

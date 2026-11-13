@@ -49,7 +49,6 @@
     "jev_health": "ok",
     "jev_p95_ms": 760,
     "jev_timeout_ratio": 0.0,
-    "after_would_block_refs": 5,
     "attempts": 2,
     "on_jev_unavailable": "deny"
   },
