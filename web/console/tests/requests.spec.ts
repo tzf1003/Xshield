@@ -3,7 +3,7 @@
 
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
-import { servedRequests } from "./helpers/mock-api.ts";
+import { FIXTURE_NOW_MS, mockApi, servedRequests } from "./helpers/mock-api.ts";
 import { requestList } from "./helpers/fixtures.ts";
 import { IDS, useFixtures } from "./helpers/trace.ts";
 
@@ -291,4 +291,36 @@ test("只看这个路径 names the logical path, which the path condition then m
   await page.getByRole("menuitem", { name: "只看这个路径" }).click();
   await expect(conditionBox(page)).toHaveValue("path:/api/home/dashboard.HomeService/getStats");
   await expect(listRows(page)).toHaveCount(1);
+});
+
+test("the rows stay on screen while a preset window that has moved with the clock is read again", async ({
+  page,
+}) => {
+  await page.clock.install({ time: FIXTURE_NOW_MS });
+  await mockApi(page);
+  await page.goto("/requests");
+  await expect(listRows(page)).toHaveCount(41);
+  const first = servedRequests(page).filter((call) => call.path === "/api/requests").length;
+
+  // Hold every later list answer, so the page is seen between asking for the moved window and getting it.
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let asked = 0;
+  await page.route("**/api/requests?*", async (route) => {
+    asked += 1;
+    await held;
+    await route.fallback();
+  });
+
+  await page.clock.runFor(31_000);
+  await expect.poll(() => asked).toBeGreaterThan(0);
+  await expect(listRows(page)).toHaveCount(41);
+
+  release();
+  await expect
+    .poll(() => servedRequests(page).filter((call) => call.path === "/api/requests").length)
+    .toBeGreaterThan(first);
+  await expect(listRows(page)).toHaveCount(41);
 });
