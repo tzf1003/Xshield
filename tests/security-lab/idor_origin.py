@@ -156,6 +156,10 @@ class _Handler(BaseHTTPRequestHandler):
             doctor = DOCTORS[user]
             token = origin.issue_token(doctor)
             return 200, {"authentication": {"token": token, "doctor": doctor}}, {}
+        if method == "GET" and url.path == "/login":
+            # The login page answers anyone with 200 and names no one. Only the lab asks for it (F2 in
+            # docs/04 section 4.3): an entry the origin accepts without a session.
+            return 200, {"login": "form"}, {}
         doctor = self._caller()
         if doctor is None:
             return 401, {"error": "login_required"}, {}
