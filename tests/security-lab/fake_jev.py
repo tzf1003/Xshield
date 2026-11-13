@@ -18,14 +18,24 @@ Script:
   or command execution text, and BENIGN otherwise.
 
 Every judgement body is kept in `bodies`, so the lab can check what Jev was shown.
+
+Ideal model (`FakeJev(attack_texts=...)`, the measurement's reference, see
+tests/security-lab/corpus): the access rules are the same, but attack is ATTACK
+exactly when one of the given texts lies wholly inside the path or inside one value,
+once both sides are normalized by `normalize`. Each judgement's `state` is kept in
+`states`, and `carries` tells whether a text reached Jev. Without `attack_texts` the
+marker rules above apply, unchanged.
 """
 
 from __future__ import annotations
 
 import json
 import time
+import unicodedata
+from collections.abc import Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
+from urllib.parse import unquote_plus
 
 ACCESS_OPTIONS = ("ALLOW", "DENY", "UNKNOWN")
 ATTACK_OPTIONS = ("BENIGN", "ATTACK", "UNKNOWN")
@@ -56,8 +66,52 @@ def selects_object(value: dict) -> bool:
     return value.get("kind") == "reference"
 
 
-def judge(document: dict) -> dict:
-    """The answers the script gives for one judgement document."""
+def normalize(text: str) -> str:
+    """The form the ideal model compares in: percent-decoded (a '+' is a space) until
+    stable, then NFKC-folded (full-width characters become ASCII) and case-folded.
+    """
+    current = str(text)
+    while True:
+        decoded = unquote_plus(current)
+        if decoded == current:
+            break
+        current = decoded
+    return unicodedata.normalize("NFKC", current).casefold()
+
+
+def attack_forms_of(texts: Iterable[str]) -> tuple[str, ...]:
+    """The normalized attack texts the ideal model looks for, sorted and de-duplicated.
+
+    A blank text is refused: it would sit inside every value and judge everything ATTACK.
+    """
+    forms: set[str] = set()
+    for text in texts:
+        if not isinstance(text, str):
+            raise ValueError("attack texts must be strings")
+        form = normalize(text)
+        if not form.strip():
+            raise ValueError("attack texts must not be blank")
+        forms.add(form)
+    return tuple(sorted(forms))
+
+
+def _items(request: dict) -> list[str]:
+    """The strings the ideal model reads from a request: its path and each of its values."""
+    return [str(request["path"]), *(str(value.get("value", "")) for value in request.get("values", []))]
+
+
+def _carried(forms: tuple[str, ...], items: Iterable[str]) -> bool:
+    """Whether one normalized form lies wholly inside one normalized item."""
+    texts = [normalize(item) for item in items]
+    return any(form in text for form in forms for text in texts)
+
+
+def judge(document: dict, attack_forms: tuple[str, ...] | None = None) -> dict:
+    """The answers the script gives for one judgement document.
+
+    With `attack_forms` (from `attack_forms_of`) the attack answer is the ideal model's;
+    without it, the marker rules.
+    """
     state = document["state"]
     request = state["request"]
     path = request["path"]
@@ -72,9 +126,12 @@ def judge(document: dict) -> dict:
         selects_object(value) and not value.get("verified") and not value.get("seen_as")
         for value in values
     ) and not entry_input
-    text = " ".join([path, *(str(value.get("value", "")) for value in values)]).lower()
     access = "DENY" if attempt or unseen else "ALLOW"
-    attack = "ATTACK" if any(marker in text for marker in ATTACK_MARKERS) else "BENIGN"
+    if attack_forms is None:
+        text = " ".join([path, *(str(value.get("value", "")) for value in values)]).lower()
+        attack = "ATTACK" if any(marker in text for marker in ATTACK_MARKERS) else "BENIGN"
+    else:
+        attack = "ATTACK" if _carried(attack_forms, _items(request)) else "BENIGN"
     return {
         "model": "fake-jev",
         "answers": {
@@ -85,11 +142,17 @@ def judge(document: dict) -> dict:
 
 
 class FakeJev:
-    """The scripted endpoint on a loopback port, run in-process by the lab."""
+    """The scripted endpoint on a loopback port, run in-process by the lab.
 
-    def __init__(self) -> None:
+    `attack_texts` switches the attack answer to the ideal model (see `judge`). Every
+    judgement body is kept in `bodies`, and its `state` in `states`, in arrival order.
+    """
+
+    def __init__(self, attack_texts: Iterable[str] | None = None) -> None:
         self.lock = Lock()
         self.bodies: list[dict] = []
+        self.states: list[dict] = []
+        self.attack_forms = None if attack_texts is None else attack_forms_of(attack_texts)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         self.server.service = self
         self.port: int = self.server.server_address[1]
@@ -97,6 +160,20 @@ class FakeJev:
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}/v1/systemone"
+
+    def carries(self, text: str, call: int | None = None) -> bool:
+        """Whether `text` lies wholly inside one path or value Jev was shown, after `normalize`.
+
+        `call` picks one judgement by its index in `states` (0 is the first); without it any
+        judgement counts. It tells a payload that never reached the model from one the model
+        judged wrongly.
+        """
+        form = normalize(text)
+        if not form.strip():
+            raise ValueError("a blank text is inside every request")
+        with self.lock:
+            states = list(self.states) if call is None else [self.states[call]]
+        return any(form in normalize(item) for state in states for item in _items(state["request"]))
 
     def start(self) -> None:
         Thread(target=self.server.serve_forever, daemon=True).start()
@@ -118,6 +195,7 @@ class _Handler(BaseHTTPRequestHandler):
         service: FakeJev = self.server.service  # type: ignore[attr-defined]
         with service.lock:
             service.bodies.append(document)
+            service.states.append(document["state"])
         values = document["state"]["request"].get("values", [])
         text = " ".join(str(value.get("value", "")) for value in values)
         if "JEVDOWN" in text:
@@ -125,7 +203,7 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             if "JEVSLOW" in text:
                 time.sleep(1.0)
-            status, reply = 200, judge(document)
+            status, reply = 200, judge(document, service.attack_forms)
         data = json.dumps(reply).encode()
         try:
             self.send_response(status)
