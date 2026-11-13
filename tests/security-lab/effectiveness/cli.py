@@ -7,9 +7,10 @@
     measure_effectiveness.py score --observations FILE --decisions FILE
                              [--truth FILE] [--learned FILE] [--baseline FILE] [--out DIR]
 
-Without a subcommand the command is `lab`. `site` is implemented by effectiveness.site and sends no
-traffic; `lab` is implemented by effectiveness.lab, which does not exist yet, so it reports "尚未实现"
-and exits 2.
+Without a subcommand the command is `lab`. `lab` (effectiveness.lab) runs the training, learning and
+protection segments in quick mode. `--mode full`, `--jev record|replay`, `--keep` and `--update-baseline`
+are not built yet and exit 2. `site` (effectiveness.site) reads the suite output and the decision
+records and sends no traffic.
 
 Exit status: 0 when every gate passes (a gate with no data does not fail), 1 when a gate
 fails, 2 for a usage or environment error.
@@ -46,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", metavar="{lab,site,score}")
 
-    lab = commands.add_parser("lab", help="靶场：发流量、学习、防护三段（尚未实现）")
+    lab = commands.add_parser("lab", help="靶场：训练段、学习段和防护段，快速模式（完整模式尚未实现）")
     lab.add_argument("--mode", choices=("quick", "full"), default="quick")
     lab.add_argument("--jev", choices=("ideal", "live", "record", "replay"), default="ideal")
     lab.add_argument("--seed", type=int, default=20261113)
