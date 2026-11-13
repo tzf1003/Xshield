@@ -169,13 +169,13 @@ def _observation(run: SuiteRun, index: int, row: dict[str, Any], *, site: str, c
     if row.get("trafficClass") not in TRAFFIC_GROUPS:
         raise SuiteError(f"{where}：trafficClass 应为 attack 或 benign")
     expected = row.get("expected")
-    if expected == "observe":
-        result.observe += 1
-        return None
-    if expected not in SCORED_EXPECTS:
+    if expected not in SCORED_EXPECTS and expected != "observe":
         raise SuiteError(f"{where}：expected 应为 block、allow 或 observe")
     if row.get("outcome") in UNRUN_OUTCOMES:
-        result.unrun += 1
+        result.unrun += 1  # never sent, whatever it was expected to do
+        return None
+    if expected == "observe":
+        result.observe += 1
         return None
 
     request = _mapping(row.get("request"))

@@ -144,6 +144,15 @@ class AdapterTests(_Fixture):
         self.assertEqual(by_case["block-with-session"]["mode"], "observe")
         self.assertTrue(all(row["origin_served"] is None for row in converted.observations))
 
+    def test_an_unsent_observe_row_is_counted_as_unsent_not_observed(self) -> None:
+        folder = write_suite(self.root / "suite", {1: [
+            suite_row("observe-sent", expected="observe", request_id="req_9"),
+            suite_row("observe-never-sent", expected="observe", outcome="not_run", sent=False),
+        ]})
+        converted = to_observations(read_runs(folder), site="juice", config="juice", mode="observe")
+        self.assertEqual((converted.observe, converted.unrun), (1, 1))
+        self.assertEqual(converted.observations, [])
+
     def test_the_rows_pass_the_observation_contract(self) -> None:
         folder = write_suite(self.root / "suite", {1: self.rows_run_one()})
         converted = to_observations(read_runs(folder), site="juice", config="juice", mode="enforce")
