@@ -43,7 +43,7 @@ export const DECISION_INFO: Record<DecisionPath, { name: string; icon: string; d
   jev_unavailable: {
     name: "Jev 不可用",
     icon: "∅",
-    desc: "Jev 超时、出错、调用达到上限或答不上来，按站点设置处理",
+    desc: "Jev 超时、出错或答不上来，按站点设置处理；调用达到上限回 429，上下文过大回 403",
   },
   no_session: { name: "无会话", icon: "⊘", desc: "没有会话凭证，路径也不是入口" },
   body_not_inspectable: {
@@ -63,7 +63,7 @@ export const OUTCOME_INFO: Record<
     name: "拦截",
     icon: "■",
     tone: "blocked",
-    desc: "网关返回 401 / 403 / 404 / 413，没有转发",
+    desc: "网关返回 401 / 403 / 404 / 413 / 429，没有转发",
   },
   would_block: {
     name: "本应拦截",
@@ -135,8 +135,8 @@ export const FAILURE_INFO: Record<JevFailure, { short: string; desc: string }> =
   JEV_RESPONSE_TOO_LARGE: { short: "响应过大", desc: "响应超过 64 KiB" },
   JEV_RESPONSE_INVALID: { short: "响应无效", desc: "响应结构不符合约定" },
   JEV_UNKNOWN: { short: "答不上来", desc: "最高项是 UNKNOWN 或两项并列" },
-  JEV_STATE_TOO_LARGE: { short: "上下文过大", desc: "裁剪后仍超过 8 KiB，没有调用" },
-  JEV_CALL_LIMIT: { short: "达到上限", desc: "会话或地址每分钟调用次数用完，没有调用" },
+  JEV_STATE_TOO_LARGE: { short: "上下文过大", desc: "裁剪后仍超过 8 KiB，没有调用，返回 403" },
+  JEV_CALL_LIMIT: { short: "达到上限", desc: "会话或地址每分钟调用次数用完，没有调用，返回 429" },
 };
 
 export const SKIP_LABEL: Record<ResponseSkip, string> = {

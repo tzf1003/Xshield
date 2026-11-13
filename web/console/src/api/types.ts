@@ -50,6 +50,7 @@ export type ValueKind = "reference" | "route" | "input";
 export type RefusedReason =
   | "unauthenticated"
   | "forbidden"
+  | "rate_limited"
   | "body_not_inspectable"
   | "unknown_site";
 

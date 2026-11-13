@@ -33,7 +33,7 @@ export function JevAnswerArea({
   stateBytes,
   onPrompt,
 }: Props) {
-  const gateway = gatewayText(outcome, status, path);
+  const gateway = gatewayText(outcome, status, path, jev.failure);
   const usage: Record<string, unknown> = jev.usage ?? {};
   const input = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
   const output = typeof usage.output_tokens === "number" ? usage.output_tokens : null;

@@ -8,6 +8,7 @@ import type {
   GatewayProblem,
   JevAccess,
   JevAttack,
+  JevFailure,
   JevRecord,
   JevState,
   Outcome,
@@ -408,7 +409,12 @@ export function answerLine(jev: JevRecord): string {
 }
 
 /** What the gateway did with Jev's conclusion (docs/06 6.4.5): the gateway's action, not Jev's answer. */
-export function gatewayText(outcome: Outcome, status: number | null, path: DecisionPath): string {
+export function gatewayText(
+  outcome: Outcome,
+  status: number | null,
+  path: DecisionPath,
+  failure: JevFailure | null,
+): string {
   switch (outcome) {
     case "allowed":
       return "放行，转发给源站";
@@ -417,6 +423,13 @@ export function gatewayText(outcome: Outcome, status: number | null, path: Decis
     case "unjudged":
       return "Jev 不可用，按站点设置放行";
     case "blocked":
+      // A spent call limit and a state that does not fit are refused whatever the site says (docs/02).
+      if (failure === "JEV_CALL_LIMIT") {
+        return `调用次数达到上限，不论站点设置，已拦截，返回 ${status ?? "—"}`;
+      }
+      if (failure === "JEV_STATE_TOO_LARGE") {
+        return `上下文过大，不论站点设置，已拦截，返回 ${status ?? "—"}`;
+      }
       return path === "jev_unavailable"
         ? `Jev 不可用，按站点设置拦截，返回 ${status ?? "—"}`
         : `已拦截，返回 ${status ?? "—"}`;
