@@ -49,6 +49,18 @@ export async function untilDialogOpen(page: Page, name: string): Promise<void> {
   await expect(page.getByRole("dialog", { name })).toHaveCSS("opacity", "1");
 }
 
+/**
+ * Opens the row menu of a request in the list (the ⋯ button names the request), and waits until the menu has
+ * finished opening. antd animates the popup in and moves it while it does: a press on an item that lands during
+ * the animation can be released on another item, and the click then lands on the menu itself, not on an item.
+ */
+export async function openRowMenu(page: Page, requestId: string): Promise<void> {
+  await page.getByRole("button", { name: `操作：${requestId}` }).click();
+  const menu = page.locator(".ant-dropdown", { has: page.getByRole("menu") });
+  await expect(menu).toBeVisible();
+  await expect(menu).not.toHaveClass(/-(appear|enter|leave)/);
+}
+
 /** Whether a timeline row is inside a `only=` choice of the timeline (docs/07 7.9.6). */
 function matchesOnly(row: TimelineRow, only: string): boolean {
   if (only === "jev") return row.jev !== null;

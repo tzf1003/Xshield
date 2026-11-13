@@ -119,3 +119,17 @@ test("没有变化时，路由和对象设置都不写出任何改动", () => {
   assert.deepEqual(semanticChanges(same, structuredClone(same)), []);
   assert.deepEqual(semanticChanges(withKinds([]), { ...base, objects: {} }), []);
 });
+
+test("the function table's changes are in the summary: an entry added, and the admin tier added to one", () => {
+  const exported = { key: "POST /api/admin/export", source: "rule" as const };
+  assert.deepEqual(semanticChanges(base, { ...base, objects: { functions: [exported] } }), [
+    "对象表 ＋ 功能 POST /api/admin/export",
+  ]);
+  assert.deepEqual(
+    semanticChanges(
+      { ...base, objects: { functions: [exported] } },
+      { ...base, objects: { functions: [{ ...exported, tier: "admin" }] } },
+    ),
+    ["功能 POST /api/admin/export 档位 对所有会话开放 → 仅管理员"],
+  );
+});

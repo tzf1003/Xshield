@@ -83,7 +83,7 @@ export function readinessRows(readiness: Readiness, now: number): Row[] {
       : {
           key: "unavailable",
           mark: "▲",
-          text: "Jev 不可用时：放行（这些请求不经判定直接转发，记录标为“未经判定”）",
+          text: "Jev 不可用时：放行（这些请求不经判定直接转发，记录标为“未经判定”；调用次数达到上限的请求仍然拒绝）",
         },
   );
   return rows;

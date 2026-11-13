@@ -54,14 +54,20 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string | undefined;
   readonly field: string | undefined;
+  /** Why the field is refused, when the gateway names a reason (`function_tier_unsupported`). */
+  readonly reason: string | undefined;
   readonly currentVersion: number | undefined;
 
-  constructor(status: number, body: { error?: string; field?: string; current_version?: number }) {
+  constructor(
+    status: number,
+    body: { error?: string; field?: string; reason?: string; current_version?: number },
+  ) {
     super(body.error ?? `HTTP ${status}`);
     this.name = "ApiError";
     this.status = status;
     this.code = body.error;
     this.field = body.field;
+    this.reason = body.reason;
     this.currentVersion = body.current_version;
   }
 }
@@ -104,7 +110,7 @@ async function call<T>(
     for (const listener of unauthorizedListeners) listener();
   }
   if (!response.ok && !answered) {
-    let parsed: { error?: string; field?: string; current_version?: number } = {};
+    let parsed: { error?: string; field?: string; reason?: string; current_version?: number } = {};
     try {
       parsed = (await response.json()) as typeof parsed;
     } catch {

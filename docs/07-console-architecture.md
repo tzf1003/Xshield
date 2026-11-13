@@ -86,7 +86,7 @@ AGENTS.md 要求新增配置项、表、依赖之前先确认现有机制不够�
 
 `request_id` 沿用现有格式：`req_` 加 UUIDv7 的 32 位小写十六进制（`uuid::Uuid::now_v7().simple()`）。前 12 位十六进制是毫秒时间戳，例如 `req_01a19741107477ff9224781077354552` 生成于 2026-11-01 13:16:26.100 UTC。控制面按 ID 查询时先解出时间 `t`，查 `at_millis BETWEEN t − 60 秒 AND t + 60 秒` 且 `request_id` 相等的行：`at_millis` 取自请求到达时刻，与 ID 生成时刻只差几毫秒，留 60 秒余量是为了不依赖这个假设；跨午夜时窗口自然落在相邻两个分区，PostgreSQL 只扫这两个。解不出时间的输入（不是 `req_` 加 32 位十六进制）不按 ID 查询。
 
-请求 ID 出现在：网关返回给客户端的每个响应头 `X-Xshield-Request-Id`；拦截响应体 `{"error":"forbidden","request_id":"req_…"}`；转发给源站的请求头 `X-Xshield-Request-Id`（源站日志可以用它关联）。用户反馈“被拦了”时，让他提供这个 ID。
+请求 ID 出现在：网关返回给客户端的每个响应头 `X-Xshield-Request-Id`；拦截响应体 `{"error":"forbidden","request_id":"req_…"}`（`error` 随拒绝原因变化，见 7.4.1）；转发给源站的请求头 `X-Xshield-Request-Id`（源站日志可以用它关联）。用户反馈“被拦了”时，让他提供这个 ID。
 
 ### 7.3.2 追溯链路
 
@@ -132,7 +132,9 @@ GET /api/patients ──响应里出现 id=7──┐
 | `cached_allow` | 缓存时长内同一请求已由 Jev 放行 | `allowed` | 判定记录 |
 | `jev_allow` | Jev 通过 | `allowed` | Jev 记录 |
 | `jev_deny` | Jev 判越权或攻击 | `blocked` / `would_block` | Jev 记录 |
-| `jev_unavailable` | Jev 超时、出错、限额用尽或答 UNKNOWN | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽时没有 `state`） |
+| `jev_unavailable` | Jev 超时、出错、限额用尽、state 过大或答 UNKNOWN | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽和 state 过大时没有 `state`，也没有调用） |
+
+`jev_unavailable` 的拒绝不全由 `on_jev_unavailable` 决定：调用限额用完时回 429，`refused` 为 `rate_limited`；state 裁剪后仍超过 8 KiB 时回 403。两者都不论 `on_jev_unavailable`，观察模式下只记“本应拦截”并照常转发。其余失败按 `on_jev_unavailable`：`deny` 回 403，`allow` 记为 `unjudged` 并转发（7.5.4 列出每个失败码的处理）。
 
 `413` 和 `404` 与模式无关，观察模式下也拒绝（现有行为，[01.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。源站不可达等转发错误不是新的判定路径：记录照常写，`status` 为网关返回的 502/504，`trace.upstream_error` 写原因。
 
@@ -211,7 +213,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | 字段 | 说明 |
 |---|---|
 | `entry` / `bypass` | 命中的入口、绕过模式原文（不止是布尔值，界面要显示“命中 `/share/*`”） |
-| `refused` | 网关自己回的错误码：`unauthenticated`、`forbidden`、`body_not_inspectable`、`unknown_site` |
+| `refused` | 网关自己回的错误码：`unauthenticated`（401）、`forbidden`（403）、`rate_limited`（429，Jev 调用限额用完）、`body_not_inspectable`（413）、`unknown_site`（404） |
 | `values[]` | 请求里拆出的**全部**值，按提取顺序，含惰性值（`inert: true`）；最多 200 个（`REQUEST_VALUES_MAX`） |
 | `values[].kind` | `reference` / `route` / `input`，与 `state` 里的 `kind` 同一函数（`values::value_kind`） |
 | `values[].at`、`key`、`slot` | 位置、键名和位置标识超过 256 字节（`TRACE_NAME_BYTES_MAX`）时截到 256 字节，不切断字符；`values[].at_len` 记截断前的 `at` 长度（字节），只用于显示“已裁剪”，判定不看它。来源的字段名和请求不截，因为 `seen_as` 要逐字相同 |
@@ -360,18 +362,18 @@ GET /api/patients ──响应里出现 id=7──┐
 
 ### 7.5.4 失败码
 
-| 失败码 | 含义 | 有无 `state` |
-|---|---|---|
-| `JEV_TIMEOUT` | 超过 `timeout_ms`（站点值或 `XSHIELD_JEV_TIMEOUT_MS`，默认 2000 ms） | 有 |
-| `JEV_RATE_LIMITED` | 模型服务返回 429 | 有 |
-| `JEV_TRANSPORT` | 连接、TLS 或协议错误 | 有 |
-| `JEV_HTTP_ERROR` | 其他非 200 状态，状态码在 `http_status` | 有 |
-| `JEV_RESPONSE_TOO_LARGE` | 响应超过 64 KiB | 有 |
-| `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 |
-| `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 |
-| `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 |
-| `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB | 无 |
-| `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调） | 无 |
+| 失败码 | 含义 | 有无 `state` | 网关的处理 |
+|---|---|---|---|
+| `JEV_TIMEOUT` | 超过 `timeout_ms`（站点值或 `XSHIELD_JEV_TIMEOUT_MS`，默认 2000 ms） | 有 | 按 `on_jev_unavailable` |
+| `JEV_RATE_LIMITED` | 模型服务返回 429 | 有 | 按 `on_jev_unavailable` |
+| `JEV_TRANSPORT` | 连接、TLS 或协议错误 | 有 | 按 `on_jev_unavailable` |
+| `JEV_HTTP_ERROR` | 其他非 200 状态，状态码在 `http_status` | 有 | 按 `on_jev_unavailable` |
+| `JEV_RESPONSE_TOO_LARGE` | 响应超过 64 KiB | 有 | 按 `on_jev_unavailable` |
+| `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 | 按 `on_jev_unavailable` |
+| `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 | 按 `on_jev_unavailable` |
+| `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 | 按 `on_jev_unavailable` |
+| `JEV_STATE_TOO_LARGE` | 裁剪到级别 4 仍超过 8 KiB。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
+| `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调）。没有发出调用 | 无 | 429（`rate_limited`），不论 `on_jev_unavailable` |
 
 ### 7.5.5 指令版本表
 
@@ -399,7 +401,7 @@ advanced:
 | 字段 | 默认 | 取值 | 作用 | 调整的代价 |
 |---|---|---|---|---|
 | `jev_timeout_ms` | `XSHIELD_JEV_TIMEOUT_MS`，未设时 2000 | 100–30000 | 本站点每次 Jev 调用的超时 | 调大：慢链路下少按 `on_jev_unavailable` 处理，但要判定的请求最多多等这么久；调小：反之 |
-| `session_calls_per_minute` | 60 | 1–600 | 每个会话每分钟 Jev 调用上限，超出按 `on_jev_unavailable` 处理 | 调大：单个会话能消耗的模型费用上限提高 |
+| `session_calls_per_minute` | 60 | 1–600 | 每个会话每分钟 Jev 调用上限，超出的请求回 429 拒绝，不论 `on_jev_unavailable` | 调大：单个会话能消耗的模型费用上限提高 |
 | `address_calls_per_minute` | 30 | 1–600 | 没有会话的请求（登录、注册等入口）按客户端地址的同一上限 | NAT 或代理后多个用户共用一个地址时需要调大；调大后未登录请求能消耗的额度也提高 |
 | `allow_cache_minutes` | 10 | 0–60 | 同一会话、同一请求被 Jev 放行后直接复用结论的时长 | 调大：调用次数减少；修改配置或提示词后，旧的放行结论仍复用到期。已缓存的条目按写入时的时长到期 |
 | `secret_fields` | 空 | 最多 32 个词，每个 3–32 个字符，小写字母、数字、`_`、`-` | 追加在内置 9 个脱敏词之后（不能删除内置词），按“字段名或位置包含该词”匹配；命中的值发给 Jev 和写日志时都写成 `<redacted>` | 被脱敏的值 Jev 只看到长度，无法判断它是否越权。只加纯输入字段（身份证号、银行卡号），不要加对象引用字段；最短 3 个字符就是为了挡住 `id`、`no` 这类会把所有 ID 都脱敏的词 |
@@ -591,6 +593,8 @@ CREATE TABLE jev_prompts (
 ```
 
 与 PR #73 草稿的差异：`site_config_history` 从“修改前 / 修改后”改为“版本号 + 全文 + 变更类型 + 备注”；`decision_log` 加列、分区；新增 `edge_status`、`jev_prompts`。网关与控制面之间的表契约以本节为准，`crates/xshield-edge/tests/postgres.rs` 的建表语句随之更新。
+
+迁移 `0011_function_evidence.sql`（功能的学习证据，见 [7.9.19](#7919-功能的学习证据与管理档提议)）只把 `object_response_evidence_kind_check` 换成允许四个功能类型（`function`、`function_anon`、`function_admin`、`function_refused`）的约束，并更新表和列的注释；不建表、不回填、不改其他约束。已应用的迁移不改动，`_sqlx_migrations` 的校验和因此不变。
 
 ### 7.8.2 分区与保留
 
@@ -863,7 +867,7 @@ CREATE TABLE jev_prompts (
 - `name` 与路径参数不一致：400 `SITE_NAME_MISMATCH`。
 - `hosts` 中有其他站点已占用的主机名：409 `SITE_HOST_TAKEN`，`field` 指出哪一项。现状是网关按站点名顺序先到先得、落选站点只写 stderr，控制面在保存时就拒绝。
 - 请求体最大 64 KiB；`note` 最长 500 字符。
-- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复）、`key_invalid`（位置格式不对或过长）、`too_many`（超过 64 个类别或 2,048 个位置）、`class_id_invalid`（类别 id 格式不对）、`judgement_conflict`（一个条目同时带 `tier` 和 `accepts_public`）、`reliability_without_judgement`（`reliability` 没有 `tier` 或 `accepts_public` 与之同在）；其余对象表错误只带 `field`。
+- `SiteSpec::from_json` 的错误码（`SITE_CONFIG_*`，含新增的 `SITE_CONFIG_ADVANCED_INVALID`）原样返回；错误信息不回显配置值（现有约定）。界面另做逐项的本地校验，指出具体哪一行（[06.4.9](06-console-ui.md#649-站点详情)）。对象表的错误还带 `field`（如 `objects.slots[3]`，从 0 数）和 `reason`：`class_unknown`（位置指向未声明的类别）、`duplicate_key`（类别或位置重复；功能的键忽略模板大小写后重复）、`key_invalid`（位置或功能的键格式不对或过长）、`too_many`（超过 64 个类别、2,048 个位置或 2,048 条功能）、`class_id_invalid`（类别 id 格式不对）、`judgement_conflict`（一个条目同时带 `tier` 和 `accepts_public`）、`reliability_without_judgement`（`reliability` 没有 `tier` 或 `accepts_public` 与之同在；功能条目的 `reliability` 没有 `tier` 同在也是它）、`function_tier_unsupported`（功能的 `tier` 不是 `admin`，见 7.9.18）；其余对象表错误只带 `field`。
 
 ### 7.9.13 状态灯与配置生效
 
@@ -998,7 +1002,7 @@ CREATE TABLE jev_prompts (
 
 提议与确认（响应位置的 `tier`，已实现）：
 
-- 证据存放在表 `object_response_evidence`，只由控制面写入。每个站点、响应位置、单位和 UTC 日一行，记该单位当天在该位置见到的指纹（每条记录至多保留 8 个最小的，一天至多 64 个），以及 `complete` 标记：某条记录因只留了最小的 8 个而可能漏掉值时为 `false`。同一表还记管理员单位（`admin`）、被拒绝的非管理员单位（`refused`，按路由记）和记录只留了部分位置的单位（`capped`）。超过 7 天学习窗口的行每次学习删除；站点被删除时同一事务删除（`forget_site`）。
+- 证据存放在表 `object_response_evidence`，只由控制面写入。每个站点、响应位置、单位和 UTC 日一行，记该单位当天在该位置见到的指纹（每条记录至多保留 8 个最小的，一天至多 64 个），以及 `complete` 标记：某条记录因只留了最小的 8 个而可能漏掉值时为 `false`。同一表还记管理员单位（`admin`）、被拒绝的非管理员单位（`refused`，按路由记）和记录只留了部分位置的单位（`capped`）。功能证据（[7.9.19](#7919-功能的学习证据与管理档提议)）也记在这张表里，四类为 `function`、`function_anon`、`function_admin`、`function_refused`，它们的 `slot` 是功能键（`METHOD 模板`），不是响应位置。超过 7 天学习窗口的行每次学习删除；站点被删除时同一事务删除（`forget_site`）。
 - 每次学习在站点配置的当前版本上，对声明、未暂停、不是身份且不是请求位置的响应位置各判断一次（`judge_tiers`）。规则给出档位，且条目还没有同样的 `tier` 与 `reliability` 时写一条提议；规则不给判断，或条目已带同样的判断时撤回提议。不再被声明的位置，它的行被删去。写入带站点代际，与接受公共来源的提议相同。
 - 驳回后，同一档位不再提议，哪怕可靠性变了；规则转到另一档位时，提议重新出现；规则转到条目已有的档位时，驳回失效。
 - 确认：请求体 `{"tier", "reliability"}` 必须与当前提议一致，否则 409 `JUDGEMENT_CHANGED`。通过后 `tier` 与 `reliability` 作为站点配置的一个新版本写入（备注说明是确认），提议被清除。条目已带同样的判断时只清除提议，不写版本。
@@ -1034,6 +1038,107 @@ CREATE TABLE jev_prompts (
 - 告警说的是“同一个响应里同时有这两类内容”，不判断敏感属性属于哪一个对象。字段遮挡和拦截要等有数据再定，因为改响应体比拦请求风险大。
 - 请求里自己发出的值（回声）不排除。
 - 控制台的请求详情在学习步骤里显示“疑似属性越权，仅告警未拦截”，只列出类别，不显示值。
+
+### 7.9.18 功能表
+
+功能表是站点配置 `objects` 下的 `functions` 列表（[03.2](03-admin-config-audit.md#32-站点配置)）。对象表的位置说的是“某个接口里的某个值是哪一类对象”，装不下“这个接口本身归谁用”，所以功能单独成表。本节定义格式、校验和查找规则。本版只读入、校验和保存，网关的判定还不使用它，判定结果与没有功能表时相同；判定的启用、学习基线和确认写入见后续改动。
+
+格式：
+
+```yaml
+objects:
+  functions:
+    - key: POST /api/admin/export
+      source: rule
+      tier: admin
+      reliability: high
+    - key: "GET /api/patients/{id}"
+      source: admin
+```
+
+| 字段 | 必填 | 取值 |
+|---|---|---|
+| `key` | 是 | `方法 路由模板`，中间一个空格 |
+| `source` | 是 | `admin`、`rule`、`agent`，与位置条目相同 |
+| `tier` | 否 | 只接受 `admin`。省略表示对所有会话开放，条目只说明“站点有这个功能” |
+| `reliability` | 否 | `low`、`medium`、`high`，只能与 `tier` 同在。省略按 `low` 算 |
+
+功能条目没有 `paused`。目前没有对功能的自动暂停：想停用一个管理功能，删掉 `tier` 即可，条目仍是已知功能。有了自动暂停的需求再加。`functions` 省略或为空时不写出这个键，现有站点的配置逐字不变。最多 2,048 条，与位置相同。
+
+**键的校验**。拒绝时 `reason` 为 `key_invalid`，位置是 `objects.functions[n]`。键必须是判定能产生的拼写，全部满足才接受：
+
+1. 恰好两段，用一个空格分开；整个键不超过 256 字节。
+2. 方法是 3 到 7 个大写 ASCII 字母，且不是 `HEAD` 或 `OPTIONS`。这两个方法在查找时另有规则，写成条目永远匹配不上。
+3. 模板以 `/` 开头，不含 `?`、`#`、控制字符和 `;`，并且是规范拼写（与位置键相同，见 [7.4.7](#747-档位在判定中的使用)）。
+4. 模板中纯数字或 UUID 的段必须写成 `{id}`。
+5. 含 `{` 或 `}` 的段只能恰好是 `{id}`。写成 `{userId}` 的会被拒绝，免得管理员以为它是占位符。
+
+其他校验：超过 2,048 条为 `too_many`；忽略模板字母大小写后两条键相同为 `duplicate_key`（位置是后一条）；`tier` 为 `self`、`org`、`public` 等非 `admin` 的档位为 `function_tier_unsupported`；有 `reliability` 没有 `tier` 为 `reliability_without_judgement`。`tier` 写成完全不认识的字样（如 `everyone`）时，与位置条目相同，整个 `objects` 段按段解析失败处理。条目里有不认识的字段（如 `paused`）时也是段解析失败。错误信息不回显配置值。
+
+**查找**。`ObjectMap` 的三个方法（`function_of`、`admin_only`、`knows_function`）接收方法和请求的路由模板，即 `position_template(逻辑路径)` 的结果（判定里对应 `route_template`），方法内部不再规范化：
+
+- **段的比较**。条目模板和请求模板按 `/` 分段，段数必须相同。条目的 `{id}` 段覆盖请求的任意一个非空段。其他段先去掉请求段的第一个 `;` 及之后的部分，再与条目段做忽略 ASCII 大小写的比较；去掉之后为空的段不匹配任何字面段。逐字相等（或忽略大小写相等）的段数记为字面段数。位置条目的比较（`template_covers`）不改。
+- **为什么忽略大小写和 `;` 参数**。源站如果不分大小写（IIS、部分框架）或会剥掉 `;` 参数（Java 系），`/API/Admin/export` 与 `/api/admin;x/export` 到的是同一个功能，条目必须照样管住。源站如果区分，这些写法本来就是 404，多管一下没有代价。
+- **`function_of`**。在方法相同、覆盖请求的条目中取第一名：字面段数多的优先；一样多时，档位为 `admin` 且可靠性为 `high` 的优先，取更严的；再一样时，书写顺序靠前的优先。
+- **`HEAD` 和 `OPTIONS`**。`HEAD` 按 `GET` 查。`OPTIONS` 是预检，不带凭证，不参与功能查找：`function_of` 返回空，`admin_only` 为假。`knows_function` 对 `OPTIONS` 的判断是：任何方法下该路由已知即为真。
+- **`admin_only`**。`function_of` 的结果是 `admin` 档且可靠性为 `high`。可靠性不是 `high` 的条目不收紧，与位置条目的规矩相同。
+- **`knows_function`**。功能表有条目覆盖请求，或者对象表里有位置（暂停与否都算）的方法与请求方法相同（`HEAD` 按 `GET`）且模板覆盖请求，即为已知。位置声明过的接口，它的功能自动算已知，不必在功能表里重复登记。
+- **性能**。校验时把键按方法和段数分组，并把模板预先切分成段（每个请求只切分一次）。查找只看同方法、同段数的组，不扫全表，也不对每个键重新切分。对象表追加位置时同步更新这个索引。
+
+### 7.9.19 功能的学习证据与管理档提议
+
+功能级越权需要按“功能”统计：哪些功能在正常流量里被走过（以后作为基线候选），哪些功能只有管理员走过（管理档提议）。本节说明学习任务怎样记录这两类证据并提出提议。这一步**不改变任何判定，也不改站点配置**：提议只写进库里，列表接口的 `judgements` 不列出它们，确认与页面属于后续的接口和页面（见本节末尾）。
+
+**功能键。** 功能键是 `方法 模板`，例如 `GET /api/patients/{id}`，规则如下（`function_key`、`function_template`）：
+
+- 方法须是 3 至 7 个大写 ASCII 字母；`HEAD` 记作 `GET`；`OPTIONS`（预检）不算功能；整个键超过 256 字节的不记。
+- 路径取逻辑路径（`COALESCE(logical_path, path)`），所以按请求头或请求体取接口名的站点，每个接口名是一个功能。
+- 路径先按 RFC 3986 第 6.2.2 节规范化（与路径模板相同，见 `canonical_path`）。没有规范拼写的路径（相对路径、带查询串或控制字符、转义不完整）不算功能。
+- 每段先去掉第一个 `;` 及之后的矩阵参数；去掉后为空的段使整条路径不算功能。
+- 纯数字或 UUID 的段写成 `{id}`。超过 32 字节，或含 `[A-Za-z0-9._~-]` 之外字节（邮箱、`:`、`{`、保留下来的百分号转义等）的段也写成 `{id}`：这类段是令牌、邮箱或编码过的文字，不是路由词，也不应原样进入证据表。
+- 其余段原样保留，不改大小写。
+
+**证据。** 每条判定记录至多产生两个功能事实（`observe_functions`），两个只出现在管理员在入口上走过的请求上。“走过”指判定为放行（快速放行、缓存放行或 Jev 放行）且状态码在 200 至 399 之间。跳转也算走过：表单提交后的 302 是正常的。这与位置学习只认 2xx 不同，位置学习的 `answered_and_allowed` 没有改。“被拒绝”指 Jev 拒绝，或状态码为 401、403。绕过（`bypass`）的请求不产生事实。
+
+| `kind` | `slot` | `unit` | 含义 |
+|---|---|---|---|
+| `function` | 功能键 | 普通单位 | 普通单位走过 |
+| `function_anon` | 功能键 | `s:` 加会话标签，或 `a:` 加客户端地址 | 没有身份的访问者走过 |
+| `function_admin` | 功能键 | 管理员单位 | 管理员走过 |
+| `function_refused` | 功能键 | 普通单位 | 普通单位被拒绝 |
+
+单位沿用位置学习的定义：站点声明了用户身份位置时是用户，否则是会话。没有身份的访问者有两种：用户身份站点上会话还没声明用户的请求；没有会话的请求，按客户端地址作单位。它单独记为一类，因为它不能证明有足够多的普通用户在活动，但基线需要它（登录页、登录提交这些功能只有它们在走）。
+
+两条取舍写在 `observe_functions` 的文档注释里：
+
+- 入口上走过的请求一律按普通使用记，不论是谁，所以入口永远不会被提议成管理档；入口上被拒绝的请求不产生事实。管理员在入口上的请求还多记一条管理员使用（`function_admin`），这个单位因此不计入全站普通单位数：只登录过的管理员不算普通用户的旁证。
+- 用户身份站点上会话还没声明用户时，管理员的请求记为没有身份的访问者，也就是“有非管理员走过”。这是有意保守：判定那边同样把这种请求当作非管理员，管理员登录后头几个请求碰到的功能，不该被提议。
+
+证据存放在表 `object_response_evidence` 里（与 [7.9.16](#7916-对象表的档位与可靠性w3) 的响应证据同一张表，迁移 0011 只放宽 `kind` 的约束）。每个站点、类型、功能、单位、UTC 日一行，写入带站点代际，超过 7 天窗口的行每次学习删除，站点被删除时同一事务清除。
+
+**路径段合并。** 路径里不是数字也不是 UUID 的标识（`/products/PT-7004`、`/u/alice`、带哈希的静态文件名）每个取值都是一个不同的功能，永远攒不够单位。提议之前，学习把这样的段合并成 `{id}`（`merge_functions`，纯函数）：
+
+1. **受保护的键**：站点 `routes` 里每条规则路径的主干（去掉结尾的 `/`）的段，与键开头的几段逐字相同时，键原样保留，既不被合并，也不算别人的兄弟。路由规则之下的段是接口名，每个名字都是一个功能；合并会把没人用过的接口名也变成已知。主干为空的规则（如 `/*`）会保护所有键，也就是这个站点不做合并。
+2. 从第 0 段起逐段处理。同一方法、前面各段（已替换后的结果）相同的键成一组。组内每个不同取值（`{id}` 除外）是一个孩子，它的分量是带这个取值的键里单位数的最大值。分量小于 `objects.learning.thresholds.sessions` 的是轻量孩子。
+3. 轻量孩子分两类，各算各的：含 ASCII 数字的达到 `MERGE_IDS_MIN`（10）个时，这些孩子在本段都换成 `{id}`；不含数字的达到 `MERGE_WORDS_MIN`（50）个时同样处理。
+4. 分量达到阈值的孩子不动：它自己就是一个站得住的功能（`/u/settings`、`/products/featured`）。
+
+两个门槛不同，理由是：`/api/users`、`/api/orders` 这样的路由词也不含数字，一个小站点的接口可能还没攒够单位；如果 10 个就合并，会得到 `GET /api/{id}`，把 `/api/metrics` 也变成已知。50 个互不相同、都很少人用的纯字母兄弟段，基本只会是用户名、标签这类数据。两个门槛、`MERGE_IDS_MIN`、`MERGE_WORDS_MIN` 和 `FUNCTION_KEYS_MAX`（20 000，一次学习按单位数从多到少取的功能键数）都是代码常量，不做成配置。结果与输入的顺序无关。合并的结果只用来汇总证据和生成提议，最终进不进功能表仍由管理员确认。
+
+**管理档提议。** 功能 `F` 被提议为管理档（`judge_function`），需要同时满足：
+
+- 至少一个管理员单位用过它，并且没有任何普通单位用过它（`function` 与 `function_anon` 的单位数合计为零）；
+- 有旁证说明“普通单位没用过”不是因为没有普通单位：`max(被拒绝的普通单位数, 全站普通单位数)` 不少于 `objects.learning.thresholds.sessions`。
+
+全站普通单位数（`site_ordinary_units`）是窗口内走过任意功能的不同普通单位数，匿名访问者不计。窗口内有管理员走过（任意功能的 `function_admin` 行）的单位不计，不论它还走过别的功能。管理员在入口上的请求同时记为普通使用和管理员使用，所以只登录过的管理员也不计。仍计入的只剩一种：窗口里没有任何请求以已知的管理员身份走过（例如角色始终没有显示出来）的单位，它和普通用户分不出来，这一点接受。
+
+可靠性用位置学习的同一套 `grade`：旁证不少于两倍 `sessions`、且管理员在两天以上用过它时为强证据；强证据在有用户身份的站点上为 `high`，否则为 `medium`。没有用户身份的站点各降一档，所以它最多得到 `medium`，与位置档位的规矩相同。
+
+提议写进 `object_tier_judgements`，复用位置提议的表：`slot` 为功能键，`tier` 为 `admin`，`units` 为管理员单位数，`seen_values` 与 `agreement_per_mille` 为 0，`last_day` 为证据的最后一天。功能键恰有一个空格，位置键恰有两个，两类行靠这个区分：位置的 `retain` 只删位置键的行，功能的 `retain_functions` 只删功能键的行，两类互不清除。每次学习在站点的当前配置上重新判断：规则不再给出提议的功能，它未驳回的提议撤回；被驳回的保留，同一条不会再提。有证据的功能键超过 `FUNCTION_KEYS_MAX`（20 000 个，一次学习按单位数从多到少读这么多）时，这一轮整个不判断：不写提议，也不撤回任何提议，并在日志里记一行。合并后超过 `KEY_MAX`（256 字节）的键不提议。
+
+列表接口（`GET …/objects`）的 `judgements` 只列位置提议：`judgement_bodies` 用 `declared_class_of` 过滤，功能键不是声明的位置，会被滤掉（有测试钉住）。本次不读 `objects.functions`：配置里已有的功能与提议的去重，留给确认与列表接口的后续改动。学习关闭（`auto_learn` 为假）的站点不记证据，也不出提议。
+
+实现状态：证据、路径段合并和提议已实现。确认、驳回功能提议的接口与页面是后续工作；在那之前提议只存在于库里，控制台不显示，判定也不读取。
 
 ## 7.10 控制台前端架构
 
@@ -1125,6 +1230,7 @@ web/console/src/
 
 - 判定日志里的请求值、查询串、客户端 IP 是业务数据和个人信息，保留 7 天；导出文件同样包含这些内容，界面在导出前提示。需要不外发、不落日志的字段用 `advanced.secret_fields` 追加。
 - 会话凭证原文从不进入记录；`session` 是带密钥的 HMAC 截断值，不能反推凭证。
+- 功能证据（[7.9.19](#7919-功能的学习证据与管理档提议)）按单位记：识别了用户的站点记用户标签，否则记会话标签；没有会话的请求记客户端地址（`a:` 开头），与判定日志的客户端 IP 同样保留 7 天。路径里超过 32 字节，或含 `[A-Za-z0-9._~-]` 之外字节（如邮箱、百分号转义）的段写成 `{id}`，不以原文进入证据表。
 - 控制台只读日志，日志不参与任何放行决定（AGENTS.md）。
 - 控制面所有查询都有时间窗、行数和扫描上限，防止一个请求压垮数据库。
 - 登录限速、Cookie `__Host-`/`Secure`/`HttpOnly`/`SameSite=Lax` 沿用 PR #73，并要求写操作为 JSON 请求体。

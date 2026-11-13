@@ -4,7 +4,10 @@ import type {
   BootstrapCandidate,
   FieldKindDeclaration,
   ObjectEvent,
+  ObjectFunctionEntry,
+  ObjectSlotEntry,
   ObjectSlotRow,
+  ObjectsSpec,
   SiteSpec,
 } from "../src/api/types.ts";
 import {
@@ -20,18 +23,23 @@ import {
   revertEvent,
   routeFilter,
   scopeOfKey,
+  withClasses,
   withDeclarations,
   withPlan,
+  withSlot,
+  withoutSlot,
 } from "../src/features/sites/objects/objects-model.ts";
 import {
   checkDeclarations,
   checkField,
   checkKind,
+  checkObjects,
   checkScope,
   declarationChanges,
   declarationProblem,
   declarationsOf,
   fieldKey,
+  functionRefusalWords,
   inScope,
   kindKey,
   objectChanges,
@@ -39,6 +47,7 @@ import {
   patternsOverlap,
   scopesOverlap,
 } from "../src/lib/objects-validate.ts";
+import { DECLARE_TEXT } from "../src/lib/vocab.ts";
 
 const decl = (field: string, kind: string, scope?: string[]): FieldKindDeclaration =>
   scope === undefined ? { field, kind } : { field, kind, in: scope };
@@ -435,4 +444,188 @@ test("the request list condition of a flow names its class and route", () => {
   };
   assert.equal(flowSearch(flow, "doctor"), "object:doctor path:/doctor/*");
   assert.equal(flowSearch(flow, null), "path:/doctor/*");
+});
+
+// ------------------------------------------------------------------ the function table (objects.functions)
+
+const fn = (
+  key: string,
+  source: ObjectFunctionEntry["source"],
+  over: Partial<ObjectFunctionEntry> = {},
+): ObjectFunctionEntry => ({ key, source, ...over });
+
+test("the function table is read item by item, and its entries come through as they are", () => {
+  const functions: ObjectFunctionEntry[] = [
+    fn("POST /api/admin/export", "rule", { tier: "admin", reliability: "high" }),
+    fn("GET /api/patients/{id}", "admin"),
+  ];
+  assert.deepEqual(parseObjects({ functions }), { ok: true, value: { functions } });
+  assert.deepEqual(parseObjects({ functions: [] }), { ok: true, value: { functions: [] } });
+});
+
+test("a function entry is read strictly, and a wrong one is refused with its place in the table", () => {
+  assert.deepEqual(parseObjects({ functions: "POST /api/admin/export" }), {
+    ok: false,
+    message: DECLARE_TEXT.functionsShape,
+  });
+  assert.deepEqual(
+    parseObjects({
+      functions: [
+        { key: "GET /api/a", source: "admin" },
+        { key: "GET /api/b", source: "nobody" },
+      ],
+    }),
+    { ok: false, message: DECLARE_TEXT.functionShape(2) },
+  );
+  assert.deepEqual(parseObjects({ functions: [{ key: "GET /api/a" }] }), {
+    ok: false,
+    message: DECLARE_TEXT.functionShape(1),
+  });
+  assert.deepEqual(
+    parseObjects({ functions: [{ key: "GET /api/a", source: "admin", note: "x" }] }),
+    { ok: false, message: DECLARE_TEXT.unknownKey("note") },
+  );
+  assert.deepEqual(
+    parseObjects({
+      functions: [{ key: "GET /api/a", source: "admin", tier: "admin", reliability: "huge" }],
+    }),
+    { ok: false, message: DECLARE_TEXT.functionShape(1) },
+  );
+  assert.deepEqual(
+    parseObjects({ functions: [{ key: "GET /api/a", source: "admin", tier: "public" }] }),
+    { ok: false, message: DECLARE_TEXT.functionTier(1) },
+  );
+  assert.deepEqual(
+    parseObjects({ functions: [{ key: "GET /api/a", source: "admin", reliability: "high" }] }),
+    { ok: false, message: DECLARE_TEXT.functionReliabilityAlone(1) },
+  );
+});
+
+test("the function table is checked as the gateway checks it: count, key, duplicates, tier and reliability", () => {
+  const exported = fn("POST /api/admin/export", "rule", { tier: "admin", reliability: "high" });
+  assert.deepEqual(
+    checkObjects({ functions: [exported, fn("GET /api/patients/{id}", "admin")] }),
+    [],
+  );
+
+  const many = Array.from({ length: 2049 }, (_, i) => fn(`GET /api/items/${i}`, "admin"));
+  assert.deepEqual(checkObjects({ functions: many }), [DECLARE_TEXT.functionCountMax]);
+
+  // The method is three to seven capitals, the key is two parts with one space, the template starts with a slash,
+  // and the key is 256 bytes at most.
+  const badKeys = [
+    "get /api/a",
+    "GET api/a",
+    "GET /api/a b",
+    "GE /api/a",
+    `GET /${"a".repeat(260)}`,
+  ];
+  for (const key of badKeys) {
+    assert.deepEqual(
+      checkObjects({ functions: [fn(key, "admin")] }),
+      [DECLARE_TEXT.functionShape(1)],
+      key,
+    );
+  }
+
+  // Two keys that differ only in the letters of the template are the same function; the later one is the duplicate.
+  assert.deepEqual(
+    checkObjects({
+      functions: [fn("GET /api/patients/{id}", "admin"), fn("GET /api/patients/{ID}", "rule")],
+    }),
+    [DECLARE_TEXT.functionDuplicate("GET /api/patients/{ID}")],
+  );
+
+  const openTierButPublic = {
+    key: "POST /api/x",
+    source: "admin",
+    tier: "public",
+  } as unknown as ObjectFunctionEntry;
+  assert.deepEqual(checkObjects({ functions: [openTierButPublic] }), [
+    DECLARE_TEXT.functionTier(1),
+  ]);
+
+  const reliabilityOnly = {
+    key: "POST /api/x",
+    source: "admin",
+    reliability: "high",
+  } as ObjectFunctionEntry;
+  assert.deepEqual(checkObjects({ functions: [reliabilityOnly] }), [
+    DECLARE_TEXT.functionReliabilityAlone(1),
+  ]);
+});
+
+test("a gateway refusal of one function entry reads as the check's words for that entry", () => {
+  const objects: ObjectsSpec = {
+    functions: [
+      fn("POST /api/admin/export", "rule", { tier: "admin" }),
+      fn("POST /api/admin/export", "rule"),
+    ],
+  };
+  assert.equal(
+    functionRefusalWords("objects.functions[0]", "function_tier_unsupported", objects),
+    DECLARE_TEXT.functionTier(1),
+  );
+  assert.equal(
+    functionRefusalWords("objects.functions[0]", "reliability_without_judgement", objects),
+    DECLARE_TEXT.functionReliabilityAlone(1),
+  );
+  assert.equal(
+    functionRefusalWords("objects.functions[1]", "duplicate_key", objects),
+    DECLARE_TEXT.functionDuplicate("POST /api/admin/export"),
+  );
+  assert.equal(
+    functionRefusalWords("objects.functions[2]", "key_invalid", objects),
+    DECLARE_TEXT.functionShape(3),
+  );
+  assert.equal(
+    functionRefusalWords("objects.functions", "too_many", objects),
+    DECLARE_TEXT.functionCountMax,
+  );
+  // A refusal about another place, or one with no reason the console knows, is left to the error code.
+  assert.equal(functionRefusalWords("objects.slots[3]", "class_unknown", objects), null);
+  assert.equal(functionRefusalWords("objects.functions[0]", undefined, objects), null);
+  assert.equal(functionRefusalWords("objects.functions[0]", "class_unknown", objects), null);
+});
+
+test("the function table's changes are listed one line each: an entry added or removed, and its tier, reliability or source", () => {
+  const exported = fn("POST /api/admin/export", "rule");
+  assert.deepEqual(objectChanges(undefined, { functions: [exported] }), [
+    "对象表 ＋ 功能 POST /api/admin/export",
+  ]);
+  assert.deepEqual(
+    objectChanges(undefined, { functions: [fn(exported.key, "rule", { tier: "admin" })] }),
+    ["对象表 ＋ 功能 POST /api/admin/export"],
+  );
+  assert.deepEqual(objectChanges({ functions: [exported] }, undefined), [
+    "对象表 －1：功能 POST /api/admin/export",
+  ]);
+  assert.deepEqual(
+    objectChanges(
+      { functions: [exported] },
+      { functions: [fn(exported.key, "rule", { tier: "admin" })] },
+    ),
+    ["功能 POST /api/admin/export 档位 对所有会话开放 → 仅管理员"],
+  );
+  const admin = fn(exported.key, "rule", { tier: "admin", reliability: "high" });
+  assert.deepEqual(
+    objectChanges({ functions: [admin] }, { functions: [{ ...admin, reliability: "medium" }] }),
+    ["功能 POST /api/admin/export 可靠性 高 → 中"],
+  );
+  assert.deepEqual(
+    objectChanges({ functions: [exported] }, { functions: [{ ...exported, source: "admin" }] }),
+    ["功能 POST /api/admin/export 来源 规则 → 管理员声明"],
+  );
+});
+
+test("the object map's own edits keep the function table", () => {
+  const exported = fn("POST /api/admin/export", "rule", { tier: "admin" });
+  const slot: ObjectSlotEntry = { key: "GET /api/doctors [].id", class: "doctor", source: "admin" };
+  const spec: SiteSpec = { ...base, objects: { functions: [exported] } };
+  assert.deepEqual(withSlot(spec, slot).objects, { functions: [exported], slots: [slot] });
+  assert.deepEqual(withClasses(spec, [{ id: "doctor", name: "医生" }]).objects, {
+    functions: [exported],
+    classes: [{ id: "doctor", name: "医生" }],
+  });
+  assert.deepEqual(withoutSlot(withSlot(spec, slot), slot.key).objects, { functions: [exported] });
 });

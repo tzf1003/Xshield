@@ -15,10 +15,18 @@ export function bellPanel(page: Page): Locator {
   return page.getByRole("region", { name: "需要处理" });
 }
 
-/** Opens the bell and waits for its panel. A click on an open bell closes it, so open it once per page load. */
+/**
+ * Opens the bell and waits for its panel to finish opening. A click on an open bell closes it, so open it once per
+ * page load. The panel is an antd Popover and moves while its motion runs, and toBeVisible passes at once. A press on
+ * a link during that motion can be released on another element, and the click then lands on the panel, not the link
+ * (the race openRowMenu waits out in trace.ts), so wait until the motion classes are gone.
+ */
 export async function openBell(page: Page): Promise<void> {
   await bell(page).click();
   await expect(bellPanel(page)).toBeVisible();
+  await expect(page.locator(".ant-popover", { has: bellPanel(page) })).not.toHaveClass(
+    /-(appear|enter|leave)/,
+  );
 }
 
 /** Every gateway instance online, no problem listed, and Jev healthy. */

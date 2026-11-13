@@ -43,7 +43,7 @@ export const DECISION_INFO: Record<DecisionPath, { name: string; icon: string; d
   jev_unavailable: {
     name: "Jev 不可用",
     icon: "∅",
-    desc: "Jev 超时、出错、调用达到上限或答不上来，按站点设置处理",
+    desc: "Jev 超时、出错或答不上来，按站点设置处理；调用达到上限回 429，上下文过大回 403",
   },
   no_session: { name: "无会话", icon: "⊘", desc: "没有会话凭证，路径也不是入口" },
   body_not_inspectable: {
@@ -63,7 +63,7 @@ export const OUTCOME_INFO: Record<
     name: "拦截",
     icon: "■",
     tone: "blocked",
-    desc: "网关返回 401 / 403 / 404 / 413，没有转发",
+    desc: "网关返回 401 / 403 / 404 / 413 / 429，没有转发",
   },
   would_block: {
     name: "本应拦截",
@@ -135,8 +135,8 @@ export const FAILURE_INFO: Record<JevFailure, { short: string; desc: string }> =
   JEV_RESPONSE_TOO_LARGE: { short: "响应过大", desc: "响应超过 64 KiB" },
   JEV_RESPONSE_INVALID: { short: "响应无效", desc: "响应结构不符合约定" },
   JEV_UNKNOWN: { short: "答不上来", desc: "最高项是 UNKNOWN 或两项并列" },
-  JEV_STATE_TOO_LARGE: { short: "上下文过大", desc: "裁剪后仍超过 8 KiB，没有调用" },
-  JEV_CALL_LIMIT: { short: "达到上限", desc: "会话或地址每分钟调用次数用完，没有调用" },
+  JEV_STATE_TOO_LARGE: { short: "上下文过大", desc: "裁剪后仍超过 8 KiB，没有调用，返回 403" },
+  JEV_CALL_LIMIT: { short: "达到上限", desc: "会话或地址每分钟调用次数用完，没有调用，返回 429" },
 };
 
 export const SKIP_LABEL: Record<ResponseSkip, string> = {
@@ -282,6 +282,7 @@ export const ERROR_TEXT: Record<string, string> = {
   SITE_CONFIG_ENTRIES_INVALID: "入口至少一条、最多 64 条；每条以 / 开头，* 只能在末尾",
   SITE_CONFIG_BYPASS_INVALID: "绕过最多 64 条，规则格式同入口",
   SITE_CONFIG_ADVANCED_INVALID: "高级判定参数有误，请检查各项的取值范围",
+  SITE_CONFIG_OBJECTS_INVALID: "对象表的配置有误，请检查对象表的各项",
   INVALID_FILTER: "筛选条件有误",
   WINDOW_TOO_LARGE: "时间范围最长 7 天",
   TOO_MANY_IDS: "一次最多对照 1000 个请求 ID",
@@ -1270,6 +1271,13 @@ export const DECLARE_TEXT = {
   judgementConflict: (index: number) =>
     `对象表第 ${index} 个位置同时带了归属和接受公共来源，一个位置只能带一种`,
   reliabilityAlone: (index: number) => `对象表第 ${index} 个位置只有可靠性，没有归属或接受公共来源`,
+  functionsShape: "对象表的功能格式不对",
+  functionShape: (index: number) => `对象表第 ${index} 个功能的格式不对`,
+  functionCountMax: "对象表最多 2,048 个功能",
+  functionDuplicate: (key: string) => `功能 ${key} 在功能表里已经有一条`,
+  functionTier: (index: number) =>
+    `对象表第 ${index} 个功能的档位只能是 admin，对所有会话开放的功能不写档位`,
+  functionReliabilityAlone: (index: number) => `对象表第 ${index} 个功能只有可靠性，没有档位`,
   slotClassUnknown: (key: string, cls: string) => `位置 ${key} 的类别 ${cls} 还没有声明`,
   slotKeyFormat: "位置的格式不对：应为“方法 /路径 位置”",
   slotKeyLong: "位置键最多 256 个字节",
@@ -1277,6 +1285,19 @@ export const DECLARE_TEXT = {
   label: (field: string, kind: string, scope: string | null) =>
     `字段 ${field} 归为${kind}（${scope === null ? "全站" : `仅 ${scope}`}）`,
 };
+
+/** The function table's changes in the change list, written as the positions' are (console design 6). */
+export const FUNCTION_TEXT = {
+  added: (key: string) => `对象表 ＋ 功能 ${key}`,
+  removed: (key: string) => `对象表 －1：功能 ${key}`,
+  tier: (key: string, was: string, now: string) => `功能 ${key} 档位 ${was} → ${now}`,
+  reliability: (key: string, was: string, now: string) => `功能 ${key} 可靠性 ${was} → ${now}`,
+  source: (key: string, was: string, now: string) => `功能 ${key} 来源 ${was} → ${now}`,
+  /** A function with no tier is open to every session. */
+  open: "对所有会话开放",
+  admin: "仅管理员",
+  noReliability: "无",
+} as const;
 
 /** The learning settings in words, for the change list and the version conflict. */
 export const LEARNING_TEXT = {
