@@ -276,7 +276,7 @@ def _second_sqli() -> str:
 
 
 def session_total_cap(p: Prober) -> None:
-    """Eleven sessions from one address, each made by a real login of the same doctor. Since WAF batch 11 (PR #232) a
+    """Eleven sessions from one address, each made by a real login of the same doctor. Since PR #232 a
     credential the origin never issued makes no session, so these are issued sessions. The first ten spend two model
     calls each, the address total of 20. The eleventh's injection must then be refused at the limit (429) before the
     model is called: the row's `delivered` is false, so the payload never reached the model."""
