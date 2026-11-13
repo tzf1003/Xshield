@@ -1376,7 +1376,7 @@ fn shop_cases() -> Vec<Case> {
             true,
         )
         .known_gap(),
-        // KnownGap: `access` answers ALLOW and `attack` answers ATTACK 0.41 to 0.45, so all three live runs allow it.
+        // KnownGap: `access` answers ALLOW and `attack` answers BENIGN (ATTACK 0.41 to 0.45), so all three live runs allow it.
         // The function table does not cover an open redirect; this one rests on the attack question.
         get(
             "shop GET /redirect?to=",
