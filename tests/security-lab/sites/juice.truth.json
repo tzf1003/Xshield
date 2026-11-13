@@ -1,0 +1,32 @@
+{
+  "site": "juice",
+  "seed": 0,
+  "note": "Juice Shop 不是生成的靶场，没有种子；seed 为 0 只为满足 truth.json 的字段要求。位置只写有依据的：路径与请求体的写法来自批次的真实请求（body 下的 orderDetails 是嵌套的），含义来自 docs/04 §4.5 与 waf-audit/juice-6190-console-audit.md。没有把握的位置不写（地址、卡的响应位置，订单、购物车条目）。",
+  "classes": ["basket", "card", "address", "product", "user", "security_question"],
+  "identity": [],
+  "request_positions": [
+    {"key": "GET /rest/basket/{id} path[2]", "class": "basket", "accepts_public": false, "learnable": true,
+     "why": "读购物车，编号在路径里（审计第 4 节）"},
+    {"key": "POST /rest/basket/{id}/checkout path[2]", "class": "basket", "accepts_public": false, "learnable": true,
+     "why": "结算的购物车，编号在路径里（审计第 5 节）"},
+    {"key": "POST /rest/basket/{id}/checkout body.orderDetails.paymentId", "class": "card", "accepts_public": false,
+     "learnable": true, "why": "结算用的卡，是本人的卡（4.5.3：paymentId 对应 /api/Cards 展示过的卡）"},
+    {"key": "POST /rest/basket/{id}/checkout body.orderDetails.addressId", "class": "address", "accepts_public": false,
+     "learnable": true, "why": "结算用的地址，是本人的地址（结算请求体 orderDetails.addressId）"},
+    {"key": "POST /api/BasketItems body.BasketId", "class": "basket", "accepts_public": false, "learnable": true,
+     "why": "加购的购物车编号（加购请求体 BasketId；尾斜杠按规范拼写去掉）"},
+    {"key": "POST /api/BasketItems body.ProductId", "class": "product", "accepts_public": true, "learnable": true,
+     "why": "加购的商品编号，来自公开的商品列表"},
+    {"key": "POST /api/SecurityAnswers body.UserId", "class": "user", "accepts_public": false, "learnable": true,
+     "why": "注册流程里本人的用户编号（4.5.3：对这个会话展示过的新用户 id）"},
+    {"key": "POST /api/SecurityAnswers body.SecurityQuestionId", "class": "security_question", "accepts_public": true,
+     "learnable": true, "why": "注册页对所有访客展示的安全问题"}
+  ],
+  "response_positions": [
+    {"key": "POST /rest/user/login authentication.bid", "class": "basket", "tier": "self", "learnable": true,
+     "why": "登录响应里本人的购物车编号（审计第 6 节）"}
+  ],
+  "non_objects": [
+    "POST /rest/basket/{id}/checkout body.orderDetails.deliveryMethodId"
+  ]
+}

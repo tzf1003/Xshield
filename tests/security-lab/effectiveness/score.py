@@ -72,6 +72,7 @@ def score(
     *,
     exclude_suspicious: bool = False,
     baseline: dict[str, Any] | None = None,
+    probe_values_from_record: bool = False,
 ) -> dict[str, Any]:
     records = {record["request_id"]: record for record in decisions}
     pairs: list[Pair] = []
@@ -81,7 +82,7 @@ def score(
         if record is None:
             missing.append(row)
             continue
-        suspicious, bypass = _label_flags(row, record, records)
+        suspicious, bypass = _label_flags(row, record, records, probe_values_from_record)
         pairs.append(Pair(row, record, suspicious, bypass))
 
     active = [pair for pair in pairs if not _known_gap(pair.row)]
@@ -212,17 +213,26 @@ def _same_session(rec: dict[str, Any], source: dict[str, Any], records: dict[str
     return origin is not None and bool(rec.get("session")) and origin.get("session") == rec.get("session")
 
 
-def _label_flags(row: dict[str, Any], rec: dict[str, Any], records: dict[str, dict[str, Any]]) -> tuple[bool, bool]:
-    """Section 4.6 checks for a probe. Only expected blocks are probes."""
+def _label_flags(row: dict[str, Any], rec: dict[str, Any], records: dict[str, dict[str, Any]],
+                 from_record: bool = False) -> tuple[bool, bool]:
+    """Section 4.6 checks for a probe. Only expected blocks are probes. The values checked are the probe's
+    references, or with from_record every value its decision record carries: a real site has no origin
+    truth to name the references by."""
     if row["expect"] != "block":
         return False, False
+    values = _record_values(rec) if from_record else [ref["value"] for ref in row["refs"]]
     suspicious = row["reason"] == "access" and any(
         bool(entry.get("verified"))
         and any(_same_session(rec, source, records) for source in entry.get("sources") or [])
-        for ref in row["refs"]
-        for entry in _entries(rec, ref["value"])
+        for value in values
+        for entry in _entries(rec, value)
     )
     return suspicious, rec["decision_path"] == "bypass"
+
+
+def _record_values(rec: dict[str, Any]) -> list[str]:
+    values = (rec.get("trace") or {}).get("values") or []
+    return sorted({entry["value"] for entry in values if isinstance(entry.get("value"), str)})
 
 
 def _jev_calls(rec: dict[str, Any]) -> int:
