@@ -248,7 +248,15 @@ async fn learn_site(
     tighten_split(run, pool, site, generation, oldest_day).await?;
     judge_accepts(pool, site, generation, oldest_day, now_millis).await?;
     judge_tiers(pool, site, generation, oldest_day, now_millis).await?;
-    judge_functions(pool, site, generation, oldest_day, now_millis).await?;
+    judge_functions(
+        pool,
+        site,
+        generation,
+        oldest_day,
+        FUNCTION_KEYS_MAX,
+        now_millis,
+    )
+    .await?;
     store::retire_unseen(pool, site, today.saturating_sub(RETIRE_DAYS), now_millis).await?;
     store::prune_retired(pool, site, today.saturating_sub(KEEP_RETIRED_DAYS)).await?;
     Ok(())
@@ -675,11 +683,15 @@ async fn judge_tiers(
 /// proposal the rules no longer make is withdrawn, and a dismissed one stays. The writes read the configuration
 /// the site holds now and name its generation, as `judge_tiers` does, so a site deleted meanwhile gets none.
 /// Nothing here changes the configuration.
+///
+/// The pass reads the `keys_max` keys used by the most units. When more keys have evidence, the pass judges
+/// nothing and writes nothing: a key past the limit would look unused, and its proposal would be withdrawn.
 async fn judge_functions(
     pool: &PgPool,
     site: &str,
     generation: DateTime<Utc>,
     oldest_day: u64,
+    keys_max: usize,
     now_millis: i64,
 ) -> Result<(), store::LearningStoreError> {
     let record = match site_spec_store::get(pool, site).await {
@@ -693,9 +705,13 @@ async fn judge_functions(
     let map = record.spec.objects();
     let thresholds = thresholds_of(map.learning());
     let identified = identified_by(map);
-    // The FUNCTION_KEYS_MAX keys used by the most units. Keys past that are not judged in this pass.
-    let (uses, _more) =
-        function_store::function_keys(pool, site, oldest_day, FUNCTION_KEYS_MAX).await?;
+    let (uses, more) = function_store::function_keys(pool, site, oldest_day, keys_max).await?;
+    if more {
+        eprintln!(
+            "xshield-control: function judgement skipped for site {site}, more than {keys_max} function keys have evidence"
+        );
+        return Ok(());
+    }
     let named_under: Vec<String> = record
         .spec
         .routes()
@@ -2267,15 +2283,21 @@ mod function_pass_tests {
 
     use serde_json::{Value, json};
     use sqlx::PgPool;
+    use xshield_core::context::learning::{FUNCTION_KEYS_MAX, FunctionFact, WINDOW_DAYS, day_of};
     use xshield_core::context::{Reliability, SiteSpec, Tier};
-    use xshield_postgres::{object_tier_judgement_store as tier_judgements, site_spec_store};
+    use xshield_postgres::{
+        object_function_store as function_store, object_tier_judgement_store as tier_judgements,
+        site_spec_store,
+    };
 
-    use super::learn_once;
     use super::pass_tests::{drop_scratch, partitions, scratch};
+    use super::{judge_functions, learn_once};
     use crate::params::DAY_MILLIS;
 
     /// The function the administrator alone uses in most tests.
     const SEARCH: &str = "GET /api/admin/search";
+    /// Another function only administrators use, in the test that reads one key at a time.
+    const EXPORT: &str = "GET /api/admin/export";
     /// The function ordinary users use.
     const FEED: &str = "GET /api/feed";
     /// A response position that the ordinary users all see the same values at.
@@ -2723,6 +2745,132 @@ mod function_pass_tests {
         .expect("count the rows");
         assert_eq!(rows, 0, "no function evidence is kept");
         assert!(!proposed(&pool, SEARCH).await);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    /// Each of `users`, an administrator, logs in once two days ago. A login is an entry request, which the
+    /// function evidence counts as an ordinary use of the entry, so each login makes its unit a function unit.
+    async fn admin_logins(pool: &PgPool, now: i64, users: &[&str]) {
+        for &user in users {
+            let session = format!("login-{user}");
+            let call = Call {
+                session: &session,
+                user: Some(user),
+                role: Some("admin"),
+                method: "POST",
+                path: "/login",
+                entry: true,
+            };
+            log(pool, now - 2 * DAY_MILLIS, &call).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn administrators_on_entries_are_no_ordinary_bystanders() {
+        let Some((admin, pool, name)) = scratch("function_entries").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        // Five administrators log in, and `root` also uses the administrator's function on two days. There is no
+        // ordinary user. Counting every login would give five bystanders, enough for a proposal; leaving out the
+        // administrator who uses the function leaves four, below the five sessions a proposal needs.
+        admin_logins(&pool, now, &["root", "root2", "root3", "root4", "root5"]).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            !proposed(&pool, SEARCH).await,
+            "an administrator who uses the function is no ordinary bystander"
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_site_with_more_function_keys_than_one_pass_reads_is_not_judged() {
+        let Some((admin, pool, name)) = scratch("function_more").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&json!({"auto_tighten": false, "auto_pause": false})),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        admin_uses(&pool, now, SEARCH, false).await;
+        ten_users_use_feed(&pool, now).await;
+        learn_once(&pool, None, now).await;
+        assert!(
+            proposed(&pool, SEARCH).await,
+            "the first pass proposes the function only the administrator uses"
+        );
+
+        // A second administrator function that two administrators use, so it has more units and sorts first.
+        // A limit of one reads it alone. A pass that judged that key would withdraw SEARCH, which it does not read.
+        let site = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        let today = day_of(u64::try_from(now).unwrap_or(0));
+        let mut facts = Vec::new();
+        for unit in ["root", "root2"] {
+            for back in [2_u64, 3] {
+                facts.push(FunctionFact::Admin {
+                    function: EXPORT.to_owned(),
+                    unit: unit.to_owned(),
+                    day: today - back,
+                });
+            }
+        }
+        function_store::record_function_facts(&pool, "clinic", site.created_at, &facts)
+            .await
+            .expect("record the facts");
+        let oldest_day = today.saturating_sub(WINDOW_DAYS - 1);
+        let (_, more) = function_store::function_keys(&pool, "clinic", oldest_day, 1)
+            .await
+            .expect("list the keys");
+        assert!(
+            more,
+            "two function keys have evidence and one pass reads one"
+        );
+
+        judge_functions(&pool, "clinic", site.created_at, oldest_day, 1, now)
+            .await
+            .expect("judge the functions");
+        assert!(
+            proposed(&pool, SEARCH).await,
+            "a pass that does not read every key keeps the proposal it does not read"
+        );
+        assert!(
+            !proposed(&pool, EXPORT).await,
+            "a pass that does not read every key proposes nothing"
+        );
+
+        // Read every key, and the same evidence proposes both functions.
+        judge_functions(
+            &pool,
+            "clinic",
+            site.created_at,
+            oldest_day,
+            FUNCTION_KEYS_MAX,
+            now,
+        )
+        .await
+        .expect("judge the functions");
+        assert!(proposed(&pool, SEARCH).await);
+        assert!(
+            proposed(&pool, EXPORT).await,
+            "with every key read, the second function is proposed"
+        );
         drop_scratch(admin, pool, name).await;
     }
 }

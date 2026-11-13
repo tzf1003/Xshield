@@ -195,8 +195,10 @@ pub async fn function_evidence(
     Ok(evidence)
 }
 
-/// The distinct units that used any function over the window from `oldest_day` on: the ordinary units the
-/// rules weigh against "no ordinary unit used it". Anonymous units are not counted.
+/// The distinct ordinary units that used any function over the window from `oldest_day` on: the units the
+/// rules weigh against "no ordinary unit used it". Anonymous units are not counted. A unit that is an
+/// administrator in the window is left out, for any function: an administrator is no bystander for a
+/// function only administrators use, even when the unit also used other functions as an ordinary user.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
@@ -206,8 +208,13 @@ pub async fn site_ordinary_units(
     oldest_day: u64,
 ) -> Result<u32, LearningStoreError> {
     let count: i64 = sqlx::query_scalar(
-        "SELECT count(DISTINCT unit) FROM object_response_evidence
-         WHERE site = $1 AND kind = 'function' AND day >= $2",
+        "WITH administrators AS (
+             SELECT DISTINCT unit FROM object_response_evidence
+             WHERE site = $1 AND kind = 'function_admin' AND day >= $2
+         )
+         SELECT count(DISTINCT e.unit) FROM object_response_evidence e
+         WHERE e.site = $1 AND e.kind = 'function' AND e.day >= $2
+           AND NOT EXISTS (SELECT 1 FROM administrators a WHERE a.unit = e.unit)",
     )
     .bind(site)
     .bind(day_i64(oldest_day))
@@ -453,6 +460,13 @@ mod tests {
                 anonymous(FUNCTION, "a:10.0.0.9", DAY),
                 admin(FUNCTION, "root", DAY),
                 refused(FUNCTION, "carol", DAY),
+                // An administrator who also used the function as an ordinary user is no bystander, even
+                // when the window holds only his administration of another function.
+                used(FUNCTION, "dave", DAY),
+                admin("GET /api/admin/search", "dave", DAY + 1),
+                // An administration outside the window leaves nobody out.
+                used(FUNCTION, "erin", DAY),
+                admin(FUNCTION, "erin", DAY - 10),
             ],
         )
         .await
@@ -461,7 +475,8 @@ mod tests {
             site_ordinary_units(&pool, &site, DAY - 1)
                 .await
                 .expect("count the units"),
-            2
+            3,
+            "alice, bob and erin: dave administers in the window, root is no function user"
         );
     }
 
