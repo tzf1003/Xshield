@@ -43,7 +43,7 @@ jobs:
           match() { if printf '%s\n' "$files" | grep -Eq "$1"; then echo true; else echo false; fi; }
           {
             echo "web=$(match '^(web/console/|\.github/)')"
-            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|migrations/|\.github/)')"
+            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|migrations/|web/console/|\.github/)')"
             echo "fuzz=$(match '^(crates/xshield-core/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|\.github/)')"
           } >> "$GITHUB_OUTPUT"
 
@@ -96,9 +96,9 @@ jobs:
           cache-dependency-path: web/console/package-lock.json
       - run: pip install -r scripts/requirements.txt
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace --all-targets
-      - run: cargo test --workspace --doc
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+      - run: cargo test --workspace --doc --locked
       # docs/04 section 4.4: the acceptance scenarios against the real edge binary, with a
       # scripted Jev stand-in, so no model is called. The cargo steps above built the binary.
       - name: Acceptance scenarios (docs/04 4.3)

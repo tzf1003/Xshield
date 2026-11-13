@@ -361,6 +361,7 @@ function SiteDetailBody({ name }: { name: string }) {
         onDelete={deleteSite}
         deleting={remove.isPending}
       />
+      {remove.isError ? <ErrorBar error={remove.error} /> : null}
 
       {created ? (
         <div className="created-site">
