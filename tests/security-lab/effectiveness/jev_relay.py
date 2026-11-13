@@ -9,7 +9,8 @@ The digest is SHA-256 of the request body as canonical JSON. The body holds the 
 instruction text, so a changed instruction changes the digest (the instruction version); it also holds the state
 and the model. Two parts are left out. `state.session.age_seconds` is the wall clock, which differs between any two
 runs, and the instructions never read it. The file holds digests, statuses and replies, and nothing else: no request
-headers and no key. A record run refuses to write a line that contains its key.
+headers and no key. A record run refuses to write a line that contains its key, and a reply that is not 2xx: only an answer belongs in a
+recording.
 """
 
 from __future__ import annotations
@@ -138,7 +139,7 @@ class JevRelay:
 
     Counts: `calls` is every judgement request the relay saw. In replay, `misses` counts the requests that had no
     recorded reply. In record, `recorded` counts the replies written, and `failures` counts the requests that got no
-    usable reply from the real endpoint, or whose reply carried the key; those are not written, so the recording is
+    usable reply from the real endpoint (not 2xx, or carrying the key); those are not written, so the recording is
     incomplete and the run must say so.
     """
 
@@ -217,6 +218,9 @@ class JevRelay:
         line = json.dumps({"digest": digest, "status": status, "body": text}, ensure_ascii=False)
         with self._lock:
             self.calls += 1
+            if not 200 <= status < 300:  # a limit, an authentication failure or a server error is not an answer
+                self.failures += 1
+                return 502, b'{"error":"upstream"}'
             if self._key in line:  # the key must never reach the file; the recording is then incomplete
                 self.failures += 1
                 return 502, b'{"error":"upstream"}'

@@ -172,6 +172,22 @@ class RecordTests(unittest.TestCase):
         self.assertNotIn(RECORD_KEY, Path(relay.recording).read_text(encoding="utf-8"))
         self.assertEqual(relay.failures, 1)
 
+    def test_a_reply_that_is_not_2xx_is_a_failure_and_is_not_written(self):
+        # A limit, an authentication failure or a server error is not an answer, and its body carries no key here, so
+        # only the status makes it a failure. A recording that held it would hand replay a non-answer.
+        for code in (429, 401, 500, 503):
+            with self.subTest(status=code):
+                def sender(url: str, body: bytes, headers: Any, code: int = code) -> tuple[int, bytes]:
+                    return code, b'{"error":"refused"}'
+
+                relay = self.relay(sender)
+                relay.start()
+                status, _ = relay.answer(judgement(), {})
+                relay.stop()
+                self.assertEqual(status, 502)
+                self.assertEqual(Path(relay.recording).read_text(encoding="utf-8"), "")  # nothing written for it
+                self.assertEqual((relay.calls, relay.recorded, relay.failures), (1, 0, 1))
+
     def test_a_record_needs_the_endpoint_and_the_key(self):
         with self.assertRaisesRegex(jev_relay.RelayError, "地址和密钥"):
             jev_relay.JevRelay(jev_relay.RECORD, recording=Path(tempfile.mkdtemp()) / "x.jsonl", endpoint="", key="")
