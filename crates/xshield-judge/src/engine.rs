@@ -4090,6 +4090,7 @@ mod tests {
         let request = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             request_id: RID,
             method: "POST",
             path: "/login",
