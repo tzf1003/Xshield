@@ -6614,6 +6614,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cached_allow_does_not_settle_a_request_that_names_an_administrator_function() {
+        // The cache key leaves out the method overrides, so the plain request's cached allow has
+        // the same key as the override. The read guard in `plan` keeps that allow from settling it.
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let plain = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/patients/8", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(plain.record.decision_path, DecisionPath::JevAllow);
+        let cached = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/patients/8", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(cached.record.decision_path, DecisionPath::CachedAllow);
+        assert_eq!(fake.calls(), 1);
+        let overrides = ["DELETE".to_owned()];
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method_overrides: &overrides,
+                    ..call_as("POST", "/api/patients/8", "doctor-a", 3_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
+        assert_eq!(
+            function_shown(&fake, 1),
+            json!({"tier": "admin", "attempt": "over_privilege"})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allow_of_a_request_that_names_an_administrator_function_is_not_cached() {
+        // The attempt is judged and Jev allows it. That allow must not settle the plain request,
+        // which shares its cache key: the write guard in `remember_allow` keeps it out of the cache.
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let overrides = ["DELETE".to_owned()];
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method_overrides: &overrides,
+                    ..call_as("POST", "/api/patients/8", "doctor-a", 1_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt.record.decision_path, DecisionPath::JevAllow);
+        let plain = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/patients/8", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(plain.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
     async fn a_known_function_is_judged_as_before() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
