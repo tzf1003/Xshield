@@ -9,7 +9,7 @@
 //! templates changes every position in one spot.
 
 use xshield_core::context::{IdentityRole, ObjectMap, PublicAccess, Reliability, Tier};
-use xshield_core::path_template::position_template;
+use xshield_core::path_template::{canonical_path, position_template};
 
 use crate::context::Origin;
 use crate::values::ResponseValue;
@@ -21,6 +21,27 @@ use crate::values::ResponseValue;
 #[must_use]
 pub fn route_template(path: &str) -> String {
     position_template(path)
+}
+
+/// The templates a request is looked up by in the site's function table (docs/07 section 7.9.18).
+/// The first is [`route_template`]. When the canonical spelling of `path` still carries an escaped
+/// slash (`%2F`) or backslash (`%5C`), a second template is the route of that spelling with those
+/// escapes read as `/`, when it differs: an origin or a proxy in front of it may decode the slash
+/// before it routes, so `/api/admin%2Fexport` reaches `/api/admin/export`.
+#[must_use]
+pub fn function_templates(path: &str) -> Vec<String> {
+    let first = route_template(path);
+    let mut templates = vec![first.clone()];
+    if let Some(canonical) = canonical_path(path)
+        && (canonical.contains("%2F") || canonical.contains("%5C"))
+    {
+        let decoded = canonical.replace("%2F", "/").replace("%5C", "/");
+        let second = route_template(&decoded);
+        if second != first {
+            templates.push(second);
+        }
+    }
+    templates
 }
 
 /// The position of a request value: `GET /doctor/{id} path[1]`.
@@ -164,6 +185,35 @@ pub fn identity_claims<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_request_is_looked_up_by_its_template_and_by_its_decoded_slash() {
+        let cases: [(&str, &[&str]); 6] = [
+            ("/api/patients/8", &["/api/patients/{id}"]),
+            ("/api/admin/export", &["/api/admin/export"]),
+            (
+                "/api/admin%2Fexport",
+                &["/api/admin%2Fexport", "/api/admin/export"],
+            ),
+            (
+                "/api/admin%2fexport",
+                &["/api/admin%2Fexport", "/api/admin/export"],
+            ),
+            (
+                "/api/admin%5Cexport",
+                &["/api/admin%5Cexport", "/api/admin/export"],
+            ),
+            (
+                "/api/x/..%2Fadmin/export",
+                &["/api/x/..%2Fadmin/export", "/api/admin/export"],
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(function_templates(path), expected, "{path}");
+        }
+        // A path without a canonical spelling has one template, as it is.
+        assert_eq!(function_templates("/api/%zz"), ["/api/%zz"]);
+    }
+
     use super::*;
 
     #[test]

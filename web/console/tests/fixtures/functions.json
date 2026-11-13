@@ -1,0 +1,96 @@
+{
+  "status": "ok",
+  "window_days": 7,
+  "threshold_units": 5,
+  "identified": true,
+  "ordinary_units": 37,
+  "admin_units": 2,
+  "functions": [
+    {
+      "key": "POST /api/admin/export",
+      "source": "rule",
+      "tier": "admin",
+      "reliability": "high",
+      "ordinary_units": 0,
+      "admin_units": 2,
+      "refused_units": 3,
+      "last_seen": "2026-11-12T00:00:00.000Z",
+      "on_entry": false
+    },
+    {
+      "key": "GET /api/products/{id}",
+      "source": "admin",
+      "ordinary_units": 21,
+      "admin_units": 1,
+      "refused_units": 0,
+      "last_seen": "2026-11-13T00:00:00.000Z",
+      "on_entry": true
+    }
+  ],
+  "candidates": [
+    {
+      "key": "GET /api/system/metrics",
+      "ordinary_units": 1,
+      "admin_units": 0,
+      "refused_units": 2,
+      "last_seen": "2026-11-11T00:00:00.000Z",
+      "requests_24h": 9,
+      "suggested": false,
+      "sensitive": true,
+      "on_entry": false
+    },
+    {
+      "key": "GET /api/reports/{id}",
+      "ordinary_units": 12,
+      "admin_units": 1,
+      "refused_units": 0,
+      "last_seen": "2026-11-13T00:00:00.000Z",
+      "requests_24h": 340,
+      "suggested": true,
+      "sensitive": false,
+      "on_entry": false
+    }
+  ],
+  "proposals": [
+    {
+      "key": "DELETE /api/users/{id}",
+      "tier": "admin",
+      "reliability": "medium",
+      "admin_units": 2,
+      "refused_units": 1,
+      "last_seen": "2026-11-13T00:00:00.000Z",
+      "in_table": true
+    },
+    {
+      "key": "POST /api/orders/{id}/refund",
+      "tier": "admin",
+      "reliability": "high",
+      "admin_units": 1,
+      "refused_units": null,
+      "last_seen": "2026-11-10T00:00:00.000Z",
+      "in_table": false
+    }
+  ],
+  "unlearned": {
+    "requests": 55,
+    "unkeyed_requests": 2,
+    "complete": true,
+    "top": [
+      {
+        "key": "GET /metrics",
+        "requests": 40,
+        "sample": "req_0f3c9a7e2b1d4c6e8a5f7b9d1c3e5a7b"
+      },
+      {
+        "key": "GET /favicon.ico",
+        "requests": 9,
+        "sample": "req_a4d81e6f0c2b4973b5e8d2f6a1c09e47"
+      },
+      {
+        "key": "GET /.env",
+        "requests": 6,
+        "sample": "req_5e27b0c94d1a4f83a6c2e9d07b5f1a38"
+      }
+    ]
+  }
+}

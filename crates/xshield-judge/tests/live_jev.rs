@@ -403,6 +403,7 @@ async fn run(judge: &Judge<JevClient>, site: &SiteSpec, cases: &[Case], start_ms
                 &RequestFacts {
                     route: None,
                     request_headers: &[],
+                    method_overrides: &[],
                     request_id: &request_id,
                     method: case.method,
                     path: case.path,

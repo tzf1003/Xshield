@@ -88,8 +88,21 @@ pub struct JevRecord {
     pub route: String,
     /// The timeout this call used, in milliseconds.
     pub timeout_ms: u32,
-    /// The trim level of `state`, 0 to 4; `None` when no state was built.
+    /// The trim level of `state`, 0 to 4; `None` when no state was built. With several batches
+    /// it is the level of the batch this record shows.
     pub trim: Option<u8>,
+    /// How many calls the state was cut into; set only when there were several (docs/07
+    /// section 7.5.1). Every other field of this record describes the batch in `batch`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batches: Option<u16>,
+    /// The batch this record shows, from 1; set only together with `batches`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<u16>,
+    /// How many values and pieces were not sent, because the request needed more than the
+    /// batches allowed (docs/02 section 2.4). Set only when there were some; the verdict then
+    /// rests on the values that were sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_out: Option<u32>,
     /// Size of the whole request body sent to the provider.
     pub request_bytes: Option<u32>,
     /// The provider's HTTP status; `None` for timeouts and transport failures.

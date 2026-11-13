@@ -135,7 +135,10 @@ export const FAILURE_INFO: Record<JevFailure, { short: string; desc: string }> =
   JEV_RESPONSE_TOO_LARGE: { short: "响应过大", desc: "响应超过 64 KiB" },
   JEV_RESPONSE_INVALID: { short: "响应无效", desc: "响应结构不符合约定" },
   JEV_UNKNOWN: { short: "答不上来", desc: "最高项是 UNKNOWN 或两项并列" },
-  JEV_STATE_TOO_LARGE: { short: "上下文过大", desc: "裁剪后仍超过 8 KiB，没有调用，返回 403" },
+  JEV_STATE_TOO_LARGE: {
+    short: "上下文过大",
+    desc: "分批（最多 16 批）后仍装不下，没有调用，返回 403（正常不出现）",
+  },
   JEV_CALL_LIMIT: { short: "达到上限", desc: "会话或地址每分钟调用次数用完，没有调用，返回 429" },
 };
 
@@ -1277,6 +1280,9 @@ export const DECLARE_TEXT = {
   functionTier: (index: number) =>
     `对象表第 ${index} 个功能的档位只能是 admin，对所有会话开放的功能不写档位`,
   functionReliabilityAlone: (index: number) => `对象表第 ${index} 个功能只有可靠性，没有档位`,
+  askShape: "对象表的 ask_unknown_functions 只能是真或假",
+  askWithoutFunctions:
+    "要让未知功能送 Jev 判定，功能表不能是空的：先列出站点的接口功能，或关闭这个开关",
   slotClassUnknown: (key: string, cls: string) => `位置 ${key} 的类别 ${cls} 还没有声明`,
   slotKeyFormat: "位置的格式不对：应为“方法 /路径 位置”",
   slotKeyLong: "位置键最多 256 个字节",
@@ -1292,6 +1298,8 @@ export const FUNCTION_TEXT = {
   tier: (key: string, was: string, now: string) => `功能 ${key} 档位 ${was} → ${now}`,
   reliability: (key: string, was: string, now: string) => `功能 ${key} 可靠性 ${was} → ${now}`,
   source: (key: string, was: string, now: string) => `功能 ${key} 来源 ${was} → ${now}`,
+  /** The switch that sends the functions the table does not list to the judge, turned on or off. */
+  ask: (now: boolean) => `功能表 未知功能送 Jev 判定 ${now ? "关 → 开" : "开 → 关"}`,
   /** A function with no tier is open to every session. */
   open: "对所有会话开放",
   admin: "仅管理员",

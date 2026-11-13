@@ -262,6 +262,11 @@ pub struct ObjectMapDto {
     /// Functions of the site, at most [`FUNCTIONS_MAX`]. Absent or empty is not written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub functions: Vec<ObjectFunction>,
+    /// Whether the judge asks Jev about a request whose function the table does not list
+    /// (`objects.ask_unknown_functions`, docs/07 section 7.9.18). Needs `functions`. Absent or false
+    /// is not written.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ask_unknown_functions: bool,
     /// Learning settings, at `objects.learning`. Absent or default settings are not written.
     #[serde(default, skip_serializing_if = "LearningSettings::is_default")]
     pub learning: LearningSettings,
@@ -275,6 +280,11 @@ pub struct ObjectMap {
     slots: Vec<ObjectSlot>,
     /// The functions, in the order they were written.
     functions: Vec<ObjectFunction>,
+    /// Whether the judge asks Jev about functions the table does not list.
+    ask_unknown_functions: bool,
+    /// Whether the judge reads the function table at all. Worked out once, when the map is validated.
+    #[serde(skip)]
+    guards: bool,
     /// The learning settings. The default when the site sets none.
     learning: LearningSettings,
     /// Position key to its place in `slots`, built once when the map is validated.
@@ -293,6 +303,7 @@ impl ObjectMap {
         self.classes.is_empty()
             && self.slots.is_empty()
             && self.functions.is_empty()
+            && !self.ask_unknown_functions
             && self.learning.is_default()
     }
 
@@ -513,6 +524,21 @@ impl ObjectMap {
         &self.functions
     }
 
+    /// Whether the judge asks Jev about a request whose function the table does not list
+    /// (docs/07 section 7.9.18).
+    #[must_use]
+    pub fn asks_unknown_functions(&self) -> bool {
+        self.ask_unknown_functions
+    }
+
+    /// Whether the judge reads the function table for this site at all: it asks about unknown
+    /// functions, or the table holds an administrator's function the map is sure of. A site for
+    /// which this is false is judged exactly as before the table existed (docs/07 section 7.9.18).
+    #[must_use]
+    pub fn guards_functions(&self) -> bool {
+        self.guards
+    }
+
     /// The function that governs a request: `method`, and the route `template` the judge keys it
     /// by (docs/07 section 7.9.18). `HEAD` is looked up as `GET`. `OPTIONS` is a preflight, which
     /// carries no credential, so it names no function. Among the functions whose template covers
@@ -596,6 +622,7 @@ impl ObjectsIssue {
             ObjectsPlace::Slot(index) => format!("objects.slots[{index}]"),
             ObjectsPlace::Functions => "objects.functions".to_owned(),
             ObjectsPlace::Function(index) => format!("objects.functions[{index}]"),
+            ObjectsPlace::AskUnknownFunctions => "objects.ask_unknown_functions".to_owned(),
         }
     }
 }
@@ -619,6 +646,8 @@ pub enum ObjectsPlace {
     Functions,
     /// One function, `objects.functions[n]`.
     Function(usize),
+    /// The switch `objects.ask_unknown_functions`.
+    AskUnknownFunctions,
 }
 
 /// The reasons an object map entry is refused, as their stable codes name them.
@@ -641,6 +670,8 @@ pub enum ObjectsReason {
     ReliabilityWithoutJudgement,
     /// A function's `tier` is something other than `admin`. A function is an administrator's, or open to all.
     FunctionTierUnsupported,
+    /// The switch is on, but the site lists no function for the judge to ask about.
+    AskWithoutFunctions,
 }
 
 impl ObjectsReason {
@@ -656,6 +687,7 @@ impl ObjectsReason {
             Self::JudgementConflict => "judgement_conflict",
             Self::ReliabilityWithoutJudgement => "reliability_without_judgement",
             Self::FunctionTierUnsupported => "function_tier_unsupported",
+            Self::AskWithoutFunctions => "ask_without_functions",
         }
     }
 }
@@ -724,10 +756,19 @@ impl TryFrom<ObjectMapDto> for ObjectMap {
             shapes.add_position(at, &slot.key);
         }
         check_functions(&dto.functions, &mut shapes)?;
+        if dto.ask_unknown_functions && dto.functions.is_empty() {
+            return Err(refused(
+                ObjectsPlace::AskUnknownFunctions,
+                Some(ObjectsReason::AskWithoutFunctions),
+            ));
+        }
+        let guards = dto.ask_unknown_functions || dto.functions.iter().any(admin_and_high);
         Ok(Self {
             classes: dto.classes,
             slots: dto.slots,
             functions: dto.functions,
+            ask_unknown_functions: dto.ask_unknown_functions,
+            guards,
             learning: dto.learning,
             index,
             shapes,
@@ -741,6 +782,7 @@ impl From<ObjectMap> for ObjectMapDto {
             classes: map.classes,
             slots: map.slots,
             functions: map.functions,
+            ask_unknown_functions: map.ask_unknown_functions,
             learning: map.learning,
         }
     }
@@ -1548,6 +1590,86 @@ mod function_tests {
             json!({"key": "GET /api/a", "source": "admin", "paused": true}),
         ]);
         assert!(serde_json::from_value::<ObjectMapDto>(extra).is_err());
+    }
+
+    #[test]
+    fn the_unknown_function_switch_round_trips_and_is_left_out_when_off() {
+        let mut on = with(vec![open("GET /api/a")]);
+        on["ask_unknown_functions"] = json!(true);
+        let loaded = map_of(&on);
+        assert!(loaded.asks_unknown_functions());
+        let written = serde_json::to_value(&loaded).expect("the map serializes");
+        assert_eq!(written["ask_unknown_functions"], json!(true));
+        assert_eq!(map_of(&written), loaded);
+
+        // Off, or left out, the key is not written at all.
+        let mut off = with(vec![open("GET /api/a")]);
+        off["ask_unknown_functions"] = json!(false);
+        for section in [with(vec![open("GET /api/a")]), off] {
+            let plain = map_of(&section);
+            assert!(!plain.asks_unknown_functions());
+            let text = serde_json::to_string(&plain).expect("the map serializes");
+            assert!(!text.contains("ask_unknown_functions"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_switch_that_is_not_a_boolean_is_not_read() {
+        let mut section = with(vec![open("GET /api/a")]);
+        section["ask_unknown_functions"] = json!("yes");
+        assert!(serde_json::from_value::<ObjectMapDto>(section).is_err());
+    }
+
+    #[test]
+    fn the_switch_without_functions_is_refused() {
+        let mut section = json!({});
+        section["ask_unknown_functions"] = json!(true);
+        let issue = refusal(&section);
+        assert_eq!(issue.place, ObjectsPlace::AskUnknownFunctions);
+        assert_eq!(issue.reason, Some(ObjectsReason::AskWithoutFunctions));
+        assert_eq!(issue.field(), "objects.ask_unknown_functions");
+        assert_eq!(
+            ObjectsReason::AskWithoutFunctions.code(),
+            "ask_without_functions"
+        );
+    }
+
+    #[test]
+    fn a_map_guards_functions_only_with_a_sure_admin_entry_or_the_switch() {
+        assert!(!map_of(&json!({})).guards_functions());
+        assert!(!map_of(&with(vec![open("GET /api/a")])).guards_functions());
+        assert!(!map_of(&with(vec![admin("POST /api/a", "medium")])).guards_functions());
+        assert!(map_of(&with(vec![admin("POST /api/a", "high")])).guards_functions());
+        let mut switched = with(vec![open("GET /api/a")]);
+        switched["ask_unknown_functions"] = json!(true);
+        let switched = map_of(&switched);
+        assert!(switched.guards_functions());
+        assert!(!switched.is_empty());
+    }
+
+    #[test]
+    fn with_entry_and_the_judgement_setters_keep_the_switch() {
+        let mut section = with(vec![admin("GET /api/admin/search", "high")]);
+        section["ask_unknown_functions"] = json!(true);
+        section["classes"] = json!([{"id": "patient", "name": "患者"}]);
+        section["slots"] = json!([
+            {"key": "GET /api/search results[].id", "class": "patient", "source": "admin"},
+            {"key": "GET /api/patients/{id} path[2]", "class": "patient", "source": "admin"},
+        ]);
+        let map = map_of(&section)
+            .with_entry("GET /api/notes/{id} path[2]", "patient", SlotSource::Admin)
+            .with_tier(
+                "GET /api/search results[].id",
+                Tier::Public,
+                Reliability::High,
+            )
+            .expect("the response position takes a tier")
+            .with_accepts_public("GET /api/patients/{id} path[2]", false, Reliability::High)
+            .expect("the request position takes an acceptance")
+            .with_paused(&["GET /api/patients/{id} path[2]".to_owned()]);
+        assert!(map.asks_unknown_functions());
+        assert!(map.guards_functions());
+        assert_eq!(map.functions().len(), 1);
     }
 }
 

@@ -4,10 +4,13 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use futures_util::{StreamExt, stream};
+use xshield_core::context::trace::{TRACE_PATH_BYTES_MAX, TraceFunction};
 use xshield_core::context::{
-    Conclusion, ContextKind, DecisionPath, DecisionRecord, FINGERPRINT_SLOTS_MAX,
+    Attempt, Conclusion, ContextKind, DecisionPath, DecisionRecord, FINGERPRINT_SLOTS_MAX,
     FINGERPRINTS_PER_SLOT_MAX, FieldCount, JevRecord, Mode, ObjectMap, ObservationSummary,
     Observed, OnJevUnavailable, Outcome, Reliability, Resolved, SessionCredential, ShapeField,
     SiteSpec, Skip, Tier, Trace, TraceSession, TraceValue,
@@ -23,15 +26,17 @@ use crate::context::{
 use crate::exposure;
 use crate::jev::{JevFailure, JevPort, REPLY_BYTES_MAX, failure_code};
 use crate::slots::{
-    identity_claims, origin_object, origin_tier, reliability_name, request_place, response_slot,
-    route_template, tier_name,
+    function_templates, identity_claims, origin_object, origin_tier, reliability_name,
+    request_place, response_slot, route_template, tier_name,
 };
 use crate::state::{
-    Answers, JudgeError, Prompt, StateInput, StateValue, build_state, conclude, parse_response,
-    request_body,
+    Answers, Batched, JudgeError, Prompt, StateFunction, StateInput, StateValue, build_states,
+    conclude, parse_response, request_body,
 };
 use crate::tiers;
-use crate::trace::{Place, entry_trace, recent_trace, redacted_path, redacted_query, value_entry};
+use crate::trace::{
+    Place, cut, entry_trace, recent_trace, redacted_path, redacted_query, value_entry,
+};
 use crate::values::{
     ExtractedRequest, ResponseFacts, ResponseValue, extract_request, extract_response_facts,
     json_unescape, path_segment, percent_decode,
@@ -46,6 +51,9 @@ const LIMITER_MAX: usize = 50_000;
 const RECENT_IN_STATE: usize = 10;
 /// Field names listed in a response summary (docs/07 section 7.4.3).
 const FIELDS_IN_SUMMARY: usize = 12;
+/// Calls to Jev in flight at once for one request whose state is cut into batches (docs/02
+/// section 2.5).
+pub const JEV_PARALLEL_MAX: usize = 8;
 
 /// One request as the gateway sees it, before forwarding.
 #[derive(Debug, Clone)]
@@ -73,6 +81,10 @@ pub struct RequestFacts<'a> {
     pub route: Option<&'a Resolved>,
     /// The request's header names, lower case, as the decision row keeps them.
     pub request_headers: &'a [String],
+    /// The values of the method override headers the request carries (`X-HTTP-Method-Override`,
+    /// `X-HTTP-Method`, `X-Method-Override`), one per occurrence, as sent (docs/07 section 7.9.18).
+    /// Empty when the request has none.
+    pub method_overrides: &'a [String],
 }
 
 /// What to do with the request.
@@ -271,6 +283,125 @@ struct Turn<'a> {
     tuning: &'a Tuning<'a>,
     /// The session credential as it must be redacted (see [`redaction_secret`]).
     secret: Option<&'a str>,
+    /// What the site's function table says about the request, when the table guards functions.
+    function: Option<FunctionView>,
+}
+
+/// What the site's function table says about one request (docs/07 section 7.9.18). Worked out once in
+/// [`Judge::judge`] for a site whose map guards functions; `plan`, `ask_jev` and `remember_allow` read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionView {
+    /// The function the request is looked up as: the upper-case transport method, one space, and the
+    /// route template of the redacted path. The trace keeps it, so no credential reaches it.
+    key: String,
+    /// The key of the administrator-only function of the table the request reaches, when it reaches one.
+    admin_entry: Option<String>,
+    /// The request reaches an administrator-only function and the session is not an administrator's.
+    attempt: bool,
+    /// The site asks about unknown functions and the table does not list the request's function.
+    unknown: bool,
+}
+
+impl FunctionView {
+    /// The `function` of the state: present only for an attempt or an unknown function.
+    fn state(&self) -> Option<StateFunction> {
+        (self.attempt || self.unknown).then_some(StateFunction {
+            admin_attempt: self.attempt,
+            unknown: self.unknown,
+        })
+    }
+
+    /// The `function` of the trace: present when the request reaches an administrator-only function, or
+    /// when its function is unknown (docs/07 section 7.4.3).
+    fn trace(&self) -> Option<TraceFunction> {
+        (self.admin_entry.is_some() || self.unknown).then(|| TraceFunction {
+            key: self.key.clone(),
+            entry: self.admin_entry.clone(),
+            tier: self.admin_entry.as_ref().map(|_| "admin".to_owned()),
+            attempt: self.attempt.then_some(Attempt::OverPrivilege),
+            known: self.unknown.then_some(false),
+        })
+    }
+}
+
+/// The function view of one request, or `None` when the site's table does not guard functions. A site
+/// without a guarding table is judged exactly as before, and runs no lookup for it (docs/07 section 7.9.18).
+fn function_view(
+    objects: &ObjectMap,
+    request: &RequestFacts<'_>,
+    extracted: &ExtractedRequest,
+    logical: &str,
+    secret: Option<&str>,
+    admin: bool,
+) -> Option<FunctionView> {
+    if !objects.guards_functions() {
+        return None;
+    }
+    let method = request.method.to_ascii_uppercase();
+    let templates = function_templates(logical);
+    let first = templates.first().map_or("", String::as_str);
+    // The administrator-only function the request reaches: the transport method first, then each method
+    // the request names for itself, each with every template, in that order. The first hit names it.
+    let overrides = override_methods(&method, request, extracted);
+    let mut admin_entry = None;
+    'search: for candidate in
+        std::iter::once(method.as_str()).chain(overrides.iter().map(String::as_str))
+    {
+        for template in &templates {
+            if objects.admin_only(candidate, template) {
+                admin_entry = objects
+                    .function_of(candidate, template)
+                    .map(|function| function.key.clone());
+                break 'search;
+            }
+        }
+    }
+    let attempt = admin_entry.is_some() && !admin;
+    // Unknown is judged on the transport method and the first template only: the table was learned from
+    // the traffic's methods and paths, not from the overrides or the decoded slashes.
+    let unknown = objects.asks_unknown_functions()
+        && (!is_templatable(logical) || !objects.knows_function(&method, first));
+    let redacted = redacted_path(logical, secret);
+    let key = cut(
+        format!("{method} {}", route_template(&redacted)),
+        TRACE_PATH_BYTES_MAX,
+    );
+    Some(FunctionView {
+        key,
+        admin_entry,
+        attempt,
+        unknown,
+    })
+}
+
+/// The methods a request names for itself other than its transport method (docs/07 section 7.9.18): the
+/// values of its method override headers and of its `_method` field in the query or the body. Each value is
+/// trimmed and upper-cased; one that is 3 to 7 ASCII letters counts, once, and the transport method is left out.
+fn override_methods(
+    method: &str,
+    request: &RequestFacts<'_>,
+    extracted: &ExtractedRequest,
+) -> Vec<String> {
+    let fields = extracted
+        .values
+        .iter()
+        .filter(|value| value.at == "query._method" || value.at == "body._method")
+        .map(|value| value.value.as_str());
+    let mut methods: Vec<String> = Vec::new();
+    for raw in request
+        .method_overrides
+        .iter()
+        .map(String::as_str)
+        .chain(fields)
+    {
+        let named = raw.trim().to_ascii_uppercase();
+        let letters =
+            (3..=7).contains(&named.len()) && named.bytes().all(|byte| byte.is_ascii_uppercase());
+        if letters && named != method && !methods.contains(&named) {
+            methods.push(named);
+        }
+    }
+    methods
 }
 
 impl<J: JevPort> Judge<J> {
@@ -395,6 +526,14 @@ impl<J: JevPort> Judge<J> {
         let tuning = Tuning::new(site, self.jev.default_timeout());
         let admin = self.is_administrator(session_id, request.now_ms);
         let cache_key = self.cache_key(request, resolved, &extracted.values, tuning.objects, admin);
+        let function = function_view(
+            tuning.objects,
+            request,
+            &extracted,
+            resolved.logical_path(),
+            redaction_secret(Some(site), request),
+            admin,
+        );
         record.session = session_id.map(|id| label(&id)).unwrap_or_default();
         record.context = match (session_id, entry) {
             (Some(_), _) => Some(ContextKind::Session),
@@ -414,6 +553,7 @@ impl<J: JevPort> Judge<J> {
             cache_key: &cache_key,
             tuning: &tuning,
             secret: redaction_secret(Some(site), request),
+            function,
         };
         let mut jev = None;
         let mut sent = Vec::new();
@@ -517,10 +657,23 @@ impl<J: JevPort> Judge<J> {
             login_request_id: session.login_request().and_then(request_text),
             login_unbound: session.login_unbound(),
         });
+        let function = turn.function.as_ref();
+        trace.function = function.and_then(FunctionView::trace);
+        // A function the table makes an attempt, or does not know, is never fast-allowed: it goes to Jev,
+        // even when every value of it was verified (docs/01 section 1.4).
+        let attempt = function.is_some_and(|view| view.attempt);
+        let unknown_function = function.is_some_and(|view| view.unknown);
         // An unknown interface always goes to Jev: neither its values nor a cached
         // allow of another request can settle it. A path the map cannot place does too.
         let unknown = turn.resolved.is_unknown();
-        if all_known && !attempted && !unplaceable && !turn.extracted.truncated && !unknown {
+        if all_known
+            && !attempted
+            && !unplaceable
+            && !turn.extracted.truncated
+            && !unknown
+            && !attempt
+            && !unknown_function
+        {
             return Plan::Done(Verdict::Safe(DecisionPath::FastAllow));
         }
         // An attempt goes to Jev, whatever an earlier allow of the same request said.
@@ -530,6 +683,7 @@ impl<J: JevPort> Judge<J> {
             && !unknown
             && !attempted
             && !unplaceable
+            && !attempt
             && !turn.extracted.truncated
             && let Some(source) = session.cached_allow(turn.cache_key, request.now_ms)
         {
@@ -628,6 +782,7 @@ impl<J: JevPort> Judge<J> {
                     verified,
                     at: value.at.clone(),
                     value: value.value.clone(),
+                    part: None,
                     key: value.key.clone(),
                     seen_as: ranked
                         .iter()
@@ -638,6 +793,7 @@ impl<J: JevPort> Judge<J> {
                     object: request_object.map(str::to_owned),
                     public_access: access,
                     attempt,
+                    whole_kind: None,
                 });
             }
             let place = Place {
@@ -715,23 +871,114 @@ impl<J: JevPort> Judge<J> {
             truncated: turn.extracted.truncated,
             credential: turn.secret,
             secret_words: tuning.secret_words,
+            function: turn.function.as_ref().and_then(FunctionView::state),
         };
-        let (state, trim) = match build_state(&input) {
-            Ok(built) => built,
-            // A state that does not fit even trimmed is refused with 403 whatever the site allows.
-            // No call is made, and `on_jev_unavailable` does not apply (docs/02 section 2.4).
+        let batched = match build_states(&input) {
+            Ok(batched) => batched,
+            // A state that does not fit even in batches is refused with 403 whatever the site
+            // allows. No call is made, and `on_jev_unavailable` does not apply (docs/02 section 2.4).
             Err(error @ JudgeError::StateTooLarge) => {
                 row.failure = Some(error.to_string());
                 return (Verdict::Unsafe(DecisionPath::JevUnavailable), row);
             }
             Err(error) => return unjudged(row, &error.to_string()),
         };
-        let body = request_body(&self.jev.model(), &state, &self.prompt);
-        row.trim = Some(trim);
-        row.request_bytes = u32::try_from(body.len()).ok();
-        row.state = Some(state);
+        self.call_batches(turn, &row, batched).await
+    }
+
+    /// Makes one call per batch, at most [`JEV_PARALLEL_MAX`] at a time, and merges the answers
+    /// (docs/02 section 2.5). The verdict does not depend on the order the calls finish in. A
+    /// denial decides the request at once: the calls still waiting are dropped, not awaited. Values
+    /// left out of the batches are counted in the record and keep the request out of the cache.
+    async fn call_batches(
+        &self,
+        turn: &Turn<'_>,
+        template: &JevRecord,
+        batched: Batched,
+    ) -> (Verdict, JevRecord) {
+        let Batched { states, left_out } = batched;
         let started = Instant::now();
-        let reply = self.jev.ask(body, tuning.jev_timeout).await;
+        let sent = AtomicU64::new(0);
+        let timeout = turn.tuning.jev_timeout;
+        let total = states.len();
+        let mut calls = stream::iter(states.into_iter().enumerate())
+            .map(|(index, (state, trim))| {
+                self.call_batch(index, state, trim, template, timeout, &sent)
+            })
+            .buffer_unordered(JEV_PARALLEL_MAX);
+        let mut answers = Vec::with_capacity(total);
+        while let Some(answer) = calls.next().await {
+            let denied = answer.kind == Kind::Deny;
+            answers.push(answer);
+            if denied {
+                break;
+            }
+        }
+        drop(calls);
+        let Some(position) = decisive(&answers) else {
+            return unjudged(template.clone(), "JEV_UNKNOWN");
+        };
+        let usage = if total > 1 {
+            merged_usage(&answers, position)
+        } else {
+            None
+        };
+        let BatchAnswer {
+            index,
+            kind,
+            mut row,
+        } = answers.swap_remove(position);
+        row.request_bytes = u32::try_from(sent.load(Ordering::Relaxed)).ok();
+        row.millis = elapsed_millis(started);
+        if total > 1 {
+            row.batches = u16::try_from(total).ok();
+            row.batch = u16::try_from(index + 1).ok();
+            row.usage = usage;
+        }
+        row.left_out = (left_out > 0).then_some(left_out);
+        match kind {
+            Kind::Allow => {
+                // A verdict that judged only part of the request is not kept for the cache window.
+                if left_out == 0 {
+                    self.remember_allow(turn);
+                }
+                (Verdict::Safe(DecisionPath::JevAllow), row)
+            }
+            Kind::Deny => (Verdict::Unsafe(DecisionPath::JevDeny), row),
+            Kind::Unknown | Kind::Failed => {
+                let code = row
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "JEV_UNKNOWN".to_owned());
+                unjudged(row, &code)
+            }
+        }
+    }
+
+    /// One call for one batch: its state goes to Jev, and the reply is read into the batch's
+    /// record, which fills the same fields a single call always filled.
+    async fn call_batch(
+        &self,
+        index: usize,
+        state: String,
+        trim: u8,
+        template: &JevRecord,
+        timeout: Duration,
+        sent: &AtomicU64,
+    ) -> BatchAnswer {
+        let body = request_body(&self.jev.model(), &state, &self.prompt);
+        let mut row = JevRecord {
+            trim: Some(trim),
+            state: Some(state),
+            request_bytes: u32::try_from(body.len()).ok(),
+            ..template.clone()
+        };
+        sent.fetch_add(
+            u64::try_from(body.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let started = Instant::now();
+        let reply = self.jev.ask(body, timeout).await;
         row.millis = elapsed_millis(started);
         let reply = match reply {
             Ok(reply) => reply,
@@ -740,14 +987,26 @@ impl<J: JevPort> Judge<J> {
                     row.http_status = Some(status);
                     row.response = Some(lenient_text(body));
                 }
-                return unjudged(row, failure_code(&failure));
+                row.failure = Some(failure_code(&failure).to_owned());
+                return BatchAnswer {
+                    index,
+                    kind: Kind::Failed,
+                    row,
+                };
             }
         };
         row.http_status = Some(200);
         row.response = Some(lenient_text(&reply));
         let answers = match parse_response(&reply) {
             Ok(answers) => answers,
-            Err(error) => return unjudged(row, &error.to_string()),
+            Err(error) => {
+                row.failure = Some(error.to_string());
+                return BatchAnswer {
+                    index,
+                    kind: Kind::Failed,
+                    row,
+                };
+            }
         };
         let conclusion = conclude(&answers);
         let Answers {
@@ -759,15 +1018,15 @@ impl<J: JevPort> Judge<J> {
         row.attack = attack;
         row.usage = usage;
         row.conclusion = Some(conclusion);
-        let verdict = match conclusion {
-            Conclusion::Allow => {
-                self.remember_allow(turn);
-                Verdict::Safe(DecisionPath::JevAllow)
+        let kind = match conclusion {
+            Conclusion::Allow => Kind::Allow,
+            Conclusion::Deny => Kind::Deny,
+            Conclusion::Unknown => {
+                row.failure = Some("JEV_UNKNOWN".to_owned());
+                Kind::Unknown
             }
-            Conclusion::Deny => Verdict::Unsafe(DecisionPath::JevDeny),
-            Conclusion::Unknown => return unjudged(row, "JEV_UNKNOWN"),
         };
-        (verdict, row)
+        BatchAnswer { index, kind, row }
     }
 
     /// Keeps Jev's allow for the cache window under the session that asked (docs/01 section 1.4
@@ -775,7 +1034,10 @@ impl<J: JevPort> Judge<J> {
     fn remember_allow(&self, turn: &Turn<'_>) {
         let request = turn.request;
         let tuning = turn.tuning;
-        if tuning.cache_ms == 0 || turn.resolved.is_unknown() || turn.extracted.truncated {
+        // An attempt is never remembered: a model that did not answer DENY for it must not settle the next one.
+        let attempt = turn.function.as_ref().is_some_and(|view| view.attempt);
+        if tuning.cache_ms == 0 || turn.resolved.is_unknown() || turn.extracted.truncated || attempt
+        {
             return;
         }
         // A credential without a session has nowhere to keep the allow.
@@ -1400,6 +1662,102 @@ fn unjudged(mut row: JevRecord, code: &str) -> (Verdict, JevRecord) {
     (Verdict::Unjudged(DecisionPath::JevUnavailable), row)
 }
 
+/// How one batch's call ended, for the merge in [`Judge::call_batches`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Jev allowed the batch: `access` is ALLOW and `attack` is BENIGN.
+    Allow,
+    /// Jev denied the batch: `access` is DENY or `attack` is ATTACK.
+    Deny,
+    /// The top option of a question is UNKNOWN, or two options tie.
+    Unknown,
+    /// No usable answer: a timeout, a transport or HTTP failure, or an invalid reply.
+    Failed,
+}
+
+/// What one batch's call came to: the batch's place in the request, how the call ended, and the
+/// record of the call.
+struct BatchAnswer {
+    index: usize,
+    kind: Kind,
+    row: JevRecord,
+}
+
+impl BatchAnswer {
+    /// The weaker of the two probabilities an allow rests on: `min(P(ALLOW), P(BENIGN))`.
+    fn assurance(&self) -> f64 {
+        let access = self.row.access.get("ALLOW").copied().unwrap_or(0.0);
+        let attack = self.row.attack.get("BENIGN").copied().unwrap_or(0.0);
+        access.min(attack)
+    }
+}
+
+/// The position in `answers` of the batch whose answer decides the request (docs/02 section 2.5).
+/// A denial decides first, then a failure, then an UNKNOWN; among several of one kind the lowest
+/// batch wins. When every batch allows, the least assured one decides, the lowest batch on a tie.
+fn decisive(answers: &[BatchAnswer]) -> Option<usize> {
+    let first = |kind: Kind| {
+        answers
+            .iter()
+            .enumerate()
+            .filter(|(_, answer)| answer.kind == kind)
+            .min_by_key(|(_, answer)| answer.index)
+            .map(|(position, _)| position)
+    };
+    first(Kind::Deny)
+        .or_else(|| first(Kind::Failed))
+        .or_else(|| first(Kind::Unknown))
+        .or_else(|| {
+            answers
+                .iter()
+                .enumerate()
+                .filter(|(_, answer)| answer.kind == Kind::Allow)
+                .min_by(|(_, left), (_, right)| {
+                    left.assurance()
+                        .total_cmp(&right.assurance())
+                        .then(left.index.cmp(&right.index))
+                })
+                .map(|(position, _)| position)
+        })
+}
+
+/// The usage of several calls: each top-level number is added up by name, and every other field
+/// is the one the decisive batch reports (docs/02 section 2.5).
+fn merged_usage(answers: &[BatchAnswer], decisive: usize) -> Option<serde_json::Value> {
+    let shown = answers.get(decisive)?.row.usage.as_ref()?.as_object()?;
+    let mut merged = serde_json::Map::new();
+    for usage in answers
+        .iter()
+        .filter_map(|answer| answer.row.usage.as_ref()?.as_object())
+    {
+        for (name, amount) in usage {
+            let Some(number) = amount.as_number() else {
+                continue;
+            };
+            let total = match merged.get(name).and_then(serde_json::Value::as_number) {
+                Some(sum) => add_numbers(sum, number),
+                None => number.clone(),
+            };
+            merged.insert(name.clone(), serde_json::Value::Number(total));
+        }
+    }
+    for (name, value) in shown {
+        if !value.is_number() {
+            merged.insert(name.clone(), value.clone());
+        }
+    }
+    Some(serde_json::Value::Object(merged))
+}
+
+/// The sum of two JSON numbers: exact for whole numbers, floating point otherwise.
+fn add_numbers(left: &serde_json::Number, right: &serde_json::Number) -> serde_json::Number {
+    if let (Some(a), Some(b)) = (left.as_u64(), right.as_u64()) {
+        return serde_json::Number::from(a.saturating_add(b));
+    }
+    let sum = left.as_f64().unwrap_or(0.0) + right.as_f64().unwrap_or(0.0);
+    serde_json::Number::from_f64(sum).unwrap_or_else(|| left.clone())
+}
+
 /// The status and the start of the reply a refused call got back, if any.
 fn failure_reply(failure: &JevFailure) -> Option<(u16, &[u8])> {
     match failure {
@@ -1570,7 +1928,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use xshield_core::context::LoginUnbound;
+    use xshield_core::context::{Attempt, LoginUnbound};
 
     #[test]
     fn a_full_limiter_refuses_new_keys_and_does_not_grow() {
@@ -1594,12 +1952,19 @@ mod tests {
     /// The gateway id of the origin responses the tests observe.
     const RID: &str = "req_00000000000000000000000000000001";
 
+    /// What a call to the fake answers: the two choices, or a failure.
+    type Reply = Result<(&'static str, &'static str), JevFailure>;
+
     #[derive(Clone)]
     struct FakeJev {
         calls: Arc<AtomicUsize>,
         sent: Arc<Mutex<Vec<String>>>,
         timeouts: Arc<Mutex<Vec<Duration>>>,
-        reply: Arc<Mutex<Result<(&'static str, &'static str), JevFailure>>>,
+        reply: Arc<Mutex<Reply>>,
+        /// Replies for the calls whose body contains a marker, looked up before `reply`.
+        marked: Arc<Mutex<Vec<(&'static str, Reply)>>>,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
     }
 
     impl FakeJev {
@@ -1609,6 +1974,9 @@ mod tests {
                 sent: Arc::default(),
                 timeouts: Arc::default(),
                 reply: Arc::new(Mutex::new(Ok(("ALLOW", "BENIGN")))),
+                marked: Arc::default(),
+                in_flight: Arc::default(),
+                peak: Arc::default(),
             }
         }
         fn timeouts(&self) -> Vec<Duration> {
@@ -1620,8 +1988,27 @@ mod tests {
         fn fail(&self, failure: JevFailure) {
             *self.reply.lock().unwrap() = Err(failure);
         }
+        /// The calls whose body contains `marker` answer `access` and `attack`.
+        fn answer_marked(&self, marker: &'static str, access: &'static str, attack: &'static str) {
+            self.marked
+                .lock()
+                .unwrap()
+                .push((marker, Ok((access, attack))));
+        }
+        /// The calls whose body contains `marker` fail with `failure`.
+        fn fail_marked(&self, marker: &'static str, failure: JevFailure) {
+            self.marked.lock().unwrap().push((marker, Err(failure)));
+        }
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+        /// The bodies sent, in arrival order.
+        fn sent(&self) -> Vec<String> {
+            self.sent.lock().unwrap().clone()
+        }
+        /// The most calls that were in flight at the same time.
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
         }
     }
 
@@ -1656,11 +2043,25 @@ mod tests {
         async fn ask(&self, body: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, JevFailure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.timeouts.lock().unwrap().push(timeout);
-            self.sent
+            let text = String::from_utf8(body).unwrap();
+            self.sent.lock().unwrap().push(text.clone());
+            let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(in_flight, Ordering::SeqCst);
+            // The call waits here, so that calls made together are in flight together.
+            tokio::task::yield_now().await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            let marked = self
+                .marked
                 .lock()
                 .unwrap()
-                .push(String::from_utf8(body).unwrap());
-            let (access, attack) = self.reply.lock().unwrap().clone()?;
+                .iter()
+                .find(|(marker, _)| text.contains(marker))
+                .map(|(_, reply)| reply.clone());
+            let reply = match marked {
+                Some(reply) => reply,
+                None => self.reply.lock().unwrap().clone(),
+            };
+            let (access, attack) = reply?;
             Ok(json!({"model":"fake","answers":{
                 "access":{"type":"choice","choice":access,"probabilities":probabilities(crate::state::ACCESS_OPTIONS, access)},
                 "attack":{"type":"choice","choice":attack,"probabilities":probabilities(crate::state::ATTACK_OPTIONS, attack)},
@@ -1691,6 +2092,7 @@ mod tests {
         RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             request_id: "req_00000000000000000000000000000002",
             method: "GET",
             path,
@@ -2247,6 +2649,7 @@ mod tests {
         let login = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "POST",
             content_type: Some("application/json"),
             body: br#"{"userId":"P-0000099"}"#,
@@ -2308,6 +2711,7 @@ mod tests {
                 &RequestFacts {
                     route: None,
                     request_headers: &[],
+                    method_overrides: &[],
                     method: "POST",
                     ..get("/api/session/renew", None, Some("alice"), 2_000)
                 },
@@ -2358,6 +2762,7 @@ mod tests {
         let upload = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "POST",
             content_type: Some("text/plain"),
             body: body.as_bytes(),
@@ -2392,6 +2797,7 @@ mod tests {
         let search = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "POST",
             content_type: Some("text/plain"),
             body: br#"{"patientId":"P-0000099"}"#,
@@ -2488,6 +2894,7 @@ mod tests {
         let search = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "POST",
             content_type: Some("text/plain"),
             body: b"{\"patientId\":\"\\u0050-0000099\"}",
@@ -2982,6 +3389,7 @@ mod tests {
         let login = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "POST",
             path: "/login",
             content_type: Some("application/json"),
@@ -3011,6 +3419,7 @@ mod tests {
         let poll = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "GET",
             path: "/login",
             query: Some("name=Score%20Board"),
@@ -3020,6 +3429,7 @@ mod tests {
             let at = RequestFacts {
                 route: None,
                 request_headers: &[],
+                method_overrides: &[],
                 now_ms: 1_000 + u64::from(index),
                 ..poll
             };
@@ -3032,6 +3442,7 @@ mod tests {
         let attack = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             query: Some("name=%27%20OR%201%3D1--"),
             now_ms: 9_000,
             ..poll
@@ -3053,6 +3464,7 @@ mod tests {
         let first_unseen = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "POST",
             content_type: Some("application/json"),
             body: br#"{"patient":"42","patient":"7"}"#,
@@ -3134,6 +3546,7 @@ mod tests {
         let sign_up = |client| RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             client,
             ..get("/api/patients", Some("id=7"), None, 5_000)
         };
@@ -3293,17 +3706,313 @@ mod tests {
         format!("{{{},\"done\":\"1\"}}", answers.join(","))
     }
 
+    /// A survey request of `alice`, sent with a JSON body.
+    fn survey_request(body: &[u8], now_ms: u64) -> RequestFacts<'_> {
+        RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body,
+            ..get("/api/survey", None, Some("alice"), now_ms)
+        }
+    }
+
+    /// [`oversized_survey`] with its last answer set to `last`, so a marker lands in the last batch.
+    fn survey_ending_with(last: &str) -> String {
+        oversized_survey().replace("\"done\":\"1\"", &format!("\"done\":\"{last}\""))
+    }
+
+    #[tokio::test]
+    async fn a_large_survey_is_judged_in_batches_and_allowed_when_every_batch_allows() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let body = oversized_survey();
+        let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
+        let verdict = judge
+            .judge(&lenient, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        assert!(fake.calls() >= 2, "{} calls", fake.calls());
+        let jev = verdict.record.jev.as_ref().unwrap();
+        assert_eq!(jev.batches, u16::try_from(fake.calls()).ok());
+        assert_eq!(
+            jev.batch,
+            Some(1),
+            "all allow: the first batch is the least assured"
+        );
+        assert!(jev.failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_large_request_counts_once_against_the_call_limit() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let limited = site(r#","mode":"enforce","advanced":{"session_calls_per_minute":1}"#);
+        confirm(&judge, &limited, "alice");
+        let body = oversized_survey();
+        let first = judge
+            .judge(&limited, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(first.forward);
+        assert!(fake.calls() >= 2);
+        let next = judge
+            .judge(
+                &limited,
+                &get("/api/search", Some("q=next1x"), Some("alice"), 1_500),
+            )
+            .await;
+        assert!(!next.forward);
+        assert_eq!(next.refuse_status, 429);
+        assert_eq!(next.record.trace.refused.as_deref(), Some("rate_limited"));
+    }
+
+    #[tokio::test]
+    async fn an_injection_past_the_first_piece_of_a_long_value_is_sent_and_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let query = format!("comment={}%27%20OR%201%3D1--", "A".repeat(600));
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/comments", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert!(fake.sent().iter().any(|body| body.contains("OR 1=1")));
+    }
+
+    #[tokio::test]
+    async fn one_denying_batch_refuses_the_request_and_the_record_shows_that_batch() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("DENY_HERE", "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        let body = survey_ending_with("DENY_HERE");
+        let verdict = judge
+            .judge(&enforced, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 403);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let jev = verdict.record.jev.as_ref().unwrap();
+        let batches = jev.batches.unwrap();
+        assert!(batches >= 2);
+        assert_eq!(
+            jev.batch,
+            Some(batches),
+            "the last batch holds the denied value"
+        );
+        assert!(
+            jev.state
+                .as_deref()
+                .unwrap_or_default()
+                .contains("DENY_HERE")
+        );
+        assert_eq!(jev.conclusion, Some(Conclusion::Deny));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_batch_follows_the_site_policy_and_a_denial_in_another_batch_wins() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.fail_marked("TIMEOUT_HERE", JevFailure::Timeout);
+        let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
+        let strict = site(r#","mode":"enforce""#);
+        let body = survey_ending_with("TIMEOUT_HERE");
+        let survey = survey_request(body.as_bytes(), 1_000);
+        let forwarded = judge.judge(&lenient, &survey).await;
+        assert!(forwarded.forward);
+        assert_eq!(forwarded.record.outcome, Outcome::Unjudged);
+        let jev = forwarded.record.jev.as_ref().unwrap();
+        assert_eq!(jev.failure.as_deref(), Some("JEV_TIMEOUT"));
+        assert_eq!(
+            jev.batch, jev.batches,
+            "the timed out batch is the last one"
+        );
+        let refused = judge.judge(&strict, &survey).await;
+        assert!(!refused.forward);
+        assert_eq!(refused.refuse_status, 403);
+        // A denial in the first batch wins over the timeout in the last one.
+        fake.answer_marked("DENY_HERE", "DENY", "BENIGN");
+        let both = oversized_survey()
+            .replace("\"done\":\"1\"", "\"done\":\"TIMEOUT_HERE\"")
+            .replace("number 0 typed", "DENY_HERE number 0 typed");
+        let verdict = judge
+            .judge(&lenient, &survey_request(both.as_bytes(), 2_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let shown = verdict.record.jev.as_ref().unwrap();
+        assert!(
+            shown
+                .state
+                .as_deref()
+                .unwrap_or_default()
+                .contains("DENY_HERE")
+        );
+    }
+
+    #[tokio::test]
+    async fn batches_are_asked_together_and_never_more_than_eight_at_once() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        // Words are inert and never reach the state, so each value has spaces: 2000 characters.
+        // Twenty-five of them stay under the 64 KiB the body is parsed up to.
+        let fields: Vec<String> = (0..25)
+            .map(|n| format!("\"f{n}\":\"{}\"", "x ".repeat(1_000)))
+            .collect();
+        let body = format!("{{{}}}", fields.join(","));
+        let verdict = judge
+            .judge(&enforced, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(verdict.forward);
+        let batches = usize::from(verdict.record.jev.as_ref().unwrap().batches.unwrap());
+        assert!(batches > JEV_PARALLEL_MAX, "{batches} batches");
+        assert_eq!(fake.calls(), batches);
+        assert_eq!(fake.peak(), JEV_PARALLEL_MAX);
+    }
+
+    #[tokio::test]
+    async fn a_request_allowed_in_batches_is_served_from_the_cache_next_time() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let body = oversized_survey();
+        let survey = survey_request(body.as_bytes(), 1_000);
+        assert!(judge.judge(&enforced, &survey).await.forward);
+        let calls = fake.calls();
+        assert!(calls >= 2);
+        let again = judge.judge(&enforced, &survey).await;
+        assert!(again.forward);
+        assert_eq!(again.record.decision_path, DecisionPath::CachedAllow);
+        assert_eq!(fake.calls(), calls);
+    }
+
+    #[tokio::test]
+    async fn the_largest_body_of_distinct_short_numbers_is_judged_in_batches() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        let numbers: Vec<String> = (0..8_000).map(|n| n.to_string()).collect();
+        let body = format!("[{}]", numbers.join(","));
+        assert!(body.len() <= 48 * 1024, "{} bytes", body.len());
+        let verdict = judge
+            .judge(&enforced, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(verdict.forward, "{:?}", verdict.record.decision_path);
+        let batches = verdict
+            .record
+            .jev
+            .as_ref()
+            .and_then(|jev| jev.batches)
+            .map_or(1, usize::from);
+        assert_eq!(fake.calls(), batches);
+        // The 200-value cap (REQUEST_VALUES_MAX) keeps this body to two batches. That is not the worst
+        // case: without the cap the same body takes JEV_BATCHES_MAX calls, and the rest is left out.
+        assert_eq!(batches, 2);
+    }
+
+    #[tokio::test]
+    async fn a_single_call_record_has_no_batch_fields() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/search", Some("q=one1x"), Some("alice"), 1_000),
+            )
+            .await;
+        assert_eq!(fake.calls(), 1);
+        let json = serde_json::to_value(verdict.record.jev.as_ref().unwrap()).unwrap();
+        assert!(json.get("batches").is_none() && json.get("batch").is_none());
+        assert!(json.get("left_out").is_none());
+    }
+
+    /// A query whose `comment` is `length` characters of `A`, followed by `tail` (already encoded).
+    fn long_comment_query(length: usize, tail: &str) -> String {
+        format!("comment={}&tail={tail}", "A".repeat(length))
+    }
+
+    #[tokio::test]
+    async fn a_long_value_past_the_batch_limit_leaves_out_the_rest_and_still_sends_the_short_value()
+    {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let query = long_comment_query(300_000, "%27%20OR%201%3D1--");
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/comments", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        // The denial comes from the first batch, where the short value is, so the calls not yet
+        // started are never made (docs/02 section 2.5): the first wave ran, and nothing past the cap.
+        assert!(
+            (JEV_PARALLEL_MAX..=crate::state::JEV_BATCHES_MAX).contains(&fake.calls()),
+            "{} calls",
+            fake.calls()
+        );
+        assert!(fake.sent().iter().any(|body| body.contains("OR 1=1")));
+    }
+
+    #[tokio::test]
+    async fn a_request_judged_in_part_of_its_batches_is_allowed_but_not_cached() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let query = long_comment_query(300_000, "plain1x");
+        let first = judge
+            .judge(
+                &enforced,
+                &get("/api/comments", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(first.forward);
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        let jev = first.record.jev.as_ref().unwrap();
+        assert_eq!(
+            jev.batches,
+            u16::try_from(crate::state::JEV_BATCHES_MAX).ok()
+        );
+        assert!(jev.left_out.is_some_and(|left| left > 0));
+        let calls = fake.calls();
+        let second = judge
+            .judge(
+                &enforced,
+                &get("/api/comments", Some(query.as_str()), Some("alice"), 1_500),
+            )
+            .await;
+        assert!(second.forward);
+        assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(
+            fake.calls(),
+            2 * calls,
+            "the second request is judged again"
+        );
+    }
+
     #[tokio::test]
     async fn a_state_that_cannot_fit_is_refused_with_403_whatever_the_site_allows() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
-        let body = oversized_survey();
-        let survey = RequestFacts {
-            method: "POST",
-            content_type: Some("application/json"),
-            body: body.as_bytes(),
-            ..get("/api/survey", None, Some("alice"), 1_000)
-        };
+        // A path number of 200 000 digits: Jev must judge its pieces, and 16 batches cannot hold
+        // them (docs/02 section 2.4). A survey of many answers is batched instead.
+        let path = format!("/api/survey/{}", "7".repeat(200_000));
+        let survey = get(&path, None, Some("alice"), 1_000);
         let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
         let verdict = judge.judge(&lenient, &survey).await;
         assert!(!verdict.forward);
@@ -3326,6 +4035,33 @@ mod tests {
         assert!(watched.forward);
         assert_eq!(watched.record.outcome, Outcome::WouldBlock);
         assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn every_piece_of_a_long_path_number_is_judged_as_a_reference() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let path = format!("/api/patients/{}7", "a".repeat(600));
+        let verdict = judge
+            .judge(&enforced, &get(&path, None, Some("alice"), 1_000))
+            .await;
+        let state = verdict
+            .record
+            .jev
+            .as_ref()
+            .and_then(|jev| jev.state.clone())
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&state).unwrap();
+        let pieces: Vec<&serde_json::Value> = json["request"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.get("part").is_some())
+            .collect();
+        assert!(pieces.len() >= 2, "{} pieces", pieces.len());
+        assert!(pieces.iter().all(|item| item["kind"] == "reference"));
     }
 
     #[tokio::test]
@@ -3931,6 +4667,7 @@ mod tests {
         let request = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             request_id: RID,
             method: "POST",
             path: "/login",
@@ -4034,6 +4771,7 @@ mod tests {
         let upload = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "POST",
             content_type: Some("application/octet-stream"),
             body: b"\x00\x01data",
@@ -4366,6 +5104,7 @@ mod tests {
         let login = |body: &'static [u8]| RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             method: "POST",
             path: "/login",
             content_type: Some("application/json"),
@@ -4428,6 +5167,7 @@ mod tests {
                 &RequestFacts {
                     route: None,
                     request_headers: &[],
+                    method_overrides: &[],
                     now_ms: 2_000,
                     ..request.clone()
                 },
@@ -4686,6 +5426,7 @@ mod tests {
         let request = RequestFacts {
             route: None,
             request_headers: &[],
+            method_overrides: &[],
             request_id: "req_00000000000000000000000000000003",
             method: "POST",
             path: "/api/patients/7/notes",
@@ -5971,5 +6712,865 @@ mod tests {
             .await;
         assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
         assert_eq!(fake.calls(), 0);
+    }
+
+    /// The objects of a site: its classes and slots (the home page names the role, the patient path is
+    /// an object), then `tail`, which is empty or a comma and the members that follow the slots.
+    fn objects_with(tail: &str) -> String {
+        format!(
+            r#"{{"classes":[{{"id":"doctor","name":"医生"}},{{"id":"staff","name":"员工"}},{{"id":"patient","name":"患者"}}],
+                "slots":[
+                    {{"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"}},
+                    {{"key":"GET /api/home role","class":"staff","source":"admin","identity":"role"}},
+                    {{"key":"DELETE /api/patients/{{id}} path[2]","class":"patient","source":"admin","accepts_public":false,"reliability":"high"}}
+                ]{tail}}}"#
+        )
+    }
+
+    /// The administrator-only functions (docs/07 section 7.9.18): the export and the delete are high, the
+    /// search is medium, so it tightens nothing.
+    const ADMIN_FUNCTIONS: &str = r#"[
+        {"key":"POST /api/admin/export","source":"rule","tier":"admin","reliability":"high"},
+        {"key":"DELETE /api/patients/{id}","source":"rule","tier":"admin","reliability":"high"},
+        {"key":"GET /api/admin/search","source":"rule","tier":"admin","reliability":"medium"}
+    ]"#;
+
+    /// The objects of a site with [`ADMIN_FUNCTIONS`]. `switch` adds `ask_unknown_functions`.
+    fn functions_objects(switch: bool) -> String {
+        let ask = if switch {
+            r#","ask_unknown_functions":true"#
+        } else {
+            ""
+        };
+        objects_with(&format!(r#"{ask},"functions":{ADMIN_FUNCTIONS}"#))
+    }
+
+    /// A site in `head` (its mode and other settings, starting with a comma) with [`functions_objects`].
+    fn functions_site_in(head: &str, switch: bool) -> SiteSpec {
+        site(&format!(
+            r#"{head},"objects":{}"#,
+            functions_objects(switch)
+        ))
+    }
+
+    fn functions_site(switch: bool) -> SiteSpec {
+        functions_site_in(r#","mode":"enforce""#, switch)
+    }
+
+    /// A site that asks about unknown functions and lists two of them, with no tier.
+    fn asking_site() -> SiteSpec {
+        site(
+            r#","mode":"enforce","objects":{"ask_unknown_functions":true,"functions":[{"key":"GET /api/patients","source":"rule"},{"key":"GET /api/home","source":"rule"}]}"#,
+        )
+    }
+
+    /// The `function` of the state Jev was shown for the judgement at `index`, as JSON.
+    fn function_shown(fake: &FakeJev, index: usize) -> serde_json::Value {
+        let sent = fake.sent.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&sent[index]).unwrap();
+        body["state"]["request"]["function"].clone()
+    }
+
+    #[tokio::test]
+    async fn a_non_administrator_on_an_admin_function_is_sent_to_jev_as_an_attempt() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let verdict = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/admin/export", "doctor-a", 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 403);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(
+            function_shown(&fake, 0),
+            json!({"tier": "admin", "attempt": "over_privilege"})
+        );
+        let trace = verdict
+            .record
+            .trace
+            .function
+            .clone()
+            .expect("the trace names the function");
+        assert_eq!(trace.key, "POST /api/admin/export");
+        assert_eq!(trace.entry.as_deref(), Some("POST /api/admin/export"));
+        assert_eq!(trace.tier.as_deref(), Some("admin"));
+        assert_eq!(trace.attempt, Some(Attempt::OverPrivilege));
+        assert_eq!(trace.known, None);
+    }
+
+    #[tokio::test]
+    async fn an_attempt_on_an_admin_function_is_never_fast_allowed_with_verified_values() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+        );
+        let verdict = judge
+            .judge(
+                &site,
+                &call_as("DELETE", "/api/patients/7005", "doctor-a", 1_000),
+            )
+            .await;
+        assert_ne!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 1);
+        let shown_value = verdict
+            .record
+            .trace
+            .values
+            .iter()
+            .find(|value| value.value == "7005")
+            .expect("the id is traced");
+        assert!(shown_value.verified, "the id was shown to the session");
+        assert_eq!(
+            function_shown(&fake, 0),
+            json!({"tier": "admin", "attempt": "over_privilege"})
+        );
+    }
+
+    #[tokio::test]
+    async fn every_batch_of_a_request_on_an_admin_function_carries_the_function() {
+        // A request split into batches (docs/02 section 2.4) names its function in each batch's
+        // state, not only in the first one.
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        let numbers: Vec<String> = (0..8_000).map(|n| n.to_string()).collect();
+        let body = format!("[{}]", numbers.join(","));
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get("/api/admin/export", None, Some("doctor-a"), 1_000)
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(verdict.forward, "{:?}", verdict.record.decision_path);
+        assert!(fake.calls() >= 2, "{} calls", fake.calls());
+        assert_eq!(
+            verdict.record.jev.as_ref().and_then(|jev| jev.batches),
+            Some(u16::try_from(fake.calls()).unwrap())
+        );
+        for index in 0..fake.calls() {
+            assert_eq!(
+                function_shown(&fake, index),
+                json!({"tier": "admin", "attempt": "over_privilege"}),
+                "batch {}",
+                index + 1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_attempt_on_an_admin_function_neither_reads_nor_writes_the_allow_cache() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let first = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/admin/export", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        let second = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/admin/export", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_administrator_uses_an_admin_function_as_before() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &home_for("root", br#"{"doctor":{"id":"DR-A"},"role":"admin"}"#),
+        );
+        let exported = judge
+            .judge(&site, &call_as("POST", "/api/admin/export", "root", 1_000))
+            .await;
+        assert_eq!(exported.record.decision_path, DecisionPath::FastAllow);
+        assert_eq!(fake.calls(), 0);
+        let trace = exported
+            .record
+            .trace
+            .function
+            .clone()
+            .expect("the trace names the tier");
+        assert_eq!(trace.tier.as_deref(), Some("admin"));
+        assert_eq!(trace.attempt, None);
+        // An unseen reference is still judged, and its state carries no function: the administrator is
+        // not an attempt, so the function is left out of the state.
+        fake.answer("DENY", "BENIGN");
+        let unseen = judge
+            .judge(
+                &site,
+                &call_as("DELETE", "/api/patients/7009", "root", 2_000),
+            )
+            .await;
+        assert_eq!(unseen.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(function_shown(&fake, 0), serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn an_admin_function_of_medium_reliability_tightens_nothing() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        let verdict = judge
+            .judge(
+                &site,
+                &call_as("GET", "/api/admin/search", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert!(verdict.record.trace.function.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_method_override_header_is_judged_by_the_stricter_method() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+        );
+        let overrides = ["delete".to_owned()];
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method_overrides: &overrides,
+                    ..call_as("POST", "/api/patients/7005", "doctor-a", 1_000)
+                },
+            )
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let trace = verdict
+            .record
+            .trace
+            .function
+            .clone()
+            .expect("the trace names the function");
+        assert_eq!(trace.key, "POST /api/patients/{id}");
+        assert_eq!(trace.entry.as_deref(), Some("DELETE /api/patients/{id}"));
+        assert_eq!(trace.attempt, Some(Attempt::OverPrivilege));
+    }
+
+    #[tokio::test]
+    async fn a_method_field_in_the_form_or_the_query_is_judged_by_the_stricter_method() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+        );
+        let form = RequestFacts {
+            content_type: Some("application/x-www-form-urlencoded"),
+            body: b"_method=DELETE",
+            ..call_as("POST", "/api/patients/7005", "doctor-a", 1_000)
+        };
+        let in_form = judge.judge(&site, &form).await;
+        assert_eq!(in_form.record.decision_path, DecisionPath::JevDeny);
+        let query = RequestFacts {
+            query: Some("_method=DELETE"),
+            ..call_as("POST", "/api/patients/7005", "doctor-a", 2_000)
+        };
+        let in_query = judge.judge(&site, &query).await;
+        assert_eq!(in_query.record.decision_path, DecisionPath::JevDeny);
+        for verdict in [in_form, in_query] {
+            let trace = verdict
+                .record
+                .trace
+                .function
+                .expect("the trace names the function");
+            assert_eq!(trace.attempt, Some(Attempt::OverPrivilege));
+            assert_eq!(trace.entry.as_deref(), Some("DELETE /api/patients/{id}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_override_that_is_no_method_is_ignored() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+        );
+        let plain = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/patients/7005", "doctor-a", 1_000),
+            )
+            .await;
+        for (index, value) in ["DELETE FROM", "", "X", "TOOLONGMETHOD"]
+            .into_iter()
+            .enumerate()
+        {
+            let overrides = [value.to_owned()];
+            let verdict = judge
+                .judge(
+                    &site,
+                    &RequestFacts {
+                        method_overrides: &overrides,
+                        ..call_as(
+                            "POST",
+                            "/api/patients/7005",
+                            "doctor-a",
+                            2_000 + index as u64,
+                        )
+                    },
+                )
+                .await;
+            assert!(verdict.record.trace.function.is_none(), "{value:?}");
+            assert_eq!(
+                verdict.record.decision_path, plain.record.decision_path,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lower_case_transport_method_is_looked_up_in_upper_case() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+        );
+        let verdict = judge
+            .judge(
+                &site,
+                &call_as("delete", "/api/patients/7005", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let trace = verdict
+            .record
+            .trace
+            .function
+            .expect("the trace names the function");
+        assert_eq!(trace.key, "DELETE /api/patients/{id}");
+        assert_eq!(trace.attempt, Some(Attempt::OverPrivilege));
+    }
+
+    #[tokio::test]
+    async fn an_encoded_slash_is_looked_up_as_a_slash_too() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        for (now_ms, path) in [
+            (1_000, "/api/admin%2Fexport"),
+            (2_000, "/api/x/..%2Fadmin/export"),
+        ] {
+            let verdict = judge
+                .judge(&site, &call_as("POST", path, "doctor-a", now_ms))
+                .await;
+            assert_eq!(
+                verdict.record.decision_path,
+                DecisionPath::JevDeny,
+                "{path}"
+            );
+            let trace = verdict
+                .record
+                .trace
+                .function
+                .expect("the trace names the function");
+            assert_eq!(
+                trace.entry.as_deref(),
+                Some("POST /api/admin/export"),
+                "{path}"
+            );
+            assert_eq!(trace.attempt, Some(Attempt::OverPrivilege), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_head_on_an_admin_get_function_is_an_attempt_and_options_is_not() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"enforce","objects":{"functions":[{"key":"GET /api/admin/search","source":"rule","tier":"admin","reliability":"high"}]}"#,
+        );
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let head = judge
+            .judge(
+                &site,
+                &call_as("HEAD", "/api/admin/search", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(head.record.decision_path, DecisionPath::JevDeny);
+        let trace = head
+            .record
+            .trace
+            .function
+            .expect("the trace names the function");
+        assert_eq!(trace.entry.as_deref(), Some("GET /api/admin/search"));
+        assert_eq!(trace.attempt, Some(Attempt::OverPrivilege));
+        let options = judge
+            .judge(
+                &site,
+                &call_as("OPTIONS", "/api/admin/search", "doctor-a", 2_000),
+            )
+            .await;
+        assert!(options.record.trace.function.is_none());
+        assert_ne!(options.record.decision_path, DecisionPath::JevDeny);
+    }
+
+    #[tokio::test]
+    async fn observe_mode_forwards_an_attempt_as_would_block() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site_in(r#","mode":"observe""#, false);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let verdict = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/admin/export", "doctor-a", 1_000),
+            )
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.outcome, Outcome::WouldBlock);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+    }
+
+    #[tokio::test]
+    async fn an_attempt_follows_the_site_policy_when_jev_is_down() {
+        let fake = FakeJev::new();
+        fake.fail(JevFailure::Timeout);
+        let judge = judge(&fake);
+        let denying = functions_site_in(r#","mode":"enforce","on_jev_unavailable":"deny""#, false);
+        judge.observe(
+            &denying,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let refused = judge
+            .judge(
+                &denying,
+                &call_as("POST", "/api/admin/export", "doctor-a", 1_000),
+            )
+            .await;
+        assert!(!refused.forward);
+        assert_eq!(refused.refuse_status, 403);
+        let allowing =
+            functions_site_in(r#","mode":"enforce","on_jev_unavailable":"allow""#, false);
+        judge.observe(
+            &allowing,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let forwarded = judge
+            .judge(
+                &allowing,
+                &call_as("POST", "/api/admin/export", "doctor-a", 2_000),
+            )
+            .await;
+        assert!(forwarded.forward);
+        assert_eq!(forwarded.record.outcome, Outcome::Unjudged);
+    }
+
+    #[tokio::test]
+    async fn a_request_without_a_session_off_an_entry_is_still_no_session() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        let verdict = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method: "POST",
+                    ..get("/api/admin/export", None, None, 1_000)
+                },
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 401);
+        assert_eq!(verdict.record.decision_path, DecisionPath::NoSession);
+        assert_eq!(fake.calls(), 0);
+        assert!(verdict.record.trace.function.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_bypassed_path_is_not_guarded_by_the_function_table() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"enforce","objects":{"functions":[{"key":"POST /static/export","source":"rule","tier":"admin","reliability":"high"}]}"#,
+        );
+        let verdict = judge
+            .judge(&site, &call_as("POST", "/static/export", "doctor-a", 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::Bypass);
+        assert!(verdict.record.trace.function.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_credential_in_a_path_never_reaches_the_function_trace() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let credential = "tok-5ecret-0123456789";
+        let site = site(
+            r#","mode":"enforce","objects":{"functions":[{"key":"POST /api/{id}/export","source":"rule","tier":"admin","reliability":"high"}]}"#,
+        );
+        let path = format!("/api/{credential}/export");
+        let verdict = judge
+            .judge(&site, &call_as("POST", &path, credential, 1_000))
+            .await;
+        let trace = verdict
+            .record
+            .trace
+            .function
+            .clone()
+            .expect("the trace names the function");
+        assert_eq!(trace.key, "POST /api/<redacted>/export");
+        assert_eq!(trace.entry.as_deref(), Some("POST /api/{id}/export"));
+        let text = serde_json::to_string(&verdict.record).unwrap();
+        assert!(!text.contains(credential), "{text}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_function_is_sent_to_jev_when_the_site_asks() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = asking_site();
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7"}]}"#, "doctor-a"),
+        );
+        let verdict = judge
+            .judge(&site, &call_as("GET", "/metrics", "doctor-a", 1_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert_eq!(function_shown(&fake, 0), json!({"known": false}));
+        let trace = verdict
+            .record
+            .trace
+            .function
+            .expect("the trace names the unknown function");
+        assert_eq!(trace.key, "GET /metrics");
+        assert_eq!(trace.known, Some(false));
+        assert_eq!(trace.entry, None);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_function_jev_allows_is_served_from_the_cache_next_time() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = asking_site();
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7"}]}"#, "doctor-a"),
+        );
+        let first = judge
+            .judge(&site, &call_as("GET", "/metrics", "doctor-a", 1_000))
+            .await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        let second = judge
+            .judge(&site, &call_as("GET", "/metrics", "doctor-a", 2_000))
+            .await;
+        assert_eq!(second.record.decision_path, DecisionPath::CachedAllow);
+        assert_eq!(fake.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_cached_allow_does_not_settle_a_request_that_names_an_administrator_function() {
+        // The cache key leaves out the method overrides, so the plain request's cached allow has
+        // the same key as the override. The read guard in `plan` keeps that allow from settling it.
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let plain = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/patients/8", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(plain.record.decision_path, DecisionPath::JevAllow);
+        let cached = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/patients/8", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(cached.record.decision_path, DecisionPath::CachedAllow);
+        assert_eq!(fake.calls(), 1);
+        let overrides = ["DELETE".to_owned()];
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method_overrides: &overrides,
+                    ..call_as("POST", "/api/patients/8", "doctor-a", 3_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
+        assert_eq!(
+            function_shown(&fake, 1),
+            json!({"tier": "admin", "attempt": "over_privilege"})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allow_of_a_request_that_names_an_administrator_function_is_not_cached() {
+        // The attempt is judged and Jev allows it. That allow must not settle the plain request,
+        // which shares its cache key: the write guard in `remember_allow` keeps it out of the cache.
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        let overrides = ["DELETE".to_owned()];
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method_overrides: &overrides,
+                    ..call_as("POST", "/api/patients/8", "doctor-a", 1_000)
+                },
+            )
+            .await;
+        assert_eq!(attempt.record.decision_path, DecisionPath::JevAllow);
+        let plain = judge
+            .judge(
+                &site,
+                &call_as("POST", "/api/patients/8", "doctor-a", 2_000),
+            )
+            .await;
+        assert_eq!(plain.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_known_function_is_judged_as_before() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        // GET /api/notes/{id} is not in the table, but the object map declares a position on that route.
+        let site = site(
+            r#","mode":"enforce","objects":{"classes":[{"id":"patient","name":"患者"}],"slots":[{"key":"GET /api/notes/{id} path[2]","class":"patient","source":"admin"}],"ask_unknown_functions":true,"functions":[{"key":"GET /api/patients","source":"rule"}]}"#,
+        );
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7"}]}"#, "doctor-a"),
+        );
+        let listed = judge
+            .judge(&site, &call_as("GET", "/api/patients", "doctor-a", 1_000))
+            .await;
+        assert_eq!(listed.record.decision_path, DecisionPath::FastAllow);
+        let positioned = judge
+            .judge(&site, &call_as("GET", "/api/notes/7", "doctor-a", 2_000))
+            .await;
+        assert_eq!(positioned.record.decision_path, DecisionPath::FastAllow);
+        assert!(listed.record.trace.function.is_none());
+        assert!(positioned.record.trace.function.is_none());
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_site_that_does_not_ask_leaves_unknown_functions_alone() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = functions_site(false);
+        let verdict = judge
+            .judge(&site, &call_as("GET", "/metrics", "doctor-a", 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::FastAllow);
+        assert!(verdict.record.trace.function.is_none());
+        assert_eq!(fake.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_path_without_a_canonical_spelling_is_an_unknown_function() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = asking_site();
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7"}]}"#, "doctor-a"),
+        );
+        let verdict = judge
+            .judge(
+                &site,
+                &call_as("GET", "/api/patients/%zz", "doctor-a", 1_000),
+            )
+            .await;
+        assert_eq!(fake.calls(), 1);
+        assert_eq!(function_shown(&fake, 0), json!({"known": false}));
+        assert_eq!(
+            verdict.record.trace.function.and_then(|trace| trace.known),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_entry_request_without_a_credential_on_an_unlearned_method_is_asked() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = asking_site();
+        let verdict = judge
+            .judge(&site, &call_as("DELETE", "/api/patients", "", 1_000))
+            .await;
+        assert_eq!(fake.calls(), 1);
+        let document: serde_json::Value =
+            serde_json::from_str(&fake.sent.lock().unwrap()[0]).unwrap();
+        assert_eq!(document["state"]["entry"], json!({"matched": true}));
+        assert_eq!(function_shown(&fake, 0), json!({"known": false}));
+        assert_eq!(
+            verdict.record.trace.function.and_then(|trace| trace.known),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_override_onto_an_admin_function_from_an_unknown_one_carries_both() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let site = site(
+            r#","mode":"enforce","objects":{"ask_unknown_functions":true,"functions":[{"key":"DELETE /api/patients/{id}","source":"rule","tier":"admin","reliability":"high"}]}"#,
+        );
+        judge.observe(
+            &site,
+            &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+        );
+        let overrides = ["DELETE".to_owned()];
+        let request = RequestFacts {
+            method_overrides: &overrides,
+            ..call_as("POST", "/api/patients/7005", "doctor-a", 1_000)
+        };
+        let first = judge.judge(&site, &request).await;
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(
+            function_shown(&fake, 0),
+            json!({"tier": "admin", "attempt": "over_privilege", "known": false})
+        );
+        let trace = first
+            .record
+            .trace
+            .function
+            .expect("the trace names the function");
+        assert_eq!(trace.entry.as_deref(), Some("DELETE /api/patients/{id}"));
+        assert_eq!(trace.attempt, Some(Attempt::OverPrivilege));
+        assert_eq!(trace.known, Some(false));
+        // An attempt is never cached, so the same request is judged again.
+        let again = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    method_overrides: &overrides,
+                    ..call_as("POST", "/api/patients/7005", "doctor-a", 2_000)
+                },
+            )
+            .await;
+        assert_eq!(again.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_function_table_that_guards_nothing_leaves_the_state_and_the_record_as_they_were() {
+        // The same objects with no function table, and with a table that guards nothing: a plain
+        // function and a medium administrator function, the switch off.
+        let ordinary = r#","functions":[{"key":"GET /api/patients","source":"rule"},{"key":"GET /api/admin/search","source":"rule","tier":"admin","reliability":"medium"}]"#;
+        let mut records = Vec::new();
+        for objects in [objects_with(""), objects_with(ordinary)] {
+            let site = site(&format!(r#","mode":"enforce","objects":{objects}"#));
+            let fake = FakeJev::new();
+            fake.answer("DENY", "BENIGN");
+            let judge = judge(&fake);
+            judge.observe(
+                &site,
+                &shown("/api/patients", br#"{"items":[{"id":"7005"}]}"#, "doctor-a"),
+            );
+            let mut rows = Vec::new();
+            for (now_ms, method, path) in [
+                (1_000, "DELETE", "/api/patients/7005"),
+                (2_000, "GET", "/api/patients"),
+                (3_000, "POST", "/api/patients/7005"),
+                // An id never shown to the session: judged by Jev, so its state is compared too.
+                (4_000, "DELETE", "/api/patients/7009"),
+            ] {
+                let verdict = judge
+                    .judge(&site, &call_as(method, path, "doctor-a", now_ms))
+                    .await;
+                let mut row = serde_json::to_value(&verdict.record).unwrap();
+                row["at_millis"] = json!(0);
+                row["trace"]["timing"] = json!({});
+                if let Some(jev) = row
+                    .get_mut("jev")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    jev.remove("millis");
+                }
+                rows.push(row);
+            }
+            records.push(rows);
+        }
+        assert_eq!(records[0].len(), records[1].len());
+        assert!(
+            records[0].iter().any(|row| row["jev"]["state"].is_string()),
+            "at least one judgement must reach Jev, or the comparison proves nothing"
+        );
+        for (left, right) in records[0].iter().zip(&records[1]) {
+            assert_eq!(left["jev"]["state"], right["jev"]["state"]);
+            assert_eq!(left["decision_path"], right["decision_path"]);
+            assert!(left["trace"].get("function").is_none());
+            assert!(right["trace"].get("function").is_none());
+        }
     }
 }

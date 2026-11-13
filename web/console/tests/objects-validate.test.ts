@@ -629,3 +629,53 @@ test("the object map's own edits keep the function table", () => {
   });
   assert.deepEqual(withoutSlot(withSlot(spec, slot), slot.key).objects, { functions: [exported] });
 });
+
+// ------------------------------------------------------------------ the switch (objects.ask_unknown_functions)
+
+test("the switch is read as a boolean, and anything else is refused", () => {
+  const functions = [fn("GET /api/patients", "rule")];
+  assert.deepEqual(parseObjects({ functions, ask_unknown_functions: true }), {
+    ok: true,
+    value: { functions, ask_unknown_functions: true },
+  });
+  assert.deepEqual(parseObjects({ functions, ask_unknown_functions: false }), {
+    ok: true,
+    value: { functions, ask_unknown_functions: false },
+  });
+  assert.deepEqual(parseObjects({ functions, ask_unknown_functions: "yes" }), {
+    ok: false,
+    message: DECLARE_TEXT.askShape,
+  });
+});
+
+test("the switch on an empty table is a local error, as the gateway would refuse it", () => {
+  assert.deepEqual(checkObjects({ ask_unknown_functions: true }), [
+    DECLARE_TEXT.askWithoutFunctions,
+  ]);
+  assert.deepEqual(checkObjects({ functions: [], ask_unknown_functions: true }), [
+    DECLARE_TEXT.askWithoutFunctions,
+  ]);
+  assert.deepEqual(
+    checkObjects({ functions: [fn("GET /api/patients", "rule")], ask_unknown_functions: true }),
+    [],
+  );
+  assert.deepEqual(checkObjects({ ask_unknown_functions: false }), []);
+  // The gateway's refusal names the switch's own place, and only its own reason.
+  assert.equal(
+    functionRefusalWords("objects.ask_unknown_functions", "ask_without_functions", {}),
+    DECLARE_TEXT.askWithoutFunctions,
+  );
+  assert.equal(functionRefusalWords("objects.ask_unknown_functions", "class_unknown", {}), null);
+  assert.equal(functionRefusalWords("objects.ask_unknown_functions", undefined, {}), null);
+});
+
+test("the switch's change is one line in the change list, turned on or off", () => {
+  const functions = [fn("GET /api/patients", "rule")];
+  assert.deepEqual(objectChanges({ functions }, { functions, ask_unknown_functions: true }), [
+    "功能表 未知功能送 Jev 判定 关 → 开",
+  ]);
+  assert.deepEqual(objectChanges({ functions, ask_unknown_functions: true }, { functions }), [
+    "功能表 未知功能送 Jev 判定 开 → 关",
+  ]);
+  assert.deepEqual(objectChanges({ functions }, { functions, ask_unknown_functions: false }), []);
+});
