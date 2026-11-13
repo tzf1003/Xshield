@@ -225,7 +225,7 @@ class ClinicOriginTest(unittest.TestCase):
         self.assertNotEqual(first.snapshot(), other.snapshot())
         truth = self.origin.truth()
         self.assertEqual(set(truth), {"site", "seed", "classes", "identity", "request_positions",
-                                      "response_positions", "non_objects"})
+                                      "response_positions", "non_objects", "functions"})
         self.assertEqual(truth["site"], "clinic")
         self.assertEqual(truth["seed"], DEFAULT_SEED)
         for item in truth["request_positions"] + truth["response_positions"]:
