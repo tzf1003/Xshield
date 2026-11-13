@@ -692,7 +692,7 @@ fn jsonl_line(detail: &RequestDetail) -> String {
 #[must_use]
 pub fn csv_cell(value: &str) -> String {
     let mut cell = value.to_owned();
-    if cell.starts_with(['=', '+', '-', '@']) {
+    if cell.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         cell.insert(0, '\'');
     }
     if cell.contains([',', '"', '\n', '\r']) {
@@ -1017,6 +1017,8 @@ mod tests {
     fn csv_cells_neutralise_formulas_and_quote_separators() {
         assert_eq!(csv_cell("=HYPERLINK(\"x\")"), "\"'=HYPERLINK(\"\"x\"\")\"");
         assert_eq!(csv_cell("-1"), "'-1");
+        assert_eq!(csv_cell("\t=1+1"), "'\t=1+1");
+        assert_eq!(csv_cell("\r=1+1"), "\"'\r=1+1\"");
         assert_eq!(csv_cell("a,b"), "\"a,b\"");
         assert_eq!(csv_cell("plain"), "plain");
     }

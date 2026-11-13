@@ -143,9 +143,14 @@ struct Limiter {
 
 impl Limiter {
     fn allow(&mut self, key: Digest16, limit: u32, now_ms: u64) -> bool {
-        if self.windows.len() >= LIMITER_MAX {
+        if self.windows.len() >= LIMITER_MAX && !self.windows.contains_key(&key) {
             self.windows
                 .retain(|_, (start, _)| now_ms.saturating_sub(*start) < WINDOW_MS);
+            // Every window is still running: a new key gets no call, so the map
+            // stays at its cap and is not scanned again for each known key.
+            if self.windows.len() >= LIMITER_MAX {
+                return false;
+            }
         }
         let entry = self.windows.entry(key).or_insert((now_ms, 0));
         if now_ms.saturating_sub(entry.0) >= WINDOW_MS {
@@ -1448,6 +1453,25 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use xshield_core::context::LoginUnbound;
+
+    #[test]
+    fn a_full_limiter_refuses_new_keys_and_does_not_grow() {
+        let mut limiter = Limiter::default();
+        for n in 0..LIMITER_MAX {
+            let mut key = [0_u8; 16];
+            key[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            assert!(limiter.allow(key, 2, 1_000));
+        }
+        let fresh = [0xFF_u8; 16];
+        assert!(!limiter.allow(fresh, 2, 1_000));
+        assert_eq!(limiter.windows.len(), LIMITER_MAX);
+        // A known key keeps its own budget while the map is full.
+        assert!(limiter.allow([0; 16], 2, 1_000));
+        assert!(!limiter.allow([0; 16], 2, 1_000));
+        // Once the windows have run out the map is pruned and the new key is served.
+        assert!(limiter.allow(fresh, 2, 1_000 + WINDOW_MS));
+        assert_eq!(limiter.windows.len(), 1);
+    }
 
     /// The gateway id of the origin responses the tests observe.
     const RID: &str = "req_00000000000000000000000000000001";
