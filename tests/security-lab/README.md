@@ -4,6 +4,7 @@
 
 - `idor_origin.py`：一个 EMR 源站，没有对象级鉴权。任何登录的医生都能读取、删除、分享任何患者，所以拦截必须由 edge 完成。
 - `fake_jev.py`：脚本化的 Jev 假服务，应答固定，不调用模型。
+- `labkit.py`：`test_idor_lab.py` 与 clinic 流量共用的管道，负责启动 edge、发送请求，并把判定记录同时写入文件。
 - 真实的 `xshield-edge` 二进制，站点由 `XSHIELD_EDGE_SITES_FILE` 提供。
 
 驱动逐条发送请求，核对三件事：客户端收到的状态码、源站是否收到了这个请求、edge 为该请求写下的判定记录（`decision_path`、`outcome`、`jev.failure`）。拦截类场景还会直接问源站一次，证明被拦的对象确实能从源站拿到。
@@ -39,7 +40,7 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，记为未经判定 | `jev_unavailable`（`unjudged`） |
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |
 | C4 | 登录请求 | Jev 收到的是 `<redacted>`，判定日志里也没有口令 | `jev_allow` |
-| C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拦截，`JEV_CALL_LIMIT` | `jev_unavailable` |
+| C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拒绝并回 429（`{"error":"rate_limited"}`），`JEV_CALL_LIMIT`；不论 `on_jev_unavailable` | `jev_unavailable` |
 | W1 | 声明了 `GET /api/home doctor.id` 为用户身份的站点：医生 A、B 各自登录后，判定记录的 `trace.session.identity.user` 是各自的键控哈希标签，换账号不同，同一账号相同；没有声明身份的站点不写 `identity` | 放行，身份标签按上述规则 | `fast_allow` |
 | W4a | 管理员站点：管理员在管理档搜索（`GET /api/admin/search`）里搜到医生 B 的患者后删除 | 放行，删除的值核验为管理档来源，不是尝试 | `fast_allow` |
 | W4b | 管理员没在管理档搜索里见过的患者，直接删除 | 拦截，源站不收到请求；角色不是放行理由 | `jev_deny` |
@@ -73,6 +74,29 @@ A9 的第一条删除原来预期放行（已知缺口），标注档位之后�
 - access：带 `attempt: over_privilege` 的值判 DENY（只由公共档响应展示过，请求位置不接受公共来源）。路径段或查询参数被 edge 标为 `reference` 且会话从未见过，也判 DENY。入口自身需要的输入（`/login` 的表单、`/share/` 下的分享码）不算。请求体里的自由文本（新患者的姓名、备注）不算对象引用，只有标识字段才算。
 - attack：值或路径含 `union select`、`or 1=1`、`../`、`; cat `、`<script>` 时判 ATTACK。
 - 概率固定：所选选项 0.9，其余每个选项 0.05。
+
+## clinic 源站与良性训练流量
+
+`clinic_origin.py` 是第二个源站，对应规划文档第 4.1 节（规划文档未入库）。数据由种子决定（默认 `20261113`），规模由医生数决定（快速模式 12 位，完整模式 48 位）。它和 `idor_origin.py` 一样没有对象级鉴权，只能在靶场里运行，不得部署。除了接口，它还对外提供真值：`served`（处理过的每个请求）、`shown`（每个凭证见过哪些对象）、`owner_of()`（对象归属）和 `truth()`（位置真值，格式见规划文档第 9.3 节）。
+
+`clinic_traffic.py` 产生良性训练流量（规划文档第 4.2 节）。每个医生每次登录走一条固定的旅程，全部是正常路径，同一种子发送的请求顺序完全相同。旅程里的固定安排如下。
+
+- 每个医生搜自己的科室和另外两个科室。快速模式每个科室两位医生，所以每个搜索结果都被同科室的两位医生看到，这是公共档的证据。
+- 每位医生的第一次登录会在管理搜索里被源站拒绝（403），共 12 次，是管理档的证据。
+- 每次登录删除一个自己的患者，共 48 次。删除放在所有医生搜索之后：否则某个搜索结果会在它的主人删除后只剩一位医生见到，公共档的一致程度会低于高可靠性所需的 980‰。
+- 每次登录给搜到的他人患者写一条备注，共 48 次。
+- 文本输入取自良性语料的快速子集（`corpus/benign.jsonl` 中 `quick` 为 true 的条目，规划文档第 4.4 节）。检查时用理想模型的 Jev：只有语料中的完整攻击文本才判 ATTACK（`FakeJev(attack_texts=…)`）。
+
+检查命令如下。
+
+```sh
+python3 tests/security-lab/clinic_traffic.py --check                      # 经网关跑一遍训练流量，核对真值与判定记录
+python3 -m unittest discover -s tests/security-lab -p "test_*.py"         # 源站和流量的单元测试，不经网关
+```
+
+训练段在观察模式（`TRAINING_MODE`，`observe`）下经网关运行，观察行的 `mode` 与之一致，`category` 为 `train_<步骤名>`，便于按步骤看误拦率。
+
+`--check` 核对四件事。第一，每个 `learnable` 位置的键和每个 `non_objects` 键都在判定记录里出现过（请求位置看 `trace.values[].slot`，响应位置看 `trace.response.fingerprints`）。第二，没有任何记录是拦截、本应拦截、未经判定或 Jev 失败。第三，每个请求的状态码符合旅程的预期。第四，四项证据达到学习规则判定 `high` 所需的数量。阈值沿用 `crates/xshield-core/src/context/learning.rs`：`SESSIONS_MIN` 为 5，`VOTES_MIN` 为 20，`high` 需要两倍的单位数或票数，公共档的一致程度需要 980‰。预算是 30 秒。
 
 ## 边界
 
