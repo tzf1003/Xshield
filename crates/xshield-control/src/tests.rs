@@ -404,6 +404,27 @@ async fn protected_routes_need_a_valid_session_cookie() {
 }
 
 #[tokio::test]
+async fn the_function_table_routes_need_a_valid_session() {
+    let app = router(test_state());
+    // The read and both writes pass the content-type check and stop at the session check.
+    let read = send(&app, get("/api/sites/emr/objects/functions", None)).await;
+    assert_eq!(read.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(read).await["error"], "UNAUTHENTICATED");
+    for uri in [
+        "/api/sites/emr/objects/functions/changes",
+        "/api/sites/emr/objects/functions/proposals/dismiss",
+    ] {
+        let response = send(
+            &app,
+            request("POST", uri, None, Some("application/json"), Body::empty()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        assert_eq!(body_json(response).await["error"], "UNAUTHENTICATED");
+    }
+}
+
+#[tokio::test]
 async fn the_session_endpoint_reflects_the_cookie() {
     let state = test_state();
     let app = router(Arc::clone(&state));

@@ -12,8 +12,9 @@
 //!
 //! An administrator's listing proves a value to an administrator session only, as an
 //! ordinary response does; the session's role is read from its identity (docs/07 section
-//! 7.4.7). A site without tiers is judged as it always was: every origin that shows the
-//! value as the request's kind of object proves it.
+//! 7.4.7). A response the map labels `self` proves a value as an untiered one does, and a
+//! value that such a response shows is never an attempt. A site without tiers is judged as
+//! it always was: every origin that shows the value as the request's kind of object proves it.
 
 use xshield_core::context::{Attempt, ObjectMap, PublicAccess, Reliability, Tier, tier_proves};
 
@@ -208,23 +209,25 @@ mod tests {
     }
 
     #[test]
-    fn a_self_sighting_never_allows_on_its_own_and_keeps_a_value_from_tightening() {
+    fn a_self_sighting_proves_the_value_and_keeps_it_from_tightening() {
         let objects = map(TIERED);
-        // Only the session's own record shows the value: it is not verified, so Jev decides.
+        // The session's own record shows the value: it is verified, as an untiered response would
+        // show it, so no Jev call is needed for it.
         let own = sightings(&[OWN]);
         assert_eq!(
             judge(&refs(&own), &refs(&own), CLOSED, &objects, false),
             Judged {
-                verified: false,
+                verified: true,
                 attempt: None,
             }
         );
-        // Beside a public sighting, the own record keeps the value from being an attempt.
+        // Beside a public sighting, the own record keeps the value from being an attempt, and it
+        // proves the value too.
         let sources = sightings(&[SEARCH, OWN]);
         assert_eq!(
             judge(&refs(&sources), &refs(&sources), CLOSED, &objects, false),
             Judged {
-                verified: false,
+                verified: true,
                 attempt: None,
             }
         );
@@ -326,13 +329,15 @@ mod tests {
     }
 
     #[test]
-    fn a_self_sighting_without_a_reliability_never_allows_and_is_no_attempt() {
+    fn a_self_sighting_without_a_reliability_proves_the_value_and_is_no_attempt() {
         let objects = map(TIERED);
+        // An absent reliability is low, and a self sighting proves whatever its reliability, as a
+        // rated one does.
         let own = sightings(&[OWN_UNRATED]);
         assert_eq!(
             judge(&refs(&own), &refs(&own), CLOSED, &objects, false),
             Judged {
-                verified: false,
+                verified: true,
                 attempt: None,
             }
         );
@@ -341,7 +346,7 @@ mod tests {
         assert_eq!(
             judge(&refs(&sources), &refs(&sources), CLOSED, &objects, false),
             Judged {
-                verified: false,
+                verified: true,
                 attempt: None,
             }
         );

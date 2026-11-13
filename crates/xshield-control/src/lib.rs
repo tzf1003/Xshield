@@ -23,6 +23,7 @@ mod migrations;
 mod models;
 mod object_agent;
 mod object_agent_api;
+mod object_functions;
 mod object_impact;
 mod object_learning;
 mod object_map;
@@ -251,8 +252,9 @@ pub fn router(state: Arc<ControlState>) -> Router {
 }
 
 /// The object map's routes under `/api/sites/{name}/objects`: the positions and their actions, the
-/// automatic changes and their acknowledgements, and the learning agent. The session check covers them
-/// with the rest of the `/api` surface.
+/// automatic changes and their acknowledgements, the learning agent, and the function table's candidates,
+/// confirmations and dismissals (docs/07 section 7.9.20). The session check covers them with the rest of
+/// the `/api` surface.
 fn object_routes() -> Router<Arc<ControlState>> {
     Router::new()
         .route("/api/sites/{name}/objects", get(object_map::list))
@@ -304,6 +306,18 @@ fn object_routes() -> Router<Arc<ControlState>> {
         .route(
             "/api/sites/{name}/objects/agent-sample",
             get(object_agent_api::sample),
+        )
+        .route(
+            "/api/sites/{name}/objects/functions",
+            get(object_functions::list),
+        )
+        .route(
+            "/api/sites/{name}/objects/functions/changes",
+            post(object_functions::changes),
+        )
+        .route(
+            "/api/sites/{name}/objects/functions/proposals/dismiss",
+            post(object_functions::dismiss),
         )
 }
 
