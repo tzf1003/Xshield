@@ -81,6 +81,9 @@ SITE_NEGATIVES = [
     ('function_key_method_not_upper', functions_site(key='get /api/patients/{id}')),
     ('function_key_without_slash', functions_site(key='GET api/patients')),
     ('function_carries_paused', functions_site(paused=True)),
+    ('switch_without_functions', lambda site: site.update(objects={'ask_unknown_functions': True})),
+    ('switch_not_boolean', lambda site: site.update(objects={
+        'functions': [{'key': 'GET /api/search', 'source': 'rule'}], 'ask_unknown_functions': 'yes'})),
 ]
 
 checks: list[dict[str, object]] = []
@@ -176,6 +179,9 @@ def check_sites(schema: dict) -> list[str]:
         {'key': 'GET /api/search', 'source': 'agent'},
     ]}
     check('site:functions_accepted', valid(schema, functions), errors(schema, functions))
+    switched = copy.deepcopy(functions)
+    switched['objects']['ask_unknown_functions'] = True
+    check('site:functions_switch_accepted', valid(schema, switched), errors(schema, switched))
     for label, mutate in SITE_NEGATIVES:
         site = copy.deepcopy(emr)
         mutate(site)

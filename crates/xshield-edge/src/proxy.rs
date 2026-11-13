@@ -108,6 +108,28 @@ fn header_text<'a>(header: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
     header.get(name).and_then(|value| value.to_str().ok())
 }
 
+/// The headers an origin may read a method from instead of the transport method (docs/07 section 7.9.18).
+const METHOD_OVERRIDE_HEADERS: [&str; 3] = [
+    "x-http-method-override",
+    "x-http-method",
+    "x-method-override",
+];
+
+/// The values of the method override headers, one per occurrence and in the order sent, for the judge to
+/// read as the methods the request names for itself. A value that is not text is left out: the judge reads
+/// only ASCII letters as a method, so such a value could not name one.
+fn method_overrides(headers: &http::HeaderMap) -> Vec<String> {
+    let mut values = Vec::new();
+    for name in METHOD_OVERRIDE_HEADERS {
+        for value in headers.get_all(name) {
+            if let Ok(text) = value.to_str() {
+                values.push(text.to_owned());
+            }
+        }
+    }
+    values
+}
+
 /// The interface name a route reads from the request, or the reason it has none.
 /// `body` is the request body when it was read, `None` when it was not.
 fn resolve_request(spec: &SiteSpec, header: &RequestHeader, body: Option<&[u8]>) -> Resolved {
@@ -281,6 +303,7 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
         let names = request_header_names(header);
         // The row still redacts the session credential from the path and the query.
         let credential = site.and_then(|site| request_credential::<J>(site, header));
+        let overrides = method_overrides(&header.headers);
         let facts = RequestFacts {
             request_id: &ctx.request_id,
             method: header.method.as_str(),
@@ -293,6 +316,7 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
             now_ms: now_ms(),
             route,
             request_headers: &names,
+            method_overrides: &overrides,
         };
         let mut record = refused_row(site, &facts, decision_path, status);
         record.edge.clone_from(&self.edge);
@@ -432,6 +456,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
         let path = header.uri.path().to_owned();
         let query = header.uri.query().map(str::to_owned);
         let content_type = header_text(&header.headers, "content-type").map(str::to_owned);
+        let overrides = method_overrides(&header.headers);
         let judgement = self
             .judge
             .judge(
@@ -448,6 +473,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
                     now_ms: now_ms(),
                     route: Some(&resolved),
                     request_headers: &names,
+                    method_overrides: &overrides,
                 },
             )
             .await;

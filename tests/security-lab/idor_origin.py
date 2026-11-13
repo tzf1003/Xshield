@@ -182,6 +182,10 @@ class _Handler(BaseHTTPRequestHandler):
             return 200, {"comments": COMMENTS.get(query.get("patient", [""])[0], [])}, {}
         if method == "POST" and url.path == "/api/notes":
             return 201, {"saved": True}, {}
+        if method == "POST" and url.path == "/api/admin/export":
+            # Deliberately unchecked: the administrator's page shows the export button only to
+            # administrators, but the interface answers any logged-in doctor (docs/04 section 4.3, F5).
+            return 200, {"exported": len(origin.patients)}, {}
         return 404, {"error": "not_found"}, {}
 
     def _send(self, status: int, payload: object, extra: dict[str, str]) -> None:

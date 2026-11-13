@@ -701,6 +701,8 @@ export interface ObjectsSpec {
   slots?: ObjectSlotEntry[];
   /** The function table: the interfaces the administrator confirmed, each with its source and optional admin tier. */
   functions?: ObjectFunctionEntry[];
+  /** Send the functions the table does not list to the judge (docs/07 7.9.18). Needs a table that is not empty. */
+  ask_unknown_functions?: boolean;
 }
 
 export interface SiteSpec {

@@ -14,6 +14,10 @@ Script:
   "reference") that the session was never shown, except for the input the
   entry itself needs (the share code under /share/, the login form). Otherwise
   ALLOW;
+- access is also DENY when the request carries a function attempt
+  (`function.attempt` is over_privilege), and when its function is unknown
+  (`function.known` is false) and its path holds a word of OPS_WORDS. An
+  unknown function on an ordinary path is judged on its values as above;
 - attack is ATTACK when a value or the path carries injection, path traversal
   or command execution text, and BENIGN otherwise.
 
@@ -42,6 +46,10 @@ ATTACK_OPTIONS = ("BENIGN", "ATTACK", "UNKNOWN")
 ATTACK_MARKERS = ("union select", "or 1=1", "../", "; cat ", "<script>")
 ENTRY_INPUT_PATHS = ("/login",)
 ENTRY_INPUT_PREFIXES = ("/share/",)
+# Words of administrator, operations and hidden-interface paths. An unknown function whose path holds one of
+# them is answered DENY: this is the fake's copy of the instruction paragraph about unknown functions (docs/02 2.2).
+OPS_WORDS = ("admin", "metrics", "actuator", "server-status", "debug", "swagger", "console", "phpinfo",
+             "ftp", "backup", "internal")
 
 
 def _probabilities(options: tuple[str, ...], choice: str) -> dict[str, float]:
@@ -126,7 +134,12 @@ def judge(document: dict, attack_forms: tuple[str, ...] | None = None) -> dict:
         selects_object(value) and not value.get("verified") and not value.get("seen_as")
         for value in values
     ) and not entry_input
-    access = "DENY" if attempt or unseen else "ALLOW"
+    function = request.get("function") or {}
+    # A function attempt is refused whatever else the request says. An unknown function is refused only
+    # where its path names administration or operations; elsewhere it is judged on its values alone.
+    unlisted = function.get("known") is False and any(word in path.lower() for word in OPS_WORDS)
+    attempted_function = function.get("attempt") == "over_privilege"
+    access = "DENY" if attempt or unseen or attempted_function or unlisted else "ALLOW"
     if attack_forms is None:
         text = " ".join([path, *(str(value.get("value", "")) for value in values)]).lower()
         attack = "ATTACK" if any(marker in text for marker in ATTACK_MARKERS) else "BENIGN"

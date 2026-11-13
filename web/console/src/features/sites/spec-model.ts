@@ -335,6 +335,7 @@ const CONFLICT_LABELS: Record<string, string> = {
   "advanced.address_calls_per_minute": "地址调用上限",
   "advanced.allow_cache_minutes": "放行缓存时长",
   "objects.learning": "学习设置",
+  "objects.ask_unknown_functions": "功能表未知功能判定",
 };
 
 /**
@@ -475,14 +476,27 @@ export function rebaseSpec(
     latest.objects?.functions ?? [],
     (item) => item.key,
   );
+  // The switch is one value, like the learning settings. Off is the gateway's default, so it is merged as on or off
+  // and written only when on.
+  const askUnknown = pick<boolean>(
+    "objects.ask_unknown_functions",
+    base.objects?.ask_unknown_functions === true,
+    mine.objects?.ask_unknown_functions === true,
+    latest.objects?.ask_unknown_functions === true,
+  );
   const objects: ObjectsSpec | undefined =
-    learning === undefined && classes.length === 0 && slots.length === 0 && functions.length === 0
+    learning === undefined &&
+    classes.length === 0 &&
+    slots.length === 0 &&
+    functions.length === 0 &&
+    !askUnknown
       ? undefined
       : {
           ...(learning === undefined ? {} : { learning }),
           ...(classes.length === 0 ? {} : { classes }),
           ...(slots.length === 0 ? {} : { slots }),
           ...(functions.length === 0 ? {} : { functions }),
+          ...(askUnknown ? { ask_unknown_functions: true } : {}),
         };
   const spec: SiteSpec = {
     name: latest.name,

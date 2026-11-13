@@ -33,6 +33,25 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 
 站点配置了档位（[07.4.7](07-console-architecture.md#747-档位在判定中的使用)）时，`seen_as` 的每一项在括号里附上来源响应的档位和可靠性，如 `"id @ GET /api/search [patient] (tier public, reliability high)"`；请求值的位置配置了 `accepts_public` 时，值上带 `"public_access": {"accepts": false, "reliability": "high"}`。值被判为尝试越权时带 `"attempt": "over_privilege"`：这个值只由公共档响应展示过，而请求位置不接受公共来源。指令要求 Jev 对带 `attempt` 的值答 DENY，不论它在 `seen_as` 里出现过几次，因为公共搜索只证明源站展示过它，不证明本会话有权操作它。没有标档位的站点，`state` 的内容与之前相同。
 
+站点有功能表并接管判定（[07.9.18](07-console-architecture.md#7918-功能表)）时，`state.request` 多一个 `function` 对象，描述请求的功能。它有两个字段，都可以单独出现，也可以同时出现：
+
+- `"tier": "admin"` 与 `"attempt": "over_privilege"`：请求命中管理档条目，而会话不是管理员，即尝试越权。指令要求 Jev 对这次请求答 DENY，不论值如何。
+- `"known": false`：站点开了 `ask_unknown_functions`，而功能表和对象表都不认得这个请求的功能。指令只在路径或接口名本身显示特权或运维功能时才要求 DENY；普通页面、普通接口照值判定，不因“未知”而拒绝。
+
+请求没有触及这两类功能时，`request` 里没有 `function` 键，`state` 与之前相同。下面是医生会话请求 `POST /api/admin/export` 的例子（管理员的导出在这个站点上是管理功能）：
+
+```json
+"request": {
+  "method": "POST",
+  "path": "/api/admin/export",
+  "function": {"tier": "admin", "attempt": "over_privilege"},
+  "values": [],
+  "truncated": false
+}
+```
+
+指令新增的两段说明了这两种情况。第一段列出管理、运维、调试、内部接口、备份、目录列表和批量导出或删除这类特权或运维功能，并规定只有路径或接口名本身显示它们时，才对 `function.known` 为假的请求答 DENY。第二段规定 `function.known` 为假而路径普通时，照值判定，不因此拒绝。这两段是对着真实模型调过的，逐字保留；改动它们须重新用真实模型测试，并在 [07.5.5](07-console-architecture.md#755-指令版本表) 的版本表里登记新的指令 ID。
+
 两个问题：
 
 | 问题 | 选项 |
@@ -64,6 +83,7 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 - 单次调用超时默认 2 秒，部署时可用 `XSHIELD_JEV_TIMEOUT_MS` 改默认值，站点可用 `advanced.jev_timeout_ms` 覆盖（[07.6](07-console-architecture.md#76-站点级判定参数advanced)）；超时按 `on_jev_unavailable` 处理。
 - 配置来源：控制台保存的 Jev 配置（[03.3.1](03-admin-config-audit.md#331-模型配置在控制台保存)）优先，没有时读环境变量。两者都没有时网关照常启动，判定记为 `JEV_NOT_CONFIGURED`，不发出调用。
 - 快速放行和放行缓存（[01.4](01-request-flow.md#14-判定步骤) 第 4、5 步）用来减少调用次数。
+- 功能表接管判定且开关为真时，功能表和对象表都没有的接口，每次请求都先交给 Jev，直到一次放行进入缓存；之后在缓存时长内同一会话的同一请求不再调用。它们与其他请求共用每个会话每分钟 60 次的上限。上线前先在观察模式下统计 `trace.function` 里 `known` 为假的次数，再决定是否调大 `advanced.session_calls_per_minute`。
 - 每个会话每分钟最多 60 次 Jev 调用；没有会话的请求按来源 IP 每分钟最多 30 次，凭证还没有会话的请求（源站尚未认过这个凭证，见 [01](01-request-flow.md) 1.2）也算在来源 IP 上。超出的请求不发出调用，直接返回 429 拒绝，不论 `on_jev_unavailable` 如何设置，防止有人用大量不同请求消耗模型额度。两个上限站点可用 `advanced.session_calls_per_minute`、`advanced.address_calls_per_minute` 调整。额度按凭证和来源 IP 计，不按站点分开：同一个凭证在各站点的请求共用它的额度；学到的上下文则按站点分开（[01](01-request-flow.md) 1.2）。
 - 这些数值是起点，需要用真实站点的观察模式数据校准。控制台在每个参数旁显示最近 24 小时的耗时、超时和触发上限的次数，并在观察模式下给出调整建议。
 
