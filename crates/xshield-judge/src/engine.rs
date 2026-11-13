@@ -4548,11 +4548,12 @@ mod tests {
     async fn a_typeless_form_padded_with_blanks_sends_its_id_under_its_trimmed_name() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
-        fake.answer_marked(r#""value":"8""#, "DENY", "BENIGN");
+        fake.answer_marked(r#""value":"8 ""#, "DENY", "BENIGN");
         let enforced = site(r#","mode":"enforce""#);
         confirm(&judge, &enforced, "alice");
         // The body has blanks at its ends, and its shape is that of a form once they are gone. An
-        // origin that takes the blanks off reads the id as patient_id, so it is a reference there.
+        // origin that takes the blanks off the name reads the id as patient_id, so it is a reference
+        // there. The value keeps its blank, as it is in the body.
         let body = " patient_id=8 ";
         let verdict = judge
             .judge(
@@ -4571,7 +4572,7 @@ mod tests {
             sent_values(body).iter().any(|item| {
                 item["at"] == "body.patient_id"
                     && item["kind"] == "reference"
-                    && item["value"] == "8"
+                    && item["value"] == "8 "
             })
         }));
     }
