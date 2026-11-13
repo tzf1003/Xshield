@@ -2748,8 +2748,8 @@ mod function_pass_tests {
         drop_scratch(admin, pool, name).await;
     }
 
-    /// Each of `users`, an administrator, logs in once two days ago. A login is an entry request, which the
-    /// function evidence counts as an ordinary use of the entry, so each login makes its unit a function unit.
+    /// Each of `users`, an administrator, logs in once two days ago. A login is an entry request: the function
+    /// evidence counts it as an ordinary use of the entry, and as the administrator's use of it.
     async fn admin_logins(pool: &PgPool, now: i64, users: &[&str]) {
         for &user in users {
             let session = format!("login-{user}");
@@ -2779,15 +2779,19 @@ mod function_pass_tests {
         .await
         .expect("create the site");
         partitions(&pool, now).await;
-        // Five administrators log in, and `root` also uses the administrator's function on two days. There is no
-        // ordinary user. Counting every login would give five bystanders, enough for a proposal; leaving out the
-        // administrator who uses the function leaves four, below the five sessions a proposal needs.
-        admin_logins(&pool, now, &["root", "root2", "root3", "root4", "root5"]).await;
+        // Six administrators: `root` uses the administrator's function on two days, and the other five only log
+        // in. There is no ordinary user. A login counts as an administrator's use too, so none of the six is a
+        // bystander: neither the function nor the entry is proposed.
+        admin_logins(&pool, now, &["root2", "root3", "root4", "root5", "root6"]).await;
         admin_uses(&pool, now, SEARCH, false).await;
         learn_once(&pool, None, now).await;
         assert!(
             !proposed(&pool, SEARCH).await,
             "an administrator who uses the function is no ordinary bystander"
+        );
+        assert!(
+            !proposed(&pool, "POST /login").await,
+            "an entry is never proposed, even when only administrators log in"
         );
         drop_scratch(admin, pool, name).await;
     }

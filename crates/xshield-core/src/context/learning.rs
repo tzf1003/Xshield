@@ -1192,7 +1192,8 @@ fn anonymous_unit(record: &DecisionFacts) -> Option<String> {
     }
 }
 
-/// The function fact of one decision record, if it has one (docs/07 section 7.9.19), and `None` otherwise.
+/// The function facts of one decision record (docs/07 section 7.9.19): none, one, or, for an administrator's
+/// request on an entry, two. Each fact is one unit's use or refusal of one function.
 ///
 /// A request that went through (see [`went_through`]) is a use. A request Jev refused, or that the origin
 /// refused with 401 or 403, is a refusal. A bypassed request is no fact. The unit is the one
@@ -1200,46 +1201,69 @@ fn anonymous_unit(record: &DecisionFacts) -> Option<String> {
 /// since the rules must tell that ordinary units were around. `identified` says whether the site declares
 /// user identity positions.
 ///
-/// A request on an entry is counted as an ordinary use or refusal whoever made it: an entry is never
-/// proposed as an administrator function, and an administrator's refused request on an entry is no refusal
-/// of an ordinary unit. Same for the administrator's session with no identity: its requests count as anonymous,
-/// so the first requests of an administrator whose user is not yet declared do not propose the function.
+/// A request on an entry counts as an ordinary use or refusal whoever made it, so an entry is never proposed
+/// as an administrator function. An administrator's request on an entry also counts as an administrator use:
+/// the unit is then left out of the site's ordinary units (`site_ordinary_units`), so an administrator who only
+/// logged in is no bystander. Same for the administrator's session with no identity: its requests count as
+/// anonymous, so the first requests of an administrator whose user is not yet declared do not propose the
+/// function.
 #[must_use]
-pub fn observe_functions(record: &DecisionFacts, identified: bool) -> Option<FunctionFact> {
+pub fn observe_functions(record: &DecisionFacts, identified: bool) -> Vec<FunctionFact> {
     if record.trace.bypass.is_some() {
-        return None;
+        return Vec::new();
     }
-    let function = function_key(&record.method, &record.path)?;
+    let Some(function) = function_key(&record.method, &record.path) else {
+        return Vec::new();
+    };
     let day = record.at_millis / DAY_MILLIS;
     let on_entry = record.trace.entry.is_some();
     let primary = unit_of(record, identified).map(str::to_owned);
     if went_through(record) {
         return match primary {
-            Some(unit) if is_admin(record) && !on_entry => Some(FunctionFact::Admin {
+            Some(unit) if is_admin(record) && !on_entry => vec![FunctionFact::Admin {
                 function,
                 unit,
                 day,
-            }),
-            Some(unit) => Some(FunctionFact::Used {
+            }],
+            // On an entry the administrator is also an ordinary use, which keeps the entry out of the proposals.
+            Some(unit) if is_admin(record) => vec![
+                FunctionFact::Used {
+                    function: function.clone(),
+                    unit: unit.clone(),
+                    day,
+                },
+                FunctionFact::Admin {
+                    function,
+                    unit,
+                    day,
+                },
+            ],
+            Some(unit) => vec![FunctionFact::Used {
                 function,
                 unit,
                 day,
-            }),
-            None => anonymous_unit(record).map(|unit| FunctionFact::Anonymous {
-                function,
-                unit,
-                day,
-            }),
+            }],
+            None => anonymous_unit(record)
+                .map(|unit| FunctionFact::Anonymous {
+                    function,
+                    unit,
+                    day,
+                })
+                .into_iter()
+                .collect(),
         };
     }
     if was_refused(record) && !on_entry && !is_admin(record) {
-        return primary.map(|unit| FunctionFact::Refused {
-            function,
-            unit,
-            day,
-        });
+        return primary
+            .map(|unit| FunctionFact::Refused {
+                function,
+                unit,
+                day,
+            })
+            .into_iter()
+            .collect();
     }
-    None
+    Vec::new()
 }
 
 /// A function key the learning counts, with the distinct units that used it over the window.
@@ -2211,8 +2235,8 @@ mod function_tests {
             );
             assert!(
                 matches!(
-                    observe_functions(&facts, false),
-                    Some(FunctionFact::Used { .. })
+                    observe_functions(&facts, false).as_slice(),
+                    [FunctionFact::Used { .. }]
                 ),
                 "status {status}"
             );
@@ -2225,7 +2249,10 @@ mod function_tests {
                 Outcome::Allowed,
                 Some(status),
             );
-            assert_eq!(observe_functions(&facts, false), None, "status {status}");
+            assert!(
+                observe_functions(&facts, false).is_empty(),
+                "status {status}"
+            );
         }
         // Neither a would-block nor a block is a use, even when the origin answered 200.
         let would_block = record(
@@ -2235,7 +2262,7 @@ mod function_tests {
             Outcome::WouldBlock,
             Some(200),
         );
-        assert_eq!(observe_functions(&would_block, false), None);
+        assert!(observe_functions(&would_block, false).is_empty());
         let blocked = record(
             "GET",
             "/api/patients/7",
@@ -2243,7 +2270,7 @@ mod function_tests {
             Outcome::Blocked,
             Some(200),
         );
-        assert_eq!(observe_functions(&blocked, false), None);
+        assert!(observe_functions(&blocked, false).is_empty());
     }
 
     #[test]
@@ -2251,21 +2278,30 @@ mod function_tests {
         let admin = signed_in(used_record(), "s2", Some("root"), Some(ADMIN_ROLE));
         assert_eq!(
             observe_functions(&admin, true),
-            Some(FunctionFact::Admin {
+            vec![FunctionFact::Admin {
                 function: "GET /api/patients/{id}".to_owned(),
                 unit: "root".to_owned(),
                 day: 4,
-            })
+            }]
         );
+        // On an entry the administrator is also an ordinary use, and the administrator fact keeps the unit out of
+        // the bystanders.
         let mut on_entry = admin;
         on_entry.trace.entry = Some("/login".to_owned());
         assert_eq!(
             observe_functions(&on_entry, true),
-            Some(FunctionFact::Used {
-                function: "GET /api/patients/{id}".to_owned(),
-                unit: "root".to_owned(),
-                day: 4,
-            })
+            vec![
+                FunctionFact::Used {
+                    function: "GET /api/patients/{id}".to_owned(),
+                    unit: "root".to_owned(),
+                    day: 4,
+                },
+                FunctionFact::Admin {
+                    function: "GET /api/patients/{id}".to_owned(),
+                    unit: "root".to_owned(),
+                    day: 4,
+                },
+            ]
         );
     }
 
@@ -2274,11 +2310,11 @@ mod function_tests {
         let facts = signed_in(used_record(), "s9", None, Some(ADMIN_ROLE));
         assert_eq!(
             observe_functions(&facts, true),
-            Some(FunctionFact::Anonymous {
+            vec![FunctionFact::Anonymous {
                 function: "GET /api/patients/{id}".to_owned(),
                 unit: "s:s9".to_owned(),
                 day: 4,
-            })
+            }]
         );
     }
 
@@ -2288,14 +2324,14 @@ mod function_tests {
         facts.session.clear();
         assert_eq!(
             observe_functions(&facts, false),
-            Some(FunctionFact::Anonymous {
+            vec![FunctionFact::Anonymous {
                 function: "GET /api/patients/{id}".to_owned(),
                 unit: "a:10.0.0.9".to_owned(),
                 day: 4,
-            })
+            }]
         );
         facts.client.clear();
-        assert_eq!(observe_functions(&facts, false), None);
+        assert!(observe_functions(&facts, false).is_empty());
     }
 
     #[test]
@@ -2309,11 +2345,11 @@ mod function_tests {
         );
         assert_eq!(
             observe_functions(&jev_deny, false),
-            Some(FunctionFact::Refused {
+            vec![FunctionFact::Refused {
                 function: "DELETE /api/patients/{id}".to_owned(),
                 unit: "s1".to_owned(),
                 day: 4,
-            })
+            }]
         );
         for status in [401, 403] {
             let refused = record(
@@ -2325,8 +2361,8 @@ mod function_tests {
             );
             assert!(
                 matches!(
-                    observe_functions(&refused, false),
-                    Some(FunctionFact::Refused { .. })
+                    observe_functions(&refused, false).as_slice(),
+                    [FunctionFact::Refused { .. }]
                 ),
                 "status {status}"
             );
@@ -2334,19 +2370,19 @@ mod function_tests {
         // An administrator's refusal, a refusal on an entry, and a refusal of a unit that shows no user
         // count for nothing.
         let admin = signed_in(jev_deny.clone(), "s2", Some("root"), Some(ADMIN_ROLE));
-        assert_eq!(observe_functions(&admin, true), None);
+        assert!(observe_functions(&admin, true).is_empty());
         let mut on_entry = jev_deny.clone();
         on_entry.trace.entry = Some("/login".to_owned());
-        assert_eq!(observe_functions(&on_entry, false), None);
+        assert!(observe_functions(&on_entry, false).is_empty());
         let anonymous = signed_in(jev_deny, "s3", None, None);
-        assert_eq!(observe_functions(&anonymous, true), None);
+        assert!(observe_functions(&anonymous, true).is_empty());
     }
 
     #[test]
     fn a_bypassed_request_is_no_function_fact() {
         let mut facts = used_record();
         facts.trace.bypass = Some("/static".to_owned());
-        assert_eq!(observe_functions(&facts, false), None);
+        assert!(observe_functions(&facts, false).is_empty());
     }
 
     #[test]
