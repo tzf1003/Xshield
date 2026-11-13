@@ -124,6 +124,51 @@ pub fn is_templatable(path: &str) -> bool {
     canonical_path(path).is_some_and(|canonical| normalize(&canonical).is_some())
 }
 
+/// The longest segment a function template keeps as it is. A longer one is a token or an identifier,
+/// not a route word (docs/07 section 7.9.19).
+const FUNCTION_SEGMENT_MAX: usize = 32;
+
+/// The template a request path is counted as a function by (docs/07 section 7.9.19): the canonical
+/// spelling of `path`, with the matrix parameters of each segment dropped, so `/api/admin;x=1/users`
+/// is `/api/admin/users`. A segment that is a number or a UUID, that is longer than
+/// [`FUNCTION_SEGMENT_MAX`] bytes, or that holds a byte outside `[A-Za-z0-9._~-]` (a kept
+/// percent-escape, `@`, `:`, a brace) is a value rather than a route word, and becomes `{id}`. Every
+/// other segment is kept as it is, case included. The root is `/`.
+///
+/// `None` when `path` has no canonical spelling, or when a segment is nothing but matrix parameters
+/// (`/api/;x/users`), since such a path names no function.
+#[must_use]
+pub fn function_template(path: &str) -> Option<String> {
+    let canonical = canonical_path(path)?;
+    let body = canonical.strip_prefix('/')?;
+    if body.is_empty() {
+        return Some("/".to_owned());
+    }
+    let mut template = String::with_capacity(canonical.len());
+    for segment in body.split('/') {
+        let name = segment.split_once(';').map_or(segment, |(name, _)| name);
+        if name.is_empty() {
+            return None;
+        }
+        template.push('/');
+        if is_variable_segment(name) || !is_route_word(name) {
+            template.push_str(PLACEHOLDER);
+        } else {
+            template.push_str(name);
+        }
+    }
+    Some(template)
+}
+
+/// Whether a function template keeps `segment` as it is: at most [`FUNCTION_SEGMENT_MAX`] bytes, all
+/// of them letters, digits, `.`, `_`, `~` or `-`. A number or a UUID is checked by the caller.
+fn is_route_word(segment: &str) -> bool {
+    segment.len() <= FUNCTION_SEGMENT_MAX
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
+}
+
 /// A segment counts as variable only when it is entirely digits or a
 /// canonical (hyphenated, case-insensitive) UUID. Anything else — including a
 /// mixed alphanumeric slug — is kept literal: the heuristic would rather
@@ -306,5 +351,77 @@ mod tests {
         let path = format!("/{}", "a".repeat(MAX_PATH_BYTES - 1));
         assert_eq!(path.len(), MAX_PATH_BYTES);
         assert!(normalize(&path).is_some());
+    }
+}
+
+#[cfg(test)]
+mod function_template_tests {
+    use super::function_template;
+
+    #[test]
+    fn a_function_template_replaces_numbers_and_uuids() {
+        assert_eq!(
+            function_template("/api/patients/8").as_deref(),
+            Some("/api/patients/{id}")
+        );
+        assert_eq!(
+            function_template("/api/patients/9c858f3e-5b61-4d1a-8c7e-6b1c9d9f2a3b/visits")
+                .as_deref(),
+            Some("/api/patients/{id}/visits")
+        );
+        assert_eq!(function_template("/").as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn a_function_template_drops_matrix_parameters() {
+        assert_eq!(
+            function_template("/api/admin;x=1/users").as_deref(),
+            Some("/api/admin/users")
+        );
+        assert_eq!(
+            function_template("/api/users/7;v=2").as_deref(),
+            Some("/api/users/{id}")
+        );
+        assert_eq!(function_template("/api/;x/users"), None);
+    }
+
+    #[test]
+    fn a_long_or_unusual_segment_is_an_id() {
+        for segment in [
+            "a".repeat(33),
+            "a@b.com".to_owned(),
+            "%E4%BD%A0".to_owned(),
+            "{id}".to_owned(),
+            "a:b".to_owned(),
+        ] {
+            assert_eq!(
+                function_template(&format!("/api/{segment}")).as_deref(),
+                Some("/api/{id}"),
+                "segment {segment}"
+            );
+        }
+        // The longest word segment is kept.
+        let word = "a".repeat(32);
+        assert_eq!(
+            function_template(&format!("/api/{word}")),
+            Some(format!("/api/{word}"))
+        );
+    }
+
+    #[test]
+    fn a_word_segment_is_kept_as_it_is() {
+        assert_eq!(
+            function_template("/api/Users/PT-7004/v2.list").as_deref(),
+            Some("/api/Users/PT-7004/v2.list")
+        );
+    }
+
+    #[test]
+    fn a_path_without_a_canonical_spelling_has_no_function() {
+        assert_eq!(function_template("orders/1"), None);
+        assert_eq!(function_template("/orders?x=1"), None);
+        assert_eq!(function_template("/api/\u{7}x"), None);
+        assert_eq!(function_template("/api/%4"), None);
+        assert_eq!(function_template("/api/%zz"), None);
     }
 }
