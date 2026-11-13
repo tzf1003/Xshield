@@ -123,6 +123,9 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | W4b | 管理员没在管理档搜索里见过的患者，直接删除 | 拦截（角色不是放行理由） |
 | W4c | 管理员在公共搜索里搜到医生 B 的患者后删除 | 拦截（公共档的见过不证明删除） |
 | W4d | 管理员在管理档搜索里搜到患者后写备注（POST 子路径） | 放行（备注位置接受公开来源） |
+| W4e | 站点声明“我的患者”`GET /api/patients patients[].id` 为 `self`、`DELETE` 不接受公共来源：医生 A 新开会话，看自己的列表后打开、删除自己的患者 | 放行（本人档的展示证明会话见过对象，不调用 Jev） |
+| W4f | 同一站点：医生 A 在公共搜索里搜到医生 B 的患者后删除 | 拦截（尝试越权，交 Jev 判 DENY；本人档不放行别人的患者） |
+| W4g | 同一站点：医生 A 先在搜索里搜到自己的患者，删除被拦；之后它出现在自己的列表里，再删除 | 第一次拦截（尝试越权）；列表之后再删除放行 |
 | W6 | 站点声明身份，评论接口返回另一位医生的手机号与邮箱（[07.9.17](07-console-architecture.md#7917-属性越权告警w6)） | 放行；判定记录的 `trace.response.exposure` 记一条告警且不含值；读取本人资料、未声明身份的站点不告警 |
 | F5 | 医生登录后 `POST /api/admin/export`（功能表里的管理档功能） | 拦截，交 Jev 判为越权尝试（Jev 收到的 `function.attempt` 为 `over_privilege`），源站没收到；判定记录的 `trace.function` 带 `tier` 和 `attempt` |
 | F5b | 医生新建患者后 `POST /api/patients/{新编号}`，并带请求头 `X-HTTP-Method-Override: DELETE` | 拦截，按更严的 `DELETE /api/patients/{id}` 判为越权尝试；`trace.function.key` 仍是 `POST /api/patients/{id}` |
