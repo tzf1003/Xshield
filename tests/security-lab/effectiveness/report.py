@@ -319,15 +319,15 @@ def _scan_block(scan: dict[str, Any] | None) -> list[str]:
         f"{item['threshold']:.2f}",
         f"{item['benign_blocks']}（{_share(item['benign_blocks'], scan['benign_total'])}）",
         f"{item['leaks_closed']} / {scan['probe_allows']}",
-        f"{item['unanswered']}（{_share(item['unanswered'], scan['calls'])}）",
+        f"{item['unanswered']}（{_share(item['unanswered'], scan['judgements'])}）",
     ] for item in scan["thresholds"]]
     lines = ["", "### 置信度门槛扫描（3.4）", "",
              "同一批判定记录按门槛重算，不重新发流量。放行的置信度与决策日志的 jev_confidence 同一算法"
              "（两问各自最高概率中较小的一个）；恰好等于门槛的放行保留，低于门槛的放行按“答不上来”处理，"
              "站点按 on_jev_unavailable: deny 计。", ""]
-    lines += _md_table(["门槛", "新增误拦（良性请求）", "减少的漏拦（探针：条 / 原被放行的）", "答不上来的 Jev 调用"], rows)
+    lines += _md_table(["门槛", "新增误拦（良性请求）", "减少的漏拦（探针：条 / 原被放行的）", "答不上来的 Jev 判定"], rows)
     lines += ["", f"分母：良性请求 {scan['benign_total']} 条，有置信度的放行 {scan['allows']} 条，"
-              f"Jev 调用 {scan['calls']} 次。只改判 jev_allow 的记录，以及复用了这类放行的 cached_allow；"
+              f"Jev 判定 {scan['judgements']} 次（分批的判定计一次）。只改判 jev_allow 的记录，以及复用了这类放行的 cached_allow；"
               "fast_allow 和拦截不受影响；已知缺口的回归用例不计入（按记分表规则只在 P7 里计）。",
               "这是一阶估计：一个请求改判后，后面的请求会少见到一些值，这部分连带影响没有算。"]
     if scan["cache_unresolved"]:

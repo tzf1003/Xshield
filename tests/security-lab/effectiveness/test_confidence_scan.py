@@ -12,7 +12,7 @@ from typing import Any
 
 from effectiveness.builders import decision, observation
 from effectiveness.report import render_markdown
-from effectiveness.score import CONFIDENCE_THRESHOLDS, allow_confidence, confidence_scan, score
+from effectiveness.score import CONFIDENCE_THRESHOLDS, _jev_calls, allow_confidence, confidence_scan, score
 
 META = {"commit": "abc1234", "mode": "lab", "jev": "record", "seed": 1,
         "started": "2026-11-13T00:00:00+00:00", "seconds": 0.5}
@@ -109,9 +109,17 @@ class ScanRuleTests(unittest.TestCase):
         setup = decision("setup", path="jev_allow", outcome="allowed", jev_record=probabilities(0.7, 0.9))
         refusal = decision("r1", path="jev_deny", outcome="blocked", jev_record=probabilities(0.9, 0.9))
         result = confidence_scan([row], [record, setup, refusal])
-        self.assertEqual(result["calls"], 3)
+        self.assertEqual(result["judgements"], 3)
         self.assertEqual(scan_at(0.6, result)["unanswered"], 1)  # the setup allow (0.7) is kept at 0.6
         self.assertEqual(scan_at(0.75, result)["unanswered"], 2)
+
+    def test_a_judgement_cut_into_batches_counts_once_as_a_judgement_and_per_batch_as_calls(self):
+        row, record = allowed("b10", confidence=0.55)
+        record["jev"]["batches"] = 3  # the record shows the least confident of three batches (docs/07 7.5.1)
+        result = confidence_scan([row], [record])
+        self.assertEqual(result["judgements"], 1)
+        self.assertEqual(_jev_calls(record), 3)
+        self.assertEqual(scan_at(0.6, result)["unanswered"], 1)
 
     def test_a_known_gap_case_is_left_out_as_score_leaves_it_out(self):
         # score()'s population rule: a regression case with status known_gap is measured only by P7.

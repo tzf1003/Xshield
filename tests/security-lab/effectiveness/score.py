@@ -262,8 +262,11 @@ def _jev_calls(rec: dict[str, Any]) -> int:
     jev = rec.get("jev")
     if not jev:
         return 0
-    # A record carries a jev object when Jev was called or the call was skipped by the limit.
-    return 0 if jev.get("failure") == CALL_LIMIT else 1
+    # A record carries a jev object when Jev was called or the call was skipped by the limit. A state cut into
+    # batches is one call per batch (docs/07 7.5.1), and the record shows only one of them.
+    if jev.get("failure") == CALL_LIMIT:
+        return 0
+    return int(jev.get("batches") or 1)
 
 
 def _jev_choice(rec: dict[str, Any], kind: str) -> str | None:
@@ -936,8 +939,9 @@ def confidence_scan(observations: list[dict[str, Any]], decisions: list[dict[str
     An allow below T becomes an unanswered judgement, which a site with on_jev_unavailable deny refuses. Only the
     jev_allow records change, and the cached_allow records that reuse one (trace.cache_source). fast_allow and every
     refusal stay as they are. A regression case with status known_gap is left out, as score() leaves it out of every
-    metric but P7. The count is first order: a request that changes can leave later requests with fewer values to
-    see, and that effect is not counted.
+    metric but P7. The judgements counted are the records that carry a Jev answer; a judgement cut into batches counts
+    once, since its record shows one batch. The count is first order: a request that changes can leave later requests
+    with fewer values to see, and that effect is not counted.
 
     Returns None when no record holds an allow with its probabilities, which is how a run with the ideal model is told
     apart: its probabilities are fixed, so the scan is not printed for it.
@@ -992,6 +996,6 @@ def confidence_scan(observations: list[dict[str, Any]], decisions: list[dict[str
         "benign_total": benign_total,
         "probe_allows": len(probe_values),
         "allows": len(confidence),
-        "calls": sum(_jev_calls(record) for record in decisions),
+        "judgements": sum(1 for record in decisions if _jev_calls(record)),
         "cache_unresolved": unresolved,
     }
