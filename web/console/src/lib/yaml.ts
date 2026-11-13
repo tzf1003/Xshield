@@ -6,6 +6,7 @@ import type {
   Advanced,
   FieldKindDeclaration,
   LearningSettings,
+  ObjectFunctionEntry,
   ObjectsSpec,
   SiteSpec,
 } from "../api/types.ts";
@@ -76,7 +77,8 @@ function orderDeclarations(list: FieldKindDeclaration[]): unknown[] {
 /**
  * The object map section in a fixed key order, so the same settings always compare equal. Learning settings at their
  * defaults are left out: the gateway refuses the key until it accepts learning settings, so a save that does not change
- * them must not carry it. The gateway's `classes` and `slots` are passed on exactly as they are.
+ * them must not carry it. The gateway's `classes` and `slots` are passed on exactly as they are. The function table is
+ * written with its entries in a fixed key order, and is left out when it is empty, as the gateway leaves it out.
  */
 function orderObjects(objects: ObjectsSpec | undefined): ObjectsSpec | undefined {
   if (!objects) return undefined;
@@ -89,7 +91,18 @@ function orderObjects(objects: ObjectsSpec | undefined): ObjectsSpec | undefined
   }
   if (objects.classes !== undefined) out.classes = objects.classes;
   if (objects.slots !== undefined) out.slots = objects.slots;
+  if (objects.functions !== undefined && objects.functions.length > 0) {
+    out.functions = objects.functions.map(orderFunction);
+  }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** A function in a fixed key order: its key and source, then the tier and the reliability when they are set. */
+function orderFunction(item: ObjectFunctionEntry): ObjectFunctionEntry {
+  const out: ObjectFunctionEntry = { key: item.key, source: item.source };
+  if (item.tier !== undefined) out.tier = item.tier;
+  if (item.reliability !== undefined) out.reliability = item.reliability;
+  return out;
 }
 
 function orderLearning(learning: LearningSettings): LearningSettings {

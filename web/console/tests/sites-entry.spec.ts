@@ -1,10 +1,11 @@
 // Registering an entry from one request (docs/06 6.4.10, flow A): the quick rule dialog opens from a request with no
 // session record, shows the candidate rules and their impact, saves a new version, and the site lists the entry.
 
-import { expect, type Page, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { setTheme, type Theme } from "./helpers/axe.ts";
 import { FIXTURE_NOW_MS, mockApi } from "./helpers/mock-api.ts";
 import { callsTo, expectDialogNoAxeViolations, freezeClock } from "./helpers/sites-flow.ts";
+import { openRowMenu } from "./helpers/trace.ts";
 
 /** juice, GET /rest/admin/application-configuration, no session: the page the SPA asks for before login. */
 const NO_SESSION = "req_01a1971fb50073a59298767186c1a22f";
@@ -12,11 +13,6 @@ const NO_SESSION = "req_01a1971fb50073a59298767186c1a22f";
 const WITH_SESSION = "req_01a19743ded079f89fa9c4b66aa44e9b";
 const DIALOG = "登记为入口 · juice";
 const PATH = "/rest/admin/application-configuration";
-
-/** The row menu of a request in the list (the ⋯ button names the request). */
-async function openRowMenu(page: Page, requestId: string): Promise<void> {
-  await page.getByRole("button", { name: `操作：${requestId}` }).click();
-}
 
 test("registering an entry from the request list saves the rule and the site lists it", async ({
   page,

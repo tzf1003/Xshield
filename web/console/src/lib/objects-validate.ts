@@ -7,13 +7,22 @@ import type {
   FieldKindDeclaration,
   LearningSettings,
   ObjectClassEntry,
+  ObjectFunctionEntry,
+  ObjectReliability,
   ObjectSlotEntry,
   ObjectSource,
   ObjectsSpec,
 } from "../api/types.ts";
 import { judgementKey, judgementWords } from "./judgement.ts";
 import { parsePattern } from "./patterns.ts";
-import { DECLARE_TEXT, LEARNING_TEXT, OBJECT_KIND_LABEL } from "./vocab.ts";
+import {
+  DECLARE_TEXT,
+  FUNCTION_TEXT,
+  LEARNING_TEXT,
+  OBJECT_JUDGEMENT,
+  OBJECT_KIND_LABEL,
+  OBJECT_SOURCE_LABEL,
+} from "./vocab.ts";
 
 export const FIELD_MAX = 32;
 export const KIND_MIN = 3;
@@ -23,6 +32,8 @@ export const SCOPE_MAX = 8;
 /** The gateway's limits of the object map (console design 6 A1). */
 export const CLASSES_MAX = 64;
 export const SLOTS_MAX = 2048;
+/** The function table holds as many entries as the positions do. */
+export const FUNCTIONS_MAX = 2048;
 export const CLASS_NAME_MAX = 32;
 export const KEY_MAX = 256;
 
@@ -265,6 +276,7 @@ export function objectChanges(
   }
   changes.push(...classChanges(before?.classes, after?.classes));
   changes.push(...slotChanges(before?.slots, after?.slots));
+  changes.push(...functionChanges(before?.functions, after?.functions));
   return changes;
 }
 
@@ -317,6 +329,64 @@ function slotChanges(
     if (!next.has(item.key)) changes.push(`对象表 －1：${positionWords(item.key)}`);
   }
   return changes;
+}
+
+/** The function table's entries that were added or removed, and whose tier, reliability or source changed. */
+function functionChanges(
+  before: readonly ObjectFunctionEntry[] | undefined,
+  after: readonly ObjectFunctionEntry[] | undefined,
+): string[] {
+  const old = new Map(
+    (before ?? []).map((item): [string, ObjectFunctionEntry] => [item.key, item]),
+  );
+  const next = new Map(
+    (after ?? []).map((item): [string, ObjectFunctionEntry] => [item.key, item]),
+  );
+  const changes: string[] = [];
+  for (const item of after ?? []) {
+    const previous = old.get(item.key);
+    if (previous === undefined) {
+      changes.push(FUNCTION_TEXT.added(item.key));
+      continue;
+    }
+    if (previous.tier !== item.tier) {
+      changes.push(FUNCTION_TEXT.tier(item.key, tierWords(previous.tier), tierWords(item.tier)));
+    }
+    if (previous.reliability !== item.reliability) {
+      changes.push(
+        FUNCTION_TEXT.reliability(
+          item.key,
+          reliabilityWords(previous.reliability),
+          reliabilityWords(item.reliability),
+        ),
+      );
+    }
+    if (previous.source !== item.source) {
+      changes.push(
+        FUNCTION_TEXT.source(
+          item.key,
+          OBJECT_SOURCE_LABEL[previous.source],
+          OBJECT_SOURCE_LABEL[item.source],
+        ),
+      );
+    }
+  }
+  for (const item of before ?? []) {
+    if (!next.has(item.key)) changes.push(FUNCTION_TEXT.removed(item.key));
+  }
+  return changes;
+}
+
+/** A function's tier in words: a function with no tier is open to every session. */
+function tierWords(tier: "admin" | undefined): string {
+  return tier === undefined ? FUNCTION_TEXT.open : FUNCTION_TEXT.admin;
+}
+
+/** A function's reliability in words; none when the entry carries none. */
+function reliabilityWords(reliability: ObjectReliability | undefined): string {
+  return reliability === undefined
+    ? FUNCTION_TEXT.noReliability
+    : OBJECT_JUDGEMENT.reliability[reliability].name;
 }
 
 /** A position in words for the change lists: a path parameter reads as its route and number (console design 4.1). */
@@ -515,7 +585,7 @@ export function parseObjects(
   if (value === undefined || value === null) return { ok: true, value: undefined };
   if (!isRecord(value)) return { ok: false, message: DECLARE_TEXT.shape("objects") };
   for (const key of Object.keys(value)) {
-    if (key !== "learning" && key !== "classes" && key !== "slots")
+    if (!["learning", "classes", "slots", "functions"].includes(key))
       return { ok: false, message: DECLARE_TEXT.unknownKey(key) };
   }
   const out: ObjectsSpec = {};
@@ -544,7 +614,51 @@ export function parseObjects(
     }
     out.slots = slots;
   }
+  if (value.functions !== undefined && value.functions !== null) {
+    if (!Array.isArray(value.functions)) return { ok: false, message: DECLARE_TEXT.functionsShape };
+    const functions: ObjectFunctionEntry[] = [];
+    for (const [index, item] of value.functions.entries()) {
+      const parsed = functionOf(item, index);
+      if (!parsed.ok) return parsed;
+      functions.push(parsed.value);
+    }
+    out.functions = functions;
+  }
   return { ok: true, value: out };
+}
+
+const FUNCTION_KEYS: readonly string[] = ["key", "source", "tier", "reliability"];
+
+/**
+ * One function of `objects.functions`, read strictly: the key, the source, and the admin tier and the reliability when
+ * they are set. A tier other than `admin`, and a reliability with no tier, are refused with their own sentence.
+ */
+function functionOf(
+  value: unknown,
+  index: number,
+): { ok: true; value: ObjectFunctionEntry } | { ok: false; message: string } {
+  const where = DECLARE_TEXT.functionShape(index + 1);
+  if (!isRecord(value)) return { ok: false, message: where };
+  for (const key of Object.keys(value)) {
+    if (!FUNCTION_KEYS.includes(key)) return { ok: false, message: DECLARE_TEXT.unknownKey(key) };
+  }
+  const { key, source, tier, reliability } = value;
+  if (typeof key !== "string" || !isSource(source)) return { ok: false, message: where };
+  if (tier !== undefined && tier !== "admin") {
+    return { ok: false, message: DECLARE_TEXT.functionTier(index + 1) };
+  }
+  if (reliability !== undefined && !isOneOf(RELIABILITIES, reliability)) {
+    return { ok: false, message: where };
+  }
+  if (reliability !== undefined && tier === undefined) {
+    return { ok: false, message: DECLARE_TEXT.functionReliabilityAlone(index + 1) };
+  }
+  const entry: ObjectFunctionEntry = { key, source };
+  if (tier !== undefined) entry.tier = "admin";
+  if (reliability !== undefined) {
+    entry.reliability = reliability as ObjectFunctionEntry["reliability"];
+  }
+  return { ok: true, value: entry };
 }
 
 /** The gateway's limits of one position key: `METHOD /template location`, 256 bytes at most (console design 6 A1). */
@@ -598,7 +712,74 @@ export function checkObjects(objects: ObjectsSpec | undefined): string[] {
     keys.add(item.key);
     if (!ids.has(item.class)) messages.push(DECLARE_TEXT.slotClassUnknown(item.key, item.class));
   });
+  const functions = objects?.functions ?? [];
+  if (functions.length > FUNCTIONS_MAX) messages.push(DECLARE_TEXT.functionCountMax);
+  const functionIds = new Set<string>();
+  functions.forEach((item, index) => {
+    if (!functionKeyOk(item.key)) messages.push(DECLARE_TEXT.functionShape(index + 1));
+    const id = functionKeyId(item.key);
+    if (functionIds.has(id)) messages.push(DECLARE_TEXT.functionDuplicate(item.key));
+    functionIds.add(id);
+    // The type allows `admin` only; a value read from elsewhere can hold any text, so the check reads it as text.
+    const tier: string | undefined = item.tier;
+    if (tier !== undefined && tier !== "admin") messages.push(DECLARE_TEXT.functionTier(index + 1));
+    if (item.reliability !== undefined && tier === undefined) {
+      messages.push(DECLARE_TEXT.functionReliabilityAlone(index + 1));
+    }
+  });
   return messages;
+}
+
+/**
+ * The shape of a function key as the gateway reads it: `METHOD /template`, one space between the two, the method three to
+ * seven capitals, the template from a slash, and 256 bytes at most. The spelling of the template is the gateway's to check.
+ */
+function functionKeyOk(key: string): boolean {
+  const parts = key.split(" ");
+  if (parts.length !== 2) return false;
+  const [method = "", template = ""] = parts;
+  return (
+    /^[A-Z]{3,7}$/.test(method) &&
+    template.startsWith("/") &&
+    new TextEncoder().encode(key).length <= KEY_MAX
+  );
+}
+
+/** The text a function key is compared by: the letters of its template do not count their case. */
+function functionKeyId(key: string): string {
+  const [method = "", template = ""] = key.split(" ");
+  return `${method} ${template.toLowerCase()}`;
+}
+
+/**
+ * The words of a gateway refusal about one function (`objects.functions[n]`, or `objects.functions` for the table as a
+ * whole, with the gateway's `reason`): the sentence the local check gives for that entry, so a refusal reads as the check
+ * would. Null for a refusal about another place, or for a reason the console has no sentence for.
+ */
+export function functionRefusalWords(
+  field: string,
+  reason: string | undefined,
+  objects: ObjectsSpec | undefined,
+): string | null {
+  const place = /^objects\.functions(?:\[(\d+)\])?$/.exec(field);
+  if (place === null || reason === undefined) return null;
+  const index = place[1] === undefined ? null : Number(place[1]) + 1;
+  switch (reason) {
+    case "too_many":
+      return index === null ? DECLARE_TEXT.functionCountMax : null;
+    case "key_invalid":
+      return index === null ? null : DECLARE_TEXT.functionShape(index);
+    case "duplicate_key": {
+      const key = index === null ? undefined : objects?.functions?.[index - 1]?.key;
+      return key === undefined ? null : DECLARE_TEXT.functionDuplicate(key);
+    }
+    case "function_tier_unsupported":
+      return index === null ? null : DECLARE_TEXT.functionTier(index);
+    case "reliability_without_judgement":
+      return index === null ? null : DECLARE_TEXT.functionReliabilityAlone(index);
+    default:
+      return null;
+  }
 }
 
 /** A path position read apart (console design 4.1): the route template, the segment the judge reads (`path[n]`,
