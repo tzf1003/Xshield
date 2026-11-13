@@ -586,42 +586,6 @@ def g2(lab: Lab) -> None:
               f"login_request_id {session.get('login_request_id')}")
 
 
-@scenario("G1", "JSON 凭证站点：登录响应里的长令牌绑定会话，入口放行；登录响应和列表都没给过的病人交 Jev 拦截")
-def g1(lab: Lab) -> None:
-    login = lab.expect("token login is judged and forwarded", lab.send(
-        "token.lab", "POST", "/api/token-login", json_body=login_form("doctor_a")),
-        Expect(200, "jev_allow", "allowed", True))
-    token = login.reply.json().get("authentication", {}).get("token", "")
-    lab.check("the token is longer than a value is kept", len(token) > 700, f"length {len(token)}")
-    bearer = f"Bearer {token}"
-    listed = lab.expect("list my patients with the token", lab.send(
-        "token.lab", "GET", "/api/patients", authorization=bearer),
-        Expect(200, "fast_allow", "allowed", True))
-    session = ((listed.record or {}).get("trace") or {}).get("session") or {}
-    lab.check("the session is bound to that login", session.get("login_request_id") == login.reply.request_id,
-              f"login_request_id {session.get('login_request_id')}, want {login.reply.request_id}")
-    lab.check("the binding left no reason for being unbound", session.get("login_unbound") is None,
-              f"login_unbound {session.get('login_unbound')}")
-    lab.expect("open patient D, which neither the login nor the list showed", lab.send(
-        "token.lab", "GET", "/api/patients/PT-7004", authorization=bearer),
-        Expect(403, "jev_deny", "blocked", False))
-    lab.origin_direct("G1 patient D", "GET", "/api/patients/PT-7004", authorization=bearer)
-
-
-@scenario("G2", "JSON 凭证站点：源站没发过的长令牌访问入口，判定记录写 login_unmatched")
-def g2(lab: Lab) -> None:
-    unknown = new_long_token()
-    sent = lab.expect("an entry with a token the origin never issued", lab.send(
-        "token.lab", "GET", "/api/patients", authorization=f"Bearer {unknown}"),
-        Expect(401, "fast_allow", "allowed", True))
-    session = ((sent.record or {}).get("trace") or {}).get("session") or {}
-    lab.check("no held login carries it, and the record says so",
-              session.get("login_unbound") == "login_unmatched",
-              f"login_unbound {session.get('login_unbound')}")
-    lab.check("no login is bound to the session", session.get("login_request_id") is None,
-              f"login_request_id {session.get('login_request_id')}")
-
-
 @scenario("W1", "声明了身份位置的站点：判定记录带会话的用户标签；换账号标签不同；未声明的站点不写身份")
 def w1(lab: Lab) -> None:
     def identity_of(sent: Sent) -> dict:
