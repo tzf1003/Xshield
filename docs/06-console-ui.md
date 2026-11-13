@@ -1018,6 +1018,7 @@
 | `SITE_CONFIG_ENTRIES_INVALID` | 入口至少一条、最多 64 条；每条以 `/` 开头，`*` 只能在末尾，不能含查询串、`.` 或 `..` 段 |
 | `SITE_CONFIG_BYPASS_INVALID` | 绕过最多 64 条，规则格式同入口 |
 | `SITE_CONFIG_ADVANCED_INVALID` | 高级判定参数有误：{本地校验指出的具体项，例如“Jev 超时需在 100–30000 ms 之间”} |
+| `SITE_CONFIG_OBJECTS_INVALID` | 对象表的配置有误，请检查对象表的各项；功能表的条目被拒绝时，指出具体的一项，例如“对象表第 3 个功能的档位只能是 admin”（见 7.9.18） |
 | `INVALID_FILTER` | 筛选条件有误：{field} |
 | `WINDOW_TOO_LARGE` | 时间范围最长 7 天 |
 | `TOO_MANY_IDS` | 一次最多对照 1000 个请求 ID |
