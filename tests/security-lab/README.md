@@ -6,6 +6,7 @@
 - `fake_jev.py`：脚本化的 Jev 假服务，应答固定，不调用模型。
 - `labkit.py`：`test_idor_lab.py` 与 clinic 流量共用的管道，负责启动 edge、发送请求，并把判定记录同时写入文件。
 - 真实的 `xshield-edge` 二进制，站点由 `XSHIELD_EDGE_SITES_FILE` 提供。
+- `effectiveness/`：防护有效性度量（`scripts/measure_effectiveness.py`），见下文“防护有效性度量”。
 
 驱动逐条发送请求，核对三件事：客户端收到的状态码、源站是否收到了这个请求、edge 为该请求写下的判定记录（`decision_path`、`outcome`、`jev.failure`）。拦截类场景还会直接问源站一次，证明被拦的对象确实能从源站拿到。
 
@@ -120,6 +121,23 @@ python3 -m unittest discover -s tests/security-lab -p "test_*.py"         # 源�
 训练段在观察模式（`TRAINING_MODE`，`observe`）下经网关运行，观察行的 `mode` 与之一致，`category` 为 `train_<步骤名>`，便于按步骤看误拦率。
 
 `--check` 核对四件事。第一，每个 `learnable` 位置的键和每个 `non_objects` 键都在判定记录里出现过（请求位置看 `trace.values[].slot`，响应位置看 `trace.response.fingerprints`）。第二，没有任何记录是拦截、本应拦截、未经判定或 Jev 失败。第三，每个请求的状态码符合旅程的预期。第四，四项证据达到学习规则判定 `high` 所需的数量。阈值沿用 `crates/xshield-core/src/context/learning.rs`：`SESSIONS_MIN` 为 5，`VOTES_MIN` 为 20，`high` 需要两倍的单位数或票数，公共档的一致程度需要 980‰。预算是 30 秒。
+
+## 防护有效性度量
+
+`scripts/measure_effectiveness.py` 度量防护的效果，代码在 `effectiveness/`。不带参数等同于 `lab --mode quick --jev ideal`，约几十秒：
+
+```sh
+python3 scripts/measure_effectiveness.py                                        # 快速模式，理想模型
+python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   # 只跑这些类别，不与基线比较
+```
+
+- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）在有 PostgreSQL 时运行：它从训练段的判定学到对象表，作为 `clinic-learned` 站点进入防护段（只跑旅程和探针，回归用例仍只在各自的站点上跑）；没有运行时报告写明 SKIP 的原因。完整模式（批次 7）和 `--jev record|replay`（批次 9）以退出码 2 拒绝。
+- 防护段在 `clinic-none`、`clinic-truth`、带每会话 Jev 额度的 `clinic-truth-limit` 和观察模式的 `clinic-truth-observe` 上运行：攻击探针（`corpus/attacks.jsonl`）、良性文本（`corpus/benign.jsonl`）、良性旅程，以及 `effectiveness/regressions.py` 里方案 4.5 的回归用例。载荷含路径分隔符、放不进一个路径段的，不送到“路径段”注入点，报告里分别计数。
+- 理想模型是 `fake_jev.py` 传入攻击文本时的判定：攻击只看文本是否完整出现在路径或某个值里（两边先规范化）；访问规则与脚本相同，但值带 `object` 时，`seen_as` 里括号中类别不同的展示不算数。不传攻击文本时，判定与之前相同。
+- `--jev live` 改用真实 Jev，需要环境变量 `XSHIELD_JEV_ENDPOINT` 和 `XSHIELD_JEV_API_KEY`，缺一即以退出码 2 退出。密钥只从环境变量读取，不写入报告和日志。页码当处方号这条探针只在这个模式下发送，理想模型比较不了没有类别的位置。
+- 用例可以带能力要求（`requires`）：`tiers`（档位）、`functions`（功能表）、`classes`（对象表）。配置缺少所需能力时，用例显示为“需要…”，不计分。`none` 没有对象表，需要对象表的用例只在 `clinic-truth` 上计分。
+- 已知缺口：判定器还不读功能表，所以 `clinic-truth` 也显示“需要功能表”的有 `p0-3-function-level`、医生的 `GET /api/admin/search`（旅程）。功能级判定合入后，补上 `clinic-truth` 的功能表并把 `p0-3-function-level` 改为 `must`。
+- 退出码：门槛全部通过为 0，有门槛失败为 1，用法或环境错误为 2。
 
 ## 边界
 
