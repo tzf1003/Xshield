@@ -30,6 +30,18 @@ export function callsTo(page: Page, method: string, path: string): ServedRequest
 }
 
 /**
+ * Waits until the open antd modal named `name` has finished its zoom-in motion. The box moves while the motion
+ * runs, and a press on one of its buttons during the motion can be released on another element, so the click lands
+ * on the modal and the button's action never runs (the race openRowMenu waits out). toBeVisible passes at once, so
+ * wait for the motion classes to go.
+ */
+export async function untilModalSettled(page: Page, name: string): Promise<void> {
+  const dialog = page.getByRole("dialog", { name });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).not.toHaveClass(/-(appear|enter|leave)/);
+}
+
+/**
  * Axe over the open dialog only (antd's modal box). The page under the dialog's mask belongs to another
  * feature and is checked by that feature's spec: axe reads its colours without the mask's darkening, so a
  * whole-page check reports what sits under the dialog as well as the dialog itself.
