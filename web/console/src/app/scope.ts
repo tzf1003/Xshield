@@ -59,19 +59,6 @@ export function scopeQuery(
   return qs({ ...scopeParams(scope), ...extra });
 }
 
-/** Returns the current location's search with `patch` applied; `undefined` removes a key. */
-export function patchSearch(
-  previous: Record<string, unknown>,
-  patch: Record<string, string | number | boolean | undefined>,
-): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...previous };
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === undefined || value === "" || value === false) delete next[key];
-    else next[key] = value;
-  }
-  return next;
-}
-
 /** Keeps only the global part of a search, for links that should carry the scope along. */
 export function keepScope(previous: Record<string, unknown>): GlobalSearch {
   return validateGlobal(previous);

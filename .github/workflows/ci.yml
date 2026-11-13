@@ -42,9 +42,9 @@ jobs:
           echo "$files"
           match() { if printf '%s\n' "$files" | grep -Eq "$1"; then echo true; else echo false; fi; }
           {
-            echo "web=$(match '^(web/console/|tests/site-config/|\.github/)')"
-            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|migrations/|tests/site-config/|\.github/)')"
-            echo "fuzz=$(match '^(crates/xshield-core/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|tests/site-config/|\.github/)')"
+            echo "web=$(match '^(web/console/|\.github/)')"
+            echo "images=$(match '^(Cargo\.(toml|lock)|rust-toolchain\.toml|Dockerfile|\.dockerignore|crates/|migrations/|\.github/)')"
+            echo "fuzz=$(match '^(crates/xshield-core/|Cargo\.(toml|lock)|rust-toolchain\.toml|fuzz/|\.github/)')"
           } >> "$GITHUB_OUTPUT"
 
   validate:

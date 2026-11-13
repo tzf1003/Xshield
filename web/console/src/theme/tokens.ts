@@ -46,16 +46,6 @@ export const palettes: Record<ThemeMode, Record<string, string>> = {
   },
 };
 
-/** Status colours are fixed across themes and always paired with an icon and a word. */
-export const STATUS = {
-  blocked: "#d03b3b",
-  would: "#fab219",
-  unjudged: "#ec835a",
-  ok: "#0ca30c",
-} as const;
-
-export const SERIES_ORDER = ["s1", "s2", "s3"] as const;
-
 export const density = {
   comfortable: { row: 40, control: 36 },
   compact: { row: 32, control: 32 },

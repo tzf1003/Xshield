@@ -393,21 +393,6 @@ export function valueCounts(
 
 // ------------------------------------------------------------------ Jev answer
 
-/** The confidence of a call: the smaller of the two top probabilities (docs/07 7.9.3). */
-export function jevConfidence(jev: JevRecord): number | null {
-  const top = (probabilities: Partial<Record<string, number>> | null): number | null => {
-    if (!probabilities) return null;
-    const values = Object.values(probabilities).filter(
-      (value): value is number => typeof value === "number",
-    );
-    return values.length === 0 ? null : Math.max(...values);
-  };
-  const access = top(jev.access);
-  const attack = top(jev.attack);
-  if (access === null || attack === null) return null;
-  return Math.min(access, attack);
-}
-
 /** Jev's answers in words: "越权 DENY 86% · 无攻击 BENIGN 99%". */
 export function answerLine(jev: JevRecord): string {
   const parts: string[] = [];

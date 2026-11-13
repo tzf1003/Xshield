@@ -1,5 +1,5 @@
 //! Fuzz targets for the parsers that read bytes from outside the trust
-//! boundary (feasibility P1 item 8, docs/20 "Fuzz").
+//! boundary.
 //!
 //! Each target is a plain function from bytes to nothing that panics only
 //! when the parser breaks its own contract: it must never panic on any input,
@@ -19,13 +19,8 @@
 #![allow(clippy::missing_panics_doc)]
 
 use xshield_core::{
-    path_shape::{PATH_SHAPE_BYTES_MAX, path_shape as shape, valid_path_shape},
-    site::{
-        build::fingerprint,
-        config::SiteConfig,
-        find_unsupported_edge_feature,
-        upstream::{UpstreamAllowance, parse_upstream_socket},
-    },
+    context::SiteSpec,
+    path_template::{canonical_path, is_templatable, normalize, position_template},
 };
 
 /// One fuzz target: panics only when the parser breaks its contract.
@@ -33,74 +28,48 @@ pub type Target = fn(&[u8]);
 
 /// Every target, by the name of its `fuzz_targets/<name>.rs` and
 /// `seeds/<name>/` directory.
-///
-/// `xshield-gateway` was deleted (docs/05-v3-removal.md); the targets that
-/// exercised its parsers (`proxy_header`, `route_admission`,
-/// `query_pagination`, `routing_authority`, `request_crypto`,
-/// `auth_binding`, `strict_json`, `sensor_batch`) went with it. The ones
-/// left here only exercise `xshield-core` parsers, which are unaffected.
-pub const TARGETS: &[(&str, Target)] = &[
-    ("path_shape", path_shape),
-    ("site_config", site_config),
-    ("page_fingerprint", page_fingerprint),
-    ("upstream_address", upstream_address),
-];
+pub const TARGETS: &[(&str, Target)] =
+    &[("request_path", request_path), ("site_config", site_config)];
 
-/// Splits an input into at most `N` text fields at newlines; the last field
-/// keeps any further newlines. Invalid UTF-8 is replaced, so every field is
-/// text the HTTP layer could have handed over after its own decoding.
-fn fields<const N: usize>(data: &[u8]) -> [String; N] {
-    let mut out = std::array::from_fn(|_| String::new());
-    let mut rest = data;
-    for (index, slot) in out.iter_mut().enumerate() {
-        let end = if index + 1 == N {
-            rest.len()
-        } else {
-            rest.iter()
-                .position(|byte| *byte == b'\n')
-                .unwrap_or(rest.len())
-        };
-        *slot = String::from_utf8_lossy(&rest[..end]).into_owned();
-        rest = rest.get(end + 1..).unwrap_or_default();
-    }
-    out
-}
-
-/// The audit shape of an unrouted path: always a valid, bounded shape, and
-/// never a copy of a segment that could carry an identifier.
-pub fn path_shape(data: &[u8]) {
+/// A request path as the gateway reads it off the wire. The canonical
+/// spelling is absolute, has no empty or dot segment, and is its own
+/// canonical spelling; a display template keeps the segment count.
+pub fn request_path(data: &[u8]) {
     let path = String::from_utf8_lossy(data);
-    let result = shape(&path);
-    assert!(valid_path_shape(&result), "{result:?}");
-    assert!(result.len() <= PATH_SHAPE_BYTES_MAX);
-}
-
-/// A site configuration as the control API receives it: typed parse, then
-/// validation, then the classification of refused bodies.
-pub fn site_config(data: &[u8]) {
-    if let Ok(config) = serde_json::from_slice::<SiteConfig>(data) {
-        let _ = config.validate();
+    if let Some(canonical) = canonical_path(&path) {
+        assert!(canonical.starts_with('/'), "{canonical:?}");
+        if canonical != "/" {
+            assert!(
+                canonical
+                    .split('/')
+                    .skip(1)
+                    .all(|segment| !matches!(segment, "" | "." | "..")),
+                "{canonical:?}"
+            );
+        }
+        assert_eq!(canonical_path(&canonical).as_deref(), Some(&*canonical));
+        assert_eq!(is_templatable(&path), normalize(&canonical).is_some());
     } else {
-        let _ = find_unsupported_edge_feature(data);
+        assert!(!is_templatable(&path));
+        assert_eq!(position_template(&path), path);
+    }
+    if let Some(template) = normalize(&path) {
+        assert_eq!(template.split('/').count(), path.split('/').count());
     }
 }
 
-/// A frontend build's page: the injection offset points at the first
-/// lowercase `</head>` inside the page.
-pub fn page_fingerprint(data: &[u8]) {
-    if let Ok(build) = fingerprint(data) {
-        assert_eq!(build.bytes, data.len());
-        assert_eq!(
-            data.get(build.injection_offset..build.injection_offset + 7),
-            Some(&b"</head>"[..])
-        );
-        assert_eq!(build.origin_sha256.len(), 64);
+/// A site configuration as the control API receives it and the gateway loads
+/// it: the first line is a request path, the rest the JSON document. A refused
+/// document only returns an error; an accepted one answers the questions the
+/// gateway asks of every request without panicking.
+pub fn site_config(data: &[u8]) {
+    let text = String::from_utf8_lossy(data);
+    let (path, document) = text.split_once('\n').unwrap_or(("/", &text));
+    if let Ok(site) = SiteSpec::from_json(document) {
+        assert!(!site.name().is_empty());
+        assert!(!site.hosts().is_empty());
+        assert_eq!(site.is_entry(path), site.matching_entry(path).is_some());
+        assert_eq!(site.is_bypass(path), site.matching_bypass(path).is_some());
+        let _ = site.names_from_body(path);
     }
-}
-
-/// Upstream socket addresses and the private-network allowance list.
-pub fn upstream_address(data: &[u8]) {
-    let [address, allowance] = fields::<2>(data);
-    let _ = parse_upstream_socket(&address);
-    let _ = UpstreamAllowance::parse_admitted(&allowance);
 }

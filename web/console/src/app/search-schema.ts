@@ -302,6 +302,3 @@ export function validateLogin(raw: Record<string, unknown>): LoginSearch {
       : undefined;
   return { next };
 }
-
-/** The default range, exported so pages and links agree on what "no range" means. */
-export { DEFAULT_RANGE as FALLBACK_RANGE } from "../lib/time-range.ts";

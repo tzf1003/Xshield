@@ -718,38 +718,6 @@ fn call_row(row: &PgRow) -> Result<CallRow, LearningStoreError> {
     })
 }
 
-/// The model's use since `since_millis`, for every site.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Usage {
-    /// Questions asked.
-    pub calls: i64,
-    /// Questions without an accepted answer.
-    pub failed: i64,
-    /// The 95th percentile of the time the model took, when there was a call.
-    pub p95_ms: Option<i64>,
-}
-
-/// The model's use since `since_millis`.
-///
-/// # Errors
-/// Returns [`LearningStoreError`] on a database failure.
-pub async fn usage_since(pool: &PgPool, since_millis: i64) -> Result<Usage, LearningStoreError> {
-    let row = sqlx::query(
-        "SELECT count(*) AS calls,
-             count(*) FILTER (WHERE failure IS NOT NULL) AS failed,
-             percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms)::bigint AS p95_ms
-         FROM object_agent_calls WHERE asked_millis >= $1",
-    )
-    .bind(since_millis)
-    .fetch_one(pool)
-    .await?;
-    Ok(Usage {
-        calls: row.try_get("calls")?,
-        failed: row.try_get("failed")?,
-        p95_ms: row.try_get("p95_ms")?,
-    })
-}
-
 /// The model's last call, for every site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastCall {

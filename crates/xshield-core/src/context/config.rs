@@ -437,20 +437,6 @@ impl SiteSpec {
     pub fn names_from_body(&self, path: &str) -> bool {
         route::names_from_body(&self.routes, path)
     }
-
-    /// Whether `host` (any case, optional `:port`) belongs to this site.
-    #[must_use]
-    pub fn serves_host(&self, host: &str) -> bool {
-        let bare = host.rsplit_once(':').map_or(host, |(name, port)| {
-            if port.bytes().all(|byte| byte.is_ascii_digit()) {
-                name
-            } else {
-                host
-            }
-        });
-        let bare = bare.to_ascii_lowercase();
-        self.hosts.contains(&bare)
-    }
 }
 
 fn parse_patterns(raw: &[String]) -> Option<Vec<PathPattern>> {
@@ -543,14 +529,6 @@ mod tests {
         assert_eq!(site.on_jev_unavailable(), OnJevUnavailable::Deny);
         assert_eq!(site.hosts(), ["emr.example.com"]);
         assert!(!site.is_bypass("/static/app.js"));
-    }
-
-    #[test]
-    fn hosts_match_ignoring_case_and_port() {
-        let site = SiteSpec::from_json(MINIMAL).unwrap();
-        assert!(site.serves_host("emr.EXAMPLE.com:5443"));
-        assert!(!site.serves_host("evil.example.com"));
-        assert!(!site.serves_host("emr.example.com.evil.test"));
     }
 
     #[test]

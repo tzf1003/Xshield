@@ -18,7 +18,7 @@ import type {
   ObjectsSpec,
   SiteSpec,
 } from "../../../api/types.ts";
-import { declarationKey, fieldKey, kindKey, pathSlotOf } from "../../../lib/objects-validate.ts";
+import { declarationKey, fieldKey, kindKey } from "../../../lib/objects-validate.ts";
 
 /** The name a candidate goes by: its class's name, or its kind while the map has no class for it yet. */
 export function candidateName(candidate: BootstrapCandidate): string {
@@ -51,12 +51,6 @@ export function scopeOfKey(key: string): string {
   return `${cut < 0 ? path : path.slice(0, cut)}*`;
 }
 
-/** The number of a path position among the template's parameters (`path[4]` of `/api/doctors/{id}/files/{id}` is
- *  the second, 2); null when the position is not a parameter. */
-export function pathParamOrdinal(key: string): number | null {
-  return pathSlotOf(key)?.ordinal ?? null;
-}
-
 /** The route template of a flow as a path filter: `/doctor/{id}/files` becomes `/doctor/*`. */
 export function routeFilter(route: string): string {
   const cut = route.indexOf("{");
@@ -67,18 +61,6 @@ export function routeFilter(route: string): string {
 export function flowSearch(flow: ObjectFlow, cls: string | null): string {
   const terms = [cls === null ? null : `object:${cls}`, `path:${routeFilter(flow.route)}`];
   return terms.filter((term): term is string => term !== null).join(" ");
-}
-
-/** The entry a position gets when the user confirms it as `cls`: a field declaration when a field names it, otherwise
- *  an object slot (path positions). `source` is `rule` for the proposal and `admin` for a class the user changed. */
-export function entryFor(
-  slot: Pick<ObjectSlotRow, "key">,
-  cls: string,
-  source: ObjectSource,
-): ObjectConfigEntry {
-  const field = fieldOfKey(slot.key);
-  if (field === null) return { key: slot.key, class: cls, source };
-  return { field, kind: cls, in: [scopeOfKey(slot.key)] };
 }
 
 /** The object slot a position gets when its class is confirmed (console design 4.3). */

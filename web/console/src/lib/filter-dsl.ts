@@ -109,11 +109,6 @@ const API_NAME: Record<FilterKey, string> = {
   site: "site",
 };
 
-const DSL_KEY: Record<string, FilterKey> = {
-  ...Object.fromEntries(FILTER_KEYS.map((key) => [API_NAME[key], key] as const)),
-  api_unknown: "api",
-};
-
 function listOf(value: string, allowed: string[]): string | null {
   const items = value.split(",");
   if (items.some((item) => item.length === 0)) return null;
@@ -326,9 +321,4 @@ export function serializeFilter(params: FilterParams): string {
     else terms.push(`${key}:${value}`);
   }
   return terms.join(" ");
-}
-
-/** The DSL key that a parameter name belongs to, for labels and the chips of an active filter. */
-export function dslKeyOf(apiName: string): FilterKey | undefined {
-  return DSL_KEY[apiName];
 }

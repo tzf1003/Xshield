@@ -12,7 +12,6 @@ import type {
   JevHealth,
   JevRoute,
   LoginUnbound,
-  ModelSource,
   NameReasonCode,
   ObjectEventKind,
   ObjectReason,
@@ -21,7 +20,6 @@ import type {
   ObjectSource,
   ObjectState,
   Outcome,
-  RefusedReason,
   ResponseSkip,
   SuggestionKind,
   UnknownApiReason,
@@ -181,13 +179,6 @@ export const LOGIN_UNBOUND_TEXT: Record<LoginUnbound, { name: string; desc: stri
   },
 };
 
-export const REFUSED_LABEL: Record<RefusedReason, string> = {
-  unauthenticated: "未登录",
-  forbidden: "越权或攻击，已拦截",
-  body_not_inspectable: "请求体不可判定",
-  unknown_site: "未知站点",
-};
-
 export const SUGGESTION_INFO: Record<SuggestionKind, string> = {
   entry_candidate: "登记入口",
   bypass_candidate: "加入绕过",
@@ -335,11 +326,6 @@ export const MODEL_ROUTE_LABEL: Record<JevRoute, string> = {
 export const MODEL_PROVIDER_LABEL: Record<AgentProvider, string> = {
   gateway: "Vercel AI Gateway（OpenAI 兼容）",
   custom: "自定义 OpenAI 兼容地址",
-};
-
-export const MODEL_SOURCE_LABEL: Record<ModelSource, string> = {
-  console: "控制台",
-  env: "环境变量",
 };
 
 /** The words of a field in a change list or a history row. */

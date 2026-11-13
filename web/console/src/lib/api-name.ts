@@ -61,12 +61,6 @@ export function unknownReasonText(code: string, source?: string): string {
   return info.text.replace("{src}", sourceName(source));
 }
 
-/** The reason's hover text; the same words for an unknown code, which has none. */
-export function unknownReasonDesc(code: string): string {
-  if (!Object.hasOwn(UNKNOWN_API_REASON, code)) return "这个原因的说明还没有收录";
-  return UNKNOWN_API_REASON[code as keyof typeof UNKNOWN_API_REASON].desc;
-}
-
 /** The unknown-interface line of the list, the detail and the explanation (design 4.2). */
 export function unknownTitle(api: ApiUnknown): string {
   return `${API_LABEL.unknown}：${unknownReasonText(api.unknown, api.source)}，按${API_LABEL.unknown}处理（不算入口、不走绕过）`;

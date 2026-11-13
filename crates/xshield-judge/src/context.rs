@@ -33,8 +33,6 @@ pub use xshield_core::kind::LONG_VALUE_CHARS;
 /// Default time a positive judgement is reused, in minutes (docs/01 section
 /// 1.4 step 5). A site may change it with `advanced.allow_cache_minutes`.
 pub const CACHE_MINUTES: u32 = 10;
-/// [`CACHE_MINUTES`] in milliseconds.
-pub const CACHE_MS: u64 = 10 * 60 * 1000;
 const ENTRIES_MAX: usize = 16;
 const CACHE_MAX: usize = 512;
 /// Most JSON login responses held for a credential no session has taken yet (docs/01 section
@@ -1372,6 +1370,7 @@ mod tests {
 
     #[test]
     fn positive_judgements_expire() {
+        const CACHE_MS: u64 = 600_000;
         let key = key();
         let mut session = SessionContext::new(0);
         let cache_key = key.mac("cache", b"GET /x");

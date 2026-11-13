@@ -44,13 +44,3 @@ export function RequestLink({ id, className = "reqid" }: { id: string; className
     </Link>
   );
 }
-
-/** The link and a copy button for the full identifier. */
-export function RequestIdChip({ id }: { id: string }) {
-  return (
-    <span className="row" style={{ gap: 4, flexWrap: "nowrap" }}>
-      <RequestLink id={id} />
-      <CopyButton text={id} />
-    </span>
-  );
-}

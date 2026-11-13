@@ -6,7 +6,6 @@ const REQUEST_ID_IN_TEXT = /req_[0-9a-f]{32}/g;
 const SESSION_LABEL = /^[0-9a-f]{16}$/;
 const SESSION_PREFIX = /^[0-9a-f]{1,16}$/;
 const SITE_NAME = /^[a-z0-9_-]{1,64}$/;
-const SITE_NAME_LOOSE = /^[a-z0-9_-]+$/;
 
 export function isRequestId(value: string): boolean {
   return REQUEST_ID.test(value);
@@ -22,11 +21,6 @@ export function isSessionPrefix(value: string): boolean {
 
 export function isSiteName(value: string): boolean {
   return SITE_NAME.test(value);
-}
-
-/** Lower-case site name shape without the length limit, used while a name is still being typed. */
-export function looksLikeSiteName(value: string): boolean {
-  return SITE_NAME_LOOSE.test(value);
 }
 
 /** Unix milliseconds encoded in the first 12 hex digits after `req_` (7.3.1), or null. */

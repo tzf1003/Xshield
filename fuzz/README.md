@@ -1,22 +1,15 @@
 # 模糊测试
 
-这里对读取外部字节的解析器做覆盖引导的模糊测试，对应可行性建议 P1 的“外部解析器模糊测试”和 docs/20 的 Fuzz 一行。本 crate 是独立的 Cargo 工作区，产品构建与 `cargo deny` 都不包含它：libFuzzer 只在这里编译，不会进入任何镜像。
+这里对读取外部字节的解析器做覆盖引导的模糊测试。本 crate 是独立的 Cargo 工作区，产品构建与 `cargo deny` 都不包含它：libFuzzer 只在这里编译，不会进入任何镜像。
 
 ## 目标
 
 每个目标定义在 `src/lib.rs`。对任意输入都不能 panic；对解析器接受的输入，还要满足注释里写明的不变量。
 
-`xshield-gateway` was deleted (docs/05-v3-removal.md); the targets that exercised its
-parsers (`proxy_header`、`route_admission`、`query_pagination`、`routing_authority`、
-`request_crypto`、`auth_binding`、`strict_json`、`sensor_batch`) went with it. What is
-left only exercises `xshield-core` parsers.
-
 | 目标 | 解析器 | 额外检查 |
 | --- | --- | --- |
-| `path_shape` | 未匹配路径的审计形状 | 结果总是合法形状且有上界 |
-| `site_config` | 控制面收到的站点配置 | 解析、校验与拒绝分类都不 panic |
-| `page_fingerprint` | 前端构建页面指纹 | 注入偏移指向第一个小写 `</head>` |
-| `upstream_address` | 上游地址与私网放行列表 | 不 panic |
+| `request_path` | 请求路径的规范写法与展示模板（`path_template`） | 规范写法是绝对路径，没有空段和点段，再规范一次不变；模板不改变段数 |
+| `site_config` | 控制面收到、网关加载的站点配置（`SiteSpec`） | 拒绝时只返回错误；接受后入口与旁路匹配都不 panic，且两种问法答案一致 |
 
 ## 运行
 

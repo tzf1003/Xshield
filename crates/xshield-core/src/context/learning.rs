@@ -173,13 +173,6 @@ impl Evidence {
         self.denials.insert((denial.session, denial.day));
     }
 
-    /// Drops the evidence older than the window ending on `today`.
-    pub fn prune(&mut self, today: u64) {
-        let oldest = today.saturating_sub(WINDOW_DAYS - 1);
-        self.votes.retain(|(_, day), _| *day >= oldest);
-        self.denials.retain(|(_, day)| *day >= oldest);
-    }
-
     /// The number of votes.
     #[must_use]
     pub fn votes(&self) -> u32 {
@@ -359,12 +352,6 @@ pub fn contradicts(
 pub fn kind_share(evidence: &Evidence, map: &ObjectMap, kind: &str) -> u32 {
     let count = evidence.kinds(map).get(kind).copied().unwrap_or(0);
     share_of(count, evidence.votes())
-}
-
-/// Whether a position unseen since `last_day` is retired on `today`.
-#[must_use]
-pub fn is_retired(last_day: u64, today: u64) -> bool {
-    today.saturating_sub(last_day) >= RETIRE_DAYS
 }
 
 /// The UTC day a time in milliseconds falls on, counted from the epoch.
@@ -1173,21 +1160,6 @@ mod tests {
     }
 
     #[test]
-    fn evidence_older_than_the_window_is_dropped() {
-        let mut evidence = Evidence::default();
-        evidence.add_vote(vote("a", 10, None));
-        evidence.add_vote(vote("b", 11, None));
-        evidence.add_vote(vote("c", 16, None));
-        // The window ending on day 16 holds days 10 to 16 when it is seven days.
-        evidence.prune(16);
-        assert_eq!(evidence.votes(), 3);
-        evidence.prune(17);
-        assert_eq!(evidence.votes(), 2);
-        evidence.prune(20);
-        assert_eq!(evidence.votes(), 1);
-    }
-
-    #[test]
     fn a_proposal_needs_the_thresholds_and_no_refusal() {
         let map = map();
         let from = Some("GET /api/appointments [].doc_id");
@@ -1376,13 +1348,6 @@ mod tests {
         assert_eq!(kind_share(&mixed, &map, "doctor"), 900);
         assert_eq!(kind_share(&mixed, &map, "document"), 100);
         assert_eq!(kind_share(&Evidence::default(), &map, "doctor"), 0);
-    }
-
-    #[test]
-    fn a_position_unseen_for_thirty_days_is_retired() {
-        assert!(!is_retired(100, 129));
-        assert!(is_retired(100, 130));
-        assert!(!is_retired(200, 100));
     }
 
     #[test]

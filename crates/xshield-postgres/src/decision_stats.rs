@@ -11,8 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, QueryBuilder, Row};
 
 use crate::decision_log_store::{
-    DETAIL_COLUMNS, JEV_CALLED_SQL, JEV_DEMAND_SQL, RequestDetail, RequestSummary, SUMMARY_COLUMNS,
-    summary_from_row,
+    JEV_CALLED_SQL, JEV_DEMAND_SQL, RequestSummary, SUMMARY_COLUMNS, summary_from_row,
 };
 
 /// Most rows one whole-window aggregate reads (docs/07 section 7.9.1).
@@ -1071,38 +1070,6 @@ pub async fn breakdown(pool: &PgPool, scope: &Scope) -> Result<Vec<Breakdown>, s
         });
     }
     Ok(breakdown)
-}
-
-/// The full rows of the requests whose trace names `request_ids`, found
-/// through their time window. Used to show the request a value came from.
-///
-/// # Errors
-/// Returns [`sqlx::Error`] when the query fails.
-pub async fn full_rows_in_window(
-    pool: &PgPool,
-    request_ids: &[String],
-    from_millis: i64,
-    to_millis: i64,
-) -> Result<Vec<RequestDetail>, sqlx::Error> {
-    let rows = sqlx::query(AssertSqlSafe(format!(
-        "SELECT {DETAIL_COLUMNS} FROM decision_log
-         WHERE request_id = ANY($1) AND at_millis BETWEEN $2 AND $3"
-    )))
-    .bind(request_ids.to_vec())
-    .bind(from_millis)
-    .bind(to_millis)
-    .fetch_all(pool)
-    .await?;
-    rows.iter()
-        .map(|row| {
-            Ok(RequestDetail {
-                summary: summary_from_row(row)?,
-                trace: row.try_get("trace")?,
-                jev: row.try_get("jev")?,
-                request_headers: row.try_get("request_headers")?,
-            })
-        })
-        .collect()
 }
 
 /// The server version of the database, for the system page.
