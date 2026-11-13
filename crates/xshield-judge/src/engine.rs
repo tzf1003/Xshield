@@ -3762,27 +3762,53 @@ mod tests {
     #[tokio::test]
     async fn a_long_token_the_request_sent_is_not_held() {
         let fake = FakeJev::new();
-        fake.answer("DENY", "BENIGN");
         let judge = judge(&fake);
         let site = basket_site();
         let token = long_login_token(1);
-        // The login request carries the token, and the origin echoes it back.
-        let sent = [judge.key.mac("value", token.as_bytes())];
+        let body = login_body(&token, 6);
+        // The login request goes through judgement, as it does on the real path. Its verdict
+        // hands back the digests of the values it sent, and the origin's echo is checked
+        // against them.
+        let request = RequestFacts {
+            route: None,
+            request_headers: &[],
+            request_id: RID,
+            method: "POST",
+            path: "/login",
+            query: None,
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            credential: None,
+            client: "10.0.0.1",
+            now_ms: 0,
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(
+            verdict.forward,
+            "the login is forwarded, so its values are sent"
+        );
+        assert!(
+            verdict
+                .sent
+                .contains(&judge.key.mac("value", token.as_bytes())),
+            "the token the login sent is among the digests the verdict hands back"
+        );
         let login = judge.observe(
             &site,
             &Observation {
-                sent: &sent,
-                ..json_login(login_body(&token, 6).as_bytes(), "10.0.0.1", 0)
+                sent: verdict.sent.as_slice(),
+                echo: verdict.echo.as_slice(),
+                ..json_login(body.as_bytes(), "10.0.0.1", 0)
             },
         );
         assert_eq!(
             login.pending_values, None,
             "the echoed token is no candidate, so nothing is held"
         );
-        let verdict = judge
+        let entry = judge
             .judge(&site, &get("/api/home", None, Some(token.as_str()), 1))
             .await;
-        let traced = verdict.record.trace.session.expect("the session is traced");
+        let traced = entry.record.trace.session.expect("the session is traced");
         assert_eq!(traced.login_unbound, Some(LoginUnbound::Unmatched));
         assert_eq!(traced.login_request_id, None);
     }
