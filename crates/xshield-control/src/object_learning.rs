@@ -21,7 +21,7 @@ use xshield_core::context::learning::{
     DecisionFacts, Evidence, FUNCTION_KEYS_MAX, FunctionEvidence, KEEP_RETIRED_DAYS, RETIRE_DAYS,
     Thresholds, WINDOW_DAYS, contradicts, day_of, judge_accepts_public, judge_function, judge_tier,
     kind_share, merge_functions, observe, observe_functions, observe_tiers, propose,
-    response_stats,
+    propose_source, response_stats,
 };
 use xshield_core::context::objects::KEY_MAX;
 use xshield_core::context::position::PositionState;
@@ -245,6 +245,7 @@ async fn learn_site(
             settle_and_judge(run, pool, &place).await?;
         }
     }
+    judge_sources(run, pool, site, generation, oldest_day, now_millis).await?;
     pause_drifted(run, pool, site, generation).await?;
     tighten_split(run, pool, site, generation, oldest_day).await?;
     judge_accepts(pool, site, generation, oldest_day, now_millis).await?;
@@ -386,6 +387,79 @@ async fn rejudge_proposals(
             now_millis,
         };
         settle_and_judge(run, pool, &place).await?;
+    }
+    Ok(())
+}
+
+/// Proposes the kind of each response position that the window's values flow to (LQ-4a, docs/07 7.9.21): an
+/// undeclared position a value was shown at, when the request positions that used the value hold one confirmed
+/// kind (`propose_source`). A proposal waits for an administrator, as the other proposals do, and a proposal the
+/// rules no longer make is withdrawn. A key the window also sees as a request is judged by the request rules, so
+/// it is left alone here. The writes name the site's generation, as the other judgements do, so a site deleted
+/// meanwhile gets none. Nothing here changes the configuration.
+async fn judge_sources(
+    run: &mut Run<'_>,
+    pool: &PgPool,
+    site: &str,
+    generation: DateTime<Utc>,
+    oldest_day: u64,
+    now_millis: i64,
+) -> Result<(), store::LearningStoreError> {
+    let record = match site_spec_store::get(pool, site).await {
+        Ok(Some(record)) if record.created_at == generation => record,
+        Ok(_) => return Ok(()),
+        Err(error) => {
+            eprintln!("xshield-control: source proposal skipped for site {site}, {error}");
+            return Ok(());
+        }
+    };
+    let map = record.spec.objects();
+    let thresholds = thresholds_of(map.learning());
+    let positions: Vec<(String, PositionState)> = store::positions(pool, site)
+        .await?
+        .into_iter()
+        .filter(|row| row.side == "response")
+        .filter(|row| matches!(row.state, PositionState::Pending | PositionState::Proposed))
+        .map(|row| (row.slot, row.state))
+        .collect();
+    if positions.is_empty() {
+        return Ok(());
+    }
+    let slots: Vec<String> = positions.iter().map(|(slot, _)| slot.clone()).collect();
+    let requested = store::load_evidence(pool, site, &slots, oldest_day).await?;
+    let votes = store::load_source_evidence(pool, site, &slots, oldest_day).await?;
+    for (slot, state) in &positions {
+        // A key the window also sees as a request belongs to the request rules, which own its state.
+        if requested.contains_key(slot) {
+            continue;
+        }
+        let window = votes.get(slot).map_or(&[][..], Vec::as_slice);
+        // A declared position is decided by its entry, so a proposal left from before the entry is withdrawn.
+        let proposal = if map.declared_class_of(slot).is_some() {
+            None
+        } else {
+            propose_source(slot, window, map, thresholds)
+        };
+        let Some(proposal) = proposal else {
+            if *state == PositionState::Proposed {
+                store::withdraw_proposal(pool, site, generation, slot, now_millis).await?;
+            }
+            continue;
+        };
+        if !object_agent::was_proposed(pool, site, slot).await? {
+            run.counts.proposals = run.counts.proposals.saturating_add(1);
+        }
+        let judgement = Judgement {
+            slot,
+            state: LearnedState::Proposed,
+            class: &proposal.class,
+            votes: proposal.votes,
+            sessions: proposal.sessions,
+            share_per_mille: proposal.share_per_mille,
+            last_day: window.iter().map(|vote| vote.day).max().unwrap_or(0),
+            source: Source::Rule,
+        };
+        store::put_judgement(pool, site, generation, &judgement, now_millis).await?;
     }
     Ok(())
 }
@@ -2368,6 +2442,235 @@ mod tier_pass_tests {
                 .is_none(),
             "a proposal whose evidence aged out is withdrawn"
         );
+        drop_scratch(admin, pool, name).await;
+    }
+}
+
+#[cfg(test)]
+mod source_pass_tests {
+    use super::pass_tests::{drop_scratch, partitions, scratch};
+    use super::*;
+
+    /// The response position a patient's search results are shown at.
+    const SEARCH: &str = "GET /api/search results[].id";
+    /// The request position of a patient, declared.
+    const PATIENT: &str = "GET /patients/{id} path[1]";
+
+    /// The clinic site. It declares `PATIENT` as a patient, and `SEARCH` as one too when `declare_search`.
+    fn clinic(declare_search: bool) -> SiteSpec {
+        let mut slots =
+            vec![serde_json::json!({"key": PATIENT, "class": "patient", "source": "admin"})];
+        if declare_search {
+            slots.push(serde_json::json!({"key": SEARCH, "class": "patient", "source": "admin"}));
+        }
+        let spec = serde_json::json!({
+            "name": "clinic",
+            "hosts": ["clinic.example.com"],
+            "origin": "http://10.0.0.5:8080",
+            "session": {"cookie": "SESSIONID"},
+            "entries": ["/login"],
+            "objects": {
+                "classes": [{"id": "patient", "name": "患者"}],
+                "slots": slots
+            }
+        });
+        SiteSpec::from_json(&spec.to_string()).expect("test spec")
+    }
+
+    /// One use of `GET /patients/7` by session `index % 5`, on the day `1 + index / 5` days before `now`, whose
+    /// value `7` was shown at the response position `from`. Twenty uses from five sessions fall on distinct
+    /// days inside the window.
+    async fn use_of(pool: &PgPool, index: i64, now: i64, from: &str) {
+        let at_millis = now - (1 + index / 5) * DAY_MILLIS;
+        let trace = serde_json::json!({
+            "v": 1,
+            "values_truncated": false,
+            "values": [{
+                "at": "path[1]",
+                "value": "7",
+                "kind": "reference",
+                "inert": false,
+                "seen": true,
+                "verified": true,
+                "slot": PATIENT,
+                "sources": [{"field": "id", "request": "GET /api/search", "slot": from}]
+            }],
+            "timing": {"judge_ms": 1}
+        });
+        sqlx::query(
+            "INSERT INTO decision_log (at_millis, request_id, site, edge, host, client, session,
+                method, path, status, decision_path, outcome, trace)
+             VALUES ($1, $2, 'clinic', 'edge-1', 'clinic.example.com', '10.0.0.1', $3,
+                'GET', '/patients/7', 200, 'fast_allow', 'allowed', $4)",
+        )
+        .bind(at_millis)
+        .bind(format!("req_{index:032x}"))
+        .bind(format!("s{}", index % 5))
+        .bind(trace)
+        .execute(pool)
+        .await
+        .expect("insert a decision row");
+    }
+
+    /// The state, class and side of the site's row for `slot`, when it has one.
+    async fn row_of(pool: &PgPool, slot: &str) -> Option<(String, Option<String>, String)> {
+        sqlx::query_as::<_, (String, Option<String>, String)>(
+            "SELECT state, class, side FROM object_positions WHERE site = 'clinic' AND slot = $1",
+        )
+        .bind(slot)
+        .fetch_optional(pool)
+        .await
+        .expect("read the position")
+    }
+
+    async fn proposed(pool: &PgPool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM object_positions WHERE site = 'clinic' AND state = 'proposed'",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("count the proposals")
+    }
+
+    /// Twenty uses from five sessions whose values were shown at `from`, read by one pass at `now`.
+    async fn learn_uses(pool: &PgPool, now: i64, from: &str) {
+        for index in 0..20 {
+            use_of(pool, index, now, from).await;
+        }
+        learn_once(pool, None, now).await;
+    }
+
+    fn proposed_as_patient() -> (String, Option<String>, String) {
+        (
+            "proposed".to_owned(),
+            Some("patient".to_owned()),
+            "response".to_owned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_values_patient_uses_show_at_a_response_position_are_proposed_as_patients() {
+        let Some((admin, pool, name)) = scratch("source_proposal").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(false), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        learn_uses(&pool, now, SEARCH).await;
+        assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
+        // The next pass reads nothing new and the evidence still stands, so the proposal stays.
+        learn_once(&pool, None, now + 60 * 60_000).await;
+        assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_response_proposal_is_withdrawn_when_its_evidence_ages_out() {
+        let Some((admin, pool, name)) = scratch("source_aged_out").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(false), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        learn_uses(&pool, now, SEARCH).await;
+        assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
+        // Eight days later no use is in the window, and no new row has arrived.
+        learn_once(&pool, None, now + 8 * DAY_MILLIS).await;
+        assert_eq!(
+            row_of(&pool, SEARCH)
+                .await
+                .map(|(state, class, _)| (state, class)),
+            Some(("pending".to_owned(), None))
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_response_proposal_stays_while_its_evidence_holds() {
+        let Some((admin, pool, name)) = scratch("source_holds").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(false), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        learn_uses(&pool, now, SEARCH).await;
+        assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
+        // The next round still sees the same uses in the window, so the proposal is kept.
+        learn_once(&pool, None, now + DAY_MILLIS).await;
+        assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_declared_response_position_is_not_proposed() {
+        let Some((admin, pool, name)) = scratch("source_declared").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(true), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        learn_uses(&pool, now, SEARCH).await;
+        assert_eq!(proposed(&pool).await, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_response_proposal_the_administrator_declares_is_withdrawn() {
+        let Some((admin, pool, name)) = scratch("source_declared_later").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(false), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        learn_uses(&pool, now, SEARCH).await;
+        assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
+        // The administrator confirms the proposal: the entry declares the position as a patient.
+        let record = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        site_spec_store::write(
+            &pool,
+            "clinic",
+            &clinic(true),
+            record.version,
+            Change::Update,
+            None,
+        )
+        .await
+        .expect("write the confirmed entry");
+        learn_once(&pool, None, now + 60 * 60_000).await;
+        assert_eq!(
+            row_of(&pool, SEARCH)
+                .await
+                .map(|(state, class, _)| (state, class)),
+            Some(("pending".to_owned(), None))
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_response_field_that_is_not_an_identifier_is_not_proposed() {
+        let Some((admin, pool, name)) = scratch("source_field").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(false), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        learn_uses(&pool, now, "GET /api/search page").await;
+        assert_eq!(proposed(&pool).await, 0);
         drop_scratch(admin, pool, name).await;
     }
 }

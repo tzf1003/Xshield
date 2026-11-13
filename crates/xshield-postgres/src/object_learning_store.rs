@@ -567,6 +567,50 @@ pub async fn load_evidence(
     Ok(evidence)
 }
 
+/// The votes of the given response positions on or after `oldest_day`, keyed by the response position. Each vote
+/// names the request position that used the value and every response position the value was shown at
+/// (`Vote::from`), so the rules can see the other sources of the same use. A position an administrator
+/// confirmed again counts only the votes from its baseline day on, as [`load_evidence`] does.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn load_source_evidence(
+    pool: &PgPool,
+    site: &str,
+    positions: &[String],
+    oldest_day: u64,
+) -> Result<HashMap<String, Vec<Vote>>, LearningStoreError> {
+    let rows = sqlx::query(
+        "SELECT s.response, e.slot, e.session, e.day, e.from_slots
+         FROM object_evidence e
+         CROSS JOIN LATERAL unnest(e.from_slots) AS s(response)
+         LEFT JOIN object_positions p ON p.site = e.site AND p.slot = s.response
+         WHERE e.site = $1 AND e.kind = 'vote' AND e.day >= $2
+           AND s.response = ANY($3)
+           AND (p.baseline_day IS NULL OR e.day >= p.baseline_day)",
+    )
+    .bind(site)
+    .bind(day_i64(oldest_day))
+    .bind(positions.to_vec())
+    .fetch_all(pool)
+    .await?;
+    let mut votes: HashMap<String, Vec<Vote>> = HashMap::new();
+    for row in &rows {
+        let response: String = row.try_get("response")?;
+        let slot: String = row.try_get("slot")?;
+        let session: String = row.try_get("session")?;
+        let day = u64::try_from(row.try_get::<i64, _>("day")?).unwrap_or(0);
+        let from: Vec<String> = row.try_get("from_slots")?;
+        votes.entry(response).or_default().push(Vote {
+            slot,
+            session,
+            day,
+            from,
+        });
+    }
+    Ok(votes)
+}
+
 /// The distinct votes of `site` on or after `oldest_day`: each request position with the response
 /// positions its value was shown at. `None` when the window holds more than `limit` of them. A pass
 /// that cannot read every vote of the window must not change the configuration on part of them.
@@ -781,9 +825,15 @@ pub async fn advance_cursor(
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
+/// The request positions with a proposal, in key order. A response position's proposal is judged by its own
+/// rules (`learning::propose_source`), so it is left out here.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
 pub async fn proposed_slots(pool: &PgPool, site: &str) -> Result<Vec<String>, LearningStoreError> {
     let slots = sqlx::query_scalar(
-        "SELECT slot FROM object_positions WHERE site = $1 AND state = 'proposed' ORDER BY slot",
+        "SELECT slot FROM object_positions
+         WHERE site = $1 AND state = 'proposed' AND side = 'request' ORDER BY slot",
     )
     .bind(site)
     .fetch_all(pool)

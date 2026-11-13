@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::kind::is_id_like;
 use crate::path_template::function_template;
 
 use super::log::{DecisionPath, Outcome};
@@ -334,6 +335,86 @@ pub fn propose(evidence: &Evidence, map: &ObjectMap, thresholds: Thresholds) -> 
     })
 }
 
+/// The kind the rules propose for a response position, from the uses of the values it was shown at (LQ-4a,
+/// the mirror of `propose` for the other side of a flow).
+///
+/// `votes` are the window's votes whose response positions include `position` (`Vote::from`). Each names the
+/// request position that used the value and the session and day of the use. A use counts toward the total,
+/// and toward a kind when its request position has a confirmed kind; a use whose request has no kind counts
+/// toward the total only, as `propose` counts it. A use is left out altogether when another source of the same
+/// value is declared with the request's kind: that source explains the value, so this position says nothing
+/// about it. One session counts once a day, and a day whose uses disagree about the kind counts toward the
+/// total only.
+///
+/// The position must be undeclared, and its field must read like an identifier: `results[].id` may be proposed,
+/// a page number or a count may not, since one of those can match a kind by chance. The thresholds and the
+/// share are the site's (`Thresholds`). The evidence must be the window's (the store reads it that way).
+#[must_use]
+pub fn propose_source(
+    position: &str,
+    votes: &[Vote],
+    map: &ObjectMap,
+    thresholds: Thresholds,
+) -> Option<Proposal> {
+    if map.declared_class_of(position).is_some() || !is_id_like(field_of(position)) {
+        return None;
+    }
+    // Per (session, day): the kind the day's uses hold, `None` when they hold none or disagree.
+    let mut uses: BTreeMap<(&str, u64), Option<&str>> = BTreeMap::new();
+    for vote in votes {
+        if !vote.from.iter().any(|from| from.as_str() == position) {
+            continue;
+        }
+        let kind = map.class_of(&vote.slot);
+        let explained = kind.is_some_and(|kind| {
+            vote.from
+                .iter()
+                .any(|from| from.as_str() != position && map.class_of(from) == Some(kind))
+        });
+        if explained {
+            continue;
+        }
+        uses.entry((vote.session.as_str(), vote.day))
+            .and_modify(|seen| {
+                if *seen != kind {
+                    *seen = None;
+                }
+            })
+            .or_insert(kind);
+    }
+    let total = saturating_count(uses.len());
+    let sessions: BTreeSet<&str> = uses.keys().map(|(session, _)| *session).collect();
+    let sessions = saturating_count(sessions.len());
+    if total < thresholds.votes || sessions < thresholds.sessions {
+        return None;
+    }
+    let mut kinds: BTreeMap<&str, u32> = BTreeMap::new();
+    for kind in uses.values().copied().flatten() {
+        *kinds.entry(kind).or_insert(0) += 1;
+    }
+    let (class, count) = kinds.into_iter().max_by_key(|(_, count)| *count)?;
+    if !meets_share(count, total, thresholds.share_per_mille) {
+        return None;
+    }
+    Some(Proposal {
+        class: class.to_owned(),
+        votes: total,
+        sessions,
+        share_per_mille: share_of(count, total),
+    })
+}
+
+/// The field a response position names: the last dotted part of its location, so `id` for
+/// `GET /api/search results[].id`.
+fn field_of(position: &str) -> &str {
+    let location = position
+        .rsplit_once(' ')
+        .map_or(position, |(_, location)| location);
+    location
+        .rsplit_once('.')
+        .map_or(location, |(_, field)| field)
+}
+
 /// Whether the evidence of a confirmed position points at another kind: one
 /// other kind holds the share of the votes on its own. Votes split across several
 /// other kinds do not add up to a conflict. A confirmed position that the rules no
@@ -599,6 +680,204 @@ fn grade(strong: bool, identified: bool) -> Option<Reliability> {
 
 fn doubled(count: u32) -> u32 {
     count.saturating_mul(2)
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::context::ObjectMap;
+
+    /// The response position a patient's search results are shown at.
+    const SEARCH: &str = "GET /api/search results[].id";
+    /// Request positions of a patient and of a prescription, both declared.
+    const PATIENT_USE: &str = "GET /patients/{id} path[1]";
+    const PRESCRIPTION_USE: &str = "GET /prescriptions/{id} path[1]";
+    /// A request position the map does not declare.
+    const UNKNOWN_USE: &str = "GET /files/{id} path[1]";
+    /// Declared response positions of the two kinds.
+    const PATIENTS: &str = "GET /api/patients patients[].id";
+    const PRESCRIPTIONS: &str = "GET /api/prescriptions prescriptions[].id";
+
+    /// The map of the two kinds, with `search` declared as well when it is given.
+    fn map_with(search: Option<serde_json::Value>) -> ObjectMap {
+        let mut slots = vec![
+            serde_json::json!({"key": PATIENT_USE, "class": "patient", "source": "admin"}),
+            serde_json::json!({"key": PRESCRIPTION_USE, "class": "prescription", "source": "admin"}),
+            serde_json::json!({"key": PATIENTS, "class": "patient", "source": "admin"}),
+            serde_json::json!({"key": PRESCRIPTIONS, "class": "prescription", "source": "admin"}),
+        ];
+        slots.extend(search);
+        let value = serde_json::json!({
+            "classes": [{"id": "patient", "name": "患者"}, {"id": "prescription", "name": "处方"}],
+            "slots": slots,
+        });
+        serde_json::from_value(value).expect("test map")
+    }
+
+    /// `count` uses of `request` by `sessions` sessions named `tag` and a number, each use on its own
+    /// day from `first_day` on, whose values were shown at `from`.
+    fn uses(
+        tag: &str,
+        request: &str,
+        count: u64,
+        sessions: u64,
+        first_day: u64,
+        from: &[&str],
+    ) -> Vec<Vote> {
+        (0..count)
+            .map(|index| Vote {
+                slot: request.to_owned(),
+                session: format!("{tag}{}", index % sessions),
+                day: first_day + index,
+                from: from.iter().map(|position| (*position).to_owned()).collect(),
+            })
+            .collect()
+    }
+
+    /// The class, votes and share the proposal of `position` gives, when there is one.
+    fn judged(position: &str, votes: &[Vote], map: &ObjectMap) -> Option<(String, u32, u32)> {
+        propose_source(position, votes, map, Thresholds::default())
+            .map(|proposal| (proposal.class, proposal.votes, proposal.share_per_mille))
+    }
+
+    fn patient(votes: u32, share: u32) -> (String, u32, u32) {
+        ("patient".to_owned(), votes, share)
+    }
+
+    #[test]
+    fn values_that_patient_uses_show_are_proposed_as_patients() {
+        let votes = uses("a", PATIENT_USE, 20, 5, 1, &[SEARCH]);
+        assert_eq!(
+            judged(SEARCH, &votes, &map_with(None)),
+            Some(patient(20, 1_000))
+        );
+    }
+
+    #[test]
+    fn the_site_thresholds_are_the_votes_and_sessions_needed() {
+        let map = map_with(None);
+        assert_eq!(
+            judged(SEARCH, &uses("a", PATIENT_USE, 19, 5, 1, &[SEARCH]), &map),
+            None
+        );
+        assert_eq!(
+            judged(SEARCH, &uses("a", PATIENT_USE, 20, 4, 1, &[SEARCH]), &map),
+            None
+        );
+        let lower = Thresholds {
+            votes: 10,
+            sessions: 2,
+            share_per_mille: SHARE_PER_MILLE,
+        };
+        let votes = uses("a", PATIENT_USE, 10, 2, 1, &[SEARCH]);
+        assert!(propose_source(SEARCH, &votes, &map, lower).is_some());
+    }
+
+    #[test]
+    fn nine_tenths_of_the_votes_must_point_at_one_kind() {
+        let map = map_with(None);
+        let mut ninety = uses("a", PATIENT_USE, 18, 5, 1, &[SEARCH]);
+        ninety.extend(uses("b", PRESCRIPTION_USE, 2, 2, 100, &[SEARCH]));
+        assert_eq!(judged(SEARCH, &ninety, &map), Some(patient(20, 900)));
+        let mut eighty_five = uses("a", PATIENT_USE, 17, 5, 1, &[SEARCH]);
+        eighty_five.extend(uses("b", PRESCRIPTION_USE, 3, 3, 100, &[SEARCH]));
+        assert_eq!(judged(SEARCH, &eighty_five, &map), None);
+    }
+
+    #[test]
+    fn a_use_a_declared_source_of_its_kind_explains_does_not_count() {
+        let map = map_with(None);
+        let explained = uses("a", PATIENT_USE, 20, 5, 1, &[SEARCH, PATIENTS]);
+        assert_eq!(judged(SEARCH, &explained, &map), None);
+        // Ten explained uses leave ten, which is below the twenty the site needs.
+        let mut partly = uses("a", PATIENT_USE, 10, 5, 1, &[SEARCH, PATIENTS]);
+        partly.extend(uses("b", PATIENT_USE, 10, 5, 100, &[SEARCH]));
+        assert_eq!(judged(SEARCH, &partly, &map), None);
+    }
+
+    #[test]
+    fn a_declared_source_of_another_kind_does_not_explain_the_use() {
+        let votes = uses("a", PATIENT_USE, 20, 5, 1, &[SEARCH, PRESCRIPTIONS]);
+        assert_eq!(
+            judged(SEARCH, &votes, &map_with(None)),
+            Some(patient(20, 1_000))
+        );
+    }
+
+    #[test]
+    fn a_use_whose_request_has_no_kind_counts_toward_the_total_only() {
+        let map = map_with(None);
+        let unknown = uses("a", UNKNOWN_USE, 20, 5, 1, &[SEARCH]);
+        assert_eq!(judged(SEARCH, &unknown, &map), None);
+        let mut mostly = uses("a", PATIENT_USE, 18, 5, 1, &[SEARCH]);
+        mostly.extend(uses("b", UNKNOWN_USE, 2, 2, 100, &[SEARCH]));
+        assert_eq!(judged(SEARCH, &mostly, &map), Some(patient(20, 900)));
+    }
+
+    #[test]
+    fn a_day_whose_uses_disagree_counts_toward_the_total_only() {
+        let map = map_with(None);
+        // Session `m` uses both kinds on day 0: that day is a vote for no kind.
+        let mut votes = uses("a", PATIENT_USE, 19, 5, 1, &[SEARCH]);
+        votes.push(Vote {
+            slot: PATIENT_USE.to_owned(),
+            session: "m".to_owned(),
+            day: 0,
+            from: vec![SEARCH.to_owned()],
+        });
+        votes.push(Vote {
+            slot: PRESCRIPTION_USE.to_owned(),
+            session: "m".to_owned(),
+            day: 0,
+            from: vec![SEARCH.to_owned()],
+        });
+        assert_eq!(judged(SEARCH, &votes, &map), Some(patient(20, 950)));
+    }
+
+    #[test]
+    fn one_session_counts_once_a_day() {
+        let votes: Vec<Vote> = (0..20)
+            .map(|index| Vote {
+                slot: PATIENT_USE.to_owned(),
+                session: format!("s{}", index % 5),
+                day: 0,
+                from: vec![SEARCH.to_owned()],
+            })
+            .collect();
+        assert_eq!(judged(SEARCH, &votes, &map_with(None)), None);
+    }
+
+    #[test]
+    fn a_field_that_does_not_read_like_an_identifier_is_never_proposed() {
+        let map = map_with(None);
+        for field in ["GET /api/search page", "GET /api/search results[].count"] {
+            let votes = uses("a", PATIENT_USE, 20, 5, 1, &[field]);
+            assert_eq!(judged(field, &votes, &map), None, "{field}");
+        }
+    }
+
+    #[test]
+    fn a_declared_or_paused_position_is_not_proposed() {
+        let votes = uses("a", PATIENT_USE, 20, 5, 1, &[SEARCH]);
+        let declared = serde_json::json!({"key": SEARCH, "class": "patient", "source": "rule"});
+        let paused = serde_json::json!({"key": SEARCH, "class": "patient", "source": "rule", "paused": true});
+        assert_eq!(judged(SEARCH, &votes, &map_with(Some(declared))), None);
+        assert_eq!(judged(SEARCH, &votes, &map_with(Some(paused))), None);
+    }
+
+    #[test]
+    fn a_vote_that_does_not_show_the_value_at_the_position_is_not_its_evidence() {
+        let votes = uses("a", PATIENT_USE, 20, 5, 1, &[PATIENTS]);
+        assert_eq!(judged(SEARCH, &votes, &map_with(None)), None);
+    }
+
+    #[test]
+    fn the_field_is_the_last_dotted_part_of_the_location() {
+        assert_eq!(field_of("GET /api/search results[].id"), "id");
+        assert_eq!(field_of("GET /api/search results[].meta.id"), "id");
+        assert_eq!(field_of("GET /api/search id"), "id");
+        assert_eq!(field_of("GET /doctor/{id} path[1]"), "path[1]");
+    }
 }
 
 #[cfg(test)]
