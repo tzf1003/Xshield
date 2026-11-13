@@ -1,0 +1,268 @@
+{
+  "bootstrap": [
+    {
+      "key": "GET /api/search results[].id",
+      "side": "response",
+      "class": "patient",
+      "uses": 48,
+      "sessions": 48
+    },
+    {
+      "key": "GET /api/patients patients[].id",
+      "side": "response",
+      "class": "patient",
+      "uses": 48,
+      "sessions": 48
+    },
+    {
+      "key": "GET /api/comments comments[].author.id",
+      "side": "response",
+      "class": "doctor",
+      "uses": 48,
+      "sessions": 48
+    },
+    {
+      "key": "DELETE /api/patients/{id} path[2]",
+      "side": "request",
+      "class": "patient",
+      "uses": 40,
+      "sessions": 40
+    },
+    {
+      "key": "POST /api/patients/{id}/notes path[2]",
+      "side": "request",
+      "class": "patient",
+      "uses": 40,
+      "sessions": 40
+    },
+    {
+      "key": "GET /api/patients/{id} path[2]",
+      "side": "request",
+      "class": "patient",
+      "uses": 40,
+      "sessions": 40
+    }
+  ],
+  "rounds": [
+    {
+      "round": 1,
+      "run": {
+        "started_millis": 1793539100000,
+        "finished_millis": 1793539100900,
+        "error": null
+      },
+      "positions": [
+        {
+          "key": "DELETE /api/patients/{id} path[2]",
+          "state": "proposed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": false,
+          "reliability": "high"
+        },
+        {
+          "key": "POST /api/patients/{id}/notes path[2]",
+          "state": "proposed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": true,
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/patients/{id} path[2]",
+          "state": "proposed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": false,
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/search results[].id",
+          "state": "proposed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": null,
+          "reliability": null
+        },
+        {
+          "key": "GET /api/patients patients[].id",
+          "state": "proposed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": null,
+          "reliability": null
+        },
+        {
+          "key": "GET /api/comments comments[].author.id",
+          "state": "proposed",
+          "class": "doctor",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": null,
+          "reliability": null
+        }
+      ],
+      "judgements": [
+        {
+          "key": "GET /api/search results[].id",
+          "tier": "public",
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/patients patients[].id",
+          "tier": "self",
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/comments comments[].author.id",
+          "tier": "org",
+          "reliability": "high"
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "run": {
+        "started_millis": 1793539160000,
+        "finished_millis": 1793539160900,
+        "error": null
+      },
+      "positions": [
+        {
+          "key": "DELETE /api/patients/{id} path[2]",
+          "state": "confirmed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": false,
+          "reliability": "high"
+        },
+        {
+          "key": "POST /api/patients/{id}/notes path[2]",
+          "state": "confirmed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": true,
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/patients/{id} path[2]",
+          "state": "confirmed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": false,
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/search results[].id",
+          "state": "confirmed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": null,
+          "reliability": null
+        },
+        {
+          "key": "GET /api/patients patients[].id",
+          "state": "confirmed",
+          "class": "patient",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": null,
+          "reliability": null
+        },
+        {
+          "key": "GET /api/comments comments[].author.id",
+          "state": "confirmed",
+          "class": "doctor",
+          "source": "rule",
+          "tier": null,
+          "accepts_public": null,
+          "reliability": null
+        }
+      ],
+      "judgements": [
+        {
+          "key": "GET /api/search results[].id",
+          "tier": "public",
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/patients patients[].id",
+          "tier": "self",
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/comments comments[].author.id",
+          "tier": "org",
+          "reliability": "high"
+        }
+      ]
+    }
+  ],
+  "final_spec": {
+    "objects": {
+      "classes": [
+        {
+          "id": "patient",
+          "name": "患者"
+        },
+        {
+          "id": "doctor",
+          "name": "医生"
+        }
+      ],
+      "slots": [
+        {
+          "key": "GET /api/search results[].id",
+          "class": "patient",
+          "source": "rule",
+          "tier": "public",
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/patients patients[].id",
+          "class": "patient",
+          "source": "rule",
+          "tier": "self",
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/comments comments[].author.id",
+          "class": "doctor",
+          "source": "rule",
+          "tier": "org",
+          "reliability": "high"
+        },
+        {
+          "key": "DELETE /api/patients/{id} path[2]",
+          "class": "patient",
+          "source": "rule",
+          "accepts_public": false,
+          "reliability": "high"
+        },
+        {
+          "key": "POST /api/patients/{id}/notes path[2]",
+          "class": "patient",
+          "source": "rule",
+          "accepts_public": true,
+          "reliability": "high"
+        },
+        {
+          "key": "GET /api/patients/{id} path[2]",
+          "class": "patient",
+          "source": "rule",
+          "accepts_public": false,
+          "reliability": "high"
+        }
+      ]
+    }
+  }
+}

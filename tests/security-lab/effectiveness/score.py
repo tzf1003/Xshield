@@ -1,0 +1,793 @@
+"""Metrics of the effectiveness measurement (plan section 3), computed from the input files.
+
+`score` takes the parsed inputs and returns the report content: the section 9.5 keys
+plus costs, counts and label checks. It reads no file, clock or environment, so the
+same inputs give the same numbers. A denominator of zero gives None, which the report
+shows as "—".
+
+Population rules, applied throughout:
+
+- A regression case with status known_gap is measured only by P7. Once a fix flips it
+  to must, it counts in every metric.
+- An observation without a decision record is "记录缺失". It is left out of every metric
+  and fails the missing-record gate.
+- A case whose requires names a capability its configuration lacks is "需要档位". It is
+  left out of P1 to P3 and P7 and counted per configuration.
+- The label checks of section 4.6 move a probe out of P1 to P3 only when the caller asks
+  (exclude_suspicious). The site runner does; the lab keeps every probe.
+- A probe is a case with expect "block". Degradation cases (reason "limit", or a category
+  starting with "degrade") are left out of P4 only.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import statistics
+from collections import Counter
+from typing import Any, NamedTuple
+
+BENIGN_GROUPS = frozenset({"train", "benign"})
+FAST_PATHS = frozenset({"fast_allow", "cached_allow"})
+HIT_OUTCOMES = frozenset({"blocked", "would_block"})
+# Positions whose proposals count for learning: a retired, suspended or ambiguous position is not one.
+ACTIVE_STATES = frozenset({"proposed", "confirmed"})
+LOWER_IS_BETTER = frozenset({"P2", "P4", "P5"})
+CONFIG_ORDER = ("none", "learned", "truth")
+CALL_LIMIT = "JEV_CALL_LIMIT"
+TOLERANCE = 1e-9
+REASON_TEXT = {
+    "access": "越权（access=DENY）",
+    "attack": "注入（attack=ATTACK）",
+    "no_session": "无会话（no_session）",
+    "limit": "限额（JEV_CALL_LIMIT）",
+}
+LEARNING_GATE_NAMES = (
+    "L0 误学数",
+    "L1 误学数",
+    "L2 误学数",
+    "L3 误学数",
+    "学习稳定性（不加数据再跑一轮，提议集合不变）",
+)
+LEARNING_METRIC_NAMES = ("L0", "L1", "L2", "L3", "stability")
+
+
+class Pair(NamedTuple):
+    """One observation with its decision record and the two label checks of section 4.6."""
+
+    row: dict[str, Any]
+    rec: dict[str, Any]
+    suspicious: bool  # check 1: an access probe whose target this session had been shown
+    bypass: bool  # check 2: a probe that took the bypass path
+
+
+def score(
+    observations: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    truth: dict[str, Any] | None = None,
+    learned: dict[str, Any] | None = None,
+    *,
+    exclude_suspicious: bool = False,
+    baseline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    records = {record["request_id"]: record for record in decisions}
+    pairs: list[Pair] = []
+    missing: list[dict[str, Any]] = []
+    for row in observations:
+        record = records.get(row["request_id"])
+        if record is None:
+            missing.append(row)
+            continue
+        suspicious, bypass = _label_flags(row, record, records)
+        pairs.append(Pair(row, record, suspicious, bypass))
+
+    active = [pair for pair in pairs if not _known_gap(pair.row)]
+    caps = _tier_capabilities(truth, learned)
+    defend = [pair for pair in active if _defends(pair, caps, exclude_suspicious)]
+
+    metrics: dict[str, Any] = {}
+    metrics.update(_session_metrics(active))
+    metrics.update(_defense_metrics(defend, active, pairs, caps))
+    learning, skip_reason = _learning(truth, learned, decisions)
+    if learning is None:
+        metrics.update({name: None for name in LEARNING_METRIC_NAMES})
+        learning_gates = [_gate(name, None, None, None) for name in LEARNING_GATE_NAMES]
+        learning_rows: list[dict[str, Any]] = []
+    else:
+        metrics.update(learning["metrics"])
+        learning_gates = learning["gates"]
+        learning_rows = learning["rows"]
+
+    failures, known_gaps = _failures(pairs, missing, caps, exclude_suspicious)
+    p4, p5, p7 = metrics["P4"], metrics["P5"], metrics["P7"]
+    s2 = metrics["S2"]
+    gates = [
+        _gate("记录缺失数", len(missing), "== 0", (not missing) if observations else None),
+        _gate("S2 误核验数", s2["value"], "== 0", s2["value"] == 0),
+        _gate("P4 未判定请求数（理想模型下必须为 0）", p4["num"], "== 0",
+              (p4["num"] == 0) if p4["den"] else None),
+        _gate("P5 被拦请求到达源站数", p5["value"], "== 0",
+              (p5["value"] == 0) if p5["value"] is not None else None),
+        _gate("P7 must 用例通过率", p7["value"], "== 100%",
+              (p7["value"] == 1) if p7["value"] is not None else None),
+        _gate("P7 意外通过数", p7["unexpected_pass"], "== 0", p7["unexpected_pass"] == 0),
+        *learning_gates,
+    ]
+    baseline_result = compare_baseline(_flatten(metrics), baseline)
+    compared = baseline_result["compared"]
+    gates.append(_gate(
+        "基线比较（只进不退）",
+        len(baseline_result["regressions"]) if compared else None,
+        "== 0",
+        (not baseline_result["regressions"]) if compared else None,
+    ))
+
+    skipped: list[dict[str, str]] = []
+    if skip_reason is not None:
+        skipped.append({"section": "学习段", "why": skip_reason})
+    skipped.append({"section": "P6、L4、L5", "why": "完整模式专用，score 子命令不计算"})
+
+    return {
+        "metrics": metrics,
+        "gates": gates,
+        "baseline": baseline_result,
+        "failures": failures,
+        "known_gaps": known_gaps,
+        "learning": learning_rows,
+        "label_checks": _label_summary(pairs, exclude_suspicious),
+        "costs": _costs(decisions),
+        "counts": {
+            "observations": len(observations),
+            "decisions": len(decisions),
+            "scored": len(active),
+            "missing": len(missing),
+            "known_gap_cases": sum(_known_gap(pair.row) for pair in pairs),
+        },
+        "needs_tiers": _needs_tiers_by_config(pairs, caps),
+        "skipped": skipped,
+        "passed": all(gate["ok"] is not False for gate in gates),
+    }
+
+
+# ---------------------------------------------------------------- shared helpers
+
+
+def _metric(num: int, den: int) -> dict[str, Any]:
+    return {"value": num / den if den else None, "num": num, "den": den}
+
+
+def _gate(name: str, value: Any, limit: str, ok: bool | None) -> dict[str, Any]:
+    return {"name": name, "value": value, "limit": limit, "ok": ok}
+
+
+def _known_gap(row: dict[str, Any]) -> bool:
+    return row["group"] == "regression" and row["status"] == "known_gap"
+
+
+def _degraded(row: dict[str, Any]) -> bool:
+    return row["reason"] == "limit" or row["category"].startswith("degrade")
+
+
+def _needs_tiers(row: dict[str, Any], caps: dict[str, bool]) -> bool:
+    return "tiers" in row["requires"] and not caps.get(row["config"], False)
+
+
+def _label_excluded(pair: Pair, exclude_suspicious: bool) -> bool:
+    return exclude_suspicious and pair.row["group"] != "regression" and (pair.suspicious or pair.bypass)
+
+
+def _defends(pair: Pair, caps: dict[str, bool], exclude_suspicious: bool) -> bool:
+    return not _needs_tiers(pair.row, caps) and not _label_excluded(pair, exclude_suspicious)
+
+
+def _tier_capabilities(truth: dict[str, Any] | None, learned: dict[str, Any] | None) -> dict[str, bool]:
+    """Whether each configuration declares tiers. "none" never does."""
+    caps = {"none": False}
+    if truth is not None:
+        caps["truth"] = any(bool(position.get("tier")) for position in truth["response_positions"])
+    if learned is not None:
+        slots = ((learned.get("final_spec") or {}).get("objects") or {}).get("slots") or []
+        caps["learned"] = any(bool(slot.get("tier")) for slot in slots)
+    return caps
+
+
+def _entries(rec: dict[str, Any], value: str) -> list[dict[str, Any]]:
+    values = (rec.get("trace") or {}).get("values") or []
+    return [entry for entry in values if entry.get("value") == value]
+
+
+def _verified(rec: dict[str, Any], value: str) -> bool:
+    return any(bool(entry.get("verified")) for entry in _entries(rec, value))
+
+
+def _same_session(rec: dict[str, Any], source: dict[str, Any], records: dict[str, dict[str, Any]]) -> bool:
+    origin = records.get(source.get("request_id"))
+    return origin is not None and bool(rec.get("session")) and origin.get("session") == rec.get("session")
+
+
+def _label_flags(row: dict[str, Any], rec: dict[str, Any], records: dict[str, dict[str, Any]]) -> tuple[bool, bool]:
+    """Section 4.6 checks for a probe. Only expected blocks are probes."""
+    if row["expect"] != "block":
+        return False, False
+    suspicious = row["reason"] == "access" and any(
+        bool(entry.get("verified"))
+        and any(_same_session(rec, source, records) for source in entry.get("sources") or [])
+        for ref in row["refs"]
+        for entry in _entries(rec, ref["value"])
+    )
+    return suspicious, rec["decision_path"] == "bypass"
+
+
+def _jev_calls(rec: dict[str, Any]) -> int:
+    jev = rec.get("jev")
+    if not jev:
+        return 0
+    # A record carries a jev object when Jev was called or the call was skipped by the limit.
+    return 0 if jev.get("failure") == CALL_LIMIT else 1
+
+
+def _jev_choice(rec: dict[str, Any], kind: str) -> str | None:
+    jev = rec.get("jev") or {}
+    response = jev.get("response")
+    if isinstance(response, str):
+        try:
+            answer = json.loads(response)["answers"][kind]["choice"]
+        except (ValueError, KeyError, TypeError):
+            answer = None
+        if isinstance(answer, str):
+            return answer
+    probabilities = jev.get(kind)
+    if isinstance(probabilities, dict) and probabilities:
+        return max(probabilities, key=probabilities.get)
+    return None
+
+
+def _jev_summary(rec: dict[str, Any]) -> str:
+    jev = rec.get("jev")
+    if not jev:
+        return "未调用 Jev"
+    if jev.get("failure"):
+        return f"Jev 失败：{jev['failure']}"
+    parts = []
+    for kind in ("access", "attack"):
+        choice = _jev_choice(rec, kind)
+        if choice is None:
+            continue
+        probability = (jev.get(kind) or {}).get(choice)
+        shown = f"{probability:.2f}" if isinstance(probability, (int, float)) else "—"
+        parts.append(f"{kind}={choice}（概率 {shown}）")
+    return "，".join(parts) or "Jev 没有答案"
+
+
+def _reason_matches(row: dict[str, Any], rec: dict[str, Any]) -> bool:
+    """Whether a block came for the reason the case expects (P3). Timeouts and limits do not count
+    as an access or attack judgement."""
+    reason = row["reason"]
+    if reason is None:
+        return True
+    path = rec["decision_path"]
+    failure = (rec.get("jev") or {}).get("failure")
+    if reason == "limit":
+        return failure == CALL_LIMIT
+    if reason == "no_session":
+        return path == "no_session"
+    if reason == "access":
+        return path == "jev_deny" and _jev_choice(rec, "access") == "DENY"
+    if reason == "attack":
+        return path == "jev_deny" and _jev_choice(rec, "attack") == "ATTACK"
+    return False
+
+
+def _problems(row: dict[str, Any], rec: dict[str, Any]) -> list[str]:
+    """Why a scored request does not meet its expectation; an empty list means it passes."""
+    outcome = rec["outcome"]
+    if outcome == "unjudged":
+        return ["未判定"]
+    problems = []
+    if row["expect"] == "block":
+        if outcome not in HIT_OUTCOMES:
+            problems.append("应拦截，实际放行")
+        elif not _reason_matches(row, rec):
+            problems.append(f"拦截原因不符，应为 {REASON_TEXT[row['reason']]}")
+    elif outcome in HIT_OUTCOMES:
+        problems.append("应放行，实际拦截")
+    if outcome == "blocked" and row.get("origin_served") is True:
+        problems.append("被拦请求已到达源站")
+    return problems
+
+
+class _Tally:
+    """Hits over a denominator: overall, by configuration, and by category and configuration."""
+
+    def __init__(self) -> None:
+        self.num = 0
+        self.den = 0
+        self.by_config: dict[str, list[int]] = {}
+        self.by_category: dict[str, dict[str, list[int]]] = {}
+
+    def add(self, category: str, config: str, hit: bool) -> None:
+        self.den += 1
+        self.num += int(hit)
+        for cell in (self.by_config.setdefault(config, [0, 0]),
+                     self.by_category.setdefault(category, {}).setdefault(config, [0, 0])):
+            cell[0] += int(hit)
+            cell[1] += 1
+
+    def render(self) -> dict[str, Any]:
+        return {
+            **_metric(self.num, self.den),
+            "by_config": {config: _metric(*cell) for config, cell in _sorted_configs(self.by_config).items()},
+            "by_category": {
+                category: {config: _metric(*cell) for config, cell in _sorted_configs(cells).items()}
+                for category, cells in sorted(self.by_category.items())
+            },
+        }
+
+
+def _sorted_configs(cells: dict[str, Any]) -> dict[str, Any]:
+    def order(config: str) -> tuple[int, str]:
+        position = CONFIG_ORDER.index(config) if config in CONFIG_ORDER else len(CONFIG_ORDER)
+        return position, config
+
+    return {config: cells[config] for config in sorted(cells, key=order)}
+
+
+# ---------------------------------------------------------------- session values (S1 to S4)
+
+
+def _session_metrics(active: list[Pair]) -> dict[str, Any]:
+    benign = [pair for pair in active if pair.row["group"] in BENIGN_GROUPS]
+    s1_num = s1_den = 0
+    for pair in benign:
+        for ref in pair.row["refs"]:
+            if ref["shown"] and not ref["echoed"]:
+                s1_den += 1
+                s1_num += _verified(pair.rec, ref["value"])
+    # S2 checks every reference that was not an echo. An echo is a value the session sent first.
+    s2_num = s2_den = 0
+    for pair in active:
+        for ref in pair.row["refs"]:
+            if ref["echoed"]:
+                continue
+            s2_den += 1
+            if not ref["shown"] and _verified(pair.rec, ref["value"]):
+                s2_num += 1
+    judged = [pair for pair in benign if pair.rec["decision_path"] != "jev_unavailable"]
+    fast = sum(pair.rec["decision_path"] in FAST_PATHS for pair in judged)
+    calls = sum(_jev_calls(pair.rec) for pair in judged)
+    return {
+        "S1": _metric(s1_num, s1_den),
+        "S2": {"value": s2_num, "num": s2_num, "den": s2_den},
+        "S3": _metric(fast, len(judged)),
+        "S4": _metric(calls, len(judged)),
+    }
+
+
+# ---------------------------------------------------------------- defence (P1 to P5, P7)
+
+
+def _defense_metrics(defend: list[Pair], active: list[Pair], pairs: list[Pair],
+                     caps: dict[str, bool]) -> dict[str, Any]:
+    p1, p2, p3 = _Tally(), _Tally(), _Tally()
+    for pair in defend:
+        row, rec = pair.row, pair.rec
+        if rec["outcome"] == "unjudged":
+            continue
+        hit = rec["outcome"] in HIT_OUTCOMES
+        if row["expect"] == "block":
+            p1.add(row["category"], row["config"], hit)
+            if hit:
+                p3.add(row["category"], row["config"], _reason_matches(row, rec))
+        else:
+            p2.add(row["category"], row["config"], hit)
+
+    measured = [pair for pair in active if not _degraded(pair.row)]
+    unavailable = sum(pair.rec["decision_path"] == "jev_unavailable" for pair in measured)
+    served = [pair for pair in active if pair.row["origin_served"] is not None]
+    leaked = sum(pair.rec["outcome"] == "blocked" and pair.row["origin_served"] is True for pair in served)
+
+    regressions = [pair for pair in pairs if pair.row["group"] == "regression"]
+    must = [pair for pair in regressions
+            if pair.row["status"] == "must" and not _needs_tiers(pair.row, caps)]
+    gaps = [pair for pair in regressions
+            if pair.row["status"] == "known_gap" and not _needs_tiers(pair.row, caps)]
+    must_pass = sum(not _problems(pair.row, pair.rec) for pair in must)
+    unexpected = sum(not _problems(pair.row, pair.rec) for pair in gaps)
+    return {
+        "P1": p1.render(),
+        "P2": p2.render(),
+        "P3": p3.render(),
+        "P4": _metric(unavailable, len(measured)),
+        "P5": {"value": leaked if served else None, "num": leaked, "den": len(served)},
+        "P7": {**_metric(must_pass, len(must)), "known_gap": len(gaps), "unexpected_pass": unexpected},
+    }
+
+
+# ---------------------------------------------------------------- failures and label checks
+
+
+def _failure(pair: Pair, problems: list[str]) -> dict[str, Any]:
+    row, rec = pair.row, pair.rec
+    detail = "；".join(problems)
+    if row.get("delivered") is False and row["expect"] == "block":
+        detail += "；载荷没有送到模型面前"
+    return {
+        "case": row["case"],
+        "group": row["group"],
+        "status": row["status"],
+        "category": row["category"],
+        "config": row["config"],
+        "expect": row["expect"],
+        "got": rec["decision_path"],
+        "outcome": rec["outcome"],
+        "request_id": row["request_id"],
+        "jev": _jev_summary(rec),
+        "detail": detail,
+    }
+
+
+def _failures(pairs: list[Pair], missing: list[dict[str, Any]], caps: dict[str, bool],
+              exclude_suspicious: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    failures: list[dict[str, Any]] = []
+    known_gaps: list[dict[str, Any]] = []
+    for pair in pairs:
+        row = pair.row
+        if _needs_tiers(row, caps):
+            continue
+        problems = _problems(row, pair.rec)
+        if _known_gap(row):
+            known_gaps.append({
+                "case": row["case"],
+                "ref": row["ref"],
+                "note": row["note"],
+                "category": row["category"],
+                "config": row["config"],
+                "unexpected_pass": not problems,
+            })
+            if not problems:
+                failures.append(_failure(pair, ["意外通过：已知缺口的用例通过了，请把状态改为 must"]))
+            continue
+        if _label_excluded(pair, exclude_suspicious):
+            continue
+        if problems:
+            failures.append(_failure(pair, problems))
+    for row in missing:
+        failures.append({
+            "case": row["case"],
+            "group": row["group"],
+            "status": row["status"],
+            "category": row["category"],
+            "config": row["config"],
+            "expect": row["expect"],
+            "got": "记录缺失",
+            "outcome": None,
+            "request_id": row["request_id"],
+            "jev": "",
+            "detail": "没有找到这个请求 ID 的判定记录",
+        })
+    return failures, known_gaps
+
+
+def _label_summary(pairs: list[Pair], exclude_suspicious: bool) -> dict[str, Any]:
+    return {
+        "applied": exclude_suspicious,
+        "suspicious": [pair.row["case"] for pair in pairs if pair.suspicious],
+        "bypass": [pair.row["case"] for pair in pairs if pair.bypass],
+        "excluded": sum(_label_excluded(pair, exclude_suspicious) for pair in pairs),
+    }
+
+
+def _needs_tiers_by_config(pairs: list[Pair], caps: dict[str, bool]) -> dict[str, int]:
+    counts: Counter[str] = Counter(pair.row["config"] for pair in pairs if _needs_tiers(pair.row, caps))
+    return {config: counts[config] for config in sorted(counts, key=_config_position)}
+
+
+def _config_position(config: str) -> tuple[int, str]:
+    return (CONFIG_ORDER.index(config) if config in CONFIG_ORDER else len(CONFIG_ORDER), config)
+
+
+# ---------------------------------------------------------------- costs
+
+
+def _judge_ms(rec: dict[str, Any]) -> int | None:
+    value = (((rec.get("trace") or {}).get("timing")) or {}).get("judge_ms")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _p95(values: list[int]) -> int | None:
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)] if ordered else None
+
+
+def _costs(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+    calls = sum(_jev_calls(rec) for rec in decisions)
+    timings = [value for value in (_judge_ms(rec) for rec in decisions) if value is not None]
+    failures = Counter(
+        (rec.get("jev") or {}).get("failure") for rec in decisions if (rec.get("jev") or {}).get("failure")
+    )
+    return {
+        "requests": len(decisions),
+        "jev_calls": calls,
+        "calls_per_request": calls / len(decisions) if decisions else None,
+        "judge_ms_median": statistics.median(timings) if timings else None,
+        "judge_ms_p95": _p95(timings),
+        "jev_failures": dict(sorted(failures.items())),
+    }
+
+
+# ---------------------------------------------------------------- learning (L0 to L3, stability)
+
+
+def _lmetric(correct: int, proposals: int, covered: int, truth_total: int,
+             high: tuple[int, int] | None = None) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "accuracy": _metric(correct, proposals),
+        "coverage": _metric(covered, truth_total),
+        "wrong": proposals - correct,
+    }
+    if high is not None:
+        result["high"] = _metric(*high)
+    return result
+
+
+def _unique(items: list[dict[str, Any]]) -> int:
+    return len({item["key"] for item in items})
+
+
+def _template_matches(template: str, path: str) -> bool:
+    wanted = template.strip("/").split("/")
+    got = path.split("?", 1)[0].strip("/").split("/")
+    if len(wanted) != len(got):
+        return False
+    for want, have in zip(wanted, got):
+        if want.startswith("{") and want.endswith("}"):
+            if not have:
+                return False
+        elif want != have:
+            return False
+    return True
+
+
+def _route_matches(rec: dict[str, Any], method: str, route: str) -> bool:
+    if rec.get("method") != method:
+        return False
+    paths = {rec.get("path"), rec.get("logical_path")} - {None}
+    return any(_template_matches(route, path) for path in paths)
+
+
+def _unseen(key: str, position: dict[str, Any], decisions: list[dict[str, Any]]) -> str:
+    """Why a truth position was not learned (report section 4), in the groups of section 3.2."""
+    if not position["learnable"]:
+        why = f"（{position['why']}）" if position.get("why") else ""
+        return f"没学到：规则学不到{why}"
+    method, route = key.split(" ")[0], key.split(" ")[1]
+    seen = [rec for rec in decisions if _route_matches(rec, method, route)]
+    if any(rec["decision_path"] == "jev_deny" for rec in seen):
+        return "没学到：被拒绝记录挡住"
+    if seen:
+        return "没学到：其他"
+    return "没学到：流量不足"
+
+
+def _proposal_set(rnd: dict[str, Any]) -> tuple[set[tuple[Any, ...]], set[tuple[Any, ...]]]:
+    positions = {
+        (p["key"], p.get("class"), p.get("tier"), p.get("accepts_public"), p.get("reliability"))
+        for p in rnd["positions"] if p["state"] in ACTIVE_STATES
+    }
+    judgements = {(j["key"], j["tier"], j["reliability"]) for j in rnd["judgements"]}
+    return positions, judgements
+
+
+def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
+              decisions: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
+    if truth is None or learned is None:
+        absent = [name for name, doc in (("truth.json", truth), ("learned.json", learned)) if doc is None]
+        return None, f"未提供 {'、'.join(absent)}，L0 到 L3 与稳定性未计算"
+
+    request = {p["key"]: p for p in truth["request_positions"]}
+    response = {p["key"]: p for p in truth["response_positions"]}
+    non_objects = set(truth["non_objects"])
+    rounds = learned["rounds"]
+    last = rounds[-1] if rounds else {"positions": [], "judgements": []}
+    active = [p for p in last["positions"] if p["state"] in ACTIVE_STATES]
+    judgements = last["judgements"]
+    candidates = learned["bootstrap"]
+    truth_total = len(request) + len(response)
+
+    # L0: cold-start candidates, which name a class from the route alone.
+    def candidate_right(candidate: dict[str, Any]) -> bool:
+        table = request if candidate["side"] == "request" else response
+        return candidate["key"] in table and table[candidate["key"]]["class"] == candidate["class"]
+
+    right0 = [c for c in candidates if candidate_right(c)]
+    l0 = _lmetric(len(right0), len(candidates), _unique(right0), truth_total)
+
+    # L1: request-position classes proposed in the last round. A proposal on a response position
+    # belongs to L0 and L2, so it is left out here. A proposal on a non-object or unknown key is wrong (3.2).
+    props1 = [p for p in active if p.get("class") is not None and p["key"] not in response]
+    right1 = [p for p in props1 if p["key"] in request and request[p["key"]]["class"] == p["class"]]
+    l1 = _lmetric(len(right1), len(props1), _unique(right1), len(request))
+
+    # L2: response-position tiers, from the last round's judgements.
+    tiered = {key: p for key, p in response.items() if p.get("tier")}
+    # Every judgement is a proposal: a tier on a request position or a non-object has no tier in the truth.
+    props2 = list(judgements)
+    right2 = [j for j in props2 if j["key"] in tiered and tiered[j["key"]]["tier"] == j["tier"]]
+    l2 = _lmetric(len(right2), len(props2), _unique(right2), len(tiered),
+                  high=(_unique([j for j in right2 if j["reliability"] == "high"]), len(tiered)))
+
+    # L3: request-position accepts_public, from the last round.
+    props3 = [p for p in active if p.get("accepts_public") is not None and p["key"] not in response]
+    right3 = [p for p in props3
+              if p["key"] in request and request[p["key"]]["accepts_public"] == p["accepts_public"]]
+    l3 = _lmetric(len(right3), len(props3), _unique(right3), len(request),
+                  high=(_unique([p for p in right3 if p.get("reliability") == "high"]), len(request)))
+
+    stable = _proposal_set(rounds[-1]) == _proposal_set(rounds[-2]) if len(rounds) >= 2 else None
+
+    rows = _learning_rows(request, response, non_objects, active, judgements, candidates, decisions)
+    gates = [
+        _gate(LEARNING_GATE_NAMES[0], l0["wrong"], "== 0", l0["wrong"] == 0),
+        _gate(LEARNING_GATE_NAMES[1], l1["wrong"], "== 0", l1["wrong"] == 0),
+        _gate(LEARNING_GATE_NAMES[2], l2["wrong"], "== 0", l2["wrong"] == 0),
+        _gate(LEARNING_GATE_NAMES[3], l3["wrong"], "== 0", l3["wrong"] == 0),
+        _gate(LEARNING_GATE_NAMES[4], None if stable is None else ("不变" if stable else "变化"), "不变", stable),
+    ]
+    metrics = {
+        "L0": l0,
+        "L1": l1,
+        "L2": l2,
+        "L3": l3,
+        "stability": {"value": stable, "rounds": len(rounds)},
+    }
+    return {"metrics": metrics, "gates": gates, "rows": rows}, None
+
+
+def _learning_rows(request: dict[str, Any], response: dict[str, Any], non_objects: set[str],
+                   active: list[dict[str, Any]], judgements: list[dict[str, Any]],
+                   candidates: list[dict[str, Any]], decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per truth position and per wrong key (report section 4)."""
+    position_of: dict[str, dict[str, Any]] = {}
+    for proposal in active:
+        position_of.setdefault(proposal["key"], proposal)
+    judgement_of: dict[str, dict[str, Any]] = {}
+    for judgement in judgements:
+        judgement_of.setdefault(judgement["key"], judgement)
+    candidate_of: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidate in candidates:
+        candidate_of.setdefault((candidate["side"], candidate["key"]), candidate)
+
+    rows: list[dict[str, Any]] = []
+    for key, truth_position in request.items():
+        proposal = position_of.get(key)
+        learned_fields = {
+            "class": proposal.get("class") if proposal else None,
+            "accepts_public": proposal.get("accepts_public") if proposal else None,
+        }
+        mismatches = []
+        if proposal is None:
+            why = _unseen(key, truth_position, decisions)
+        else:
+            if learned_fields["class"] != truth_position["class"]:
+                mismatches.append("类别不符")
+            if learned_fields["accepts_public"] != truth_position["accepts_public"]:
+                mismatches.append("接受公共来源不符")
+            why = "；".join(mismatches)
+        rows.append({
+            "key": key,
+            "side": "request",
+            "truth": {"class": truth_position["class"], "accepts_public": truth_position["accepts_public"]},
+            "learned": learned_fields,
+            "ok": not why,
+            "why": why,
+        })
+
+    for key, truth_position in response.items():
+        proposal = position_of.get(key)
+        judgement = judgement_of.get(key)
+        candidate = candidate_of.get(("response", key))
+        if proposal is not None and proposal.get("class") is not None:
+            learned_class = proposal["class"]
+        else:
+            learned_class = candidate["class"] if candidate else None
+        learned_fields = {
+            "class": learned_class,
+            "tier": judgement["tier"] if judgement else None,
+            "reliability": judgement["reliability"] if judgement else None,
+        }
+        mismatches = []
+        if judgement is None:
+            why = _unseen(key, truth_position, decisions)
+        else:
+            if learned_class != truth_position["class"]:
+                mismatches.append("类别不符")
+            if judgement["tier"] != truth_position["tier"]:
+                mismatches.append("档位不符")
+            why = "；".join(mismatches)
+        rows.append({
+            "key": key,
+            "side": "response",
+            "truth": {"class": truth_position["class"], "tier": truth_position["tier"]},
+            "learned": learned_fields,
+            "ok": not why,
+            "why": why,
+        })
+
+    known = set(request) | set(response) | non_objects
+    for key in sorted(non_objects):
+        proposal = position_of.get(key)
+        judgement = judgement_of.get(key)
+        candidate = candidate_of.get(("response", key))
+        if proposal is None and judgement is None and candidate is None:
+            continue
+        rows.append({
+            "key": key,
+            "side": "non_object",
+            "truth": {"object": False},
+            "learned": {
+                "class": (proposal or candidate or {}).get("class"),
+                "tier": judgement["tier"] if judgement else None,
+            },
+            "ok": False,
+            "why": "误学：真值为非对象",
+        })
+    unknown = ({p["key"] for p in active} | {j["key"] for j in judgements}
+               | {c["key"] for c in candidates}) - known
+    for key in sorted(unknown):
+        proposal = position_of.get(key)
+        judgement = judgement_of.get(key)
+        rows.append({
+            "key": key,
+            "side": "unknown",
+            "truth": {},
+            "learned": {
+                "class": proposal.get("class") if proposal else None,
+                "tier": judgement["tier"] if judgement else None,
+            },
+            "ok": False,
+            "why": "误学：真值里没有这个位置",
+        })
+    return rows
+
+
+# ---------------------------------------------------------------- baseline and flattening
+
+
+def _flatten(metrics: dict[str, Any]) -> dict[str, float]:
+    """The numbers the baseline compares, by name. A name is a metric, or metric/category/config."""
+    flat: dict[str, float | None] = {}
+    if metrics.get("S1"):
+        flat["S1"] = metrics["S1"]["value"]
+        flat["S3"] = metrics["S3"]["value"]
+    for name in ("P1", "P2", "P3"):
+        if metrics.get(name):
+            flat[name] = metrics[name]["value"]
+            for category, cells in metrics[name]["by_category"].items():
+                for config, cell in cells.items():
+                    flat[f"{name}/{category}/{config}"] = cell["value"]
+    for name in ("L0", "L1", "L2", "L3"):
+        if metrics.get(name):
+            flat[f"{name}.accuracy"] = metrics[name]["accuracy"]["value"]
+            flat[f"{name}.coverage"] = metrics[name]["coverage"]["value"]
+    return {name: value for name, value in flat.items() if value is not None}
+
+
+def compare_baseline(values: dict[str, float], baseline: dict[str, Any] | None) -> dict[str, Any]:
+    """Compares each number with the baseline. A regression is a move in the wrong direction (only
+    in-or-out comparisons: a metric that is not in the baseline is not compared)."""
+    if baseline is None:
+        return {"compared": False, "regressions": [], "improvements": [], "reference": {}}
+    reference = baseline.get("values", {})
+    compared = {name: reference[name] for name in values if reference.get(name) is not None}
+    regressions: list[dict[str, Any]] = []
+    improvements: list[dict[str, Any]] = []
+    for name in sorted(compared):
+        now, then = values[name], compared[name]
+        lower = name.split("/", 1)[0] in LOWER_IS_BETTER
+        worse = now > then + TOLERANCE if lower else now < then - TOLERANCE
+        better = now < then - TOLERANCE if lower else now > then + TOLERANCE
+        if worse:
+            regressions.append({"name": name, "baseline": then, "value": now})
+        elif better:
+            improvements.append({"name": name, "baseline": then, "value": now})
+    return {"compared": True, "regressions": regressions, "improvements": improvements, "reference": compared}
