@@ -141,6 +141,13 @@
   animation: fresh 2s ease-out;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .sx-row.hl {
+    animation: none;
+    transition: none;
+  }
+}
+
 .sx-time,
 .sx-method,
 .sx-status {
