@@ -35,6 +35,7 @@ python3 -m pip install -r scripts/requirements.txt
 python3 scripts/validate_library.py     # Schema、样例与文档链接
 scripts/verify_all.sh                    # fmt、clippy、测试、PostgreSQL 与控制台
 ./dev.sh                                 # 本地开发栈
+docker compose up -d --build             # 参考部署（先按 docs/04 4.1.1 准备 .env）
 ```
 
 构建输出很大，请把 `CARGO_TARGET_DIR` 指向大容量卷。
