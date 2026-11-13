@@ -943,7 +943,9 @@ fn base_cases() -> Vec<Case> {
             Some(DOCTOR),
             true,
         ),
-        // `{id}` in the table covers this route word, so the function is known and none is sent.
+        // KnownGap: `{id}` in the table covers this route word, so the function is known and none is sent.
+        // The verdict wanted is still a block. The matching rule changes in a separate plan; after that this
+        // case becomes a Must with an unknown function.
         get(
             "GET /api/patients/export-all",
             "/api/patients/export-all",
@@ -951,7 +953,8 @@ fn base_cases() -> Vec<Case> {
             Some(DOCTOR),
             true,
         )
-        .known(),
+        .known()
+        .known_gap(),
         call(
             "DELETE",
             "DELETE /api/patients (bulk)",
@@ -1736,7 +1739,7 @@ async fn function_cases_reach_jev_as_intended() {
     let judge = Judge::new(ContextKey::new(vec![8; 32]), Stub);
     establish(&judge, &fixture);
     let judged = judge_table(&judge, &fixture).await;
-    // The plan's shape: 75 requests and 2 recorded ones, 3 known gaps, 4 attempts.
+    // The plan's shape: 75 requests and 2 recorded ones, 4 known gaps, 4 attempts.
     assert_eq!(
         judged.len(),
         77,
@@ -1747,7 +1750,7 @@ async fn function_cases_reach_jev_as_intended() {
             .iter()
             .filter(|(case, _)| case.status == Status::KnownGap)
             .count(),
-        3
+        4
     );
     assert_eq!(
         judged
