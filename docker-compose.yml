@@ -50,6 +50,9 @@ services:
       # the command runs before the hash exists; the control refuses to start without one.
       XSHIELD_ADMIN_PASSWORD_HASH: ${XSHIELD_ADMIN_PASSWORD_HASH:-}
       XSHIELD_CONTEXT_KEY_HEX: ${XSHIELD_CONTEXT_KEY_HEX:?set XSHIELD_CONTEXT_KEY_HEX in .env}
+      # Optional, from .env: the reverse proxies in front of the console (docs/03 3.3). Empty
+      # means every sign-in is counted under its connection's peer and X-Forwarded-For is ignored.
+      XSHIELD_CONTROL_TRUSTED_PROXIES: ${XSHIELD_CONTROL_TRUSTED_PROXIES:-}
     ports:
       - "127.0.0.1:${XSHIELD_CONTROL_PORT:-8081}:8081"
 

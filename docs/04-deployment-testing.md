@@ -21,6 +21,7 @@ docker compose up -d --build
 ```
 
 - 控制台只监听本机的 `127.0.0.1:8081`。管理员 Cookie 带 `Secure`，所以在本机用 `http://localhost:8081` 打开，或经 SSH 隧道，或在前面放一个 HTTPS 反向代理（[07.2.3](07-console-architecture.md#723-部署)）。
+- 控制台前面放了反向代理时，在 `.env` 里设置 `XSHIELD_CONTROL_TRUSTED_PROXIES`（代理的地址或网段，逗号分隔，[03.3](03-admin-config-audit.md#33-部署级环境变量)），并让代理追加 `X-Forwarded-For`。不设置时，所有登录失败都按代理的地址计数，任何人输错口令都会把所有人（包括管理员）锁住 10 分钟。
 - 网关监听所有网卡的 `8080`（明文）。要让网关自己终结 TLS，在 `docker-compose.yml` 的 `xshield-edge` 里挂载证书和私钥并设置 `XSHIELD_EDGE_TLS_CERT_PATH`、`XSHIELD_EDGE_TLS_KEY_PATH`（[03.3](03-admin-config-audit.md#33-部署级环境变量)）。
 - Jev 密钥可以写在 `.env` 的 `AI_GATEWAY_API_KEY`（取消该行注释后填写），也可以启动后在控制台“系统”页的“模型”标签里保存；控制台保存的密钥优先。两处都没有时判定记为 `JEV_NOT_CONFIGURED`。
 - 网关在表还没建好时会退出，由 Compose 重启，直到控制台执行完迁移。
