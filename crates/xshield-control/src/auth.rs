@@ -279,7 +279,9 @@ pub fn session_authenticated(state: &ControlState, headers: &HeaderMap) -> bool 
 
 // --- Failed sign-in limit, per client address ---
 
-/// Counts failed sign-ins per client address.
+/// Counts, per client address, the sign-in attempts that have not succeeded: an
+/// attempt counts from the moment it is admitted, so attempts made at once cannot
+/// exceed the limit while their passwords are still being checked.
 #[derive(Debug, Default)]
 pub struct LoginLimiter {
     failures: Mutex<HashMap<IpAddr, Vec<Instant>>>,
@@ -301,8 +303,11 @@ impl LoginLimiter {
         attempts.len() < LOGIN_FAILURES_ALLOWED
     }
 
-    /// Records a failed sign-in from `address` at `now`.
-    pub fn record_failure(&self, address: IpAddr, now: Instant) {
+    /// Admits a sign-in attempt from `address` at `now` and counts it, in one
+    /// step. `false` when the address has used up its attempts; the attempt then
+    /// must not be checked. A counted attempt stays a failure until [`Self::clear`].
+    #[must_use]
+    pub fn try_begin(&self, address: IpAddr, now: Instant) -> bool {
         let mut table = self.table();
         if table.len() >= LOGIN_TRACKED_MAX {
             table.retain(|_, attempts| {
@@ -313,10 +318,14 @@ impl LoginLimiter {
         }
         let attempts = table.entry(address).or_default();
         attempts.retain(|at| now.duration_since(*at) < LOGIN_WINDOW);
+        if attempts.len() >= LOGIN_FAILURES_ALLOWED {
+            return false;
+        }
         attempts.push(now);
+        true
     }
 
-    /// Forgets the failures of `address` after a successful sign-in.
+    /// Forgets the attempts of `address` after a successful sign-in.
     pub fn clear(&self, address: IpAddr) {
         self.table().remove(&address);
     }
@@ -366,13 +375,20 @@ pub async fn login(
             "LOGIN_RATE_LIMITED",
         ));
     }
+    // A malformed body costs no attempt. A well-formed one is counted as it is
+    // admitted, before the slow password check, so parallel attempts share the limit.
     let LoginBody { password } = json_body(&parts.headers, &body)?;
+    if !state.login_limiter.try_begin(address, Instant::now()) {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "LOGIN_RATE_LIMITED",
+        ));
+    }
     let stored = state.admin_password_hash.clone();
     let accepted = tokio::task::spawn_blocking(move || verify_password(&stored, &password))
         .await
         .unwrap_or(false);
     if !accepted {
-        state.login_limiter.record_failure(address, Instant::now());
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "INVALID_PASSWORD"));
     }
     state.login_limiter.clear(address);
@@ -477,12 +493,39 @@ mod tests {
         let start = Instant::now();
         for _ in 0..LOGIN_FAILURES_ALLOWED {
             assert!(limiter.allows(address, start));
-            limiter.record_failure(address, start);
+            assert!(limiter.try_begin(address, start));
         }
         assert!(!limiter.allows(address, start));
+        assert!(!limiter.try_begin(address, start));
         assert!(limiter.allows(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)), start));
         limiter.clear(address);
         assert!(limiter.allows(address, start));
+    }
+
+    #[test]
+    fn the_limiter_admits_only_ten_attempts_at_once() {
+        let limiter = LoginLimiter::default();
+        let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 4));
+        let start = Instant::now();
+        let admitted = (0..25)
+            .filter(|_| limiter.try_begin(address, start))
+            .count();
+        assert_eq!(admitted, LOGIN_FAILURES_ALLOWED);
+    }
+
+    #[test]
+    fn a_success_forgets_the_attempts_of_an_address() {
+        let limiter = LoginLimiter::default();
+        let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5));
+        let start = Instant::now();
+        for _ in 0..9 {
+            assert!(limiter.try_begin(address, start));
+        }
+        limiter.clear(address);
+        for _ in 0..10 {
+            assert!(limiter.try_begin(address, start));
+        }
+        assert!(!limiter.try_begin(address, start));
     }
 
     #[test]
@@ -491,9 +534,11 @@ mod tests {
         let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
         let start = Instant::now();
         for _ in 0..LOGIN_FAILURES_ALLOWED {
-            limiter.record_failure(address, start);
+            assert!(limiter.try_begin(address, start));
         }
+        assert!(!limiter.try_begin(address, start));
         assert!(limiter.allows(address, start + LOGIN_WINDOW));
+        assert!(limiter.try_begin(address, start + LOGIN_WINDOW));
     }
 
     #[test]
