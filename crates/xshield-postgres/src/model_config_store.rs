@@ -52,6 +52,9 @@ pub enum ModelConfigError {
     KeyUnreadable,
     /// The Jev group has no key yet, and the save brought none.
     KeyRequired,
+    /// The address changed and the save brought no key: a saved key goes only to
+    /// the address it was saved for.
+    KeyEndpointChanged,
     /// The note is longer than [`NOTE_MAX_CHARS`].
     NoteTooLong,
     /// The version the operator saw is no longer the saved one.
@@ -73,6 +76,7 @@ impl ModelConfigError {
             Self::KeyUnavailable => "MODEL_KEY_UNAVAILABLE",
             Self::KeyUnreadable => "MODEL_KEY_UNREADABLE",
             Self::KeyRequired => "MODEL_KEY_REQUIRED",
+            Self::KeyEndpointChanged => "MODEL_KEY_ENDPOINT_CHANGED",
             Self::NoteTooLong => "MODEL_NOTE_INVALID",
             Self::Conflict { .. } => "VERSION_CONFLICT",
             Self::Refused(reason) => reason.code(),
@@ -424,6 +428,9 @@ pub async fn save_jev(
         return Err(ConfigError::Share.into());
     }
     let previous = current.jev_spec()?;
+    if save.key.is_none() && previous.endpoint() != save.spec.endpoint() {
+        return Err(ModelConfigError::KeyEndpointChanged);
+    }
     let mut changes = changed_fields(&previous.values(), &save.spec.values());
     let stored = seal_optional(sealer, JEV_KEY_COLUMN, save.key.as_ref())?;
     let key_last4 = save
@@ -499,8 +506,16 @@ pub async fn save_agent(
         return Err(ConfigError::Share.into());
     }
     let previous = current.agent_spec()?;
-    let mut changes = changed_fields(&previous.values(), &save.spec.values());
     let shared = save.spec.share_key_with_jev();
+    // A shared key goes only to the fixed address of the gateway line (`check_share`).
+    if !shared
+        && save.key.is_none()
+        && current.agent_key.is_some()
+        && previous.endpoint() != save.spec.endpoint()
+    {
+        return Err(ModelConfigError::KeyEndpointChanged);
+    }
+    let mut changes = changed_fields(&previous.values(), &save.spec.values());
     let stored = seal_optional(sealer, AGENT_KEY_COLUMN, save.key.as_ref())?;
     let key_last4 = if shared {
         None
@@ -799,11 +814,15 @@ fn open_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xshield_core::model::{AGENT_TIMEOUT_MS, DIRECT_JEV_MODEL, GATEWAY_AGENT_ENDPOINT};
+    use xshield_core::model::{AGENT_TIMEOUT_MS, GATEWAY_AGENT_ENDPOINT};
 
     #[test]
     fn every_error_has_a_stable_code_and_no_detail() {
         assert_eq!(ModelConfigError::KeyRequired.code(), "MODEL_KEY_REQUIRED");
+        assert_eq!(
+            ModelConfigError::KeyEndpointChanged.code(),
+            "MODEL_KEY_ENDPOINT_CHANGED"
+        );
         assert_eq!(
             ModelConfigError::Conflict { current: 7 }.code(),
             "VERSION_CONFLICT"
@@ -1011,17 +1030,30 @@ mod tests {
             Err(ModelConfigError::KeyUnreadable)
         ));
 
-        // A save without a key keeps the saved one, and changes the route and the timeout.
-        let direct = jev_save(1, jev(JevRoute::Direct, 3_000), None);
+        // The saved key goes only to the address it was saved for: another route
+        // has another address, so a save of it must bring its key.
         assert_eq!(
-            save_jev(&pool, Some(&sealer), direct)
+            refusal(
+                save_jev(
+                    &pool,
+                    Some(&sealer),
+                    jev_save(1, jev(JevRoute::Direct, 3_000), None)
+                )
+                .await
+            ),
+            "MODEL_KEY_ENDPOINT_CHANGED"
+        );
+
+        // A save without a key keeps the saved one, and changes the timeout.
+        let slower = jev_save(1, jev(JevRoute::Gateway, 3_000), None);
+        assert_eq!(
+            save_jev(&pool, Some(&sealer), slower)
                 .await
                 .expect("save without a key"),
             2
         );
         let direct = read(&pool).await.expect("read").jev;
-        assert_eq!(direct.spec.route(), JevRoute::Direct);
-        assert_eq!(direct.spec.model(), DIRECT_JEV_MODEL);
+        assert_eq!(direct.spec.route(), JevRoute::Gateway);
         assert_eq!(direct.spec.timeout_ms(), 3_000);
         assert_eq!(direct.key_last4.as_deref(), Some("9f3a"));
         assert_eq!(direct.key_at, Some(key_at));
@@ -1139,7 +1171,11 @@ mod tests {
             .expect("load")
             .expect("configured");
         assert_eq!(own_secret.api_key.expose(), "sk-agent-8888");
-        let route_change = jev_save(3, jev(JevRoute::Direct, JEV_TIMEOUT_MS), None);
+        let route_change = jev_save(
+            3,
+            jev(JevRoute::Direct, JEV_TIMEOUT_MS),
+            Some("sk-console-d1r3"),
+        );
         assert_eq!(
             save_jev(&pool, Some(&sealer), route_change)
                 .await

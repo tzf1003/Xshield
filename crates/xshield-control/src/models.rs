@@ -341,6 +341,7 @@ impl From<ModelConfigError> for ApiError {
             ModelConfigError::KeyRequired => {
                 ApiError::new(StatusCode::BAD_REQUEST, "MODEL_KEY_REQUIRED").in_field("key")
             }
+            ModelConfigError::KeyEndpointChanged => key_endpoint_changed(),
             ModelConfigError::NoteTooLong => {
                 ApiError::new(StatusCode::BAD_REQUEST, "MODEL_NOTE_INVALID").in_field("note")
             }
@@ -848,7 +849,7 @@ pub async fn test(
             let spec = jev_spec(&body)?;
             let key = match key_of(&body)? {
                 Some(key) => key,
-                None => saved_jev_key(&state).await?,
+                None => saved_jev_key(&state, spec.endpoint()).await?,
             };
             let client = JevClient::from_spec(&spec, &key).map_err(client_refused)?;
             probe::jev(&client, Duration::from_millis(u64::from(spec.timeout_ms()))).await
@@ -858,7 +859,7 @@ pub async fn test(
             let model = spec.model().ok_or_else(|| refused(ConfigError::Model))?;
             let key = match key_of(&body)? {
                 Some(key) => key,
-                None => saved_agent_key(&state).await?,
+                None => saved_agent_key(&state, spec.endpoint()).await?,
             };
             probe::chat(
                 spec.endpoint(),
@@ -892,21 +893,37 @@ fn throttle_test(state: &ControlState, group: Group) -> ApiResult<()> {
     Ok(())
 }
 
-/// The saved Jev key, opened for a test that leaves the key out.
-async fn saved_jev_key(state: &ControlState) -> ApiResult<ApiKey> {
-    store::load_jev(&state.pool, state.key_sealer.as_ref())
+/// The refusal of a saved key for an address it was not saved for.
+fn key_endpoint_changed() -> ApiError {
+    ApiError::new(StatusCode::BAD_REQUEST, "MODEL_KEY_ENDPOINT_CHANGED").in_field("key")
+}
+
+/// The saved key when the call goes to the address the key was saved for.
+fn saved_key_for(saved_endpoint: &str, endpoint: &str, key: ApiKey) -> ApiResult<ApiKey> {
+    if saved_endpoint == endpoint {
+        Ok(key)
+    } else {
+        Err(key_endpoint_changed())
+    }
+}
+
+/// The saved Jev key, opened for a test that leaves the key out. It is given only
+/// for the address it was saved for: a test of another address must bring its key,
+/// so the saved one cannot be sent somewhere else.
+async fn saved_jev_key(state: &ControlState, endpoint: &str) -> ApiResult<ApiKey> {
+    let secret = store::load_jev(&state.pool, state.key_sealer.as_ref())
         .await?
-        .map(|secret| secret.api_key)
-        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "MODEL_KEY_REQUIRED").in_field("key"))
+        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "MODEL_KEY_REQUIRED").in_field("key"))?;
+    saved_key_for(secret.spec.endpoint(), endpoint, secret.api_key)
 }
 
 /// The saved agent key, opened for a test that leaves the key out. The agent's
-/// own key, or the Jev key when the agent shares it.
-async fn saved_agent_key(state: &ControlState) -> ApiResult<ApiKey> {
-    store::load_agent(&state.pool, state.key_sealer.as_ref())
+/// own key, or the Jev key when the agent shares it; only for the saved address.
+async fn saved_agent_key(state: &ControlState, endpoint: &str) -> ApiResult<ApiKey> {
+    let saved = store::load_agent(&state.pool, state.key_sealer.as_ref())
         .await?
-        .map(|endpoint| endpoint.api_key)
-        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "MODEL_KEY_REQUIRED").in_field("key"))
+        .ok_or_else(|| ApiError::new(StatusCode::CONFLICT, "MODEL_KEY_REQUIRED").in_field("key"))?;
+    saved_key_for(&saved.base_url, endpoint, saved.api_key)
 }
 
 /// `GET /api/system/models/{group}/history`: the newest versions first.
@@ -928,6 +945,29 @@ mod tests {
     use xshield_core::context::config::SiteSpec;
 
     use super::*;
+
+    #[test]
+    fn a_saved_key_is_given_only_for_the_address_it_was_saved_for() {
+        let key = || ApiKey::new("sk-console-9f3a").expect("key");
+        let saved = "https://api.typesafe.ai/v1/systemone";
+        assert_eq!(
+            saved_key_for(saved, saved, key())
+                .expect("same address")
+                .expose(),
+            "sk-console-9f3a"
+        );
+        for other in [
+            "https://collector.example.net/v1/systemone",
+            "https://api.typesafe.ai/v1/systemone/",
+            "http://api.typesafe.ai/v1/systemone",
+        ] {
+            let Err(refused) = saved_key_for(saved, other, key()) else {
+                panic!("the saved key was given for {other}");
+            };
+            let response = axum::response::IntoResponse::into_response(refused);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{other}");
+        }
+    }
 
     fn site(name: &str, agent: &str) -> SiteRecord {
         let text = format!(

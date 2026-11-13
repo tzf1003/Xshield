@@ -635,7 +635,7 @@ CREATE TABLE jev_prompts (
 ### 7.9.1 通用约定
 
 - 前缀 `/api`，JSON，`snake_case`。时间字段：`*_millis` 为 Unix 毫秒整数，其余为 RFC 3339 UTC 字符串。
-- 除登录、`/api/session`、`/health` 外都要求管理员 Cookie；未登录返回 401 `UNAUTHENTICATED`。写操作要求 `Content-Type: application/json`。
+- 除登录、`/api/session`、`/health` 外都要求管理员 Cookie；未登录返回 401 `UNAUTHENTICATED`。`POST`、`PUT`、`PATCH` 要求 `Content-Type: application/json`（`/api/import` 要求 `application/x-ndjson`），没有请求体的也一样，否则 415 `UNSUPPORTED_MEDIA_TYPE`，在检查登录之前就拒绝：别的站点的页面能让浏览器带着管理员 Cookie 发表单或纯文本请求，但发不出这两种类型。
 - 错误体 `{"error": "CODE", "field": "entries[2]"?, "current_version": 14?}`，界面按错误码映射中文（[06.6](06-console-ui.md#66-文案与词汇)）。
 - 列表：`limit` 默认 100、最大 500；时间窗最长 7 天，缺省最近 24 小时；游标 `cursor` 不透明，响应给 `next_cursor`。
 - 统计和建议接口单次最多扫描 200 万行，超出返回 `complete: false` 和已扫描行数，界面如实显示“按前 N 条计算”。
@@ -916,8 +916,8 @@ CREATE TABLE jev_prompts (
 | 接口 | 作用 |
 |---|---|
 | `GET /api/system/models` | 两组已保存的配置；密钥只有是否设置、末 4 位和更新时间；Jev 组的 `source` 为 `console` 或 `env`，`key_env` 是网关读取密钥的环境变量名；`loaded` 是各在线网关的 `{ edge, online, version, error }`（只列在线网关，`online` 恒为 true）；`impact` 是站点数和 `fail_closed`（拦截模式下 Jev 失败会拒绝请求的站点）；`usage` 是 Jev 最近 5 分钟的 `window_minutes`、调用数、失败数和 p95 |
-| `PUT /api/system/models/{jev｜agent}` | 保存新版本。正文：`route`（Jev）或 `provider`（学习代理，`gateway` 或 `custom`）、`endpoint`、`model`、`timeout_ms`、`expected_version`、可选 `note`（最多 200 字符）、可选 `tested`、可选 `key`（省略保留已保存的密钥，字符串替换；学习代理另有 `share_key_with_jev`）。返回 `{ group, version }`；版本不一致 409 `VERSION_CONFLICT` |
-| `POST /api/system/models/{jev｜agent}/test` | 用正文里的值发一次最小调用，`key` 省略时用已保存的。返回 `ok`、`latency_ms`、`status`、`failure`、`detail`（模型返回的错误正文，最多 300 字符，不可信文本）、`answer_valid`、`answer_reason`。每组 10 秒内第二次起返回 429 `MODEL_TEST_RATE_LIMITED` |
+| `PUT /api/system/models/{jev｜agent}` | 保存新版本。正文：`route`（Jev）或 `provider`（学习代理，`gateway` 或 `custom`）、`endpoint`、`model`、`timeout_ms`、`expected_version`、可选 `note`（最多 200 字符）、可选 `tested`、可选 `key`（省略保留已保存的密钥，字符串替换；学习代理另有 `share_key_with_jev`）。已保存的密钥只用于保存它时的地址：地址（含换线路带来的预设地址）变了而没有带 `key`，返回 400 `MODEL_KEY_ENDPOINT_CHANGED`。返回 `{ group, version }`；版本不一致 409 `VERSION_CONFLICT` |
+| `POST /api/system/models/{jev｜agent}/test` | 用正文里的值发一次最小调用，`key` 省略时用已保存的，但只在正文的地址与已保存的地址相同时；地址不同必须带 `key`，否则 400 `MODEL_KEY_ENDPOINT_CHANGED`，已保存的密钥不会发往别的地址。返回 `ok`、`latency_ms`、`status`、`failure`、`detail`（模型返回的错误正文，最多 300 字符，不可信文本）、`answer_valid`、`answer_reason`。每组 10 秒内第二次起返回 429 `MODEL_TEST_RATE_LIMITED` |
 | `DELETE /api/system/models/jev?expected_version=N` | 改回环境变量。只有在线网关都在环境里有可用配置时允许，否则 409 `MODEL_ENV_KEY_MISSING`。版本照常加一并写一条 `revert_to_env` 历史；返回与 `GET` 的 `jev` 相同结构的 Jev 组 |
 | `GET /api/system/models/{jev｜agent}/history` | 最近 20 版：版本、时间、改动的字段（旧值、新值；密钥只写末 4 位）、备注、保存时是否测试成功 |
 

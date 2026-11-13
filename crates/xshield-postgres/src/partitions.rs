@@ -466,7 +466,11 @@ mod tests {
             })
         };
         let mut marked = false;
-        for _ in 0..100 {
+        for _ in 0..1_200 {
+            assert!(
+                !detaching.is_finished(),
+                "the detach ended before it was cancelled"
+            );
             marked = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
                      WHERE c.relname = $1 AND i.inhdetachpending)",

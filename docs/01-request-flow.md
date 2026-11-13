@@ -42,7 +42,8 @@
 **类别**：较短的值还要看它被当作哪类对象（`/api/doctors/7/files/9` 里的 `9` 是文件，不是医生）。路径段取它前面最近的路由词；查询、表单或 JSON 的键有名字的，取键名（`?doctor=` 是医生）；没有名字的键（裸 `id`、`ids`，或顶层数组里的值）取路径末尾最近的路由词，即路径所指的对象。嵌套在具名对象里的裸 `id` 取对象名：`{"doc":{"id":5}}` 的 `doc.id` 装的是文档，与 `?doc=5` 一致。展示侧的裸 `id` 取父对象名，没有父对象的取返回它的接口路径末尾最近的路由词，即那个接口所指的对象；`search` 之类的动作词不算路由词，所以 `GET /rest/products/search` 返回的裸 `id` 是商品。字段类别可以用 `advanced.field_kinds` 覆盖（见 [07.6](07-console-architecture.md#76-站点级判定参数advanced)）。
 
 **惰性值**：不可能是对象引用、本身也构不成注入载荷的值不触发判定，也不影响快速放行：
-- 路径段和查询、表单、JSON 里的值，只由 1–24 个小写字母、`_`、`-` 组成，且所在字段名不像标识、也不含 `user`、`name`、`owner`、`account`、`email`、`doctor`、`patient`、`member`、`login`、`uid`（例如 `/api/patients` 里的 `api`、`patients`，`sort=asc`）；
+- 路径段和查询、表单、JSON 里的值，只由 1–40 个小写字母、`_`、`-` 组成并以字母开头，且所在字段名不像标识、也不含 `user`、`name`、`owner`、`account`、`email`、`doctor`、`patient`、`member`、`login`、`uid`（例如 `/api/patients` 里的 `api`、`patients`，`sort=asc`）；
+- 路径里不是最后一段的段，只由 1–32 个字母（大小写都算）、`_`、`-` 组成、以字母开头的，是路由名（`/api/BasketItems/7` 里的 `api`、`BasketItems`）。最后一段可能是对象名（`/users/Alice`），仍按上一条，只有小写的才算；
 - 分页字段（`page`、`pagesize`、`size`、`limit`、`offset`、`perpage`、`count`、`skip`、`take`、`index`）下不超过 6 位的数字。
 
 **已知缺口**：按用户名等纯小写字母标识访问的接口（`/users/alice`），如果字段名里没有上面的提示词，`alice` 会被当作惰性值，越权引用不会被发现。这类站点需要等"按站点学习路由词"的改进（路由词 = 在多个会话的同一路径位置反复出现的段），首版不做。
