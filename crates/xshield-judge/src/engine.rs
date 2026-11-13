@@ -682,15 +682,18 @@ impl<J: JevPort> Judge<J> {
         // earlier (a new user's id, the security questions) is the only evidence that the next sign-up
         // request names its own data.
         if turn.session_id.is_none() && !turn.entry {
-            // No session has seen any of these values, so all of them are sent, as `plan_values` sends the
-            // unseen ones. A credential the origin answers later takes them (see `note_request_sent`), so an
-            // echo of them is not learned.
-            sent.extend(
-                turn.extracted
-                    .values
-                    .iter()
-                    .map(|value| self.key.mac("value", value.value.as_bytes())),
-            );
+            // A request that carries a credential no session holds sends all its values, as `plan_values`
+            // sends the unseen ones: the credential takes them if the origin answers it later (see
+            // `note_request_sent`), so an echo of them is not learned. A request without a credential sends
+            // nothing and starts no context, as before.
+            if turn.request.credential.is_some_and(|c| !c.is_empty()) {
+                sent.extend(
+                    turn.extracted
+                        .values
+                        .iter()
+                        .map(|value| self.key.mac("value", value.value.as_bytes())),
+                );
+            }
             return Plan::Done(Verdict::Unsafe(DecisionPath::NoSession));
         }
         let mut inner = self.lock();
@@ -8357,6 +8360,9 @@ mod tests {
         assert_eq!(reports.record.decision_path, DecisionPath::FastAllow);
         assert!(reports.record.trace.function.is_none());
         assert_eq!(fake.calls(), 0);
+        // The ordinary session is recognized first: the origin answers an entry with the credential (docs/01
+        // section 1.2), so its request is judged as a session's.
+        judge.observe(&site, &home_for("doctor-a", br#"{"doctor":{"id":"DR-A"}}"#));
         // The same request from an ordinary session is asked, with the function unknown.
         let doctor = judge
             .judge(
@@ -9025,6 +9031,197 @@ mod tests {
         assert_eq!(verdict.record.decision_path, DecisionPath::NoSession);
         assert_eq!(verdict.refuse_status, 401);
         assert_eq!(fake.calls(), 0);
+    }
+
+    /// A request without a credential off an entry is refused with nothing kept: it sends nothing a credential
+    /// could later take, and starts no address context, so an observed refusal of it leaves the store as it was
+    /// (docs/01 section 1.2).
+    #[tokio::test]
+    async fn a_request_without_a_credential_off_an_entry_sends_nothing_and_starts_no_context() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let open = site(r#","mode":"observe""#);
+        let before = judge.session_count();
+        let early = judge
+            .judge(&open, &get("/api/patients/P-0000099", None, None, 1_000))
+            .await;
+        assert!(early.forward, "observe mode forwards the attempt");
+        assert_eq!(early.record.decision_path, DecisionPath::NoSession);
+        assert!(early.sent.is_empty(), "no value waits for a credential");
+        judge.observe(
+            &open,
+            &Observation {
+                would_block: true,
+                credential: None,
+                client: "10.0.0.9",
+                sent: &early.sent,
+                echo: &early.echo,
+                path: "/api/patients/P-0000099",
+                body: br#"{"id":"P-0000099"}"#,
+                ..list_response("", 1_000)
+            },
+        );
+        assert_eq!(
+            judge.session_count(),
+            before,
+            "no address context is started"
+        );
+    }
+
+    /// A login the gateway would refuse in observe mode sends a value and is issued a credential. The value
+    /// waits for the credential (docs/07 section 7.4.6), so when an entry later recognizes it, the echo of the
+    /// value in that entry's answer teaches the session nothing.
+    #[tokio::test]
+    async fn a_refused_login_that_issues_a_credential_stages_what_it_sent() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let open = site(r#","mode":"observe""#);
+        let login = judge
+            .judge(
+                &open,
+                &RequestFacts {
+                    method: "POST",
+                    content_type: Some("application/json"),
+                    body: br#"{"id":"P-0000077"}"#,
+                    ..get("/login", None, None, 1_000)
+                },
+            )
+            .await;
+        assert!(login.forward, "observe mode forwards the attempt");
+        judge.observe(
+            &open,
+            &Observation {
+                would_block: true,
+                issued_credential: Some("fresh"),
+                sent: &login.sent,
+                echo: &login.echo,
+                ..json_login(br#"{"ok":true}"#, "10.0.0.9", 1_100)
+            },
+        );
+        let entry = judge
+            .judge(&open, &get("/api/home", None, Some("fresh"), 2_000))
+            .await;
+        judge.observe(
+            &open,
+            &Observation {
+                client: "10.0.0.9",
+                ..answered(&entry, "/api/home", br#"{"id":"P-0000077"}"#, "fresh")
+            },
+        );
+        let later = judge
+            .judge(
+                &open,
+                &get("/api/patients/P-0000077", None, Some("fresh"), 3_000),
+            )
+            .await;
+        assert_eq!(
+            later.record.decision_path,
+            DecisionPath::JevAllow,
+            "the echo of a value sent before recognition is not learned"
+        );
+    }
+
+    /// An unrecognized credential's entry request that sends more tokens than a session can record stops the
+    /// learning of the address it was judged in. The credential's session stops too, the stop waiting for the
+    /// session the credential starts: neither learns from a later answer (docs/01 section 1.2).
+    #[tokio::test]
+    async fn a_request_too_long_to_record_stops_the_learning_of_its_address_and_its_credential() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        let judge = judge(&fake);
+        let open = site(r#","mode":"enforce""#);
+        let body = (0..=SENT_MAX)
+            .map(|index| format!("t{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let upload = RequestFacts {
+            route: None,
+            request_headers: &[],
+            method_overrides: &[],
+            method: "POST",
+            content_type: Some("text/plain"),
+            body: body.as_bytes(),
+            ..get("/login", None, Some("late"), 1_000)
+        };
+        assert!(judge.judge(&open, &upload).await.forward);
+        let seen = judge.observe(
+            &open,
+            &Observation {
+                credential: None,
+                client: "10.0.0.9",
+                body: br#"{"items":[{"id":"P-0000066"}]}"#,
+                ..list_response("", 1_500)
+            },
+        );
+        assert_eq!(
+            seen.new_values, 0,
+            "the address learns nothing from its next answer"
+        );
+        judge.observe(
+            &open,
+            &Observation {
+                client: "10.0.0.9",
+                path: "/api/home",
+                body: br"{}",
+                ..list_response("late", 2_000)
+            },
+        );
+        let learned = judge.observe(
+            &open,
+            &Observation {
+                client: "10.0.0.9",
+                body: br#"{"items":[{"id":"P-0000055"}]}"#,
+                ..list_response("late", 2_100)
+            },
+        );
+        assert_eq!(
+            learned.new_values, 0,
+            "the session the credential starts keeps the stop"
+        );
+    }
+
+    /// On a site with a user identity position, an entry that declares a role and no user recognizes nothing:
+    /// only a user the response declares starts the session (docs/01 section 1.2, rule S3).
+    #[tokio::test]
+    async fn an_entry_that_declares_only_a_role_does_not_recognize_on_a_user_identity_site() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = identity_site();
+        judge.observe(&site, &home_for("alice", br#"{"role":"admin"}"#));
+        assert_eq!(
+            judge.session_count(),
+            1,
+            "only the address's context of the answer exists"
+        );
+        let verdict = judge
+            .judge(&site, &get("/metrics", None, Some("alice"), 1_000))
+            .await;
+        assert_eq!(verdict.record.decision_path, DecisionPath::NoSession);
+        assert_eq!(fake.calls(), 0);
+    }
+
+    /// A page that holds an expired token logs in again. On a site with a user identity position, a login
+    /// answer that declares no user does not recognize the old credential, so the login it sends is held as
+    /// usual and the new token binds on its next request (docs/01 sections 1.2 and 1.7, rule R8).
+    #[tokio::test]
+    async fn a_login_sent_with_an_old_unrecognized_credential_still_holds_its_login() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let site = identity_site();
+        let body = login_body(LOGIN_TOKEN, 6);
+        judge.observe(
+            &site,
+            &Observation {
+                credential: Some("expired"),
+                ..json_login(body.as_bytes(), "10.0.0.1", 0)
+            },
+        );
+        let bound = judge
+            .judge(&site, &get("/metrics", None, Some(LOGIN_TOKEN), 1_000))
+            .await;
+        let traced = bound.record.trace.session.expect("the session is traced");
+        assert_eq!(traced.login_request_id.as_deref(), Some(RID));
     }
 
     /// On a site with a user identity position, a response on an entry that declares a user recognizes the
