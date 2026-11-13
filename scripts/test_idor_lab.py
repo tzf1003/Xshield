@@ -1201,6 +1201,34 @@ def f13(lab: Lab) -> None:
         "fobserve.lab", "GET", "/metrics", cookie=cookie), Expect(404, "jev_deny", "would_block", True))
 
 
+@scenario("F14", "基线站点的医生 GET /api/patients/export-all（功能表的 {id} 不覆盖路由词）：交 Jev 判为未知功能，拦截")
+def f14(lab: Lab) -> None:
+    cookie = lab.login("baseline.lab", "doctor_a", "F14 doctor A logs in on the baseline site")
+    denied = lab.expect("F14 doctor A bulk-exports the patients", lab.send(
+        "baseline.lab", "GET", "/api/patients/export-all", cookie=cookie), Expect(403, "jev_deny", "blocked", False))
+    shown = (judged_state(lab, "GET", "/api/patients/export-all").get("request") or {})
+    lab.check("F14 Jev is shown the function as unknown", shown.get("function") == {"known": False},
+              f"function {shown.get('function')}")
+    traced = function_of(denied.record) or {}
+    lab.check("F14 the trace names the route word as unknown and no entry",
+              traced.get("key") == "GET /api/patients/export-all" and traced.get("known") is False
+              and "entry" not in traced, f"trace function {traced}")
+
+
+@scenario("F15", "管理员 admin_root 在基线站点（有角色身份位置，开关为真）读 GET /metrics：不带功能，不交 Jev 判未知功能")
+def f15(lab: Lab) -> None:
+    cookie = lab.login("baseline.lab", "admin_root", "F15 the administrator logs in on the baseline site")
+    lab.expect("F15 the administrator opens the home page", lab.send(
+        "baseline.lab", "GET", "/api/home", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    before = jev_calls(lab)
+    metrics = lab.expect("F15 the administrator reads the metrics", lab.send(
+        "baseline.lab", "GET", "/metrics", cookie=cookie), Expect(404, "fast_allow", "allowed", True))
+    lab.check("F15 Jev is not asked about the unknown function", jev_calls(lab) == before,
+              f"{jev_calls(lab) - before} new calls")
+    lab.check("F15 the record carries no function", function_of(metrics.record) is None,
+              f"trace function {function_of(metrics.record)}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--only", default="", help="comma separated scenario codes, e.g. A2,C4")

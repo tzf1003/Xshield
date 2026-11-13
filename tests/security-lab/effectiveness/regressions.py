@@ -135,6 +135,11 @@ def function_level_metrics(p: Prober) -> None:
     p.request(session, "GET", "/metrics", scored=True)
 
 
+def function_route_word(p: Prober) -> None:
+    session = p.login(account(DOCTOR_A))
+    p.request(session, "GET", "/api/patients/export-all", scored=True)
+
+
 # P1: sessions that refresh, search, revalidate, and observation mode.
 
 def rotation(p: Prober) -> None:
@@ -253,6 +258,8 @@ CASES: tuple[Case, ...] = (
          requires=("functions",), note="doctor's real session on /api/admin/export"),
     Case("p0-3-function-level-metrics", "P0-3", "must", "block", "access", SITE_TRUTH, function_level_metrics,
          requires=("functions",), note="doctor's real session on /metrics"),
+    Case("p0-3-function-route-word", "P0-3", "must", "block", "access", SITE_TRUTH, function_route_word,
+         requires=("functions",), note="doctor's real session on /api/patients/export-all: a route word under {id}"),
     Case("p1-1-rotation", "P1-1", "known_gap", "allow", None, SITE_TRUTH, rotation,
          note="the credential is refreshed between the list and the open"),
     Case("p1-2-search-id-then-open", "P1-2", "known_gap", "allow", None, SITE_TRUTH, search_id_then_open,
