@@ -20,8 +20,10 @@ import type {
   ModelWrite,
   ObjectEventsFilter,
   ObjectJudgementConfirmation,
+  FunctionChanges,
   ObjectsFilter,
   SiteDetail,
+  SiteFunctions,
   SiteSpec,
   SiteWriteBody,
 } from "./types.ts";
@@ -548,6 +550,45 @@ export function useConfirmJudgement() {
       void client.invalidateQueries({ queryKey: ["object-slot", args.name] });
       void client.invalidateQueries({ queryKey: keys.site(args.name) });
       void client.invalidateQueries({ queryKey: keys.versions(args.name) });
+    },
+  });
+}
+
+/** The function table of a site (docs/07 7.9.20), read on its own so that the object map's other views do not wait for it.
+ *  Its key sits under the map's prefix, so a confirmation of a position also reads it again. */
+export function useSiteFunctions(name: string | null) {
+  return useQuery({
+    queryKey: ["objects", name ?? "", "functions"] as const,
+    queryFn: (): Promise<SiteFunctions> => api.functions(name ?? ""),
+    enabled: name !== null,
+    staleTime: 30_000,
+  });
+}
+
+/** Applies one batch of changes to the function table (docs/07 7.9.20). The batch writes one site version, so the site and
+ *  its versions are read again as well as the object map. */
+export function useChangeFunctions() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; body: FunctionChanges }) =>
+      api.changeFunctions(args.name, args.body),
+    onSettled: (_result, _error, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
+      void client.invalidateQueries({ queryKey: keys.site(args.name) });
+      void client.invalidateQueries({ queryKey: keys.versions(args.name) });
+      void client.invalidateQueries({ queryKey: keys.sites });
+    },
+  });
+}
+
+/** Dismisses the administrator proposal of a function. Learning state only: no site version is written. */
+export function useDismissFunctionProposal() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; key: string }) =>
+      api.dismissFunctionProposal(args.name, args.key),
+    onSettled: (_result, _error, args) => {
+      void client.invalidateQueries({ queryKey: ["objects", args.name] });
     },
   });
 }

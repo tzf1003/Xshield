@@ -39,7 +39,7 @@ import {
 } from "../../lib/api-name.ts";
 import { topOf } from "../../lib/explain.ts";
 import { lostReasons } from "../../lib/health.ts";
-import { fmtBytes, fmtElapsed, fmtInt, pct } from "../../lib/format.ts";
+import { clip, fmtBytes, fmtElapsed, fmtInt, FUNCTION_KEY_MAX, pct } from "../../lib/format.ts";
 import {
   isRequestId,
   isSessionLabel,
@@ -51,6 +51,7 @@ import {
   ACCESS_LABEL,
   ATTACK_LABEL,
   FAILURE_INFO,
+  FUNCTION_VIEW,
   SKIP_LABEL,
   UPSTREAM_LABEL,
 } from "../../lib/vocab.ts";
@@ -475,6 +476,43 @@ export type PipelineStep = {
 type StepInit = Pick<PipelineStep, "id" | "name" | "done" | "reason"> & Partial<PipelineStep>;
 
 /**
+ * The function step after the session (docs/06 6.4.4, docs/07 7.4.3): a request that reaches an administrator's function,
+ * or one the function table does not list. It says what the table decided. It does not decide the outcome, which the
+ * judge's step still does. Null when the trace has no function, so a record without one reads as before.
+ */
+function functionStep(trace: Trace): StepInit | null {
+  const fn = trace.function;
+  if (fn === undefined) return null;
+  const sentences: string[] = [];
+  let warn = false;
+  // The keys are compared whole and cut only for the sentence, so two keys that share their first characters stay apart.
+  if (fn.attempt === "over_privilege") {
+    const entry = fn.entry ?? fn.key;
+    const shown = clip(entry, FUNCTION_KEY_MAX);
+    sentences.push(
+      fn.key === entry
+        ? FUNCTION_VIEW.detail.attempt(shown)
+        : FUNCTION_VIEW.detail.attemptRouted(clip(fn.key, FUNCTION_KEY_MAX), shown),
+    );
+    warn = true;
+  } else if (fn.entry !== undefined) {
+    sentences.push(FUNCTION_VIEW.detail.admin(clip(fn.entry, FUNCTION_KEY_MAX)));
+  }
+  if (fn.known === false) {
+    sentences.push(FUNCTION_VIEW.detail.unknown(clip(fn.key, FUNCTION_KEY_MAX)));
+    warn = true;
+  }
+  if (sentences.length === 0) return null;
+  return {
+    id: "function",
+    name: FUNCTION_VIEW.detail.step,
+    done: true,
+    reason: sentences.join("；"),
+    warn,
+  };
+}
+
+/**
  * The interface-name step after the site (design 4.2): ✓ with the rule's name, – without a rule (the
  * path is the name), ! with the reason when the name could not be read.
  */
@@ -707,6 +745,8 @@ export function pipelineSteps(
     });
   }
 
+  const functions = functionStep(trace);
+  if (functions !== null) add(functions);
   add({
     id: "entry",
     name: "入口",

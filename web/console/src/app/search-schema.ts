@@ -197,7 +197,8 @@ export type SiteSearch = GlobalSearch & {
   /** The position table's source filter and its agent filter, the agent's offered with the agent on (console design 3.5). */
   source?: (typeof OBJECT_SOURCES)[number];
   agent?: (typeof OBJECT_AGENT_FILTERS)[number];
-  view?: "slot";
+  /** The table view: by class (absent), by position (`slot`), or the function table (`functions`, docs/06 6.4.10). */
+  view?: "slot" | "functions";
   slot?: string;
   /** The declaration dialog, opened with this field and scope (console design 3.3). */
   declare?: string;
@@ -235,7 +236,7 @@ export function validateSite(raw: Record<string, unknown>): SiteSearch {
     q: str(raw.q),
     source: oneOf(raw.source, OBJECT_SOURCES),
     agent: oneOf(raw.agent, OBJECT_AGENT_FILTERS),
-    view: oneOf(raw.view, ["slot"] as const),
+    view: oneOf(raw.view, ["slot", "functions"] as const),
     slot: str(raw.slot),
     declare: str(raw.declare),
     in: str(raw.in),

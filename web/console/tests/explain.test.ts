@@ -177,3 +177,101 @@ test("a reason names its source, and a code the console does not know falls back
   assert.equal(unknownReasonText("route_subpath"), "路径在规则之下还有子路径");
   assert.equal(unknownReasonText("bogus_code"), "未知原因（bogus_code）");
 });
+
+test("a function attempt is named before the reason, and no value is said never seen", () => {
+  const text = explainRecord({
+    decision_path: "jev_deny",
+    outcome: "blocked",
+    status: 403,
+    host: "emr.example.com",
+    jev: jev({}),
+    trace: {
+      v: 1,
+      values: [],
+      function: {
+        key: "POST /api/admin/export",
+        entry: "POST /api/admin/export",
+        tier: "admin",
+        attempt: "over_privilege",
+      },
+    },
+  });
+  assert.equal(
+    text,
+    "请求的是管理档功能 POST /api/admin/export，这个会话不是管理员。Jev 判定越权（DENY 86%）。返回 403。",
+  );
+  assert.equal(text.includes("从未出现过"), false);
+});
+
+test("an unknown function is named before the reason", () => {
+  const text = explainRecord({
+    decision_path: "jev_allow",
+    outcome: "allowed",
+    status: 200,
+    host: "emr.example.com",
+    jev: jev({
+      access: { ALLOW: 0.97, DENY: 0.02, UNKNOWN: 0.01 },
+      attack: { BENIGN: 0.99, ATTACK: 0.01, UNKNOWN: 0 },
+    }),
+    trace: { v: 1, values: [], function: { key: "GET /metrics", known: false } },
+  });
+  assert.equal(
+    text,
+    "功能 GET /metrics 不在功能表里。Jev 判定访问有依据（ALLOW 97%）、内容无攻击（BENIGN 99%）。",
+  );
+});
+
+test("an administrator's session on an entry is not named in the explanation", () => {
+  const text = explainRecord({
+    decision_path: "jev_allow",
+    outcome: "allowed",
+    status: 200,
+    host: "emr.example.com",
+    jev: jev({
+      access: { ALLOW: 0.97, DENY: 0.02, UNKNOWN: 0.01 },
+      attack: { BENIGN: 0.99, ATTACK: 0.01, UNKNOWN: 0 },
+    }),
+    trace: {
+      v: 1,
+      values: [],
+      function: { key: "GET /api/admin/y", entry: "GET /api/admin/y", tier: "admin" },
+    },
+  });
+  assert.equal(text, "Jev 判定访问有依据（ALLOW 97%）、内容无攻击（BENIGN 99%）。");
+});
+
+test("a long function key is cut in the explanation", () => {
+  const long = `POST /api/admin/${"x".repeat(100)}`;
+  const attempt = explainRecord({
+    decision_path: "jev_deny",
+    outcome: "blocked",
+    status: 403,
+    host: "emr.example.com",
+    jev: jev({}),
+    trace: {
+      v: 1,
+      values: [],
+      function: { key: long, entry: long, tier: "admin", attempt: "over_privilege" },
+    },
+  });
+  assert.equal(
+    attempt,
+    `请求的是管理档功能 ${long.slice(0, 80)}…，这个会话不是管理员。Jev 判定越权（DENY 86%）。返回 403。`,
+  );
+
+  const unknown = explainRecord({
+    decision_path: "jev_allow",
+    outcome: "allowed",
+    status: 200,
+    host: "emr.example.com",
+    jev: jev({
+      access: { ALLOW: 0.97, DENY: 0.02, UNKNOWN: 0.01 },
+      attack: { BENIGN: 0.99, ATTACK: 0.01, UNKNOWN: 0 },
+    }),
+    trace: { v: 1, values: [], function: { key: long, known: false } },
+  });
+  assert.equal(
+    unknown,
+    `功能 ${long.slice(0, 80)}… 不在功能表里。Jev 判定访问有依据（ALLOW 97%）、内容无攻击（BENIGN 99%）。`,
+  );
+});
