@@ -87,7 +87,7 @@ export function compare(
   row: LookupRow | undefined,
 ): Comparison {
   if (expected === null) return "none";
-  if (!row || !row.found || !row.summary) return "unknown";
+  if (!row?.found || !row.summary) return "unknown";
   const actual = row.summary.outcome;
   const blocked = actual === "blocked" || actual === "would_block";
   return (expected === "blocked") === blocked ? "match" : "mismatch";

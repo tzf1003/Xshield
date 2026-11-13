@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use xshield_core::hex::decode_hex;
+
 /// Everything the edge needs from its environment, except the Jev client
 /// (see `xshield_judge::jev::environment_settings`).
 #[derive(Debug, PartialEq, Eq)]
@@ -71,7 +73,7 @@ impl Settings {
         }
         let key_hex =
             lookup("XSHIELD_CONTEXT_KEY_HEX").ok_or("XSHIELD_CONTEXT_KEY_HEX is required")?;
-        let context_key = decode_hex(&key_hex)
+        let context_key = decode_hex(key_hex.trim())
             .filter(|key| key.len() >= 32)
             .ok_or("XSHIELD_CONTEXT_KEY_HEX must be at least 64 hex digits")?;
         Ok(Self {
@@ -82,20 +84,6 @@ impl Settings {
             context_key,
         })
     }
-}
-
-fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    let text = text.trim().as_bytes();
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    text.chunks(2)
-        .map(|pair| {
-            let high = char::from(pair[0]).to_digit(16)?;
-            let low = char::from(pair[1]).to_digit(16)?;
-            u8::try_from(high * 16 + low).ok()
-        })
-        .collect()
 }
 
 #[cfg(test)]

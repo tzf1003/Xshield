@@ -32,6 +32,9 @@ pub struct SiteLoader {
     known: HashMap<String, (i64, Arc<EdgeSite>)>,
     losers: Vec<String>,
     last_file: Option<String>,
+    /// The version each site was last rejected at, with its status code. A rejected
+    /// version is logged once; its status is still published on every read.
+    rejected: HashMap<String, (i64, String)>,
 }
 
 /// Why a site was not loaded: the stable code for its status, and the detail for stderr.
@@ -50,6 +53,7 @@ impl SiteLoader {
             known: HashMap::new(),
             losers: Vec::new(),
             last_file: None,
+            rejected: HashMap::new(),
         }
     }
 
@@ -78,6 +82,7 @@ impl SiteLoader {
         let now = i64::try_from(crate::sink::now_millis()).unwrap_or(i64::MAX);
         let mut next: HashMap<String, (i64, Arc<EdgeSite>)> = HashMap::new();
         let mut statuses: BTreeMap<String, SiteStatus> = BTreeMap::new();
+        let mut next_rejected: HashMap<String, (i64, String)> = HashMap::new();
         for (name, version, value) in rows {
             if let Some((known_version, site)) = self.known.get(&name)
                 && *known_version == version
@@ -95,10 +100,19 @@ impl SiteLoader {
                     next.insert(name, (version, Arc::new(site)));
                 }
                 Err(rejection) => {
-                    eprintln!("xshield-edge: site {name} not loaded: {}", rejection.detail);
+                    // The same bad version is read again on every refresh until the site
+                    // changes; it is logged only the first time it is seen.
+                    let repeated = self
+                        .rejected
+                        .get(&name)
+                        .is_some_and(|(seen, _)| *seen == version);
+                    if !repeated {
+                        eprintln!("xshield-edge: site {name} not loaded: {}", rejection.detail);
+                    }
                     let previous = self.known.get(&name).cloned();
                     let served = previous.as_ref().map(|(_, site)| &**site);
                     statuses.insert(name.clone(), SiteStatus::failed(served, &rejection.code));
+                    next_rejected.insert(name.clone(), (version, rejection.code));
                     if let Some(previous) = previous {
                         next.insert(name, previous);
                     }
@@ -132,6 +146,7 @@ impl SiteLoader {
         }
         self.table.set_statuses(statuses);
         self.known = next;
+        self.rejected = next_rejected;
         Ok(())
     }
 
@@ -301,6 +316,43 @@ mod tests {
         assert_eq!(statuses["a"].error, None);
         assert_eq!(statuses["b"].error.as_deref(), Some(HOST_TAKEN));
         assert!(statuses["b"].version.is_some());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_rejected_version_is_remembered_until_the_site_changes() {
+        let dir =
+            std::env::temp_dir().join(format!("xshield-edge-rejected-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("sites.json");
+        std::fs::write(&path, format!("[{}]", spec("a", "a.test"))).expect("write");
+        let table = Arc::new(SiteTable::new());
+        let mut loader = SiteLoader::new(SiteSource::File(path.clone()), Arc::clone(&table));
+        loader.refresh().await.expect("first");
+
+        let bad = format!(
+            "[{}]",
+            spec("a", "a.test").replace("http://127.0.0.1:9", "ftp://x")
+        );
+        std::fs::write(&path, &bad).expect("write");
+        loader.refresh().await.expect("bad");
+        assert_eq!(table.statuses()["a"].error.as_deref(), Some(ORIGIN_INVALID));
+        let (bad_version, code) = loader.rejected["a"].clone();
+        assert_eq!(code, ORIGIN_INVALID);
+
+        // The same spec with different bytes is the same version: it is still rejected, it is
+        // still recognised, and the table keeps serving the previous version.
+        std::fs::write(&path, format!("{bad}\n")).expect("write");
+        loader.refresh().await.expect("again");
+        assert_eq!(table.statuses()["a"].error.as_deref(), Some(ORIGIN_INVALID));
+        assert!(table.find("a.test").is_some());
+        assert_eq!(loader.rejected["a"].0, bad_version);
+
+        // Fixing the site clears the remembered rejection.
+        std::fs::write(&path, format!("[{}]", spec("a", "a.test"))).expect("write");
+        loader.refresh().await.expect("fixed");
+        assert!(loader.rejected.is_empty());
+        assert_eq!(table.statuses()["a"].error, None);
         std::fs::remove_dir_all(dir).ok();
     }
 

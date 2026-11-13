@@ -66,7 +66,8 @@ const LOOKUP_MAX_IDS: usize = 1_000;
 const SOURCES_MAX: usize = 1_000;
 const EXPORT_MAX_ROWS: usize = 100_000;
 const EXPORT_PAGE: i64 = 1_000;
-const IMPORT_LOOKUP_CHUNK: usize = 1_000;
+/// Rows an import reads, checks for duplicates and writes together.
+const IMPORT_BATCH: usize = 1_000;
 const IMPORT_WRITE_CHUNK: usize = 500;
 const IMPORT_ERROR_LINES: usize = 20;
 const CSV_HEADER: &str = "id,request_id,at_millis,site,site_version,edge,host,client,session,\
@@ -892,61 +893,98 @@ fn decision_from_json(value: &Value) -> Option<NewDecision> {
     })
 }
 
-/// What an import body held, line by line: the rows to write, the rows whose time
-/// lies outside the kept window, and the lines that failed.
+/// One non-blank line of an import body, read against the day partitions that exist and
+/// the kept window (section 7.9.9).
+enum ImportLine {
+    /// A row to write. Boxed, because a row is much larger than the other two variants.
+    Row(Box<NewDecision>),
+    /// A row whose time lies outside the kept window. It has no partition to go to, which
+    /// is counted as out of range, not as an error.
+    OutOfRange,
+    /// A line that is not a row, or whose day has no partition.
+    Failed,
+}
+
+/// Reads the non-blank lines of an import body, each with its line number, one at a time,
+/// so an import never holds all of its rows in memory at once.
+fn import_lines<'a>(
+    body: &'a [u8],
+    days: &'a HashSet<chrono::NaiveDate>,
+    window: (i64, i64),
+) -> impl Iterator<Item = (usize, ImportLine)> + 'a {
+    body.split(|byte| *byte == b'\n')
+        .enumerate()
+        .filter_map(move |(index, line)| {
+            let text = line.trim_ascii();
+            (!text.is_empty()).then(|| (index + 1, classify_import_line(text, days, window)))
+        })
+}
+
+/// Classifies one line against the kept `window` (both ends included) and the days that
+/// have a partition.
+fn classify_import_line(
+    text: &[u8],
+    days: &HashSet<chrono::NaiveDate>,
+    window: (i64, i64),
+) -> ImportLine {
+    let row = serde_json::from_slice::<Value>(text)
+        .ok()
+        .as_ref()
+        .and_then(decision_from_json);
+    match row {
+        Some(row) if row.at_millis < window.0 || row.at_millis > window.1 => ImportLine::OutOfRange,
+        Some(row)
+            if DateTime::from_timestamp_millis(row.at_millis)
+                .is_some_and(|time| days.contains(&time.date_naive())) =>
+        {
+            ImportLine::Row(Box::new(row))
+        }
+        _ => ImportLine::Failed,
+    }
+}
+
+/// What an import has counted so far.
 #[derive(Default)]
-struct ImportLines {
-    rows: Vec<NewDecision>,
+struct ImportTally {
+    imported: u64,
+    skipped: i64,
     out_of_range: i64,
     failed: i64,
     error_lines: Vec<usize>,
 }
 
-/// Reads the lines of an import body against the day partitions that exist and the
-/// kept `window` (both ends included, section 7.9.9). A row outside the window has no
-/// partition to go to: it is counted as out of range, which is not an error. A line
-/// that is not a row, or whose day has no partition, is an error, and its line number
-/// is kept for the first few.
-fn read_import_lines(
-    body: &[u8],
-    days: &HashSet<chrono::NaiveDate>,
-    window: (i64, i64),
-) -> ImportLines {
-    let mut lines = ImportLines::default();
-    for (index, line) in body.split(|byte| *byte == b'\n').enumerate() {
-        let text = line.trim_ascii();
-        if text.is_empty() {
-            continue;
-        }
-        let row = serde_json::from_slice::<Value>(text)
-            .ok()
-            .as_ref()
-            .and_then(decision_from_json);
-        match row {
-            Some(row) if row.at_millis < window.0 || row.at_millis > window.1 => {
-                lines.out_of_range += 1;
-            }
-            Some(row)
-                if DateTime::from_timestamp_millis(row.at_millis)
-                    .is_some_and(|time| days.contains(&time.date_naive())) =>
-            {
-                lines.rows.push(row);
-            }
-            _ => {
-                lines.failed += 1;
-                if lines.error_lines.len() < IMPORT_ERROR_LINES {
-                    lines.error_lines.push(index + 1);
-                }
-            }
+/// Writes one batch of rows: a row that already exists is skipped, and the others are written
+/// in chunks of [`IMPORT_WRITE_CHUNK`]. Each statement commits on its own, so a failure keeps
+/// the rows written before it. Importing the same file again skips those rows, so an import
+/// that failed part way can simply be run again. The batch is emptied.
+async fn write_import_batch(
+    pool: &PgPool,
+    batch: &mut Vec<NewDecision>,
+    tally: &mut ImportTally,
+) -> ApiResult<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let existing = decision_log_store::existing_keys(pool, batch.as_slice()).await?;
+    let mut fresh = Vec::with_capacity(batch.len());
+    for row in batch.drain(..) {
+        if existing.contains(&(row.request_id.clone(), row.at_millis)) {
+            tally.skipped += 1;
+        } else {
+            fresh.push(row);
         }
     }
-    lines
+    for chunk in fresh.chunks(IMPORT_WRITE_CHUNK) {
+        tally.imported += decision_log_store::insert_many(pool, chunk).await?;
+    }
+    Ok(())
 }
 
 /// `POST /api/import`: imports gateway file-mode output, one JSON row per line.
 /// A row that already exists is skipped. A row outside the kept window is counted as
 /// `out_of_range`, and a line that cannot be used is an error; the reply says which
-/// lines failed.
+/// lines failed. The rows are read and written in batches of [`IMPORT_BATCH`], and the
+/// import is not one transaction (section 7.9.9).
 ///
 /// # Errors
 /// `INTERNAL` for a database failure while writing.
@@ -956,39 +994,40 @@ pub async fn import(State(state): State<Arc<ControlState>>, body: Bytes) -> ApiR
         .iter()
         .filter_map(|partition| partition.day)
         .collect();
-    let window = partitions::kept_window_millis(crate::params::now_millis());
-    let lines = read_import_lines(&body, &days, window);
-    let mut skipped = 0_i64;
+    let window = partitions::kept_window_millis(now_millis());
+    let mut tally = ImportTally::default();
+    // A row repeated within the file is skipped here; a row already stored is skipped by the
+    // lookup in each batch.
     let mut seen = HashSet::new();
-    let mut fresh = Vec::with_capacity(lines.rows.len());
-    for row in lines.rows {
-        if seen.insert((row.request_id.clone(), row.at_millis)) {
-            fresh.push(row);
-        } else {
-            skipped += 1;
-        }
-    }
-    let mut to_write = Vec::with_capacity(fresh.len());
-    for chunk in fresh.chunks(IMPORT_LOOKUP_CHUNK) {
-        let existing = decision_log_store::existing_keys(&state.pool, chunk).await?;
-        for row in chunk {
-            if existing.contains(&(row.request_id.clone(), row.at_millis)) {
-                skipped += 1;
-            } else {
-                to_write.push(row.clone());
+    let mut batch = Vec::with_capacity(IMPORT_BATCH);
+    for (line, read) in import_lines(&body, &days, window) {
+        match read {
+            ImportLine::Row(row) => {
+                if seen.insert((row.request_id.clone(), row.at_millis)) {
+                    batch.push(*row);
+                } else {
+                    tally.skipped += 1;
+                }
+                if batch.len() == IMPORT_BATCH {
+                    write_import_batch(&state.pool, &mut batch, &mut tally).await?;
+                }
+            }
+            ImportLine::OutOfRange => tally.out_of_range += 1,
+            ImportLine::Failed => {
+                tally.failed += 1;
+                if tally.error_lines.len() < IMPORT_ERROR_LINES {
+                    tally.error_lines.push(line);
+                }
             }
         }
     }
-    let mut imported = 0_u64;
-    for chunk in to_write.chunks(IMPORT_WRITE_CHUNK) {
-        imported += decision_log_store::insert_many(&state.pool, chunk).await?;
-    }
+    write_import_batch(&state.pool, &mut batch, &mut tally).await?;
     Ok(Json(json!({
-        "imported": imported,
-        "skipped": skipped,
-        "out_of_range": lines.out_of_range,
-        "errors": lines.failed,
-        "error_lines": lines.error_lines,
+        "imported": tally.imported,
+        "skipped": tally.skipped,
+        "out_of_range": tally.out_of_range,
+        "errors": tally.failed,
+        "error_lines": tally.error_lines,
     })))
 }
 
@@ -1070,18 +1109,71 @@ mod tests {
             row(now - 5 * DAY, "req_five"),
             row(now - 9 * DAY, "req_nine"),
         );
-        let lines = read_import_lines(body.as_bytes(), &days, window);
-        assert_eq!(lines.rows.len(), 1);
-        assert_eq!(lines.out_of_range, 1);
-        assert_eq!(lines.failed, 1);
-        assert_eq!(lines.error_lines, vec![3]);
+        let (rows, out_of_range, failed) = count_import_lines(&body, &days, window);
+        assert_eq!(rows, 1);
+        assert_eq!(out_of_range, 1);
+        assert_eq!(failed, vec![3]);
 
         // Inside the window but with no partition for its day: an error, not out of range.
-        let lines = read_import_lines(body.as_bytes(), &HashSet::new(), window);
-        assert!(lines.rows.is_empty());
-        assert_eq!(lines.out_of_range, 1);
-        assert_eq!(lines.failed, 2);
-        assert_eq!(lines.error_lines, vec![1, 3]);
+        let (rows, out_of_range, failed) = count_import_lines(&body, &HashSet::new(), window);
+        assert_eq!(rows, 0);
+        assert_eq!(out_of_range, 1);
+        assert_eq!(failed, vec![1, 3]);
+    }
+
+    /// The rows, the out-of-range lines and the failed line numbers of an import body.
+    fn count_import_lines(
+        body: &str,
+        days: &HashSet<chrono::NaiveDate>,
+        window: (i64, i64),
+    ) -> (usize, usize, Vec<usize>) {
+        let (mut rows, mut out_of_range, mut failed) = (0, 0, Vec::new());
+        for (line, read) in import_lines(body.as_bytes(), days, window) {
+            match read {
+                ImportLine::Row(_) => rows += 1,
+                ImportLine::OutOfRange => out_of_range += 1,
+                ImportLine::Failed => failed.push(line),
+            }
+        }
+        (rows, out_of_range, failed)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn an_import_batch_skips_stored_rows_and_empties_itself() {
+        let url = std::env::var("XSHIELD_DATABASE_URL").expect("XSHIELD_DATABASE_URL");
+        let pool = PgPool::connect(&url).await.expect("connect");
+        for day in partitions::partition_days(chrono::Utc::now().date_naive()) {
+            partitions::ensure_partition(&pool, day)
+                .await
+                .expect("partition");
+        }
+        // The request ids carry this run's clock, so a rerun on the same database writes new rows.
+        let now = now_millis();
+        let row = |index: i64| {
+            decision_from_json(&json!({
+                "at_millis": now - index,
+                "request_id": format!("req_import_probe_{now}_{index}"),
+                "site": "import-probe", "method": "GET", "path": "/",
+                "decision_path": "fast_allow", "outcome": "allowed",
+            }))
+            .expect("a valid row")
+        };
+
+        let mut tally = ImportTally::default();
+        let mut batch = vec![row(1), row(2)];
+        write_import_batch(&pool, &mut batch, &mut tally)
+            .await
+            .expect("first batch");
+        assert!(batch.is_empty());
+        assert_eq!((tally.imported, tally.skipped), (2, 0));
+
+        // Row 2 was stored by the first batch, so it is skipped; row 3 is new.
+        let mut batch = vec![row(2), row(3)];
+        write_import_batch(&pool, &mut batch, &mut tally)
+            .await
+            .expect("second batch");
+        assert_eq!((tally.imported, tally.skipped), (3, 1));
     }
 
     #[test]
