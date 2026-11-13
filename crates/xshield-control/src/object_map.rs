@@ -4252,4 +4252,44 @@ mod live_tests {
         assert_eq!(gone.code(), "JUDGEMENT_NOT_FOUND");
         assert_eq!(version_of(&state, &name).await, 1);
     }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn function_proposals_are_not_listed_as_position_judgements() {
+        let (state, name) = judged_site("function-listing").await;
+        let generation = site_of(&state, &name).await.expect("the site").created_at;
+        // A function proposal (docs/07 section 7.9.19) is kept in the same table as the tier proposals, under a
+        // key with one space. The listing shows the declared positions only.
+        tier_judgements::put(
+            &state.pool,
+            &name,
+            generation,
+            &TierProposal {
+                slot: "GET /api/admin/search".to_owned(),
+                tier: Tier::Admin,
+                reliability: Reliability::High,
+                units: 1,
+                seen_values: 0,
+                agreement_per_mille: 0,
+                last_day: day_of(u64::try_from(now_millis()).unwrap_or(0)),
+            },
+            now_millis(),
+        )
+        .await
+        .expect("propose the function");
+        assert!(
+            tier_judgements::proposal(&state.pool, &name, "GET /api/admin/search")
+                .await
+                .expect("read the proposal")
+                .is_some(),
+            "the function proposal is stored"
+        );
+        let after = listed(&state, &name, &[]).await;
+        let rows = after["judgements"].as_array().expect("the proposals");
+        assert!(
+            rows.iter().all(|row| row["key"] != "GET /api/admin/search"),
+            "a function proposal is not listed among the position judgements"
+        );
+        assert_eq!(version_of(&state, &name).await, 1);
+    }
 }

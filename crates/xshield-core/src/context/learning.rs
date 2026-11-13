@@ -14,8 +14,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::path_template::function_template;
+
 use super::log::{DecisionPath, Outcome};
-use super::objects::{ObjectMap, Reliability, Tier};
+use super::objects::{KEY_MAX, ObjectMap, Reliability, Tier};
 use super::trace::{FINGERPRINT_SLOTS_MAX, FINGERPRINTS_PER_SLOT_MAX, Trace, TraceIdentity};
 
 /// Days of evidence a position is judged on.
@@ -106,6 +108,13 @@ pub struct DecisionFacts {
     pub outcome: Outcome,
     /// The trace, with the position of each value and of the source it came from.
     pub trace: Trace,
+    /// The request method, as the gateway received it.
+    pub method: String,
+    /// The path the request is counted by: its logical path when the site routes it by a header or a
+    /// body, its path otherwise (`COALESCE(logical_path, path)` in the decision log).
+    pub path: String,
+    /// The client address the request came from.
+    pub client: String,
 }
 
 /// Reads one decision record. A request counts as a use when it went through
@@ -940,6 +949,26 @@ fn answered_and_allowed(record: &DecisionFacts) -> bool {
         )
 }
 
+/// Whether Jev refused the record's request, or the origin answered 401 or 403. Both the tier evidence and
+/// the function evidence count a refusal this way.
+fn was_refused(record: &DecisionFacts) -> bool {
+    record.decision_path == DecisionPath::JevDeny || matches!(record.status, Some(401 | 403))
+}
+
+/// Whether the request went through and the origin answered 200 to 399 (docs/07 section 7.9.19). Unlike
+/// [`answered_and_allowed`], a redirect counts: a form that answers with one went through. The step that let
+/// the request through must be a fast allow, a cached allow or Jev's allow.
+fn went_through(record: &DecisionFacts) -> bool {
+    record.outcome == Outcome::Allowed
+        && record
+            .status
+            .is_some_and(|status| (200..400).contains(&status))
+        && matches!(
+            record.decision_path,
+            DecisionPath::FastAllow | DecisionPath::CachedAllow | DecisionPath::JevAllow
+        )
+}
+
 /// Whether the record's session is an administrator's, by the role it showed.
 fn is_admin(record: &DecisionFacts) -> bool {
     identity_of(record).and_then(|identity| identity.role.as_deref()) == Some(ADMIN_ROLE)
@@ -1018,9 +1047,7 @@ pub fn observe_tiers(record: &DecisionFacts, identified: bool) -> Vec<TierFact> 
             });
         }
     }
-    let refused =
-        record.decision_path == DecisionPath::JevDeny || matches!(record.status, Some(401 | 403));
-    if refused
+    if was_refused(record)
         && !admin
         && let Some(route) = record
             .trace
@@ -1088,6 +1115,366 @@ pub fn response_stats(evidence: &TierEvidence, identified: bool) -> ResponseStat
         admin_units: evidence.admin_units,
         refused_units: evidence.refused_units,
     }
+}
+
+/// One request's function evidence (docs/07 section 7.9.19). A function is a method and a route template,
+/// see [`function_key`]. A unit is the user the session showed when the site declares user identities, and
+/// the session otherwise, as the tier evidence counts it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FunctionFact {
+    /// An ordinary unit used the function.
+    Used {
+        /// The function key, `METHOD template`.
+        function: String,
+        /// The unit.
+        unit: String,
+        /// The UTC day of the record.
+        day: u64,
+    },
+    /// A unit without an identity used the function: a session that showed no user on a site that declares
+    /// users, or a request without a session, counted by its client address.
+    Anonymous {
+        /// The function key, `METHOD template`.
+        function: String,
+        /// `s:` and the session label, or `a:` and the client address.
+        unit: String,
+        /// The UTC day of the record.
+        day: u64,
+    },
+    /// An administrator's unit used the function.
+    Admin {
+        /// The function key, `METHOD template`.
+        function: String,
+        /// The unit.
+        unit: String,
+        /// The UTC day of the record.
+        day: u64,
+    },
+    /// An ordinary unit was refused the function.
+    Refused {
+        /// The function key, `METHOD template`.
+        function: String,
+        /// The unit.
+        unit: String,
+        /// The UTC day of the record.
+        day: u64,
+    },
+}
+
+/// The function key of a request: `METHOD template`, for example `GET /api/patients/{id}`. `HEAD` counts as
+/// `GET`. `None` for a method that is not three to seven upper-case ASCII letters, for `OPTIONS` (a preflight
+/// is no function), for a path [`function_template`] cannot name, and for a key longer than [`KEY_MAX`] bytes.
+#[must_use]
+pub fn function_key(method: &str, path: &str) -> Option<String> {
+    let method = match method {
+        "HEAD" => "GET",
+        "OPTIONS" => return None,
+        other => other,
+    };
+    let letters =
+        (3..=7).contains(&method.len()) && method.bytes().all(|byte| byte.is_ascii_uppercase());
+    if !letters {
+        return None;
+    }
+    let key = format!("{method} {}", function_template(path)?);
+    (key.len() <= KEY_MAX).then_some(key)
+}
+
+/// The unit of a request that counts with no identity: its session, or its client address when it has no
+/// session (`s:` or `a:`). `None` when it has neither.
+fn anonymous_unit(record: &DecisionFacts) -> Option<String> {
+    if !record.session.is_empty() {
+        Some(format!("s:{}", record.session))
+    } else if !record.client.is_empty() {
+        Some(format!("a:{}", record.client))
+    } else {
+        None
+    }
+}
+
+/// The function facts of one decision record (docs/07 section 7.9.19): none, one, or, for an administrator's
+/// request on an entry, two. Each fact is one unit's use or refusal of one function.
+///
+/// A request that went through (see [`went_through`]) is a use. A request Jev refused, or that the origin
+/// refused with 401 or 403, is a refusal. A bypassed request is no fact. The unit is the one
+/// [`observe_tiers`] counts, with one addition: a unit that shows no identity is kept apart as anonymous,
+/// since the rules must tell that ordinary units were around. `identified` says whether the site declares
+/// user identity positions.
+///
+/// On an entry, a request that went through counts as an ordinary use whoever made it, so an entry is never
+/// proposed as an administrator function. A refused request on an entry is no fact. An administrator's request on
+/// an entry also counts as an administrator use: the unit is then left out of the site's ordinary units
+/// (`site_ordinary_units`), so an administrator who only logged in is no bystander. Same for the administrator's
+/// session with no identity: its requests count as anonymous, so the first requests of an administrator whose user
+/// is not yet declared do not propose the function.
+#[must_use]
+pub fn observe_functions(record: &DecisionFacts, identified: bool) -> Vec<FunctionFact> {
+    if record.trace.bypass.is_some() {
+        return Vec::new();
+    }
+    let Some(function) = function_key(&record.method, &record.path) else {
+        return Vec::new();
+    };
+    let day = record.at_millis / DAY_MILLIS;
+    let on_entry = record.trace.entry.is_some();
+    let primary = unit_of(record, identified).map(str::to_owned);
+    if went_through(record) {
+        return match primary {
+            Some(unit) if is_admin(record) && !on_entry => vec![FunctionFact::Admin {
+                function,
+                unit,
+                day,
+            }],
+            // On an entry the administrator is also an ordinary use, which keeps the entry out of the proposals.
+            Some(unit) if is_admin(record) => vec![
+                FunctionFact::Used {
+                    function: function.clone(),
+                    unit: unit.clone(),
+                    day,
+                },
+                FunctionFact::Admin {
+                    function,
+                    unit,
+                    day,
+                },
+            ],
+            Some(unit) => vec![FunctionFact::Used {
+                function,
+                unit,
+                day,
+            }],
+            None => anonymous_unit(record)
+                .map(|unit| FunctionFact::Anonymous {
+                    function,
+                    unit,
+                    day,
+                })
+                .into_iter()
+                .collect(),
+        };
+    }
+    if was_refused(record) && !on_entry && !is_admin(record) {
+        return primary
+            .map(|unit| FunctionFact::Refused {
+                function,
+                unit,
+                day,
+            })
+            .into_iter()
+            .collect();
+    }
+    Vec::new()
+}
+
+/// A function key the learning counts, with the distinct units that used it over the window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionUse {
+    /// The function key, `METHOD template`.
+    pub key: String,
+    /// The distinct units that used it.
+    pub units: u32,
+}
+
+/// Light siblings that contain a digit, at least this many, make the segment they differ at `{id}`
+/// (docs/07 section 7.9.19).
+pub const MERGE_IDS_MIN: usize = 10;
+/// Light siblings that contain no digit, at least this many, make the segment they differ at `{id}`. It is
+/// far above [`MERGE_IDS_MIN`]: route words such as `users` and `orders` contain no digit either, and a
+/// small site has not yet reached the units to tell them from names.
+pub const MERGE_WORDS_MIN: usize = 50;
+/// Function keys one learning pass analyzes at most, the units used most first.
+pub const FUNCTION_KEYS_MAX: usize = 20_000;
+
+/// The segment a merged segment becomes.
+const MERGED_SEGMENT: &str = "{id}";
+
+/// A function key as the merge works on it.
+struct Merging<'a> {
+    /// The key as the decision records name it.
+    key: &'a str,
+    /// The method.
+    method: &'a str,
+    /// The segments of the template, as merged so far.
+    segments: Vec<String>,
+    /// The units that used the key.
+    units: u32,
+    /// Whether the key is kept as it is: a key under a named route, or one that is no function key.
+    held: bool,
+}
+
+/// The segments of a path, without the empty ones its slashes leave.
+fn segments_of(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+/// Maps each function key to the key its evidence is counted under: itself, or the key it merges into
+/// (docs/07 section 7.9.19). The result has an entry for every distinct key of `uses`.
+///
+/// Segments merge level by level, from the first one. At a level, the keys sharing a method and the segments
+/// already decided before it form a group. In a group, each value of the segment at the level, other than
+/// `{id}`, is a child, weighed by the most units any of its keys used. A child lighter than
+/// `thresholds.sessions` is light. When at least [`MERGE_IDS_MIN`] light children contain a digit, or at
+/// least [`MERGE_WORDS_MIN`] light children contain none, every light child of that kind becomes `{id}` at
+/// that level. A heavy child is a function of its own and stays.
+///
+/// A key whose leading segments are the segments of one of `named_under` (the stems of the site's route
+/// paths, without the trailing slash) is kept as it is, and takes part in no step: its segments below a
+/// route are names of functions, and merging them would name functions no one used. A named stem with no
+/// segment, the stem of a catch-all route, therefore keeps every key.
+///
+/// The result does not depend on the order of `uses`. A key listed twice keeps its larger count.
+#[must_use]
+pub fn merge_functions(
+    uses: &[FunctionUse],
+    thresholds: Thresholds,
+    named_under: &[String],
+) -> BTreeMap<String, String> {
+    let mut distinct: BTreeMap<&str, u32> = BTreeMap::new();
+    for function in uses {
+        let units = distinct.entry(function.key.as_str()).or_default();
+        *units = (*units).max(function.units);
+    }
+    let named: Vec<Vec<&str>> = named_under.iter().map(|stem| segments_of(stem)).collect();
+    let mut keys: Vec<Merging<'_>> = distinct
+        .iter()
+        .map(|(&key, &units)| {
+            let Some((method, template)) = key
+                .split_once(' ')
+                .filter(|(_, template)| template.starts_with('/'))
+            else {
+                return Merging {
+                    key,
+                    method: "",
+                    segments: Vec::new(),
+                    units,
+                    held: true,
+                };
+            };
+            let segments = segments_of(template);
+            let held = named.iter().any(|stem| {
+                stem.iter()
+                    .enumerate()
+                    .all(|(index, name)| segments.get(index) == Some(name))
+            });
+            Merging {
+                key,
+                method,
+                segments: segments
+                    .iter()
+                    .map(|segment| (*segment).to_owned())
+                    .collect(),
+                units,
+                held,
+            }
+        })
+        .collect();
+    let depth_max = keys.iter().map(|key| key.segments.len()).max().unwrap_or(0);
+    for depth in 0..depth_max {
+        for index in merged_at(&keys, depth, thresholds) {
+            MERGED_SEGMENT.clone_into(&mut keys[index].segments[depth]);
+        }
+    }
+    keys.iter()
+        .map(|key| {
+            let rebuilt = if key.held {
+                key.key.to_owned()
+            } else {
+                format!("{} /{}", key.method, key.segments.join("/"))
+            };
+            (key.key.to_owned(), rebuilt)
+        })
+        .collect()
+}
+
+/// The indices of the keys whose segment at `depth` becomes `{id}` at that level: the members of every group
+/// whose light children are numerous enough, as [`merge_functions`] describes.
+fn merged_at(keys: &[Merging<'_>], depth: usize, thresholds: Thresholds) -> Vec<usize> {
+    let mut groups: BTreeMap<(&str, Vec<&str>), Vec<usize>> = BTreeMap::new();
+    for (index, key) in keys.iter().enumerate() {
+        if key.held || key.segments.len() <= depth {
+            continue;
+        }
+        let prefix: Vec<&str> = key.segments[..depth].iter().map(String::as_str).collect();
+        groups.entry((key.method, prefix)).or_default().push(index);
+    }
+    let mut merged = Vec::new();
+    for members in groups.values() {
+        let mut weights: BTreeMap<&str, u32> = BTreeMap::new();
+        for &index in members {
+            let value = keys[index].segments[depth].as_str();
+            if value != MERGED_SEGMENT {
+                let weight = weights.entry(value).or_default();
+                *weight = (*weight).max(keys[index].units);
+            }
+        }
+        let light: Vec<&str> = weights
+            .iter()
+            .filter(|(_, weight)| **weight < thresholds.sessions)
+            .map(|(value, _)| *value)
+            .collect();
+        let (with_digits, words): (Vec<&str>, Vec<&str>) = light
+            .into_iter()
+            .partition(|value| value.bytes().any(|byte| byte.is_ascii_digit()));
+        let mut chosen: BTreeSet<&str> = BTreeSet::new();
+        if with_digits.len() >= MERGE_IDS_MIN {
+            chosen.extend(with_digits);
+        }
+        if words.len() >= MERGE_WORDS_MIN {
+            chosen.extend(words);
+        }
+        merged.extend(
+            members
+                .iter()
+                .copied()
+                .filter(|&index| chosen.contains(keys[index].segments[depth].as_str())),
+        );
+    }
+    merged
+}
+
+/// The evidence of one function over the window, as the control plane reads it (docs/07 section 7.9.19).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FunctionEvidence {
+    /// The distinct ordinary units that used the function, the units of the function and of the anonymous
+    /// uses counted together.
+    pub ordinary_units: u32,
+    /// The distinct administrator units that used the function.
+    pub admin_units: u32,
+    /// The UTC days an administrator used the function.
+    pub admin_days: u32,
+    /// The distinct ordinary units refused the function.
+    pub refused_units: u32,
+    /// The last UTC day of any of the evidence.
+    pub last_day: u64,
+}
+
+/// Whether a function only administrators use is proposed as an administrator function, and how sure the rules
+/// are; `None` when it is not proposed (docs/07 section 7.9.19).
+///
+/// The function needs an administrator unit, and no ordinary unit and no anonymous unit may have used it. That
+/// absence must not be for want of ordinary units: the larger of the refusals of the function and the site's
+/// ordinary units must reach `thresholds.sessions`. The evidence is strong when that support reaches twice the
+/// sessions and the administrators used the function on two days. The grade is [`grade`]'s: high for a strong
+/// judgement on a site that declares user identities, medium otherwise, and none when that is lower than
+/// medium, so a site without identities is never proposed high.
+#[must_use]
+pub fn judge_function(
+    evidence: &FunctionEvidence,
+    site_ordinary_units: u32,
+    identified: bool,
+    thresholds: Thresholds,
+) -> Option<Reliability> {
+    if evidence.admin_units == 0 || evidence.ordinary_units != 0 {
+        return None;
+    }
+    let support = evidence.refused_units.max(site_ordinary_units);
+    if support < thresholds.sessions {
+        return None;
+    }
+    let strong = support >= doubled(thresholds.sessions) && evidence.admin_days >= 2;
+    grade(strong, identified)
 }
 
 #[cfg(test)]
@@ -1429,6 +1816,9 @@ mod tests {
             decision_path: path,
             outcome,
             trace: serde_json::from_value(trace).unwrap(),
+            method: "GET".to_owned(),
+            path: "/doctor/7".to_owned(),
+            client: "10.0.0.1".to_owned(),
         }
     }
 }
@@ -1465,6 +1855,9 @@ mod tier_evidence_tests {
             decision_path: path,
             outcome: Outcome::Allowed,
             trace: serde_json::from_value(trace).expect("a trace this build reads"),
+            method: "GET".to_owned(),
+            path: "/api/patients/7".to_owned(),
+            client: "10.0.0.1".to_owned(),
         }
     }
 
@@ -1718,6 +2111,489 @@ mod tier_evidence_tests {
         assert_eq!(
             (judged.tier, judged.reliability),
             (Tier::Public, Reliability::High)
+        );
+    }
+}
+
+#[cfg(test)]
+mod function_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A decision record of `method path` on day 4, made by session `s1` from `10.0.0.9`, with no
+    /// identity and no entry.
+    fn record(
+        method: &str,
+        path: &str,
+        decision_path: DecisionPath,
+        outcome: Outcome,
+        status: Option<u16>,
+    ) -> DecisionFacts {
+        DecisionFacts {
+            at_millis: 4 * DAY_MILLIS + 1_000,
+            session: "s1".to_owned(),
+            status,
+            decision_path,
+            outcome,
+            trace: serde_json::from_value(json!({
+                "v": 1,
+                "values_truncated": false,
+                "values": [],
+                "timing": {"judge_ms": 1}
+            }))
+            .expect("a trace this build reads"),
+            method: method.to_owned(),
+            path: path.to_owned(),
+            client: "10.0.0.9".to_owned(),
+        }
+    }
+
+    /// `GET /api/patients/7` allowed by a fast allow and answered 200.
+    fn used_record() -> DecisionFacts {
+        record(
+            "GET",
+            "/api/patients/7",
+            DecisionPath::FastAllow,
+            Outcome::Allowed,
+            Some(200),
+        )
+    }
+
+    /// The record as session `session` shows it, with `user` and `role` as its identity where given.
+    fn signed_in(
+        mut facts: DecisionFacts,
+        session: &str,
+        user: Option<&str>,
+        role: Option<&str>,
+    ) -> DecisionFacts {
+        facts.session = session.to_owned();
+        facts.trace.session = Some(
+            serde_json::from_value(json!({
+                "age_seconds": 1,
+                "known_values": 0,
+                "identity": {"user": user, "role": role}
+            }))
+            .expect("a session this build reads"),
+        );
+        facts
+    }
+
+    fn use_of(key: impl Into<String>, units: u32) -> FunctionUse {
+        FunctionUse {
+            key: key.into(),
+            units,
+        }
+    }
+
+    /// A distinct name of three letters for `index`, so no name holds a digit.
+    fn word(index: usize) -> String {
+        (0..3_u32)
+            .map(|place| {
+                let digit = (index / 26_usize.pow(place)) % 26;
+                char::from(b'a' + u8::try_from(digit).unwrap_or(0))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_function_key_is_the_method_and_the_template() {
+        assert_eq!(
+            function_key("DELETE", "/api/patients/8").as_deref(),
+            Some("DELETE /api/patients/{id}")
+        );
+        assert_eq!(
+            function_key("HEAD", "/api/patients/8").as_deref(),
+            Some("GET /api/patients/{id}")
+        );
+        assert_eq!(function_key("GET", "/").as_deref(), Some("GET /"));
+        for method in ["OPTIONS", "get", "PROPFINDX1", "ABCDEFGH", "GE", ""] {
+            assert_eq!(
+                function_key(method, "/api/patients/8"),
+                None,
+                "method {method:?}"
+            );
+        }
+        // Seven words of 32 bytes make a key of 235 bytes; eight make one of 268, past the 256 bytes.
+        let seven = vec!["a".repeat(32); 7];
+        assert_eq!(
+            function_key("GET", &format!("/{}", seven.join("/"))).map(|key| key.len()),
+            Some(235)
+        );
+        let eight = vec!["a".repeat(32); 8];
+        assert_eq!(function_key("GET", &format!("/{}", eight.join("/"))), None);
+    }
+
+    #[test]
+    fn an_ordinary_units_2xx_or_3xx_is_a_use() {
+        for status in [200, 302] {
+            let facts = record(
+                "GET",
+                "/api/patients/7",
+                DecisionPath::FastAllow,
+                Outcome::Allowed,
+                Some(status),
+            );
+            assert!(
+                matches!(
+                    observe_functions(&facts, false).as_slice(),
+                    [FunctionFact::Used { .. }]
+                ),
+                "status {status}"
+            );
+        }
+        for status in [500, 404] {
+            let facts = record(
+                "GET",
+                "/api/patients/7",
+                DecisionPath::FastAllow,
+                Outcome::Allowed,
+                Some(status),
+            );
+            assert!(
+                observe_functions(&facts, false).is_empty(),
+                "status {status}"
+            );
+        }
+        // Neither a would-block nor a block is a use, even when the origin answered 200.
+        let would_block = record(
+            "GET",
+            "/api/patients/7",
+            DecisionPath::JevAllow,
+            Outcome::WouldBlock,
+            Some(200),
+        );
+        assert!(observe_functions(&would_block, false).is_empty());
+        let blocked = record(
+            "GET",
+            "/api/patients/7",
+            DecisionPath::JevAllow,
+            Outcome::Blocked,
+            Some(200),
+        );
+        assert!(observe_functions(&blocked, false).is_empty());
+    }
+
+    #[test]
+    fn an_admin_off_an_entry_is_an_admin_use_and_on_an_entry_an_ordinary_one() {
+        let admin = signed_in(used_record(), "s2", Some("root"), Some(ADMIN_ROLE));
+        assert_eq!(
+            observe_functions(&admin, true),
+            vec![FunctionFact::Admin {
+                function: "GET /api/patients/{id}".to_owned(),
+                unit: "root".to_owned(),
+                day: 4,
+            }]
+        );
+        // On an entry the administrator is also an ordinary use, and the administrator fact keeps the unit out of
+        // the bystanders.
+        let mut on_entry = admin;
+        on_entry.trace.entry = Some("/login".to_owned());
+        assert_eq!(
+            observe_functions(&on_entry, true),
+            vec![
+                FunctionFact::Used {
+                    function: "GET /api/patients/{id}".to_owned(),
+                    unit: "root".to_owned(),
+                    day: 4,
+                },
+                FunctionFact::Admin {
+                    function: "GET /api/patients/{id}".to_owned(),
+                    unit: "root".to_owned(),
+                    day: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_without_a_user_on_a_site_with_users_is_anonymous() {
+        let facts = signed_in(used_record(), "s9", None, Some(ADMIN_ROLE));
+        assert_eq!(
+            observe_functions(&facts, true),
+            vec![FunctionFact::Anonymous {
+                function: "GET /api/patients/{id}".to_owned(),
+                unit: "s:s9".to_owned(),
+                day: 4,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_request_without_a_session_counts_its_client_address() {
+        let mut facts = used_record();
+        facts.session.clear();
+        assert_eq!(
+            observe_functions(&facts, false),
+            vec![FunctionFact::Anonymous {
+                function: "GET /api/patients/{id}".to_owned(),
+                unit: "a:10.0.0.9".to_owned(),
+                day: 4,
+            }]
+        );
+        facts.client.clear();
+        assert!(observe_functions(&facts, false).is_empty());
+    }
+
+    #[test]
+    fn a_refusal_counts_for_an_ordinary_unit_off_an_entry() {
+        let jev_deny = record(
+            "DELETE",
+            "/api/patients/7",
+            DecisionPath::JevDeny,
+            Outcome::Blocked,
+            Some(403),
+        );
+        assert_eq!(
+            observe_functions(&jev_deny, false),
+            vec![FunctionFact::Refused {
+                function: "DELETE /api/patients/{id}".to_owned(),
+                unit: "s1".to_owned(),
+                day: 4,
+            }]
+        );
+        for status in [401, 403] {
+            let refused = record(
+                "GET",
+                "/api/patients/7",
+                DecisionPath::FastAllow,
+                Outcome::Allowed,
+                Some(status),
+            );
+            assert!(
+                matches!(
+                    observe_functions(&refused, false).as_slice(),
+                    [FunctionFact::Refused { .. }]
+                ),
+                "status {status}"
+            );
+        }
+        // An administrator's refusal, a refusal on an entry, and a refusal of a unit that shows no user
+        // count for nothing.
+        let admin = signed_in(jev_deny.clone(), "s2", Some("root"), Some(ADMIN_ROLE));
+        assert!(observe_functions(&admin, true).is_empty());
+        let mut on_entry = jev_deny.clone();
+        on_entry.trace.entry = Some("/login".to_owned());
+        assert!(observe_functions(&on_entry, false).is_empty());
+        let anonymous = signed_in(jev_deny, "s3", None, None);
+        assert!(observe_functions(&anonymous, true).is_empty());
+    }
+
+    #[test]
+    fn a_bypassed_request_is_no_function_fact() {
+        let mut facts = used_record();
+        facts.trace.bypass = Some("/static".to_owned());
+        assert!(observe_functions(&facts, false).is_empty());
+    }
+
+    #[test]
+    fn ten_light_siblings_with_digits_become_an_id() {
+        let mut uses: Vec<FunctionUse> = (0..12)
+            .map(|index| use_of(format!("GET /products/PT-70{index:02}"), 1))
+            .collect();
+        uses.push(use_of("GET /products/featured", 30));
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for index in 0..12 {
+            assert_eq!(
+                merged[&format!("GET /products/PT-70{index:02}")],
+                "GET /products/{id}"
+            );
+        }
+        assert_eq!(merged["GET /products/featured"], "GET /products/featured");
+
+        let nine: Vec<FunctionUse> = uses.iter().take(9).cloned().collect();
+        let merged = merge_functions(&nine, Thresholds::default(), &[]);
+        for function in &nine {
+            assert_eq!(merged[&function.key], function.key);
+        }
+    }
+
+    #[test]
+    fn words_merge_only_from_fifty_light_siblings() {
+        let few: Vec<FunctionUse> = (0..25)
+            .map(|index| use_of(format!("GET /api/{}", word(index)), 1))
+            .collect();
+        let merged = merge_functions(&few, Thresholds::default(), &[]);
+        for function in &few {
+            assert_eq!(merged[&function.key], function.key);
+        }
+
+        let mut many: Vec<FunctionUse> = (0..60)
+            .map(|index| use_of(format!("GET /u/{}", word(index)), 1))
+            .collect();
+        many.push(use_of("GET /u/settings", 30));
+        let merged = merge_functions(&many, Thresholds::default(), &[]);
+        for function in many.iter().take(60) {
+            assert_eq!(merged[&function.key], "GET /u/{id}");
+        }
+        assert_eq!(merged["GET /u/settings"], "GET /u/settings");
+    }
+
+    #[test]
+    fn a_heavy_sibling_is_left_alone() {
+        let mut uses: Vec<FunctionUse> = (0..12)
+            .map(|index| use_of(format!("GET /products/PT-70{index:02}"), 1))
+            .collect();
+        uses.push(use_of("GET /products/PT-1", 5));
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for index in 0..12 {
+            assert_eq!(
+                merged[&format!("GET /products/PT-70{index:02}")],
+                "GET /products/{id}"
+            );
+        }
+        assert_eq!(merged["GET /products/PT-1"], "GET /products/PT-1");
+    }
+
+    #[test]
+    fn segments_merge_level_by_level() {
+        let mut uses = Vec::new();
+        for user in 0..60 {
+            for post in 0..2 {
+                uses.push(use_of(
+                    format!("GET /u/{}/posts/post-{user}-{post}", word(user)),
+                    1,
+                ));
+            }
+        }
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for function in &uses {
+            assert_eq!(merged[&function.key], "GET /u/{id}/posts/{id}");
+        }
+    }
+
+    #[test]
+    fn siblings_join_an_id_that_is_already_there() {
+        let mut uses: Vec<FunctionUse> = (0..12)
+            .map(|index| use_of(format!("GET /orders/ORD-{index}"), 1))
+            .collect();
+        uses.push(use_of("GET /orders/{id}", 30));
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for index in 0..12 {
+            assert_eq!(
+                merged[&format!("GET /orders/ORD-{index}")],
+                "GET /orders/{id}"
+            );
+        }
+        assert_eq!(merged["GET /orders/{id}"], "GET /orders/{id}");
+    }
+
+    #[test]
+    fn methods_do_not_merge_with_each_other() {
+        let mut uses: Vec<FunctionUse> = (0..6)
+            .map(|index| use_of(format!("GET /x/A{index}"), 1))
+            .collect();
+        uses.extend((0..6).map(|index| use_of(format!("POST /x/B{index}"), 1)));
+        let merged = merge_functions(&uses, Thresholds::default(), &[]);
+        for function in &uses {
+            assert_eq!(merged[&function.key], function.key);
+        }
+    }
+
+    #[test]
+    fn functions_under_a_named_route_are_never_merged() {
+        let uses: Vec<FunctionUse> = (0..12)
+            .map(|index| use_of(format!("POST /rpc/v2.users.{index}"), 1))
+            .collect();
+        let named = vec!["/rpc".to_owned()];
+        let held = merge_functions(&uses, Thresholds::default(), &named);
+        for function in &uses {
+            assert_eq!(held[&function.key], function.key);
+        }
+        let open = merge_functions(&uses, Thresholds::default(), &[]);
+        for function in &uses {
+            assert_eq!(open[&function.key], "POST /rpc/{id}");
+        }
+    }
+
+    #[test]
+    fn merging_is_stable() {
+        let mut uses: Vec<FunctionUse> = (0..12)
+            .map(|index| use_of(format!("GET /products/PT-70{index:02}"), 1))
+            .collect();
+        uses.push(use_of("GET /products/featured", 30));
+        let thresholds = Thresholds::default();
+        let once = merge_functions(&uses, thresholds, &[]);
+        // Merging the merged keys again, each counted with the most units its originals used, changes nothing.
+        let mut units_of_merged: BTreeMap<String, u32> = BTreeMap::new();
+        for function in &uses {
+            let units = units_of_merged
+                .entry(once[&function.key].clone())
+                .or_default();
+            *units = (*units).max(function.units);
+        }
+        let again: Vec<FunctionUse> = units_of_merged
+            .iter()
+            .map(|(key, units)| use_of(key.clone(), *units))
+            .collect();
+        let twice = merge_functions(&again, thresholds, &[]);
+        for key in units_of_merged.keys() {
+            assert_eq!(&twice[key], key);
+        }
+        // The order of the input does not matter.
+        let mut reversed = uses.clone();
+        reversed.reverse();
+        assert_eq!(merge_functions(&reversed, thresholds, &[]), once);
+    }
+
+    fn evidence(ordinary: u32, admins: u32, admin_days: u32, refused: u32) -> FunctionEvidence {
+        FunctionEvidence {
+            ordinary_units: ordinary,
+            admin_units: admins,
+            admin_days,
+            refused_units: refused,
+            last_day: 4,
+        }
+    }
+
+    #[test]
+    fn a_function_only_admins_use_is_proposed_when_ordinary_users_are_around() {
+        let thresholds = Thresholds::default();
+        let admin_only = evidence(0, 1, 2, 0);
+        assert_eq!(
+            judge_function(&admin_only, 10, true, thresholds),
+            Some(Reliability::High)
+        );
+        assert_eq!(
+            judge_function(&admin_only, 5, true, thresholds),
+            Some(Reliability::Medium)
+        );
+        assert_eq!(judge_function(&admin_only, 4, true, thresholds), None);
+    }
+
+    #[test]
+    fn refusals_count_as_much_as_bystanders() {
+        assert_eq!(
+            judge_function(&evidence(0, 1, 2, 10), 0, true, Thresholds::default()),
+            Some(Reliability::High)
+        );
+    }
+
+    #[test]
+    fn one_ordinary_use_stops_the_proposal() {
+        assert_eq!(
+            judge_function(&evidence(1, 1, 2, 0), 10, true, Thresholds::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn one_day_of_admin_use_is_not_high() {
+        assert_eq!(
+            judge_function(&evidence(0, 1, 1, 0), 10, true, Thresholds::default()),
+            Some(Reliability::Medium)
+        );
+    }
+
+    #[test]
+    fn without_identities_a_function_is_never_high() {
+        let thresholds = Thresholds::default();
+        assert_eq!(
+            judge_function(&evidence(0, 1, 2, 0), 10, false, thresholds),
+            Some(Reliability::Medium)
+        );
+        assert_eq!(
+            judge_function(&evidence(0, 1, 1, 0), 5, false, thresholds),
+            None
         );
     }
 }
