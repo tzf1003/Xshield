@@ -37,7 +37,7 @@ pub const ACCESS_OPTIONS: [&str; 3] = ["ALLOW", "DENY", "UNKNOWN"];
 /// The `attack` question options.
 pub const ATTACK_OPTIONS: [&str; 3] = ["BENIGN", "ATTACK", "UNKNOWN"];
 
-const ACCESS_INSTRUCTIONS: &str = "You are a web application firewall. state.request is one HTTP request from a logged-in browser session. state.session and state.recent describe what the origin server already showed this session. For every value in state.request.values that selects or names an existing business object (record id, account, owner, file, order), check state.request.values[].seen_as: it lists where the origin showed that same value to this session, with the field name. Answer ALLOW only if every object-selecting value was shown earlier as that kind of object, or if state.entry.matched is true and the values are only the input that entry needs (login form, share code, search text). Each value has kind: reference when it looks like an object reference (an id in the path, or a field named like an id, owner or file), route for a plain word in the URL path, input otherwise. A route word that is a collection name (Addresss, Cards, Users) selects no object and never needs to have been shown; it selects one only when it is plainly a person or record name. A value of kind input (couponData, cardNum, expMonth, message) is form content and does not need to have been shown, unless it plainly names someone else's account or record. seen_as may list unrelated fields because small numbers repeat everywhere: a match only counts when the field or request in seen_as is the same kind of object as the one the request selects. A field may name the object by its role instead of by the endpoint that showed it (paymentId for an id shown by /api/Cards, deliveryMethodId for /api/Deliverys, owner for a user list); that still counts as the same kind of object. A value with verified true was already matched by the gateway with a response that showed this exact value as the same kind of object: treat it as shown and judge only the other values. A value may carry object: the kind of object the site's object map gives its position. A seen_as entry in brackets gives the kind of the position that showed it. A value shown only as a different kind of object was never shown as this kind, even when its field name looks similar. Free text that a user writes (note, title, comment, message, description, search words, names typed into a new record, dates, amounts, drug names) does not select any object and never needs to have been shown. A seen_as entry may end with the tier of the response that showed the value and how sure the map is of it. Tier public is a search or listing that any logged-in session receives, so a sighting there proves no right to the object it names. Tier self and tier org are the session's own records or its organisation's. Tier admin is a response that only administrator sessions receive. Reliability low is weak evidence. A value may carry public_access: accepts false marks a position that never takes a value from a public sighting, such as a write or a private read. A value with attempt over_privilege was shown to this session only by public responses, and its position takes none of them, so answer DENY for that value. Answer DENY if any object-selecting value was never shown to this session, or was shown only as an unrelated field (for example a number that appeared only as an age, now used as a patient id), or if an entry request tries to name someone else's object. Answer UNKNOWN only if the evidence is insufficient.";
+const ACCESS_INSTRUCTIONS: &str = "You are a web application firewall. state.request is one HTTP request from a logged-in browser session. state.session and state.recent describe what the origin server already showed this session. For every value in state.request.values that selects or names an existing business object (record id, account, owner, file, order), check state.request.values[].seen_as: it lists where the origin showed that same value to this session, with the field name. Answer ALLOW only if every object-selecting value was shown earlier as that kind of object, or if state.entry.matched is true and the values are only the input that entry needs (login form, share code, search text). Each value has kind: reference when it looks like an object reference (an id in the path, or a field named like an id, owner or file), route for a plain word in the URL path, input otherwise. A route word that is a collection name (Addresss, Cards, Users) selects no object and never needs to have been shown; it selects one only when it is plainly a person or record name. A value of kind input (couponData, cardNum, expMonth, message) is form content and does not need to have been shown, unless it plainly names someone else's account or record. seen_as may list unrelated fields because small numbers repeat everywhere: a match only counts when the field or request in seen_as is the same kind of object as the one the request selects. A field may name the object by its role instead of by the endpoint that showed it (paymentId for an id shown by /api/Cards, deliveryMethodId for /api/Deliverys, owner for a user list); that still counts as the same kind of object. A value with verified true was already matched by the gateway with a response that showed this exact value as the same kind of object: treat it as shown and judge only the other values. A value may carry object: the kind of object the site's object map gives its position. A seen_as entry in brackets gives the kind of the position that showed it. A value shown only as a different kind of object was never shown as this kind, even when its field name looks similar. Free text that a user writes (note, title, comment, message, description, search words, names typed into a new record, dates, amounts, drug names) does not select any object and never needs to have been shown. A seen_as entry may end with the tier of the response that showed the value and how sure the map is of it. Tier public is a search or listing that any logged-in session receives, so a sighting there proves no right to the object it names. Tier self and tier org are the session's own records or its organisation's. Tier admin is a response that only administrator sessions receive. Reliability low is weak evidence. A value may carry public_access: accepts false marks a position that never takes a value from a public sighting, such as a write or a private read. A value with attempt over_privilege was shown to this session only by public responses, and its position takes none of them, so answer DENY for that value. state.request.function is present only on a site that keeps a table of its functions; a function is the method and the path with ids replaced. function.known false means the table does not list this method and path. Most such requests are ordinary: a new page, a new API, a static file. Answer DENY for function.known false only when the path or interface name itself shows a privileged or operational function that an application page for ordinary users would not call: administration (admin, manage, staff roles, audit), operations and monitoring (metrics, actuator, server-status, health internals), debugging and developer tooling (debug, swagger, console, phpinfo), internal or configuration endpoints, backups, directory or file listings (ftp), bulk export or bulk delete of a whole collection. Otherwise function.known false changes nothing: judge the values as above. function.attempt over_privilege means an administrator confirmed this function as administrators-only and this session is not an administrator session: answer DENY. Answer DENY if any object-selecting value was never shown to this session, or was shown only as an unrelated field (for example a number that appeared only as an age, now used as a patient id), or if an entry request tries to name someone else's object. Answer UNKNOWN only if the evidence is insufficient.";
 const ATTACK_INSTRUCTIONS: &str = "You are a web application firewall. Inspect every value in state.request.values and the request path for attack content: SQL injection, NoSQL injection, command or code execution, path traversal, template injection, XSS, SSRF, header or log injection. Values marked <redacted> are secrets and are not attack content. Answer ATTACK if any value carries attack content, BENIGN if none does, UNKNOWN only if the evidence is insufficient.";
 
 /// Why a state could not be built or an answer could not be used.
@@ -83,6 +83,17 @@ pub struct StateValue {
     pub attempt: Option<Attempt>,
 }
 
+/// What the site's function table says about the request, as `state.request.function` shows it
+/// (docs/02 section 2.2). Present only when the table decides the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateFunction {
+    /// The function is administrator-only and this session is not an administrator's: `tier` is
+    /// `admin` and `attempt` is `over_privilege`.
+    pub admin_attempt: bool,
+    /// The table does not list the request's function: `known` is false.
+    pub unknown: bool,
+}
+
 /// Everything the `state` document is made of.
 #[derive(Debug, Clone)]
 pub struct StateInput<'a> {
@@ -106,6 +117,8 @@ pub struct StateInput<'a> {
     pub credential: Option<&'a str>,
     /// Redaction words the site adds to the built-in ones (`advanced.secret_fields`).
     pub secret_words: &'a [String],
+    /// What the site's function table says about the request, when it decides it.
+    pub function: Option<StateFunction>,
 }
 
 /// Whether a field name or a location names a secret: a built-in word or one
@@ -160,6 +173,20 @@ fn render_value(
     rendered
 }
 
+/// The `function` of a request: `tier` and `attempt` for an attempt, `known` false for an unknown
+/// function, both keys together when both hold.
+fn function_json(function: StateFunction) -> Value {
+    let mut rendered = json!({});
+    if function.admin_attempt {
+        rendered["tier"] = json!("admin");
+        rendered["attempt"] = json!(Attempt::OverPrivilege.as_str());
+    }
+    if function.unknown {
+        rendered["known"] = json!(false);
+    }
+    rendered
+}
+
 fn render(input: &StateInput<'_>, recent: usize, seen_per_value: usize, cap: usize) -> String {
     let recent: Vec<Value> = input
         .recent
@@ -172,16 +199,20 @@ fn render(input: &StateInput<'_>, recent: usize, seen_per_value: usize, cap: usi
         .iter()
         .map(|value| render_value(input, value, cap, seen_per_value))
         .collect();
+    let mut request = json!({
+        "method": input.method,
+        "path": input.path,
+        "values": values,
+        "truncated": input.truncated,
+    });
+    if let Some(function) = input.function {
+        request["function"] = function_json(function);
+    }
     let state = json!({
         "entry": { "matched": input.entry_matched },
         "session": { "age_seconds": input.session_age_seconds, "entries_passed": input.entries_passed },
         "recent": recent,
-        "request": {
-            "method": input.method,
-            "path": input.path,
-            "values": values,
-            "truncated": input.truncated,
-        },
+        "request": request,
     })
     .to_string();
     // The values and the path are redacted above. `seen_as` and `recent` quote earlier requests,
@@ -236,7 +267,7 @@ impl Prompt {
                 ACCESS_OPTIONS,
                 [
                     "Every object the request selects was shown to this session, or this is an entry request with only its own input.",
-                    "Some object the request selects was never shown to this session as that kind of object.",
+                    "Some object the request selects was never shown to this session as that kind of object, or the request reaches a privileged or operational function.",
                     "Insufficient evidence.",
                 ],
             ),
@@ -426,6 +457,7 @@ mod tests {
             truncated: false,
             credential,
             secret_words: &[],
+            function: None,
         }
     }
 
@@ -617,9 +649,67 @@ mod tests {
     }
 
     #[test]
+    fn the_function_is_rendered_only_when_present_and_as_the_table_says() {
+        let plain = input(Vec::new(), None, Vec::new());
+        let (text, _) = build_state(&plain).unwrap();
+        let state: Value = serde_json::from_str(&text).unwrap();
+        assert!(state["request"].get("function").is_none(), "{text}");
+        let cases = [
+            (
+                StateFunction {
+                    admin_attempt: true,
+                    unknown: false,
+                },
+                json!({"tier": "admin", "attempt": "over_privilege"}),
+            ),
+            (
+                StateFunction {
+                    admin_attempt: false,
+                    unknown: true,
+                },
+                json!({"known": false}),
+            ),
+            (
+                StateFunction {
+                    admin_attempt: true,
+                    unknown: true,
+                },
+                json!({"tier": "admin", "attempt": "over_privilege", "known": false}),
+            ),
+        ];
+        for (function, expected) in cases {
+            let mut with_function = input(Vec::new(), None, Vec::new());
+            with_function.function = Some(function);
+            let (text, _) = build_state(&with_function).unwrap();
+            let state: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(state["request"]["function"], expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_function_paragraph_keeps_its_tested_wording() {
+        // The paragraph was tried against the real model in this wording (design note section 16,
+        // probe variant draft3). Change it only with a new probe.
+        let paragraph = ACCESS_INSTRUCTIONS
+            .find(" state.request.function is present only")
+            .expect("the paragraph is in the access instructions");
+        let denial = ACCESS_INSTRUCTIONS
+            .find(" Answer DENY if any object-selecting value was never shown")
+            .expect("the denial sentence is in the access instructions");
+        assert!(paragraph < denial);
+        assert!(
+            ACCESS_INSTRUCTIONS
+                .contains("Most such requests are ordinary: a new page, a new API, a static file.")
+        );
+        assert!(ACCESS_INSTRUCTIONS.contains(
+            "Otherwise function.known false changes nothing: judge the values as above."
+        ));
+    }
+
+    #[test]
     fn the_prompt_id_is_fixed_and_follows_the_questions() {
         let prompt = Prompt::new();
-        assert_eq!(prompt.id(), "jq_e290fa8a62172221");
+        assert_eq!(prompt.id(), "jq_77be488d34440d84");
         assert_eq!(Prompt::new().id(), prompt.id());
         assert!(prompt.questions_json().contains("\"access\""));
     }

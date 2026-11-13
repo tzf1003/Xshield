@@ -248,6 +248,34 @@ test("a function the newer version removed stays removed when the draft did not 
   assert.deepEqual(spec.objects?.functions, [exported]);
 });
 
+test("the switch survives the YAML, the JSON and a save over a newer version, and is written only when on", () => {
+  const on: SiteSpec = { ...site, objects: { functions: [exported], ask_unknown_functions: true } };
+  const parsed = parseSpecText(specToYaml(on));
+  if (!parsed.ok) assert.fail(parsed.message);
+  assert.deepEqual(parsed.spec.objects, on.objects);
+  const back = normalizeSpec(JSON.parse(specToJson(on)));
+  if (!back.ok) assert.fail(back.message);
+  assert.deepEqual(back.value.objects, on.objects);
+  // The switch is written after the table it needs.
+  assert.match(specToYaml(on), /functions:[\s\S]*ask_unknown_functions: true/);
+  const off: SiteSpec = {
+    ...site,
+    objects: { functions: [exported], ask_unknown_functions: false },
+  };
+  assert.doesNotMatch(specToYaml(off), /ask_unknown_functions/);
+  assert.doesNotMatch(specToJson(off), /ask_unknown_functions/);
+  // A save over a newer version keeps the switch this draft turned on.
+  const started: SiteSpec = { ...site, objects: { functions: [exported] } };
+  const mine: SiteSpec = {
+    ...started,
+    objects: { functions: [exported], ask_unknown_functions: true },
+  };
+  const latest: SiteSpec = { ...started, entries: [...started.entries, "/api/newer"] };
+  const { spec, conflicts } = rebaseSpec(started, mine, latest);
+  assert.deepEqual(conflicts, []);
+  assert.equal(spec.objects?.ask_unknown_functions, true);
+});
+
 // The text of configurations with no function table, as the console wrote them before the table existed. The table is
 // new, so these must still come out of the editor byte for byte the same (the YAML and the JSON both).
 const emrPlain: SiteSpec = {

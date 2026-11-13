@@ -83,6 +83,32 @@ ADMIN_OBJECTS = {
     ],
 }
 
+# The function table of the functions site (docs/07 section 7.9.18): three administrator-only
+# functions. The medium one tightens nothing (F8).
+ADMIN_FUNCTIONS = [
+    {"key": "POST /api/admin/export", "source": "admin", "tier": "admin", "reliability": "high"},
+    {"key": "DELETE /api/patients/{id}", "source": "admin", "tier": "admin", "reliability": "high"},
+    {"key": "GET /api/admin/search", "source": "admin", "tier": "admin", "reliability": "medium"},
+]
+# Functions every session may use, declared without a tier. The baseline site asks Jev about any
+# function it does not list (docs/07 section 7.9.18).
+BASELINE_FUNCTIONS = [
+    {"key": "POST /login", "source": "admin"},
+    {"key": "GET /api/home", "source": "admin"},
+    {"key": "GET /api/patients", "source": "admin"},
+    {"key": "POST /api/patients", "source": "admin"},
+    {"key": "GET /api/patients/{id}", "source": "admin"},
+    {"key": "GET /api/search", "source": "admin"},
+]
+FUNCTIONS_OBJECTS = {**ADMIN_OBJECTS, "functions": ADMIN_FUNCTIONS}
+BASELINE_OBJECTS = {**ADMIN_OBJECTS, "functions": BASELINE_FUNCTIONS, "ask_unknown_functions": True}
+# The observation site holds both tables and asks about unknown functions (F13).
+FOBSERVE_OBJECTS = {
+    **ADMIN_OBJECTS,
+    "functions": ADMIN_FUNCTIONS + BASELINE_FUNCTIONS,
+    "ask_unknown_functions": True,
+}
+
 
 @dataclass(frozen=True)
 class Expect:
@@ -119,6 +145,9 @@ def site_specs(origin_port: int) -> list[dict]:
         site("limited", "limit.lab", advanced={"session_calls_per_minute": 2}),
         site("identity", "identity.lab", objects=IDENTITY_OBJECTS),
         site("admin", "admin.lab", objects=ADMIN_OBJECTS),
+        site("functions", "functions.lab", objects=FUNCTIONS_OBJECTS),
+        site("baseline", "baseline.lab", objects=BASELINE_OBJECTS),
+        site("fobserve", "fobserve.lab", mode="observe", objects=FOBSERVE_OBJECTS),
         # A JSON credential site: the token login returns a long session token in its body, and the
         # session carries it as a bearer token in the Authorization header (docs/01 section 1.7).
         site("token", "token.lab", session={"header": "Authorization"},
@@ -143,9 +172,11 @@ class Lab:
 
     def send(self, host: str, method: str, target: str, *, cookie: str | None = None,
              form: dict[str, str] | None = None, json_body: dict | None = None,
-             authorization: str | None = None, source: str | None = None) -> Sent:
+             headers: dict[str, str] | None = None, authorization: str | None = None,
+             source: str | None = None) -> Sent:
         """One request through the edge, from the loopback address `source` when one is given."""
-        headers = {"Authorization": authorization} if authorization else None
+        if authorization:
+            headers = {**(headers or {}), "Authorization": authorization}
         return exchange(self.edge, self.origin_was_served, host, method, target, source=source,
                         cookie=cookie, form=form, json_body=json_body, headers=headers)
 
@@ -792,6 +823,164 @@ def w6(lab: Lab) -> None:
         Expect(200, "fast_allow", "allowed", True))
     lab.check("a site without identity positions writes no exposure key", "exposure" not in response_of(unset),
               f"exposure {exposure_of(unset)}")
+
+def jev_calls(lab: Lab) -> int:
+    """How many judgements Jev has been asked so far."""
+    with lab.jev.lock:
+        return len(lab.jev.bodies)
+
+
+def function_of(record: dict | None) -> dict | None:
+    """The trace's function of one decision record (docs/07 section 7.4.3), or None when it has none."""
+    return ((record or {}).get("trace") or {}).get("function")
+
+
+def judged_state(lab: Lab, method: str, path: str) -> dict:
+    """The state Jev was last shown for this method and path, or {} when Jev was not asked about it."""
+    with lab.jev.lock:
+        states = [document["state"] for document in lab.jev.bodies]
+    matching = [state for state in states
+                if state["request"]["method"] == method and state["request"]["path"] == path]
+    return matching[-1] if matching else {}
+
+
+@scenario("F5", "医生 POST /api/admin/export（管理档功能，非管理员）：交 Jev 判为越权尝试，拦截，源站没收到")
+def f5(lab: Lab) -> None:
+    cookie = lab.login("functions.lab", "doctor_a", "F5 doctor A logs in")
+    denied = lab.expect("F5 doctor A exports", lab.send(
+        "functions.lab", "POST", "/api/admin/export", cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    shown = (judged_state(lab, "POST", "/api/admin/export").get("request") or {})
+    lab.check("F5 Jev is shown the function as an over-privilege attempt",
+              shown.get("function") == {"tier": "admin", "attempt": "over_privilege"},
+              f"function {shown.get('function')}")
+    traced = function_of(denied.record) or {}
+    lab.check("F5 the trace names the function, its tier and the attempt",
+              traced.get("key") == "POST /api/admin/export" and traced.get("entry") == "POST /api/admin/export"
+              and traced.get("tier") == "admin" and traced.get("attempt") == "over_privilege",
+              f"trace function {traced}")
+
+
+@scenario("F5b", "医生 POST 并带 X-HTTP-Method-Override: DELETE：按更严的 DELETE 判为越权尝试，拦截")
+def f5b(lab: Lab) -> None:
+    cookie = lab.login("functions.lab", "doctor_a", "F5b doctor A logs in")
+    created = lab.expect("F5b doctor A creates a patient", lab.send(
+        "functions.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "覆盖靶患者"}),
+        Expect(201, "jev_allow", "allowed", True))
+    new_id = created.reply.json().get("id", "MISSING")
+    overridden = lab.expect("F5b the request overrides its method to DELETE", lab.send(
+        "functions.lab", "POST", f"/api/patients/{new_id}", cookie=cookie,
+        headers={"X-HTTP-Method-Override": "DELETE"}), Expect(403, "jev_deny", "blocked", False))
+    traced = function_of(overridden.record) or {}
+    lab.check("F5b the trace keys the request by POST and names the DELETE function",
+              traced.get("key") == "POST /api/patients/{id}" and traced.get("entry") == "DELETE /api/patients/{id}"
+              and traced.get("attempt") == "over_privilege", f"trace function {traced}")
+
+
+@scenario("F6", "管理员 admin_root 访问管理功能：放行，不交 Jev，记录带档位但没有尝试")
+def f6(lab: Lab) -> None:
+    cookie = lab.login("functions.lab", "admin_root", "F6 the administrator logs in")
+    lab.expect("F6 the administrator opens the home page", lab.send(
+        "functions.lab", "GET", "/api/home", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    before = jev_calls(lab)
+    exported = lab.expect("F6 the administrator exports", lab.send(
+        "functions.lab", "POST", "/api/admin/export", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    lab.check("F6 Jev is not asked about the administrator's export", jev_calls(lab) == before,
+              f"{jev_calls(lab) - before} new calls")
+    traced = function_of(exported.record) or {}
+    lab.check("F6 the trace names the administrator tier and no attempt",
+              traced.get("tier") == "admin" and "attempt" not in traced, f"trace function {traced}")
+
+
+@scenario("F7", "医生新建患者后 DELETE 它：值已核验，仍因管理档功能拦截（越权尝试不快速放行）")
+def f7(lab: Lab) -> None:
+    cookie = lab.login("functions.lab", "doctor_a", "F7 doctor A logs in")
+    created = lab.expect("F7 doctor A creates a patient", lab.send(
+        "functions.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "删除靶患者"}),
+        Expect(201, "jev_allow", "allowed", True))
+    new_id = created.reply.json().get("id", "MISSING")
+    lab.expect("F7 doctor A deletes the patient she created", lab.send(
+        "functions.lab", "DELETE", f"/api/patients/{new_id}", cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    shown = (judged_state(lab, "DELETE", f"/api/patients/{new_id}").get("request") or {})
+    values = [value for value in shown.get("values", []) if value.get("value") == new_id]
+    lab.check("F7 the id is verified and Jev is shown the attempt",
+              len(values) == 1 and values[0].get("verified") is True
+              and shown.get("function") == {"tier": "admin", "attempt": "over_privilege"},
+              f"values {values} function {shown.get('function')}")
+
+
+@scenario("F8", "医生 GET /api/admin/search（管理档可靠性为 medium）：不收紧，与没有条目时相同")
+def f8(lab: Lab) -> None:
+    cookie = lab.login("functions.lab", "doctor_a", "F8 doctor A logs in")
+    searched = lab.expect("F8 doctor A opens the administrator search", lab.send(
+        "functions.lab", "GET", "/api/admin/search?q=x", cookie=cookie),
+        Expect(403, "fast_allow", "allowed", True))
+    lab.check("F8 the trace has no function", function_of(searched.record) is None,
+              f"trace function {function_of(searched.record)}")
+
+
+@scenario("F9", "医生 GET /metrics（基线外的功能，站点要求交 Jev）：交 Jev 判为运维，拦截")
+def f9(lab: Lab) -> None:
+    cookie = lab.login("baseline.lab", "doctor_a", "F9 doctor A logs in on the baseline site")
+    denied = lab.expect("F9 doctor A reads the metrics", lab.send(
+        "baseline.lab", "GET", "/metrics", cookie=cookie), Expect(403, "jev_deny", "blocked", False))
+    shown = (judged_state(lab, "GET", "/metrics").get("request") or {})
+    lab.check("F9 Jev is shown the function as unknown", shown.get("function") == {"known": False},
+              f"function {shown.get('function')}")
+    traced = function_of(denied.record) or {}
+    lab.check("F9 the trace names the function as unknown and no entry",
+              traced.get("key") == "GET /metrics" and traced.get("known") is False and "entry" not in traced,
+              f"trace function {traced}")
+
+
+@scenario("F10", "医生 GET /api/comments（基线外）两次：第一次交 Jev 放行，第二次走放行缓存")
+def f10(lab: Lab) -> None:
+    cookie = lab.login("baseline.lab", "doctor_a", "F10 doctor A logs in on the baseline site")
+    lab.expect("F10 doctor A reads the comments", lab.send(
+        "baseline.lab", "GET", "/api/comments", cookie=cookie), Expect(200, "jev_allow", "allowed", True))
+    shown = (judged_state(lab, "GET", "/api/comments").get("request") or {})
+    lab.check("F10 Jev is shown the function as unknown", shown.get("function") == {"known": False},
+              f"function {shown.get('function')}")
+    before = jev_calls(lab)
+    lab.expect("F10 doctor A reads the comments again", lab.send(
+        "baseline.lab", "GET", "/api/comments", cookie=cookie), Expect(200, "cached_allow", "allowed", True))
+    lab.check("F10 the second read asks Jev nothing", jev_calls(lab) == before,
+              f"{jev_calls(lab) - before} new calls")
+
+
+@scenario("F11", "不带凭证访问入口路径 DELETE /api/patients（基线里没有这个方法）：交 Jev，放行后源站答 401")
+def f11(lab: Lab) -> None:
+    lab.expect("F11 an anonymous delete on an entry path", lab.send(
+        "baseline.lab", "DELETE", "/api/patients"), Expect(401, "jev_allow", "allowed", True))
+    state = judged_state(lab, "DELETE", "/api/patients")
+    lab.check("F11 Jev is shown an entry request whose function is unknown",
+              state.get("entry") == {"matched": True}
+              and (state.get("request") or {}).get("function") == {"known": False},
+              f"state {state}")
+
+
+@scenario("F12", "没有功能表的站点：医生 POST /api/admin/export 与 GET /metrics 照旧快速放行（对照 F5、F9）")
+def f12(lab: Lab) -> None:
+    cookie = lab.login("admin.lab", "doctor_a", "F12 doctor A logs in on the administrator site")
+    before = jev_calls(lab)
+    exported = lab.expect("F12 doctor A exports on a site without a table", lab.send(
+        "admin.lab", "POST", "/api/admin/export", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    metrics = lab.expect("F12 doctor A reads the metrics on a site without a table", lab.send(
+        "admin.lab", "GET", "/metrics", cookie=cookie), Expect(404, "fast_allow", "allowed", True))
+    lab.check("F12 Jev is not asked", jev_calls(lab) == before, f"{jev_calls(lab) - before} new calls")
+    lab.check("F12 the records carry no function",
+              function_of(exported.record) is None and function_of(metrics.record) is None,
+              f"trace functions {function_of(exported.record)} {function_of(metrics.record)}")
+
+
+@scenario("F13", "观察模式的功能表站点：医生 POST /api/admin/export 与 GET /metrics 都转发，记为本应拦截")
+def f13(lab: Lab) -> None:
+    cookie = lab.login("fobserve.lab", "doctor_a", "F13 doctor A logs in on the observation site")
+    lab.expect("F13 the export would be blocked", lab.send(
+        "fobserve.lab", "POST", "/api/admin/export", cookie=cookie), Expect(200, "jev_deny", "would_block", True))
+    lab.expect("F13 the metrics read would be blocked", lab.send(
+        "fobserve.lab", "GET", "/metrics", cookie=cookie), Expect(404, "jev_deny", "would_block", True))
 
 
 def main() -> int:

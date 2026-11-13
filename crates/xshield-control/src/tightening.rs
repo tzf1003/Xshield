@@ -211,6 +211,7 @@ pub fn apply(map: &ObjectMap, splits: &[Split]) -> Option<ObjectMap> {
         classes: map.classes().to_vec(),
         slots: map.slots().to_vec(),
         functions: map.functions().to_vec(),
+        ask_unknown_functions: map.asks_unknown_functions(),
         learning: *map.learning(),
     };
     for split in splits {
@@ -287,6 +288,7 @@ mod tests {
                 .collect(),
             slots,
             functions: Vec::new(),
+            ask_unknown_functions: false,
             learning: LearningSettings::default(),
         })
         .expect("a valid test map")
@@ -441,14 +443,15 @@ mod tests {
     }
 
     #[test]
-    fn a_split_keeps_the_function_table() {
+    fn a_split_keeps_the_function_table_and_its_switch() {
         let (map, votes) = two_kinds();
-        // The function table is added through the written form: the map has no writer for it.
+        // The function table and the switch are added through the written form: the map has no writer for them.
         let mut section = serde_json::to_value(&map).expect("the map writes");
         section["functions"] = serde_json::json!([
             {"key": "POST /api/admin/export", "source": "rule", "tier": "admin", "reliability": "high"},
             {"key": "GET /doctor/{id}", "source": "admin"}
         ]);
+        section["ask_unknown_functions"] = serde_json::json!(true);
         let with_functions: ObjectMap = serde_json::from_value(section).expect("a valid map");
         let splits = plan_splits(&with_functions, &votes, &word);
         assert!(!splits.is_empty(), "the test needs a split to apply");
@@ -456,5 +459,10 @@ mod tests {
         assert_ne!(after.class_of(DOCTOR), after.class_of(DOCUMENT));
         assert_eq!(after.functions(), with_functions.functions());
         assert!(after.admin_only("POST", "/api/admin/export"));
+        assert!(
+            after.asks_unknown_functions(),
+            "the switch survives the split"
+        );
+        assert!(after.guards_functions());
     }
 }

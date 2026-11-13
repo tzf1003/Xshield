@@ -223,6 +223,28 @@ pub async fn site_ordinary_units(
     Ok(count_u32(count))
 }
 
+/// The distinct administrator units that used any function over the window from `oldest_day` on: the units
+/// the function list shows as the site's `admin_units` (docs/07 section 7.9.20). Only the `function_admin`
+/// kind counts, so the ordinary and refused rows of the same units do not.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn site_admin_units(
+    pool: &PgPool,
+    site: &str,
+    oldest_day: u64,
+) -> Result<u32, LearningStoreError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT unit) FROM object_response_evidence
+         WHERE site = $1 AND kind = 'function_admin' AND day >= $2",
+    )
+    .bind(site)
+    .bind(day_i64(oldest_day))
+    .fetch_one(pool)
+    .await?;
+    Ok(count_u32(count))
+}
+
 /// A day counted from the epoch as the column stores it. A value out of range saturates, which no real day
 /// reaches.
 fn day_i64(day: u64) -> i64 {
@@ -477,6 +499,48 @@ mod tests {
                 .expect("count the units"),
             3,
             "alice, bob and erin: dave administers in the window, root is no function user"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn site_admin_units_counts_distinct_administrators() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("function_admin_units");
+        let generation = with_site(&pool, &site).await;
+        record_function_facts(
+            &pool,
+            &site,
+            generation,
+            &[
+                admin(FUNCTION, "root", DAY),
+                // The same administrator on another day, and on another function, counts once.
+                admin(FUNCTION, "root", DAY + 1),
+                admin("GET /api/admin/search", "root", DAY),
+                admin(FUNCTION, "root2", DAY),
+                // The other kinds of rows are not administrators.
+                used(FUNCTION, "alice", DAY),
+                anonymous(FUNCTION, "a:10.0.0.9", DAY),
+                refused(FUNCTION, "bob", DAY),
+                // An administration outside the window is left out.
+                admin(FUNCTION, "old", DAY - 10),
+            ],
+        )
+        .await
+        .expect("record the facts");
+        assert_eq!(
+            site_admin_units(&pool, &site, DAY - 1)
+                .await
+                .expect("count the administrators"),
+            2,
+            "root and root2"
+        );
+        assert_eq!(
+            site_admin_units(&pool, &site, DAY + 2)
+                .await
+                .expect("count the administrators"),
+            0,
+            "no administration on or after the day"
         );
     }
 

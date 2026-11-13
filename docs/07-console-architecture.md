@@ -206,7 +206,7 @@ GET /api/patients ──响应里出现 id=7──┐
 
 网关写出 trace 时省略下面这些键，读取方（控制台、导出）把缺省的键当作 null、false 或空列表处理。上面的示例为了看清结构把所有键都列了出来，所以和实际输出不完全一致。
 
-- 顶层 `entry`、`bypass`、`refused`、`cache_source`、`session`、`response`、`upstream_error` 为 null 时省略；`values_truncated`、`trimmed` 为 false 时省略；`values` 为空时省略。
+- 顶层 `entry`、`bypass`、`refused`、`cache_source`、`function`、`session`、`response`、`upstream_error` 为 null 时省略；`values_truncated`、`trimmed` 为 false 时省略；`values` 为空时省略。
 - `values[].len` 为空、`values[].clipped` 为 false 时省略；`values[].public_access`、`values[].attempt`、`values[].sources[].tier`、`values[].sources[].reliability` 为空时省略，`values[].unplaced` 为 false 时省略；`response.skip` 为空时省略；`session.entries_passed`、`session.recent` 为空时省略。
 - 其余的 null 照常写出，例如 `values[].key`、`sources[].request_id`、`timing.origin_ms`、`response.content_type`。
 
@@ -228,7 +228,8 @@ GET /api/patients ──响应里出现 id=7──┐
 | `session.identity` | 站点声明了身份位置且会话已见身份时才有：`user`、`org` 为键控哈希标签，`role` 为角色标签，规则见 [7.9.15](#7915-对象表的身份位置w1)。没有身份位置的站点不写这一段 |
 | `session.login_request_id` | JSON 凭证站点的会话由哪次登录建立时，那次登录请求的 ID。登录响应暂存的标量在那次绑定时记入会话（[01 1.7](01-request-flow.md#17-网关对请求和响应的处理边界)）。没有时不写 |
 | `session.login_unbound` | 凭证建立会话时没有绑定到登录响应，原因为 `login_ambiguous`（对上多份暂存）、`login_expired`（暂存已过期）或 `login_unmatched`（没有对上）。没有时不写 |
->| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
+| `cache_source` | 缓存放行复用的那次 Jev 放行的请求 ID |
+| `function` | 请求到达管理档条目，或它的功能未知时才有（见 7.9.18 的“在判定中的使用”）：`key` 是传输方法、一个空格和路由模板，凭证已脱敏；`entry` 是命中的管理档条目的键；`tier` 为 `admin`；`attempt` 为 `over_privilege`（非管理员会话，即尝试越权）；`known` 为 `false`（功能表没有这个功能）。不适用的 `entry`、`tier`、`attempt`、`known` 省略 |
 | `timing` | `total_ms` 从收到请求头到响应写完；`judge_ms` 是判定耗时（含 Jev）；`origin_ms` 从发出上游请求到收到响应头 |
 | `response.observed` | `json` / `html` / `skipped`；`skip` 给原因：`status`（非 2xx）、`content_type`、`compressed`、`too_large`（超过 1 MiB，[01.2](01-request-flow.md#12-会话与上下文) 要求日志注明）、`head`、`not_forwarded` |
 | `response.values` / `new_values` | 从响应里取出的值数、其中会话原先没有的值数 |
@@ -374,6 +375,13 @@ GET /api/patients ──响应里出现 id=7──┐
 ### 7.5.5 指令版本表
 
 网关启动时计算 `questions` JSON（两个问题的 `instructions` 和 `criteria`，代码常量）和它的 ID，执行 `INSERT INTO jev_prompts … ON CONFLICT (id) DO NOTHING`。控制台按 `jev.prompt` 读出指令全文，与 `model` 和 `state` 拼回完整请求体。同一份指令无论调用多少次只存一行；修改提示词（例如 [04.5](04-deployment-testing.md#45-首次真实-jev-调用记录) 的几轮修复）会产生新 ID，旧记录仍能还原当时的指令。
+
+| 指令 ID | 说明 |
+|---|---|
+| `jq_e290fa8a62172221` | 功能表之前的指令：档位说明与尝试越权说明，没有 `state.request.function` 的说明 |
+| `jq_77be488d34440d84` | 功能表。新增 `state.request.function` 的说明（尝试越权答 DENY；未知功能只在路径含管理、运维、调试等词时答 DENY，其余照值判定），以及 DENY 标准里的“请求触及特权或运维功能”。新增的一段逐字与真实模型测试时相同（见 [02 2.2](02-jev.md)），改动须重新测试 |
+
+所有站点都会换用新 ID，不论它是否有功能表：指令文字对每个请求都一样。
 
 ## 7.6 站点级判定参数（advanced）
 
@@ -645,7 +653,7 @@ CREATE TABLE jev_prompts (
 - 列表：`limit` 默认 100、最大 500；时间窗最长 7 天，缺省最近 24 小时；游标 `cursor` 不透明，响应给 `next_cursor`。
 - 统计和建议接口单次最多扫描 200 万行，超出返回 `complete: false` 和已扫描行数，界面如实显示“按前 N 条计算”。
 - 写站点配置都带 `expected_version`，不一致返回 409 `VERSION_CONFLICT` 和 `current_version`。
-- 错误码沿用 PR #73 的 `UNAUTHENTICATED`、`INVALID_PASSWORD`、`SITE_NOT_FOUND`、`SITE_EXISTS`、`SITE_NAME_MISMATCH`、`ROLLBACK_TARGET_DELETED`、`INTERNAL` 和 `SITE_CONFIG_*`，新增：`LOGIN_RATE_LIMITED`（429）、`REQUEST_NOT_FOUND`（404，取代 `DECISION_NOT_FOUND`）、`SITE_HOST_TAKEN`、`VERSION_CONFLICT`（409）、`INVALID_FILTER`（400，取代 `INVALID_OUTCOME`，`field` 指出哪个参数）、`WINDOW_TOO_LARGE`（400）、`TOO_MANY_IDS`（400）、`BODY_TOO_LARGE`（413）。界面文案见 [06.6.5](06-console-ui.md#665-错误码文案)。
+- 错误码沿用 PR #73 的 `UNAUTHENTICATED`、`INVALID_PASSWORD`、`SITE_NOT_FOUND`、`SITE_EXISTS`、`SITE_NAME_MISMATCH`、`ROLLBACK_TARGET_DELETED`、`INTERNAL` 和 `SITE_CONFIG_*`，新增：`LOGIN_RATE_LIMITED`（429）、`REQUEST_NOT_FOUND`（404，取代 `DECISION_NOT_FOUND`）、`SITE_HOST_TAKEN`、`VERSION_CONFLICT`（409）、`INVALID_FILTER`（400，取代 `INVALID_OUTCOME`，`field` 指出哪个参数）、`WINDOW_TOO_LARGE`（400）、`TOO_MANY_IDS`（400）、`BODY_TOO_LARGE`（413）、`FUNCTION_CHANGED`（409，见 7.9.20）、`FUNCTION_ON_ENTRY`（409，见 7.9.20）。界面文案见 [06.6.5](06-console-ui.md#665-错误码文案)。
 
 ### 7.9.2 端点一览
 
@@ -675,6 +683,9 @@ CREATE TABLE jev_prompts (
 | `POST /api/sites/{name}/objects/slots/{id}/ambiguous` | 标为歧义，规则不再提议，成功返回 204；错误码同上 |
 | `POST /api/sites/{name}/objects/slots/{id}/judgement/confirm` | 确认声明的位置的提议（7.9.16）。请求位置的请求体为 `{"accepts_public": bool, "reliability": "high" \| "medium"}`，响应位置的为 `{"tier": "self" \| "org" \| "admin" \| "public", "reliability": "high" \| "medium"}`，必须与当前提议一致，成功写入站点配置的一个新版本并返回 204。409：`JUDGEMENT_CHANGED`（请求体与提议不一致，或判断的种类不对）、`SLOT_NOT_JUDGED`（身份位置）、`SLOT_STATE_CONFLICT`（条目带着另一种判断）、`VERSION_CONFLICT`（保存已让站点前进）；404：`JUDGEMENT_NOT_FOUND`（没有提议）、`SLOT_NOT_FOUND` |
 | `POST /api/sites/{name}/objects/slots/{id}/judgement/dismiss` | 驳回位置的提议（请求位置的接受公共来源，或响应位置的档位），成功返回 204；同一个判断不再提议（7.9.16）。错误码：`JUDGEMENT_NOT_FOUND`（404）、`SLOT_NOT_JUDGED`（409，身份位置）、`SLOT_NOT_FOUND`（404） |
+| `GET /api/sites/{name}/objects/functions` | 功能表：配置里的功能及其证据、没有进表的候选、管理档提议，以及最近一天没有学到的流量（7.9.20） |
+| `POST /api/sites/{name}/objects/functions/changes` | 管理员对功能表的一批变更（删除、取消管理档、确认管理档提议、新增），写成一个新版本，成功返回 204。错误码：`FUNCTION_CHANGED`、`FUNCTION_ON_ENTRY`、`JUDGEMENT_CHANGED`、`VERSION_CONFLICT`（409）；`JUDGEMENT_NOT_FOUND`（404）；`INVALID_BODY`、`SITE_CONFIG_OBJECTS_INVALID`（400）（7.9.20） |
+| `POST /api/sites/{name}/objects/functions/proposals/dismiss` | 驳回一条功能的管理档提议，成功返回 204；`JUDGEMENT_NOT_FOUND`（404）、`INVALID_BODY`（400）（7.9.20） |
 | `GET /api/sites/{name}/objects/bootstrap` | 冷启动的类别候选（24 小时窗口）；候选尚未计算，当前为空 |
 | `GET /api/status` | 顶栏状态灯和“配置生效”需要的轻量状态，每 15 秒轮询一次（7.9.13） |
 | `GET /api/system` | 网关实例、日志存储、运行参数（7.9.8）；只在系统页按需读取，不轮询 |
@@ -1037,7 +1048,7 @@ CREATE TABLE jev_prompts (
 
 ### 7.9.18 功能表
 
-功能表是站点配置 `objects` 下的 `functions` 列表（[03.2](03-admin-config-audit.md#32-站点配置)）。对象表的位置说的是“某个接口里的某个值是哪一类对象”，装不下“这个接口本身归谁用”，所以功能单独成表。本节定义格式、校验和查找规则。本版只读入、校验和保存，网关的判定还不使用它，判定结果与没有功能表时相同；判定的启用、学习基线和确认写入见后续改动。
+功能表是站点配置 `objects` 下的 `functions` 列表（[03.2](03-admin-config-audit.md#32-站点配置)）。对象表的位置说的是“某个接口里的某个值是哪一类对象”，装不下“这个接口本身归谁用”，所以功能单独成表。本节定义格式、校验、查找规则，以及功能表在判定中的使用（见下文“在判定中的使用”）。功能表的学习基线见 7.9.19，确认与修改的接口见 7.9.20。
 
 格式：
 
@@ -1076,14 +1087,53 @@ objects:
 - **段的比较**。条目模板和请求模板按 `/` 分段，段数必须相同。条目的 `{id}` 段覆盖请求的任意一个非空段。其他段先去掉请求段的第一个 `;` 及之后的部分，再与条目段做忽略 ASCII 大小写的比较；去掉之后为空的段不匹配任何字面段。逐字相等（或忽略大小写相等）的段数记为字面段数。位置条目的比较（`template_covers`）不改。
 - **为什么忽略大小写和 `;` 参数**。源站如果不分大小写（IIS、部分框架）或会剥掉 `;` 参数（Java 系），`/API/Admin/export` 与 `/api/admin;x/export` 到的是同一个功能，条目必须照样管住。源站如果区分，这些写法本来就是 404，多管一下没有代价。
 - **`function_of`**。在方法相同、覆盖请求的条目中取第一名：字面段数多的优先；一样多时，档位为 `admin` 且可靠性为 `high` 的优先，取更严的；再一样时，书写顺序靠前的优先。
-- **`HEAD` 和 `OPTIONS`**。`HEAD` 按 `GET` 查。`OPTIONS` 是预检，不带凭证，不参与功能查找：`function_of` 返回空，`admin_only` 为假。`knows_function` 对 `OPTIONS` 的判断是：任何方法下该路由已知即为真。
+- **`HEAD` 和 `OPTIONS`**。`HEAD` 按 `GET` 查。`OPTIONS` 是预检，不带凭证，不会命中管理档条目：`function_of` 返回空，`admin_only` 为假。对 `OPTIONS` 判断未知时，只要这条路由在任一方法下已知（功能表里有覆盖它的条目，或对象表里有声明过位置的同一路由），就算已知。
 - **`admin_only`**。`function_of` 的结果是 `admin` 档且可靠性为 `high`。可靠性不是 `high` 的条目不收紧，与位置条目的规矩相同。
 - **`knows_function`**。功能表有条目覆盖请求，或者对象表里有位置（暂停与否都算）的方法与请求方法相同（`HEAD` 按 `GET`）且模板覆盖请求，即为已知。位置声明过的接口，它的功能自动算已知，不必在功能表里重复登记。
 - **性能**。校验时把键按方法和段数分组，并把模板预先切分成段（每个请求只切分一次）。查找只看同方法、同段数的组，不扫全表，也不对每个键重新切分。对象表追加位置时同步更新这个索引。
 
+**开关 `objects.ask_unknown_functions`**。布尔，默认 `false`。为假时不写出这个键，现有站点的配置逐字不变。为真时，判定把功能表里没有的功能也送 Jev 判定（见下文“在判定中的使用”）。开关与 `functions` 并列，放在 `objects` 下，不放进 `learning`：它是判定的设置，不是学习的设置。
+
+- 不是布尔值：整段 `objects` 按解析失败处理，与其他字段的类型错误相同。
+- 功能表为空（省略，或为 `[]`）而开关为真：拒绝，位置是 `objects.ask_unknown_functions`，`reason` 为 `ask_without_functions`。空表没有基线，开关会把所有请求都送 Jev。界面在本地给出同样的说明，保存前就能看到。
+- 开关为真时，功能表每条条目的校验不变。
+
+**在判定中的使用**。功能表只在“接管判定”的站点上起作用：站点的功能表里有至少一条 `tier: admin`、`reliability: high` 的条目，或者开关为真。否则请求的处理与没有功能表时逐字相同，连路由模板都不计算。
+
+- **请求的功能**。传输方法转大写，加一个空格，加逻辑路径的路由模板（会话凭证已脱敏）。规范拼写里还有 `%2F` 或 `%5C` 时，再取一个模板：把它们换成 `/` 之后的模板。两个模板不同就都查，所以 `/api/admin%2Fexport` 和 `/api/x/..%2Fadmin/export` 都能找到 `POST /api/admin/export` 的条目。这是为了源站或其前面的代理先解码再路由的情况。双重编码（`%252F`）不解码查找，见下面的局限。
+- **方法覆盖**。请求头 `X-HTTP-Method-Override`、`X-HTTP-Method`、`X-Method-Override` 的每一次取值，以及请求值 `query._method`、`body._method`，去掉首尾空白并转大写后，是 3 到 7 个 ASCII 字母的才算；去重，去掉与传输方法相同的。覆盖不看传输方法是不是 `POST`。同一个头出现多次时，每个取值都算。
+- **大小写与 `HEAD`、`OPTIONS`**。传输方法先转大写再查，条目的方法都是大写。`HEAD` 按 `GET` 查；`OPTIONS` 不会命中管理档条目（见上）。
+- **管理档命中**。按顺序试传输方法，再试每个覆盖方法，每种方法配每个模板；第一个命中的管理档条目即为命中。`reliability` 不是 `high` 的管理档条目不收紧，与位置条目相同。
+- **尝试越权**：命中，且会话不是管理员。管理员会话命中时照常判定，`trace.function` 里记下档位，但没有 `attempt`。
+- **未知功能**：开关为真，且传输方法与第一条模板在基线里没有对应的功能。基线是功能表的条目，加上对象表里声明过位置的接口（暂停与否都算）。模板不能化为规范拼写的请求也算未知。未知只看传输方法和第一条模板：覆盖方法与解码后的模板不在基线里，不据此判未知。
+
+| 情况 | 快速放行 | 读放行缓存 | 写放行缓存 | `state` 的 `request.function` | `trace.function` |
+|---|---|---|---|---|---|
+| 尝试越权 | 不 | 不 | 不 | `{"tier":"admin","attempt":"over_privilege"}` | 有 |
+| 未知功能（不是尝试越权） | 不 | 可以 | 可以 | `{"known":false}` | 有 |
+| 尝试越权，同时未知 | 不 | 不 | 不 | `{"tier":"admin","attempt":"over_privilege","known":false}` | 有 |
+| 管理员会话命中管理档条目 | 与没有功能表时相同 | 相同 | 相同 | 没有；开关为真且传输方法未知时为 `{"known":false}` | 有（没有 `attempt`） |
+| 其他 | 相同 | 相同 | 相同 | 没有 | 没有 |
+
+- **尝试越权即使请求值全部核验过，也不快速放行**。值照常进入 `state`，带 `verified: true`。网关不自己拒绝尝试越权，交 Jev 并要求 DENY（指令的说明见 [02 2.2](02-jev.md)）。
+- **放行缓存**。`remember_allow` 遇到尝试越权直接返回：即使模型没有照指令答 DENY，这个放行也不被缓存。未知功能被 Jev 放行后可以走缓存，否则一个不在基线里的轮询接口会把会话的调用额度用完。缓存键已含对象表的摘要和管理员标志，改表或换开关会让旧缓存失效，不需要改键。
+- **不受管的请求**。`bypass` 的路径最先返回，功能表管不到它。没有凭证、又不在入口上的请求仍先得到 `no_session`（401），不调 Jev，不写 `trace.function`。
+- **Jev 不可用**。尝试越权和未知功能按站点的 `on_jev_unavailable` 处理，不加新的分支。`allow` 的站点在 Jev 不可用期间会转发这些请求，与值的尝试越权一致。
+- **观察模式**。尝试越权与未知功能在观察模式下记为 `would_block`，请求照常转发。建议先在观察模式下看 `trace.function`，确认管理功能和基线没有错配，再切到拦截。
+
+**已知局限**（不在本版解决，写在这里）：
+
+- 第 2 层只在声明了角色身份位置、且角色标签是 `admin` 的站点上有意义。没有任何会话被认作管理员的站点上，管理档条目会把真管理员也拦住。
+- 管理员会话在身份响应到达之前（刚登录、网关重启后）调管理功能会被拦。
+- 管理档条目落在入口上（比如把 `POST /login` 标成管理档）会拦住所有没有管理员身份的登录。控制台在后续改动里提示。
+- `bypass` 里的路径不受功能表管。
+- 未知与否只看传输方法；方法覆盖只在覆盖后的方法命中管理档条目时起作用。
+- 双重编码的斜杠（`%252F`）不解码查找。
+- 第 3 层的判断质量取决于模型。名字普通的管理接口（如 `GET /api/Users`）模型认不出来，那要靠第 2 层的条目。
+- `on_jev_unavailable: allow` 的站点在 Jev 不可用期间会转发尝试越权和未知功能的请求，与值的尝试越权一致。
 ### 7.9.19 功能的学习证据与管理档提议
 
-功能级越权需要按“功能”统计：哪些功能在正常流量里被走过（以后作为基线候选），哪些功能只有管理员走过（管理档提议）。本节说明学习任务怎样记录这两类证据并提出提议。这一步**不改变任何判定，也不改站点配置**：提议只写进库里，列表接口的 `judgements` 不列出它们，确认与页面属于后续的接口和页面（见本节末尾）。
+功能级越权需要按“功能”统计：哪些功能在正常流量里被走过（以后作为基线候选），哪些功能只有管理员走过（管理档提议）。本节说明学习任务怎样记录这两类证据并提出提议。这一步**不改变任何判定，也不改站点配置**：提议写进库里，列表接口的 `judgements` 不列出它们；功能表接口（[7.9.20](#7920-功能表的读取确认与驳回)）读出它们，管理员在那里确认或驳回。页面属于后续工作。
 
 **功能键。** 功能键是 `方法 模板`，例如 `GET /api/patients/{id}`，规则如下（`function_key`、`function_template`）：
 
@@ -1132,9 +1182,114 @@ objects:
 
 提议写进 `object_tier_judgements`，复用位置提议的表：`slot` 为功能键，`tier` 为 `admin`，`units` 为管理员单位数，`seen_values` 与 `agreement_per_mille` 为 0，`last_day` 为证据的最后一天。功能键恰有一个空格，位置键恰有两个，两类行靠这个区分：位置的 `retain` 只删位置键的行，功能的 `retain_functions` 只删功能键的行，两类互不清除。每次学习在站点的当前配置上重新判断：规则不再给出提议的功能，它未驳回的提议撤回；被驳回的保留，同一条不会再提。有证据的功能键超过 `FUNCTION_KEYS_MAX`（20 000 个，一次学习按单位数从多到少读这么多）时，这一轮整个不判断：不写提议，也不撤回任何提议，并在日志里记一行。合并后超过 `KEY_MAX`（256 字节）的键不提议。
 
-列表接口（`GET …/objects`）的 `judgements` 只列位置提议：`judgement_bodies` 用 `declared_class_of` 过滤，功能键不是声明的位置，会被滤掉（有测试钉住）。本次不读 `objects.functions`：配置里已有的功能与提议的去重，留给确认与列表接口的后续改动。学习关闭（`auto_learn` 为假）的站点不记证据，也不出提议。
+列表接口（`GET …/objects`）的 `judgements` 只列位置提议：`judgement_bodies` 用 `declared_class_of` 过滤，功能键不是声明的位置，会被滤掉（有测试钉住）。学习的提议不与 `objects.functions` 去重：功能表接口（7.9.20）读配置里的功能，去掉已是同一档位、同一可靠性的条目。学习关闭（`auto_learn` 为假）的站点不记证据，也不出提议。
 
-实现状态：证据、路径段合并和提议已实现。确认、驳回功能提议的接口与页面是后续工作；在那之前提议只存在于库里，控制台不显示，判定也不读取。
+实现状态：证据、路径段合并和提议已实现；读取、确认和驳回的接口见 [7.9.20](#7920-功能表的读取确认与驳回)。页面是后续工作，在那之前控制台不显示功能提议，判定也不读取。
+
+### 7.9.20 功能表的读取、确认与驳回
+
+功能表页背后的三个接口（页面是后续工作）。它们挂在登录检查之内，未登录返回 401 `UNAUTHENTICATED`；写接口要求 `Content-Type: application/json`（7.9.1）。这三个接口自己不做判定：只读库和写配置，每次写入都要管理员确认。功能表怎样参与判定见 7.9.18。
+
+**`GET /api/sites/{name}/objects/functions`** 读出功能表的当前状态：配置里的功能、学习窗口里的证据、没有进表的候选、管理档提议，以及最近一天没有学到的流量。响应示例（每类只列一行）：
+
+```json
+{
+  "status": "ok",
+  "window_days": 7,
+  "threshold_units": 5,
+  "identified": true,
+  "ordinary_units": 37,
+  "admin_units": 2,
+  "functions": [
+    {"key": "POST /api/admin/export", "source": "rule", "tier": "admin", "reliability": "high",
+     "ordinary_units": 0, "admin_units": 2, "refused_units": 3, "last_seen": "2026-11-12T00:00:00.000Z", "on_entry": false}
+  ],
+  "candidates": [
+    {"key": "GET /api/reports/{id}", "ordinary_units": 12, "admin_units": 1, "refused_units": 0,
+     "last_seen": "2026-11-13T00:00:00.000Z", "requests_24h": 340, "suggested": true, "sensitive": false, "on_entry": false}
+  ],
+  "proposals": [
+    {"key": "DELETE /api/users/{id}", "tier": "admin", "reliability": "medium",
+     "admin_units": 2, "refused_units": 1, "last_seen": "2026-11-13T00:00:00.000Z", "in_table": true}
+  ],
+  "unlearned": {
+    "requests": 57, "unkeyed_requests": 2, "complete": true,
+    "top": [{"key": "GET /metrics", "requests": 40, "sample": "req_…"}]
+  }
+}
+```
+
+顶层字段：
+
+| 字段 | 含义 |
+|---|---|
+| `status` | `ok`：窗口读完，候选和证据来自窗口。`over_limit`：窗口里的功能键超过 `FUNCTION_KEYS_MAX`（20,000 个），一次读不完。没有候选，功能的证据为 0、`last_seen` 为 null，提议照库里的列出，未学到的流量照常计算。`learning_off`：站点的 `objects.learning.auto_learn` 为假，没有学习，能读到的证据照实际给出。两者同时成立时给 `learning_off` |
+| `window_days`、`threshold_units` | 学习窗口的天数（7）；候选达到建议所需的单位数，即 `objects.learning.thresholds.sessions` |
+| `identified` | 站点是否声明了用户身份位置。为真时单位是用户，否则是会话 |
+| `ordinary_units`、`admin_units` | 窗口内全站的普通单位数，以及使用过管理员功能的不同单位数。后者为 0 时，控制台会提示“没有会话被认作管理员” |
+
+`functions` 是配置里的每个功能，按配置里的顺序。证据按**键逐字相等**从窗口里取，取不到就是 0 和 `null`。`tier`、`reliability` 没有时省略。`ordinary_units`、`admin_units`、`refused_units` 是窗口里的不同单位数。`last_seen` 是那一天零点的 RFC 3339 UTC 时间（毫秒精度，如 `2026-11-12T00:00:00.000Z`），与对象表的位置相同。`on_entry` 表示模板落在站点的某条入口上。
+
+`candidates` 是窗口里有证据、配置不认识的功能：
+
+- 只列合并后的键（见 7.9.19 的路径段合并）。对象表在同一路由上声明过位置的功能已算已知，不列。超过 256 字节的键不列。
+- `suggested`：普通单位数加管理员单位数不少于 `threshold_units`。控制台默认勾选的是 `suggested` 为真且 `sensitive` 为假的候选。
+- `sensitive`：模板转小写后含有下列任一词：`admin`、`manage`、`audit`、`metrics`、`actuator`、`server-status`、`debug`、`swagger`、`console`、`phpinfo`、`internal`、`config`、`backup`、`ftp`、`export`。这些多是运维或管理路径。它不改变 `suggested`，控制台也不默认勾选它，以此提醒管理员别把这类路径顺手勾进基线。
+- `requests_24h`：最近 24 小时里，这个功能键上以 `fast_allow` 或 `cached_allow` 放行的请求数。
+- 排序：普通单位数加管理员单位数从少到多，相同按键。少的排前面，让可疑的先被看到。
+
+`proposals` 是学习给出的管理档提议：
+
+- 去掉配置里已有同一个键、`tier: admin`、同样 `reliability` 的条目，按键排序。
+- `refused_units` 是窗口里同一个键的被拒绝普通单位数。窗口里没有这个键的证据，或状态为 `over_limit` 时为 `null`。
+- `in_table` 表示配置里有逐字相同的键。那条可能没有档位，或是另一种档位和可靠性。
+
+`unlearned` 是最近一天没有学到的流量：
+
+- 最近 24 小时以 `fast_allow` 或 `cached_allow` 放行、功能键既不被配置认识、也不在候选里的请求。这些多是源站没有成功应答的路径（404、被拒绝），所以学习没有把它们记为“走过”。打开“未知功能交 Jev”之后，它们会去 Jev。
+- `requests` 是这类请求的总数。`top` 是请求数最多的 50 个键（同数按键），每个带一个示例请求 ID。
+- `unkeyed_requests` 是算不出功能键的请求（如 `OPTIONS`，或不能规范化的路径）。它们不计入 `requests` 和 `top`。
+- `complete` 为假表示分组超过一次读取的上限，数字是下限。
+- 流量窗口是最近 24 小时，起点不早于站点的创建时间，同名旧站点留下的日志不计入。键取逻辑路径，并与候选使用同一个合并映射（`/products/PT-7004` 合并为 `{id}`）。
+
+**`POST /api/sites/{name}/objects/functions/changes`** 把管理员的一批操作写成站点配置的一个新版本。请求体的四个列表都可省略，未知字段拒绝：
+
+```json
+{
+  "add": ["GET /api/reports/{id}", "POST /api/reports"],
+  "admin": [{"key": "DELETE /api/users/{id}", "reliability": "medium"}],
+  "open": ["POST /api/admin/export"],
+  "remove": ["GET /api/old"]
+}
+```
+
+批次按 `remove`、`open`、`admin`、`add` 的顺序作用在功能表上：
+
+| 列表 | 效果 | 不满足时 |
+|---|---|---|
+| `remove` | 删掉逐字相同的条目 | 没有这个条目：409 `FUNCTION_CHANGED`，`field` 如 `remove[0]` |
+| `open` | 取消管理档：条目去掉 `tier` 和 `reliability`，`source` 改为 `admin`，保留为已知功能 | 没有这个条目，或它没有档位：409 `FUNCTION_CHANGED` |
+| `admin` | 确认管理档提议：条目设为 `tier: admin`、该可靠性、`source: rule`，没有条目就追加 | 没有提议：404 `JUDGEMENT_NOT_FOUND`；可靠性与提议不同：409 `JUDGEMENT_CHANGED`；模板落在入口上：409 `FUNCTION_ON_ENTRY`（入口任何人都能走到，不能设为管理档） |
+| `add` | 加入已知功能，不带档位。`source` 在这个键是当前窗口的候选时为 `rule`，否则为 `admin`；已有相同的键时不动 | 整体校验不过：400 `SITE_CONFIG_OBJECTS_INVALID`，`field` 如 `objects.functions[3]`，`reason` 为 `key_invalid` |
+
+其他错误：
+
+- 400 `INVALID_BODY`：请求体不是这个形状，四个列表全空，同一个键出现两次（跨列表也算；`field` 指第二次出现的位置，如 `add[1]`），或总条数超过 2,048。
+- 400 `SITE_CONFIG_OBJECTS_INVALID`：新的功能表整体校验不过，包括键不合法和表超过 2,048 条。
+- 404 `SITE_NOT_FOUND`；409 `VERSION_CONFLICT`（带 `current_version`），保存已让站点前进。
+
+成功返回 204，并且：
+
+- 一批只写一个版本，备注为“管理员确认了功能表的变更：新增 N，管理档 N，取消管理档 N，删除 N”，N 是各列表的条数。
+- 新表与旧表相同时（例如 `add` 的键都已在表里）不写版本，返回 204，仍清理确认过的提议。
+- 配置写入失败（404 或 409）时不清理任何提议。
+- 写入之后，`admin` 里每一条对应的提议（同一个键、管理档、同一个可靠性）被清除。
+
+`open` 之后，学习任务下一轮可能再次提议同一个功能（证据没有变）。这是预期的：它只是提议，管理员可以用下面的驳回接口压住它。
+
+**`POST /api/sites/{name}/objects/functions/proposals/dismiss`** 请求体 `{"key": "DELETE /api/users/{id}"}`。键必须是功能键的形状（恰有一个空格），否则 400 `INVALID_BODY`，`field` 为 `key`。驳回成功返回 204，只记下驳回，不改功能表；这个功能没有提议时返回 404 `JUDGEMENT_NOT_FOUND`。驳回之后，规则在证据得出另一个结论之前不再提议它。位置的档位提议不能用这个接口驳回，要用 7.9.2 里位置的 `judgement/dismiss`。
+
+候选没有驳回状态：没有地方存“这个候选不要”，不勾选即可。有需求再加。
 
 ## 7.10 控制台前端架构
 
