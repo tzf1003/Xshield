@@ -61,6 +61,8 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | F11 | 不带凭证的 `DELETE /api/patients`（入口路径，基线里没有这个方法） | 交 Jev：`state.entry.matched` 为真，`function` 为 `{"known":false}`；Jev 放行，源站答 401 | `jev_allow` |
 | F12 | 没有功能表的站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 都快速放行（源站分别答 200、404），不新增 Jev 调用，判定记录没有 `trace.function`。与 F5、F9 对照 | `fast_allow`，`fast_allow` |
 | F13 | 观察模式的功能表站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 两个都转发（源站收到），记为本应拦截 | `jev_deny`（`would_block`） |
+| F14 | 基线站点的医生 A `GET /api/patients/export-all`（功能表里的 `GET /api/patients/{id}` 不覆盖路由词） | 交 Jev：`state.request.function` 为 `{"known":false}`，Jev 判 DENY（假 Jev 的 `export-all` 规则），拦截，源站不收到请求 | `jev_deny` |
+| F15 | 基线站点（有角色身份位置，开关为真）的管理员 `admin_root` 访问首页后 `GET /metrics` | 放行，源站答 404，不新增 Jev 调用，判定记录没有 `trace.function`（管理员会话不被问未知功能） | `fast_allow` |
 
 C5、C9 从回环的 127.0.0.2 至 127.0.0.4 发请求，使它们各有自己的来源地址（会话合计的 Jev 额度按来源地址算，见 [docs/02 §2.5](../../docs/02-jev.md)）。Linux 的回环整段 127.0.0.0/8 都可用；macOS 需要先给 `lo0` 加别名（`sudo ifconfig lo0 alias 127.0.0.2` 等），否则这两个场景连不上。
 
