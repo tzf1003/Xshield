@@ -19,6 +19,11 @@ pub use xshield_core::kind::{is_id_like, path_segment};
 
 /// Longest value kept; longer scalars are not object references.
 pub const VALUE_MAX_CHARS: usize = 128;
+/// Largest string kept as a login credential candidate, in bytes (docs/01 section 1.7). A longer
+/// string is dropped.
+pub const CREDENTIAL_MAX_BYTES: usize = 8 * 1024;
+/// Most credential candidates taken from one response, in document order.
+pub const CREDENTIAL_CANDIDATES_MAX: usize = 16;
 /// Most values taken from one response.
 pub const RESPONSE_VALUES_MAX: usize = 2_000;
 /// Most values taken from one request.
@@ -75,6 +80,12 @@ pub struct ExtractedRequest {
 pub struct ResponseFacts {
     /// Scalars in the order the JSON parser yields them (object keys sorted).
     pub values: Vec<ResponseValue>,
+    /// Strings too long to be values but shaped like a credential: longer than
+    /// [`VALUE_MAX_CHARS`], at most [`CREDENTIAL_MAX_BYTES`] bytes, only visible ASCII, and not
+    /// a URL or a data URI. Taken in the order of `values`, at most
+    /// [`CREDENTIAL_CANDIDATES_MAX`]. They only serve to bind a login (docs/01 section 1.7):
+    /// they are never values of the session.
+    pub credentials: Vec<ResponseValue>,
     /// Field paths and types, sorted by path, at most [`SHAPE_FIELDS_MAX`].
     /// `Some` only for a JSON document that parsed, where an empty document
     /// has an empty structure. `None` for HTML, for a body that was not read,
@@ -540,7 +551,7 @@ pub fn extract_response_facts(content_type: Option<&str>, body: &[u8]) -> Respon
         kind if is_json_media(kind) => {
             if let Ok(json) = serde_json::from_slice::<Value>(body) {
                 let mut shape = BTreeSet::new();
-                walk_response(&mut facts.values, &mut shape, &json, "", "value", "", 0);
+                walk_response(&mut facts, &mut shape, &json, "", "value", "", 0);
                 facts.shape = Some(
                     shape
                         .into_iter()
@@ -587,6 +598,34 @@ fn add_at(out: &mut Vec<ResponseValue>, field: &str, at: &str, value: String) {
             at: position(at),
         });
     }
+}
+
+/// Keeps a JSON string: as a value when it is at most [`VALUE_MAX_CHARS`] characters long, as a
+/// credential candidate when it is longer but shaped like a credential, and not at all otherwise.
+fn add_text(facts: &mut ResponseFacts, field: &str, at: &str, text: &str) {
+    if text.chars().count() <= VALUE_MAX_CHARS {
+        add_at(&mut facts.values, field, at, text.to_owned());
+    } else if text.len() <= CREDENTIAL_MAX_BYTES
+        && credential_shaped(text)
+        && facts.credentials.len() < CREDENTIAL_CANDIDATES_MAX
+    {
+        facts.credentials.push(ResponseValue {
+            field: field_name(field),
+            value: text.to_owned(),
+            at: position(at),
+        });
+    }
+}
+
+/// Whether a long string is shaped like a credential (docs/01 section 1.7): every byte is visible
+/// ASCII, which leaves out prose, HTML fragments and anything with a blank or a non-ASCII
+/// character, and it does not start with `http://`, `https://` or `data:` in any case.
+fn credential_shaped(text: &str) -> bool {
+    text.bytes().all(|byte| byte.is_ascii_graphic())
+        && !["http://", "https://", "data:"].iter().any(|scheme| {
+            text.get(..scheme.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
+        })
 }
 
 /// HTML values: the position is the field name itself.
@@ -644,7 +683,7 @@ fn qualified(parent: &str, field: &str) -> String {
 /// Walks a JSON response. `at` is the JSON path so far: empty at the root,
 /// `attachments[]` inside an array, `attachments[].doc_id` at a field.
 fn walk_response(
-    out: &mut Vec<ResponseValue>,
+    facts: &mut ResponseFacts,
     shape: &mut BTreeSet<(String, &'static str)>,
     json: &Value,
     parent: &str,
@@ -663,22 +702,27 @@ fn walk_response(
                 } else {
                     format!("{at}.{name}")
                 };
-                walk_response(out, shape, inner, field, name, &child, depth + 1);
+                walk_response(facts, shape, inner, field, name, &child, depth + 1);
             }
         }
         Value::Array(items) => {
             let item = format!("{at}[]");
             for inner in items {
-                walk_response(out, shape, inner, parent, field, &item, depth + 1);
+                walk_response(facts, shape, inner, parent, field, &item, depth + 1);
             }
         }
         Value::String(text) => {
             note_shape(shape, at, "string");
-            add_at(out, &qualified(parent, field), at, text.clone());
+            add_text(facts, &qualified(parent, field), at, text);
         }
         Value::Number(number) => {
             note_shape(shape, at, "number");
-            add_at(out, &qualified(parent, field), at, number.to_string());
+            add_at(
+                &mut facts.values,
+                &qualified(parent, field),
+                at,
+                number.to_string(),
+            );
         }
         Value::Bool(_) => note_shape(shape, at, "boolean"),
         Value::Null => note_shape(shape, at, "null"),
@@ -1184,5 +1228,117 @@ mod tests {
         assert_eq!(shape[0].path, "[].a");
         assert_eq!(shape[0].kind, "number");
         assert!(shape.windows(2).all(|pair| pair[0].path <= pair[1].path));
+    }
+
+    /// A string of `chars` visible ASCII characters that starts with `tag`, so each tag gives a
+    /// different string.
+    fn credential(tag: &str, chars: usize) -> String {
+        format!("{tag}{}", "Q".repeat(chars.saturating_sub(tag.len())))
+    }
+
+    /// A JSON login body whose token is `token` and whose basket id is 6.
+    fn login_json(token: &str) -> String {
+        format!(r#"{{"authentication":{{"token":"{token}","bid":6}}}}"#)
+    }
+
+    #[test]
+    fn a_long_token_is_a_credential_candidate_and_not_a_value() {
+        let token = credential("tok-", 700);
+        let facts = extract_response_facts(Some("application/json"), login_json(&token).as_bytes());
+        let values: Vec<&str> = facts
+            .values
+            .iter()
+            .map(|value| value.value.as_str())
+            .collect();
+        assert_eq!(values, ["6"], "only the basket id is a value");
+        assert_eq!(facts.credentials.len(), 1);
+        let candidate = &facts.credentials[0];
+        assert_eq!(candidate.value, token);
+        // It sits where a short token would: the field and the position a value there gets.
+        let short = extract_response(
+            Some("application/json"),
+            login_json("short-token-000000000000").as_bytes(),
+        );
+        let same_place = short
+            .iter()
+            .find(|value| value.value == "short-token-000000000000")
+            .expect("a short token is a value");
+        assert_eq!(candidate.field, same_place.field);
+        assert_eq!(candidate.at, same_place.at);
+        // The structure is what it was: the token is still a string at its path.
+        assert!(facts.shape.is_some_and(|shape| {
+            shape
+                .iter()
+                .any(|field| field.path == "authentication.token" && field.kind == "string")
+        }));
+    }
+
+    #[test]
+    fn the_value_limit_decides_between_a_value_and_a_candidate() {
+        let at_limit = credential("a", VALUE_MAX_CHARS);
+        let past_limit = credential("b", VALUE_MAX_CHARS + 1);
+        let body = serde_json::json!([at_limit, past_limit]).to_string();
+        let facts = extract_response_facts(Some("application/json"), body.as_bytes());
+        assert_eq!(facts.values.len(), 1);
+        assert_eq!(facts.values[0].value, at_limit);
+        assert_eq!(facts.credentials.len(), 1);
+        assert_eq!(facts.credentials[0].value, past_limit);
+    }
+
+    #[test]
+    fn a_long_text_or_a_url_is_no_candidate() {
+        let spaced = "word ".repeat(40);
+        let chinese = "中".repeat(200);
+        let https = format!("https://example.test/{}", "x".repeat(200));
+        let upper = format!("HTTP://example.test/{}", "x".repeat(200));
+        let data = format!("data:text/plain;base64,{}", "A".repeat(200));
+        let body = serde_json::json!([spaced, chinese, https, upper, data]).to_string();
+        let facts = extract_response_facts(Some("application/json"), body.as_bytes());
+        assert!(facts.credentials.is_empty());
+        assert!(facts.values.is_empty());
+    }
+
+    #[test]
+    fn a_scalar_past_the_credential_limit_is_dropped() {
+        let largest = credential("c", CREDENTIAL_MAX_BYTES);
+        let past = credential("d", CREDENTIAL_MAX_BYTES + 1);
+        let body = serde_json::json!({ "largest": largest, "past": past }).to_string();
+        let facts = extract_response_facts(Some("application/json"), body.as_bytes());
+        assert_eq!(facts.credentials.len(), 1, "the largest one is kept");
+        assert_eq!(facts.credentials[0].value, largest);
+        assert!(facts.values.is_empty());
+    }
+
+    #[test]
+    fn a_response_yields_at_most_sixteen_candidates() {
+        let tokens: Vec<String> = (0..20)
+            .map(|index| credential(&format!("t{index:02}-"), 200))
+            .collect();
+        let body = serde_json::to_string(&tokens).expect("the tokens serialise");
+        let facts = extract_response_facts(Some("application/json"), body.as_bytes());
+        assert_eq!(facts.credentials.len(), CREDENTIAL_CANDIDATES_MAX);
+        assert!(
+            facts
+                .credentials
+                .iter()
+                .zip(&tokens)
+                .all(|(kept, token)| kept.value == *token),
+            "the first sixteen, in document order"
+        );
+    }
+
+    #[test]
+    fn html_yields_no_candidates() {
+        let long = credential("h", 300);
+        let html =
+            format!(r#"<html><input value="{long}"><a href="/items?token={long}">x</a></html>"#);
+        let facts = extract_response_facts(Some("text/html"), html.as_bytes());
+        assert!(facts.credentials.is_empty());
+        let values: Vec<&str> = facts
+            .values
+            .iter()
+            .map(|value| value.value.as_str())
+            .collect();
+        assert_eq!(values, ["items"], "only the short path segment is a value");
     }
 }
