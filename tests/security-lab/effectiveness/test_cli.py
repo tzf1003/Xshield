@@ -83,11 +83,6 @@ class CommandTests(unittest.TestCase):
         status, _, _ = run_cli(*score_args("all-correct", self.out / "i", "--baseline", str(better)))
         self.assertEqual(status, 0)
 
-    def test_site_is_not_built_yet_and_exits_2(self):
-        status, _, err = run_cli("site", "--decisions", "x.jsonl", "--suite-results", "dir")
-        self.assertEqual(status, 2)
-        self.assertIn("尚未实现", err)
-
     def test_the_lab_refuses_the_modes_that_are_not_built_and_prints_nothing_to_stdout(self):
         for args, text in ((["lab", "--mode", "full"], "批次 7"), (["lab", "--jev", "record"], "批次 9"),
                            (["lab", "--keep"], "批次 5"), (["lab", "--update-baseline"], "批次 8")):
@@ -111,6 +106,15 @@ class CommandTests(unittest.TestCase):
         status, _, err = run_cli("site", "--suite-results", "dir")
         self.assertEqual(status, 2)
         self.assertIn("site 需要 --decisions", err)
+
+    def test_a_password_on_the_command_line_is_refused_without_echo(self):
+        for flag in ("--password", "--pass=s3cret-value"):
+            with self.subTest(flag=flag):
+                status, out, err = run_cli("site", "--control", "http://127.0.0.1:1", "--site", "x",
+                                           "--suite-results", "dir", flag)
+                self.assertEqual(status, 2)
+                self.assertIn("XSHIELD_CONSOLE_PASSWORD", err)
+                self.assertNotIn("s3cret-value", err + out)
 
     def test_a_usage_error_exits_2(self):
         status, _, _ = run_cli("score")

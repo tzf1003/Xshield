@@ -61,7 +61,12 @@ def _verdict(gates: dict[str, dict[str, Any]], name: str) -> str:
 
 def conclusion(result: dict[str, Any], meta: dict[str, Any]) -> str:
     failed = [gate["name"] for gate in result["gates"] if gate["ok"] is False]
-    verdict = "结论：通过" if not failed else f"结论：失败（未通过的门槛：{'、'.join(failed)}）"
+    if failed:
+        verdict = f"结论：失败（未通过的门槛：{'、'.join(failed)}）"
+    elif meta.get("mode") == "site":
+        verdict = "结论：门槛通过（真实站点只设记录缺失与学习误学的门槛，拦截与误拦只报告）"
+    else:
+        verdict = "结论：通过"
     parts = [verdict]
     if result["failures"]:
         parts.append(f"失败项 {len(result['failures'])} 条")
@@ -71,8 +76,10 @@ def conclusion(result: dict[str, Any], meta: dict[str, Any]) -> str:
         if item["section"] == "学习段":
             parts.append(f"学习段 SKIP（{item['why']}）")
     seed = "—" if meta.get("seed") is None else str(meta["seed"])
+    parts.append(f"Jev 模式：{meta['jev']}")
+    if meta.get("note"):
+        parts.append(meta["note"])
     parts += [
-        f"Jev 模式：{meta['jev']}",
         f"提交：{meta['commit']}",
         f"种子：{seed}",
         f"用时：{meta['seconds']:.2f} 秒",
@@ -231,14 +238,25 @@ def _label_lines(checks: dict[str, Any]) -> list[str]:
               else "未应用：探针全部留在分母里（靶场模式）。")
 
     def names(cases: list[str]) -> str:
-        return "、".join(cases) if cases else "无"
+        # A real site lists a probe once per run it was sent in; each case is named once.
+        unique = list(dict.fromkeys(cases))
+        return "、".join(unique) if unique else "无"
 
-    return [
+    lines = [
         "### 标签自检（4.6）", "", status, "",
         f"- 标签可疑（目标对象在本会话里展示过）：{len(checks['suspicious'])} 条，{names(checks['suspicious'])}",
         f"- 不经判定（探针走了旁路）：{len(checks['bypass'])} 条，{names(checks['bypass'])}",
         f"- 因标签自检从分母拿出的探针：{checks['excluded']} 条",
     ]
+    if "business_error" in checks:
+        cases = checks["business_error"]
+        lines.append("- 源站业务错误（套件标 business_error）：" + f"{len(cases)} 条，{names(cases)}"
+                     + "；已按判定记录计分，源站状态码不参与计分")
+    if "conflict" in checks:
+        conflicts = checks["conflict"]
+        lines.append(f"- 标签冲突（同一请求 ID 的标签不一致，全部不计分）：{len(conflicts)} 个请求")
+        lines += [f"  - 请求 {item['request_id']}：{'、'.join(item['cases'])}" for item in conflicts]
+    return lines
 
 
 def _learning_lines(result: dict[str, Any]) -> list[str]:
@@ -329,7 +347,10 @@ def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
     failures = "、".join(f"{code} {count} 次" for code, count in costs["jev_failures"].items()) or "无"
     lines += ["", f"## 7 {SECTION_TITLES[6]}", "",
               f"- Jev 调用次数：{costs['jev_calls']}（判定记录 {costs['requests']} 条，"
-              f"每请求 {_ratio(costs['calls_per_request'])} 次）",
+              f"已判定 {costs['judged_requests']} 条，每已判定请求 {_ratio(costs['calls_per_request'])} 次）",
+              f"- 窗口内全部已判定记录 {costs['judged_requests']} 条（含探针，不含 bypass）："
+              f"快速放行占比 {_pct(costs['fast_share'])}，每个已判定请求的 Jev 调用数 "
+              f"{_ratio(costs['calls_per_judged_request'])}",
               f"- 判定耗时：中位数 {_count(costs['judge_ms_median'])} ms，p95 {_count(costs['judge_ms_p95'])} ms",
               f"- Jev 失败码：{failures}",
               "", f"## 8 {SECTION_TITLES[7]}", ""]

@@ -7,8 +7,10 @@
     measure_effectiveness.py score --observations FILE --decisions FILE
                              [--truth FILE] [--learned FILE] [--baseline FILE] [--out DIR]
 
-Without a subcommand the command is `lab`. `lab` and `site` are implemented by the modules
-effectiveness.lab and effectiveness.site; until those exist they report "尚未实现" and exit 2.
+Without a subcommand the command is `lab`. `lab` (effectiveness.lab) runs the training, learning and
+protection segments in quick mode. `--mode full`, `--jev record|replay`, `--keep` and `--update-baseline`
+are not built yet and exit 2. `site` (effectiveness.site) reads the suite output and the decision
+records and sends no traffic.
 
 Exit status: 0 when every gate passes (a gate with no data does not fail), 1 when a gate
 fails, 2 for a usage or environment error.
@@ -34,6 +36,8 @@ from .score import score
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUT = ROOT / "target" / "effectiveness" / "latest"
 SUBCOMMANDS = ("lab", "site", "score")
+PASSWORD_ENV = "XSHIELD_CONSOLE_PASSWORD"
+PASSWORD_FLAGS = frozenset({"--password", "--pass", "--passwd", "--pwd"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     lab.add_argument("--keep", action="store_true", help="跑完不关进程，打印控制台地址")
     lab.add_argument("--update-baseline", action="store_true", help="把本次指标写回基线文件")
 
-    site = commands.add_parser("site", help="真实站点：读套件输出与判定记录，不发流量（尚未实现）")
+    site = commands.add_parser("site", help="真实站点：读套件输出与判定记录，不发流量")
     site.add_argument("--decisions", type=Path, help="判定记录文件（控制台导出或网关文件模式输出）")
     site.add_argument("--control", help="控制台地址，由脚本登录后取判定记录")
     site.add_argument("--site", help="--control 下的站点名")
@@ -73,6 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    # Checked before argparse, which would echo an unknown option's value in its usage error.
+    if any(arg.split("=", 1)[0] in PASSWORD_FLAGS for arg in raw):
+        print(f"error: 口令不能通过命令行传入，请设置环境变量 {PASSWORD_ENV}", file=sys.stderr)
+        return 2
     if not raw or (raw[0] not in SUBCOMMANDS and raw[0] not in ("-h", "--help")):
         raw.insert(0, "lab")
     parser = build_parser()
