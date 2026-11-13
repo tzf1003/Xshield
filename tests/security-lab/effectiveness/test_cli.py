@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from effectiveness.cli import main
 
@@ -71,7 +73,7 @@ class CommandTests(unittest.TestCase):
     def test_the_missing_group_names_the_record_and_the_skipped_learning(self):
         _, out, _ = run_cli(*score_args("missing-and-skip", self.out / "c"))
         self.assertIn("记录缺失", out)
-        self.assertIn("学习段未执行", out)
+        self.assertIn("学习段 SKIP", out)
 
     def test_a_baseline_regression_fails_the_run_and_an_improvement_passes(self):
         worse = self.write_json("worse.json", {"values": {"S3": 0.9}})
@@ -81,12 +83,24 @@ class CommandTests(unittest.TestCase):
         status, _, _ = run_cli(*score_args("all-correct", self.out / "i", "--baseline", str(better)))
         self.assertEqual(status, 0)
 
-    def test_lab_is_not_built_yet_and_exits_2(self):
-        for args in (["lab"], []):
+    def test_the_lab_refuses_the_modes_that_are_not_built_and_prints_nothing_to_stdout(self):
+        for args, text in ((["lab", "--mode", "full"], "批次 7"), (["lab", "--jev", "record"], "批次 9"),
+                           (["lab", "--keep"], "批次 5"), (["lab", "--update-baseline"], "批次 8")):
             with self.subTest(args=args):
-                status, _, err = run_cli(*args)
+                status, out, err = run_cli(*args)
                 self.assertEqual(status, 2)
-                self.assertIn("尚未实现", err)
+                self.assertIn(text, err)
+                self.assertEqual(out, "")
+
+    def test_live_without_its_settings_is_an_error_and_never_falls_back(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("XSHIELD_JEV_ENDPOINT", None)
+            os.environ.pop("XSHIELD_JEV_API_KEY", None)
+            status, out, err = run_cli("lab", "--jev", "live", "--out", str(self.out / "live"))
+        self.assertEqual(status, 2)
+        self.assertIn("XSHIELD_JEV_ENDPOINT", err)
+        self.assertEqual(out, "")
+        self.assertFalse((self.out / "live").exists())  # refused before anything is written
 
     def test_site_needs_decisions_or_a_console(self):
         status, _, err = run_cli("site", "--suite-results", "dir")

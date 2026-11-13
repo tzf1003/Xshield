@@ -135,7 +135,10 @@ export const FAILURE_INFO: Record<JevFailure, { short: string; desc: string }> =
   JEV_RESPONSE_TOO_LARGE: { short: "响应过大", desc: "响应超过 64 KiB" },
   JEV_RESPONSE_INVALID: { short: "响应无效", desc: "响应结构不符合约定" },
   JEV_UNKNOWN: { short: "答不上来", desc: "最高项是 UNKNOWN 或两项并列" },
-  JEV_STATE_TOO_LARGE: { short: "上下文过大", desc: "裁剪后仍超过 8 KiB，没有调用，返回 403" },
+  JEV_STATE_TOO_LARGE: {
+    short: "上下文过大",
+    desc: "分批（最多 16 批）后仍装不下，没有调用，返回 403（正常不出现）",
+  },
   JEV_CALL_LIMIT: { short: "达到上限", desc: "会话或地址每分钟调用次数用完，没有调用，返回 429" },
 };
 
