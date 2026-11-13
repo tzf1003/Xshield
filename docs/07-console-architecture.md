@@ -345,7 +345,9 @@ GET /api/patients ──响应里出现 id=7──┐
 - `state.entry` 只有 `matched`（布尔值），没有规则原文：命中的是哪条入口规则只在 `trace.entry`，结构化视图的“入口”一行以 `trace.entry` 为准。`state` 里的值也没有 `key` 字段，字段名取 `trace.values[].key`。
 - `seen_as` 是该值全部来源按相关度排序（`Seen::ranked`）后反过来取前 N 个，最相关的在前，N 由裁剪级别决定（[7.5.3](#753-裁剪级别)）。`trace.values[].sources` 必须用同一个函数、同一个顺序生成，对齐才是按下标而不是按内容猜。
 
-**对不上时不猜**：`align.ts` 先校验非惰性值个数等于 `state.request.values` 长度，且每个下标上的 `at` 相同（两边都截到 256 字节再比，`sameName`，因为追溯里超长的 `at` 已被截断，见 7.4.3）；每个值的 `seen_as` 不比 `sources` 长（`trace.trimmed` 为真时来源可能已被减到 1 个，只比较公共前缀，多出的 `seen_as` 条目没有来源链接），且 `seen_as[j]` 逐字等于 `` `${sources[j].field} @ ${sources[j].request}` ``（网关生成 `seen_as` 的格式，`engine.rs`）——只比个数会放过次序互换，要求等长又会让裁剪过的正常记录失去来源链接；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
+**对不上时不猜**：`align.ts` 先把 `state.request.values` 按片段合并（见下面的分片一段），校验非惰性值个数等于合并后的值个数，且每个下标上的 `at` 相同（两边都截到 256 字节再比，`sameName`，因为追溯里超长的 `at` 已被截断，见 7.4.3）；每个值的 `seen_as` 不比 `sources` 长（`trace.trimmed` 为真时来源可能已被减到 1 个，只比较公共前缀，多出的 `seen_as` 条目没有来源链接），且 `seen_as[j]` 逐字等于按 `sources[j]` 拼出的文本：`` `${field} @ ${request}` ``，有对象类时接 `` ` [对象类]` ``，有档位时接 `` ` (tier 档位, reliability 可靠性)` ``（网关的 `seen_text`，`engine.rs`，与 [7.4.7](#747-档位在判定中的使用) 一致），超过 256 字符的先按 `state.rs` 的 `clip` 截到 256 字符加 `...`，两边用同样的截法再比——只比个数会放过次序互换，要求等长又会让裁剪过的正常记录失去来源链接；`recent`、`entries_passed` 的条数不超过 `trace` 里的条数。任何一项不成立就返回 `aligned: false`，结构化视图只按 `state` 渲染，并在顶部提示“追溯信息与发出的 state 对不上，来源链接不可用”，原文、JSON、指令视图不受影响。旧格式记录（`trace.v == 0`）同样走这条路径。
+
+**分片的值**：超过 512 个字符的值在 `state` 里是几份片段（`part` 为 `k/n`，片段不带 `seen_as`，[02 §2.2](02-jev.md#22-调用内容)）。`stateEntries` 把同一值的 n 份片段合并成一个值，再按上面的规则对齐：位置相同即可，不比较来源，`sources` 也不列出，视图写明“切成 n 片送判，来源不比对”。片段的编号不是 `1/n` 起连续排列、位置不同或个数对不上，记录按 `aligned: false` 处理。一次送完的记录同样按这一段对齐，与是否分批无关。
 
 分批的记录（带 `batches`）的 `state` 只含那一批的值，`trace.values` 是整次请求的，两者不一一对应。控制台对这种记录不做对齐，显示“这次请求分成 N 批送判，本批的 state 只含其中一部分值，来源链接不可用”，`state` 原文照常展示。
 
