@@ -6,6 +6,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row, postgres::PgRow};
 use xshield_core::context::agent::{Choice, Refusal, Verdict};
+use xshield_core::context::position::{PositionEvent, PositionState};
 
 use crate::object_learning_store::LearningStoreError;
 
@@ -801,9 +802,9 @@ pub async fn prune_calls(
 
 /// The state a position is in, as the learning pass reads it before it asks the agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PositionState {
-    /// The state: `pending`, `proposed`, `confirmed`, and so on.
-    pub state: String,
+pub struct AskStanding {
+    /// The state of the position.
+    pub state: PositionState,
     /// Whether the administrator asked the agent about the position again.
     pub ask_requested: bool,
     /// `rule` or `agent`: who gave the kind of a proposal.
@@ -822,7 +823,7 @@ pub async fn position_state(
     pool: &PgPool,
     site: &str,
     slot: &str,
-) -> Result<Option<PositionState>, LearningStoreError> {
+) -> Result<Option<AskStanding>, LearningStoreError> {
     let row = sqlx::query(
         "SELECT state, source, dismissed, dismissed_votes, ask_requested FROM object_positions
          WHERE site = $1 AND slot = $2 AND side = 'request'",
@@ -831,9 +832,9 @@ pub async fn position_state(
     .bind(slot)
     .fetch_optional(pool)
     .await?;
-    row.map(|row| -> Result<PositionState, LearningStoreError> {
-        Ok(PositionState {
-            state: row.try_get("state")?,
+    row.map(|row| -> Result<AskStanding, LearningStoreError> {
+        Ok(AskStanding {
+            state: crate::object_learning_store::state_of(&row)?,
             ask_requested: row.try_get("ask_requested")?,
             source: row.try_get("source")?,
             dismissed: row.try_get("dismissed")?,
@@ -858,18 +859,21 @@ pub async fn mark_disputed(
     rule_class: &str,
     now_millis: i64,
 ) -> Result<(), LearningStoreError> {
+    let dispute = PositionEvent::Dispute;
     let marked = sqlx::query(
         "UPDATE object_positions SET
-             state = 'ambiguous', class = NULL, source = 'rule',
+             state = $5, class = NULL, source = 'rule',
              dismissed = false, dismissed_class = NULL, dismissed_votes = 0,
              updated_millis = $3
-         WHERE site = $1 AND slot = $2 AND side = 'request' AND state IN ('pending', 'proposed')
+         WHERE site = $1 AND slot = $2 AND side = 'request' AND state = ANY($6::text[])
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $4 FOR SHARE)",
     )
     .bind(site)
     .bind(slot)
     .bind(now_millis)
     .bind(generation)
+    .bind(dispute.to().as_str())
+    .bind(dispute.from_names())
     .execute(pool)
     .await?
     .rows_affected();

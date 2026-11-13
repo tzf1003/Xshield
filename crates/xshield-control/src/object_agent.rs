@@ -13,6 +13,7 @@ use sqlx::PgPool;
 use xshield_core::context::SiteSpec;
 use xshield_core::context::agent::{self, Choice, NewKind, Question, Refusal, Verdict};
 use xshield_core::context::learning::{Evidence, Thresholds, kind_share, propose};
+use xshield_core::context::position::PositionState;
 use xshield_postgres::object_agent_store::{
     self as records, CallRecord, CallRow, Outcome, RunCounts,
 };
@@ -120,12 +121,12 @@ pub async fn settle(
     if let Some(state) = &state {
         let votes = i64::from(evidence.votes());
         let calm = state.dismissed && votes < 2 * i64::from(state.dismissed_votes);
-        if state.state == "ambiguous" || calm {
+        if state.state == PositionState::Ambiguous || calm {
             return Ok(false);
         }
     }
     let requested = state.as_ref().is_some_and(|state| state.ask_requested);
-    let was_proposed = state.is_some_and(|state| state.state == "proposed");
+    let was_proposed = state.is_some_and(|state| state.state == PositionState::Proposed);
     let flows = flow_keys(evidence);
     let votes = evidence.votes();
     let latest = records::latest_call(pool, site, slot).await?;
@@ -291,7 +292,7 @@ pub async fn was_proposed(
 ) -> Result<bool, LearningStoreError> {
     Ok(records::position_state(pool, site, slot)
         .await?
-        .is_some_and(|state| state.state == "proposed"))
+        .is_some_and(|state| state.state == PositionState::Proposed))
 }
 
 /// The answer a stored call holds, when it is one the pass may act on: an existing or a

@@ -8,6 +8,7 @@ pub mod config;
 pub mod learning;
 pub mod log;
 pub mod objects;
+pub mod position;
 pub mod route;
 pub mod trace;
 

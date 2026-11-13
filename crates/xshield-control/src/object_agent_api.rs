@@ -20,6 +20,7 @@ use axum::{
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;
+use xshield_core::context::position::PositionState;
 use xshield_core::context::{
     agent::{self, Question},
     learning::{Thresholds, day_of},
@@ -137,7 +138,7 @@ impl AgentView {
 
     /// Whether the agent may answer about a pending learned position at all.
     fn may_ask(&self, row: &PositionRow) -> bool {
-        self.enabled && self.model && row.state == "pending" && !row.dismissed
+        self.enabled && self.model && row.state == PositionState::Pending && !row.dismissed
     }
 
     /// Whether the evidence of a learned position meets the thresholds the agent is asked at.
@@ -561,7 +562,8 @@ pub async fn ask(
     {
         return Err(ApiError::new(StatusCode::CONFLICT, "AGENT_NOT_CONFIGURED"));
     }
-    let open = row.state == "pending" || (row.state == "proposed" && row.source == "agent");
+    let open = row.state == PositionState::Pending
+        || (row.state == PositionState::Proposed && row.source == "agent");
     if !open {
         return Err(ApiError::new(StatusCode::CONFLICT, "SLOT_STATE_CONFLICT"));
     }
@@ -593,7 +595,7 @@ pub async fn sample(
     let learned = store::positions(&state.pool, &name).await?;
     let waiting = learned.iter().find(|row| {
         row.side == "request"
-            && row.state == "pending"
+            && row.state == PositionState::Pending
             && !row.dismissed
             && map.declared_class_of(&row.slot).is_none()
             && i64::from(row.votes) >= i64::from(thresholds.votes)
@@ -618,12 +620,12 @@ pub async fn sample(
 mod tests {
     use super::*;
 
-    fn row(slot: &str, side: &str, state: &str, votes: i32) -> PositionRow {
+    fn row(slot: &str, side: &str, state: PositionState, votes: i32) -> PositionRow {
         PositionRow {
             id: 1,
             slot: slot.to_owned(),
             side: side.to_owned(),
-            state: state.to_owned(),
+            state,
             class: None,
             dismissed: false,
             source: "rule".to_owned(),
@@ -676,14 +678,14 @@ mod tests {
     fn a_response_position_has_no_agent_status() {
         let view = view(0);
         assert_eq!(
-            view.phase_of(&row("GET /x [].a", "response", "pending", 99)),
+            view.phase_of(&row("GET /x [].a", "response", PositionState::Pending, 99)),
             None
         );
     }
 
     #[test]
     fn an_unasked_position_with_enough_evidence_is_queued_until_the_budget_is_used() {
-        let position = row("GET /x [].a", "request", "pending", 20);
+        let position = row("GET /x [].a", "request", PositionState::Pending, 20);
         assert_eq!(view(0).phase_of(&position), Some(AgentPhase::Queued));
         assert_eq!(
             view(10).phase_of(&position),
@@ -693,11 +695,11 @@ mod tests {
 
     #[test]
     fn a_position_below_the_thresholds_or_without_a_model_is_not_queued() {
-        let thin = row("GET /x [].a", "request", "pending", 3);
+        let thin = row("GET /x [].a", "request", PositionState::Pending, 3);
         assert_eq!(view(0).phase_of(&thin), None);
         let mut no_model = view(0);
         no_model.model = false;
-        let enough = row("GET /x [].a", "request", "pending", 20);
+        let enough = row("GET /x [].a", "request", PositionState::Pending, 20);
         assert_eq!(no_model.phase_of(&enough), None);
     }
 
@@ -707,7 +709,7 @@ mod tests {
         view.latest
             .insert("GET /x [].a".to_owned(), call("GET /x [].a", None));
         view.requested.insert("GET /x [].a".to_owned());
-        let position = row("GET /x [].a", "request", "pending", 20);
+        let position = row("GET /x [].a", "request", PositionState::Pending, 20);
         assert_eq!(view.phase_of(&position), Some(AgentPhase::Queued));
     }
 
@@ -720,8 +722,8 @@ mod tests {
             "GET /x [].b".to_owned(),
             call("GET /x [].b", Some("timeout")),
         );
-        let answered = row("GET /x [].a", "request", "proposed", 20);
-        let failed = row("GET /x [].b", "request", "pending", 20);
+        let answered = row("GET /x [].a", "request", PositionState::Proposed, 20);
+        let failed = row("GET /x [].b", "request", PositionState::Pending, 20);
         assert_eq!(view.phase_of(&answered), Some(AgentPhase::Answered));
         // A failed call is retried by the pass, so the position is still shown as failed.
         assert_eq!(view.phase_of(&failed), Some(AgentPhase::Failed));
@@ -729,7 +731,7 @@ mod tests {
 
     #[test]
     fn a_dismissed_position_is_not_queued() {
-        let mut position = row("GET /x [].a", "request", "pending", 20);
+        let mut position = row("GET /x [].a", "request", PositionState::Pending, 20);
         position.dismissed = true;
         assert_eq!(view(0).phase_of(&position), None);
     }

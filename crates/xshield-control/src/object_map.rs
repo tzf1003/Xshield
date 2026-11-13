@@ -24,6 +24,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use xshield_core::context::position::{EventRefusal, EventState, Handling, PositionState};
 use xshield_core::{
     context::{
         IdentityRole, ObjectMap, ObjectSlot, Reliability, SiteSpec, SlotSource, Tier,
@@ -78,32 +79,6 @@ const BOOTSTRAP_ROWS_MAX: i64 = 5_000;
 const CANDIDATES_MAX: usize = 50;
 /// A kind word this short may be an abbreviation, and its candidate asks for a look.
 const SHORT_WORD: usize = 3;
-
-/// The learning state of a position, as the console names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum PositionState {
-    Pending,
-    Proposed,
-    Confirmed,
-    Ambiguous,
-    Suspended,
-    Retired,
-}
-
-impl PositionState {
-    fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "pending" => Self::Pending,
-            "proposed" => Self::Proposed,
-            "confirmed" => Self::Confirmed,
-            "ambiguous" => Self::Ambiguous,
-            "suspended" => Self::Suspended,
-            "retired" => Self::Retired,
-            _ => return None,
-        })
-    }
-}
 
 /// Where a position sits: a value a request carries, or a response field a value was shown at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -318,20 +293,6 @@ pub(crate) struct ObjectsBody {
 #[derive(Debug, Serialize)]
 pub(crate) struct EventsBody {
     events: Vec<AutomaticEvent>,
-}
-
-/// How an administrator handled an automatic change: `status`. An event no one handled and no later
-/// version changed is `open`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum EventState {
-    Open,
-    /// Known to the administrator, with the configuration unchanged.
-    Acknowledged,
-    /// Undone by a save, which named the event.
-    Undone,
-    /// A later version changed the same entry, so the event no longer describes it.
-    Superseded,
 }
 
 /// Who handled an automatic change, and when: `handled`.
@@ -1161,16 +1122,25 @@ pub async fn ack_event(
     let record = site_of(&state, &name).await?;
     let now = now_millis();
     let event = find_event(&state, &record, &id, now).await?;
-    match event.status {
-        EventState::Acknowledged => Ok(StatusCode::NO_CONTENT),
-        EventState::Open => {
-            let handling = handling_of(&event, "acknowledged", None, now);
-            store::record_event(&state.pool, &name, record.created_at, &handling).await?;
-            Ok(StatusCode::NO_CONTENT)
-        }
-        EventState::Undone => Err(ApiError::new(StatusCode::CONFLICT, "EVENT_UNDONE")),
-        EventState::Superseded => Err(ApiError::new(StatusCode::CONFLICT, "EVENT_SUPERSEDED")),
+    if event
+        .status
+        .handle(Handling::Acknowledged)
+        .map_err(event_refused)?
+        .is_some()
+    {
+        let handling = handling_of(&event, Handling::Acknowledged, None, now);
+        store::record_event(&state.pool, &name, record.created_at, &handling).await?;
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The response for an automatic change that does not take a handling.
+fn event_refused(refusal: EventRefusal) -> ApiError {
+    let code = match refusal {
+        EventRefusal::Undone => "EVENT_UNDONE",
+        EventRefusal::Superseded => "EVENT_SUPERSEDED",
+    };
+    ApiError::new(StatusCode::CONFLICT, code)
 }
 
 /// An automatic change a save names as the change it undoes or re-confirms.
@@ -1191,15 +1161,15 @@ pub(crate) async fn check_save_event(
     id: &str,
 ) -> ApiResult<PendingEvent> {
     let event = find_event(state, record, id, now_millis()).await?;
-    match event.status {
-        EventState::Open | EventState::Acknowledged => Ok(PendingEvent {
-            site: record.spec.name().to_owned(),
-            generation: record.created_at,
-            event,
-        }),
-        EventState::Undone => Err(ApiError::new(StatusCode::CONFLICT, "EVENT_UNDONE")),
-        EventState::Superseded => Err(ApiError::new(StatusCode::CONFLICT, "EVENT_SUPERSEDED")),
-    }
+    event
+        .status
+        .handle(Handling::Undone)
+        .map_err(event_refused)?;
+    Ok(PendingEvent {
+        site: record.spec.name().to_owned(),
+        generation: record.created_at,
+        event,
+    })
 }
 
 /// Records, after a save wrote `version`, that the save undid the pending change. The position it
@@ -1209,7 +1179,7 @@ pub(crate) async fn check_save_event(
 /// record that fails is logged, not returned.
 pub(crate) async fn mark_saved(state: &ControlState, pending: &PendingEvent, version: i64) {
     let now = now_millis();
-    let handling = handling_of(&pending.event, "undone", Some(version), now);
+    let handling = handling_of(&pending.event, Handling::Undone, Some(version), now);
     if let Err(error) =
         store::record_event(&state.pool, &pending.site, pending.generation, &handling).await
     {
@@ -1576,22 +1546,12 @@ fn automatic_event(
         })),
         _ => None,
     };
-    let (status, handled) = match handled {
-        Some(row) => (
-            if row.status == "undone" {
-                EventState::Undone
-            } else {
-                EventState::Acknowledged
-            },
-            Some(HandledBody {
-                by: row.handled_by.clone(),
-                at: rfc3339(row.handled_millis).unwrap_or_default(),
-                version: row.handled_version,
-            }),
-        ),
-        None if current == Some(slot) => (EventState::Open, None),
-        None => (EventState::Superseded, None),
-    };
+    let status = EventState::of(handled.map(|row| row.status), current == Some(slot));
+    let handled = handled.map(|row| HandledBody {
+        by: row.handled_by.clone(),
+        at: rfc3339(row.handled_millis).unwrap_or_default(),
+        version: row.handled_version,
+    });
     AutomaticEvent {
         id: format!("v{}-{index}", version.version),
         kind: version.change.as_str(),
@@ -1639,13 +1599,13 @@ async fn find_event(
 /// The handling of an event as the store records it.
 fn handling_of(
     event: &AutomaticEvent,
-    status: &str,
+    status: Handling,
     version: Option<i64>,
     now: i64,
 ) -> store::EventStatus {
     store::EventStatus {
         event: event.id.clone(),
-        status: status.to_owned(),
+        status,
         kind: event.kind.to_owned(),
         slot: event.key.clone(),
         handled_by: HANDLED_BY.to_owned(),
@@ -1757,7 +1717,7 @@ fn merged(spec: &SiteSpec, learned: &[PositionRow], view: &AgentView) -> ApiResu
 /// A declared position: confirmed, or suspended when the learned row says its evidence now
 /// points at other kinds. Its side comes from the learned row when there is one.
 fn declared_row(slot: &ObjectSlot, learned: Option<&PositionRow>) -> SlotRow {
-    let suspended = slot.paused || learned.is_some_and(|row| row.state == "suspended");
+    let suspended = slot.paused || learned.is_some_and(|row| row.state == PositionState::Suspended);
     let state = if suspended {
         PositionState::Suspended
     } else {
@@ -1795,10 +1755,9 @@ fn declared_row(slot: &ObjectSlot, learned: Option<&PositionRow>) -> SlotRow {
 /// disagree.
 ///
 /// # Errors
-/// `INTERNAL` when the stored state, side or source is not one this build reads.
+/// `INTERNAL` when the stored side or source is not one this build reads.
 fn learned_row(row: &PositionRow, view: &AgentView) -> ApiResult<SlotRow> {
-    let state = PositionState::parse(&row.state)
-        .ok_or_else(|| ApiError::internal("object position state", &row.state))?;
+    let state = row.state;
     let side = Side::parse(&row.side)
         .ok_or_else(|| ApiError::internal("object position side", &row.side))?;
     let source = match row.source.as_str() {
@@ -2101,12 +2060,18 @@ mod tests {
         .expect("the test spec")
     }
 
-    fn row(id: i64, slot: &str, side: &str, state: &str, class: Option<&str>) -> PositionRow {
+    fn row(
+        id: i64,
+        slot: &str,
+        side: &str,
+        state: PositionState,
+        class: Option<&str>,
+    ) -> PositionRow {
         PositionRow {
             id,
             slot: slot.to_owned(),
             side: side.to_owned(),
-            state: state.to_owned(),
+            state,
             class: class.map(str::to_owned),
             dismissed: false,
             source: "rule".to_owned(),
@@ -2181,7 +2146,7 @@ mod tests {
                 1,
                 "GET /api/appointments [].doc_id",
                 "response",
-                "pending",
+                PositionState::Pending,
                 None,
             ),
             // The doctor position's evidence now points elsewhere.
@@ -2189,7 +2154,7 @@ mod tests {
                 2,
                 "GET /doctor/{id} path[1]",
                 "request",
-                "suspended",
+                PositionState::Suspended,
                 Some("doctor"),
             ),
             // A position the configuration does not declare, proposed by the rules.
@@ -2197,7 +2162,7 @@ mod tests {
                 3,
                 "GET /other/{id} path[1]",
                 "request",
-                "proposed",
+                PositionState::Proposed,
                 Some("doctor"),
             ),
         ];
@@ -2220,9 +2185,10 @@ mod tests {
     }
 
     #[test]
-    fn a_learned_row_in_an_unknown_state_is_an_internal_error() {
+    fn a_learned_row_on_an_unknown_side_is_an_internal_error() {
+        // An unknown state never reaches here: the store refuses to decode it.
         let error = learned_row(
-            &row(1, "GET /x path[1]", "request", "bogus", None),
+            &row(1, "GET /x path[1]", "bogus", PositionState::Pending, None),
             &AgentView::idle(),
         )
         .unwrap_err();
@@ -2232,8 +2198,20 @@ mod tests {
     #[test]
     fn counts_leave_retired_positions_out_and_filters_match_their_fields() {
         let learned = [
-            row(1, "GET /other/{id} path[1]", "request", "pending", None),
-            row(2, "GET /old/{id} path[1]", "request", "retired", None),
+            row(
+                1,
+                "GET /other/{id} path[1]",
+                "request",
+                PositionState::Pending,
+                None,
+            ),
+            row(
+                2,
+                "GET /old/{id} path[1]",
+                "request",
+                PositionState::Retired,
+                None,
+            ),
         ];
         let rows = merged(&spec(), &learned, &AgentView::idle()).unwrap();
         let counts = counts_of(1, &rows);
@@ -2282,7 +2260,13 @@ mod tests {
 
     #[test]
     fn the_evidence_line_shows_the_share_the_sessions_and_the_uses() {
-        let mut evidence = row(1, "GET /x path[1]", "request", "proposed", Some("doctor"));
+        let mut evidence = row(
+            1,
+            "GET /x path[1]",
+            "request",
+            PositionState::Proposed,
+            Some("doctor"),
+        );
         evidence.share_per_mille = 870;
         evidence.sessions = 23;
         evidence.votes = 40;
@@ -2555,10 +2539,10 @@ mod tests {
     }
 
     /// How an administrator handled the pause `v3-0` of the request position of the doctor route.
-    fn handled(status: &str, version: Option<i64>) -> store::EventStatus {
+    fn handled(status: Handling, version: Option<i64>) -> store::EventStatus {
         store::EventStatus {
             event: "v3-0".to_owned(),
-            status: status.to_owned(),
+            status,
             kind: "auto_pause".to_owned(),
             slot: "GET /doctor/{id} path[1]".to_owned(),
             handled_by: HANDLED_BY.to_owned(),
@@ -2590,11 +2574,11 @@ mod tests {
         assert_eq!(status(&before, None), EventState::Superseded);
         // A handling stands even when a later version changed the entry again.
         assert_eq!(
-            status(&before, Some(&handled("undone", Some(4)))),
+            status(&before, Some(&handled(Handling::Undone, Some(4)))),
             EventState::Undone
         );
         assert_eq!(
-            status(&before, Some(&handled("acknowledged", None))),
+            status(&before, Some(&handled(Handling::Acknowledged, None))),
             EventState::Acknowledged
         );
     }
@@ -2615,11 +2599,11 @@ mod tests {
             ))
             .expect("an event")
         };
-        let undone = event(Some(&handled("undone", Some(4))));
+        let undone = event(Some(&handled(Handling::Undone, Some(4))));
         assert_eq!(undone["status"], "undone");
         assert_eq!(undone["handled"]["by"], "administrator");
         assert_eq!(undone["handled"]["version"], 4);
-        let acknowledged = event(Some(&handled("acknowledged", None)));
+        let acknowledged = event(Some(&handled(Handling::Acknowledged, None)));
         assert_eq!(acknowledged["status"], "acknowledged");
         assert_eq!(acknowledged["handled"]["version"], Value::Null);
         assert_eq!(event(None)["handled"], Value::Null);
