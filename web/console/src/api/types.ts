@@ -411,6 +411,8 @@ export interface JevStateValue {
   value: string;
   seen_as: string[];
   verified?: boolean;
+  /** `k/n` when this is piece k of n of a value the judge cut into pieces (docs/02 2.2). Pieces carry no `seen_as`. */
+  part?: string;
 }
 
 export interface JevState {
@@ -706,6 +708,80 @@ export interface ObjectFunctionEntry {
   reliability?: ObjectReliability;
 }
 
+/** The state of the function list (docs/07 7.9.20): read in full, over the key limit, or with learning off. */
+export type FunctionsStatus = "ok" | "over_limit" | "learning_off";
+
+/** A function of the table with its evidence over the window (`functions`, docs/07 7.9.20). */
+export interface FunctionRow {
+  key: string;
+  source: ObjectSource;
+  tier?: "admin";
+  reliability?: ObjectReliability;
+  ordinary_units: number;
+  admin_units: number;
+  refused_units: number;
+  last_seen: string | null;
+  on_entry: boolean;
+}
+
+/** A function the learning saw that the table does not name (`candidates`, docs/07 7.9.20). */
+export interface FunctionCandidate {
+  key: string;
+  ordinary_units: number;
+  admin_units: number;
+  refused_units: number;
+  last_seen: string | null;
+  requests_24h: number;
+  /** Units reach the threshold. The console selects by default the candidates that are suggested and not sensitive. */
+  suggested: boolean;
+  /** The template holds a word of an operations path (`admin`, `metrics`, `export`, ...). */
+  sensitive: boolean;
+  on_entry: boolean;
+}
+
+/** An administrator proposal the rules make (`proposals`, docs/07 7.9.19). `refused_units` is null without evidence. */
+export interface FunctionProposal {
+  key: string;
+  tier: "admin";
+  reliability: ObjectReliability;
+  admin_units: number;
+  refused_units: number | null;
+  last_seen: string | null;
+  in_table: boolean;
+}
+
+/** The traffic of the last day that neither the table nor the candidates name (`unlearned`, docs/07 7.9.20). */
+export interface UnlearnedTraffic {
+  requests: number;
+  unkeyed_requests: number;
+  /** False when the counts are lower bounds. */
+  complete: boolean;
+  top: Array<{ key: string; requests: number; sample: string }>;
+}
+
+/** `GET /api/sites/{name}/objects/functions` (docs/07 7.9.20). */
+export interface SiteFunctions {
+  status: FunctionsStatus;
+  window_days: number;
+  threshold_units: number;
+  /** Whether the site declares a user identity: its units are users, otherwise sessions. */
+  identified: boolean;
+  ordinary_units: number;
+  admin_units: number;
+  functions: FunctionRow[];
+  candidates: FunctionCandidate[];
+  proposals: FunctionProposal[];
+  unlearned: UnlearnedTraffic;
+}
+
+/** The body of `POST …/objects/functions/changes`: one batch, each list left out when it holds nothing (docs/07 7.9.20). */
+export interface FunctionChanges {
+  add?: string[];
+  admin?: Array<{ key: string; reliability: ObjectReliability }>;
+  open?: string[];
+  remove?: string[];
+}
+
 /** The identity a response position states about the session (`identity`, docs/07 7.9.15). */
 export type ObjectIdentity = "user" | "org" | "role";
 
@@ -936,7 +1012,17 @@ export interface Readiness {
   jev_timeout_ratio: number | null;
   /** Requests whose values were attempts to act on another user's object (7.4.7). */
   attempts: number;
+  /** The function table's part, when the table guards something (docs/07 7.9.11); null otherwise. */
+  functions: ReadinessFunctions | null;
   on_jev_unavailable: OnJevUnavailable;
+}
+
+/** The function table in the readiness check (docs/07 7.9.11). `unknown` is null when the site does not ask. */
+export interface ReadinessFunctions {
+  /** Requests by a session that is no administrator for an administrator's function. */
+  attempts: number;
+  /** Requests for a function the table does not list. */
+  unknown: number | null;
 }
 
 export interface Insights {

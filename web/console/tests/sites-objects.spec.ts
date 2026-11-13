@@ -172,7 +172,7 @@ test("a site with no object map lists its candidate positions, picks the clear o
   await expect(page.getByText("对象表还是空的，学习照常进行。")).toBeVisible();
 });
 
-test("confirming the candidates puts their declarations and slots in the save dialog", async ({
+test("confirming the candidates writes every position as a slot, and the saved configuration keeps its field kinds", async ({
   page,
 }) => {
   await openMap(page, "/sites/juice?tab=objects");
@@ -180,9 +180,26 @@ test("confirming the candidates puts their declarations and slots in the save di
 
   const save = page.getByRole("dialog", { name: "保存 juice 的配置" });
   const changes = save.getByRole("list", { name: "改动摘要" });
-  await expect(changes).toContainText("对象表 ＋ 字段 id 归为医生（仅 /api/doctors*）");
-  await expect(changes).toContainText("对象表 ＋ 字段 id 归为患者（仅 /api/patients*）");
+  await expect(changes).toContainText("对象表 ＋ GET /api/doctors [].id = 医生");
+  await expect(changes).toContainText("对象表 ＋ GET /api/patients [].id = 患者");
   await expect(changes).toContainText("对象表 ＋ 请求 GET /doctor/{id} 第 1 个路径参数 = 医生");
+  await expect(changes).not.toContainText("字段 id 归为");
+
+  await save.getByRole("button", { name: /^保存为 v\d+$/ }).click();
+  await expect(save).toBeHidden();
+
+  const [saved] = callsTo(page, "PUT", "/api/sites/juice");
+  expect(saved?.body).toMatchObject({
+    spec: {
+      objects: {
+        slots: expect.arrayContaining([
+          { key: "GET /api/doctors [].id", class: "doctor", source: "rule" },
+          { key: "GET /api/patients [].id", class: "patient", source: "rule" },
+        ]),
+      },
+    },
+  });
+  expect(saved?.body).not.toHaveProperty("spec.advanced.field_kinds");
 });
 
 test("the learning settings save through the save dialog, and the agent stays off without a model", async ({
