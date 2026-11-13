@@ -16,8 +16,9 @@ the module cannot be imported, the report says the segment did not run and why, 
 
 The full mode (--mode full, batch 7, plan 5.2) has 48 doctors and the whole corpus, and adds: the convergence cost (L4)
 over 3, 6, 12 and 24 users; the anti-pollution measure (L5), a learning over the training traffic with attack sessions
-mixed in; the deletions in the order of the day (report only); the observation against the enforcement (P6), the same
-protection batch on the observation-mode site; a
+mixed in, whose search-then-delete position must not learn to accept public sources (a gate); the deletions in the order
+of the day, whose public search result must learn public at high (a gate); the observation against the enforcement (P6),
+the same protection batch on the observation-mode site; a
 regression case with a session table that overflows (b11-session-eviction, its own gateway); and the whole run a
 second time, in a folder of its own, whose deterministic part must be equal. It needs PostgreSQL and the ideal model,
 and it is refused with exit status 2 otherwise. The full group of the baseline file is its own.
@@ -188,6 +189,8 @@ def execute(options: Options, *, live: Live | None = None) -> int:
             differing = full.differences(full.comparable(result), full.comparable(second))
             result["gates"].append(full.two_pass_gate(differing))
             result["gates"].append(full.consistency_gate(result["metrics"].get("P6")))
+            result["gates"].append(full.natural_order_gate(result.get("natural_order")))
+            result["gates"].append(full.polluted_delete_gate(result.get("pollution")))
             result["passed"] = all(gate["ok"] is not False for gate in result["gates"])
             extra["two_pass"] = {"differing": differing, "seconds": [extra["seconds"], second_extra["seconds"]]}
         meta = {

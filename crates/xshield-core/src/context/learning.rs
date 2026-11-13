@@ -513,6 +513,10 @@ pub const RARE_PUBLIC_PER_MILLE: u32 = 10;
 pub const COMMON_PUBLIC_PER_MILLE: u32 = 200;
 /// Agreement, in thousandths, a `high` tier needs from nearly every value.
 const HIGH_AGREEMENT_PER_MILLE: u32 = 980;
+/// A `public` position is `high` without that agreement when at most this share of its units, in thousandths,
+/// holds a value only it saw (docs/07 section 7.9.16). Additions and removals in the window leave such values on
+/// a few units; a list of private entries that mostly belong to everyone leaves them on nearly every unit.
+const SINGLE_HOLDERS_MAX_PER_MILLE: u32 = 100;
 
 /// What the control plane counted at one response position. The units are the user
 /// identities the site declares, or the sessions when it declares none. A value is one
@@ -535,6 +539,9 @@ pub struct ResponseStats {
     /// Of `values`, the ones exactly one unit saw while every other unit's records at the
     /// position were complete, so no other unit could have seen them unkept.
     pub complete_single: u32,
+    /// Non-admin units holding at least one value only they saw at the position, whether or not their record
+    /// was complete. `judge_tier` lets a `public` position be `high` when these are few.
+    pub single_holders: u32,
     /// Admin units that got a 2xx at the position.
     pub admin_units: u32,
     /// Non-admin units refused at the position (no 2xx).
@@ -557,8 +564,9 @@ pub struct TierJudgement {
 /// reliable enough to propose.
 ///
 /// `admin`: only admin units get values back, and the non-admin units that tried were
-/// refused. `public`: the non-admin units share nearly all their values. `self`: they share
-/// nearly none. Anything between is left to the learning agent, and so is `org`, which
+/// refused. `public`: the non-admin units share nearly all their values, or a few of them
+/// hold values only they saw (see [`few_single_holders`]). `self`: they share nearly none.
+/// Anything between is left to the learning agent, and so is `org`, which
 /// needs the organisation of each unit. Too little evidence gives no judgement.
 ///
 /// Without identities the units are sessions, and one user's sessions look like several
@@ -582,14 +590,23 @@ pub fn judge_tier(stats: &ResponseStats, thresholds: Thresholds) -> Option<TierJ
         Some(agreement) => (Tier::Public, agreement),
         None => (Tier::Own, own_agreement(stats, thresholds)?),
     };
-    let strong =
-        stats.units >= doubled(thresholds.sessions) && agreement >= HIGH_AGREEMENT_PER_MILLE;
+    let strong = stats.units >= doubled(thresholds.sessions)
+        && (agreement >= HIGH_AGREEMENT_PER_MILLE
+            || (tier == Tier::Public && few_single_holders(stats)));
     let reliability = grade(strong, stats.identified)?;
     Some(TierJudgement {
         tier,
         reliability,
         agreement_per_mille: agreement,
     })
+}
+
+/// Whether at most `SINGLE_HOLDERS_MAX_PER_MILLE` of the units, in thousandths, hold a value only they saw. A
+/// public list that a few units changed in the window has such values on those units only; a list where every
+/// unit keeps some private entries has them on all of them, and stays `medium`.
+fn few_single_holders(stats: &ResponseStats) -> bool {
+    u64::from(stats.single_holders) * 1_000
+        <= u64::from(stats.units) * u64::from(SINGLE_HOLDERS_MAX_PER_MILLE)
 }
 
 /// The agreement of `public`: the share of values, in thousandths, that two or more units
@@ -625,7 +642,7 @@ pub struct AcceptJudgement {
     pub accepts_public: bool,
     /// How sure the rules are.
     pub reliability: Reliability,
-    /// The votes judged: those with at least one response position of a known tier.
+    /// The votes judged: those with a response position of a known tier, or one awaiting its kind's confirmation.
     pub votes: u32,
     /// The distinct units among them: users where the site declares identities, sessions otherwise.
     pub sessions: u32,
@@ -633,13 +650,34 @@ pub struct AcceptJudgement {
     pub public_per_mille: u32,
 }
 
-/// Whether a request position accepts public sources, from its votes and the confirmed tiers
-/// of the response positions the votes were shown at.
+/// What the rules know of a response position that a vote's values were shown at, when they judge whether a
+/// request position accepts public sources ([`judge_accepts_public`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceTier {
+    /// The position has a tier: the one its configuration gives, or else the one the rules give it in this pass
+    /// and no administrator has dismissed.
+    Known(Tier),
+    /// The position awaits an administrator's confirmation of its kind (docs/07 section 7.9.21), so its tier is
+    /// not judged yet.
+    Pending,
+    /// The position has neither a tier nor a kind awaiting confirmation.
+    Unknown,
+}
+
+/// Whether a request position accepts public sources, from its votes and what the rules know of the response
+/// positions the votes were shown at ([`SourceTier`]).
 ///
-/// A vote is judged when at least one of its response positions has a tier, and it counts as
-/// public when every such position is `public`. Votes of the sessions in `admin_sessions` are left
-/// out: an admin's use of public objects says nothing about ordinary users. So are votes of sessions
-/// refused at the position, since a refused session is what the judge is there to stop.
+/// A vote is judged when one of its response positions has a tier or awaits its kind's confirmation. Its kind:
+/// non-public when one of its tiered positions is not `public`; pending when none is non-public and one awaits its
+/// kind; public when its tiered positions are all `public` and none awaits. A vote shown only at unknown positions
+/// is left out. Votes of the sessions in `admin_sessions` are left out: an admin's use of public objects says
+/// nothing about ordinary users. So are votes of sessions refused at the position, since a refused session is what
+/// the judge is there to stop.
+///
+/// A pending vote may turn out public or not, so the conclusion is the worst case for each: no acceptance unless
+/// public votes alone reach `COMMON_PUBLIC_PER_MILLE`, and no refusal unless public and pending votes together stay
+/// within `RARE_PUBLIC_PER_MILLE`. The margin of `high` is worked out the same way. Without pending votes this is
+/// the judgement the shares alone give.
 ///
 /// With identities (`identified`) the units are the users: the sessions of one user count once, and a
 /// vote that shows no user counts by its session. Without them the units are the sessions, and the
@@ -647,7 +685,7 @@ pub struct AcceptJudgement {
 #[must_use]
 pub fn judge_accepts_public(
     evidence: &Evidence,
-    tier_of: impl Fn(&str) -> Option<Tier>,
+    source_of: impl Fn(&str) -> SourceTier,
     admin_sessions: &BTreeSet<String>,
     identified: bool,
     thresholds: Thresholds,
@@ -655,44 +693,50 @@ pub fn judge_accepts_public(
     let refused = evidence.refused_sessions();
     let mut votes = 0_u32;
     let mut public = 0_u32;
+    let mut pending = 0_u32;
     let mut unit_keys = BTreeSet::new();
     for ((session, _), used) in &evidence.votes {
         if admin_sessions.contains(session) || refused.contains(session.as_str()) {
             continue;
         }
-        let mut tiers = used
-            .from
-            .iter()
-            .filter_map(|position| tier_of(position.as_str()))
-            .peekable();
-        if tiers.peek().is_none() {
-            continue;
+        let mut tiered = false;
+        let mut non_public = false;
+        let mut awaiting = false;
+        for position in &used.from {
+            match source_of(position.as_str()) {
+                SourceTier::Known(Tier::Public) => tiered = true,
+                SourceTier::Known(_) => non_public = true,
+                SourceTier::Pending => awaiting = true,
+                SourceTier::Unknown => {}
+            }
         }
+        // A non-public position settles the vote, so it is neither public nor pending.
+        let (is_public, is_pending) = match (non_public, awaiting, tiered) {
+            (true, _, _) => (false, false),
+            (false, true, _) => (false, true),
+            (false, false, true) => (true, false),
+            (false, false, false) => continue,
+        };
         votes = votes.saturating_add(1);
+        public = public.saturating_add(u32::from(is_public));
+        pending = pending.saturating_add(u32::from(is_pending));
         unit_keys.insert(match (identified, &used.user) {
             (true, Some(user)) => (true, user.as_str()),
             _ => (false, session.as_str()),
         });
-        if tiers.all(|tier| tier == Tier::Public) {
-            public = public.saturating_add(1);
-        }
     }
     let sessions = saturating_count(unit_keys.len());
     if votes < thresholds.votes || sessions < thresholds.sessions {
         return None;
     }
     let public_per_mille = share_of(public, votes);
-    let accepts_public = if public_per_mille <= RARE_PUBLIC_PER_MILLE {
-        false
+    let refusal_share = share_of(public.saturating_add(pending), votes);
+    let (accepts_public, margin) = if refusal_share <= RARE_PUBLIC_PER_MILLE {
+        (false, doubled(refusal_share) <= RARE_PUBLIC_PER_MILLE)
     } else if public_per_mille >= COMMON_PUBLIC_PER_MILLE {
-        true
+        (true, public_per_mille >= doubled(COMMON_PUBLIC_PER_MILLE))
     } else {
         return None;
-    };
-    let margin = if accepts_public {
-        public_per_mille >= doubled(COMMON_PUBLIC_PER_MILLE)
-    } else {
-        doubled(public_per_mille) <= RARE_PUBLIC_PER_MILLE
     };
     let strong =
         margin && votes >= doubled(thresholds.votes) && sessions >= doubled(thresholds.sessions);
@@ -946,11 +990,30 @@ mod tier_tests {
         Thresholds::default()
     }
 
-    fn tiers(key: &str) -> Option<Tier> {
+    /// A response position that awaits its kind's confirmation, so its tier is not judged yet.
+    const AWAITING: &str = "GET /api/search results[].id";
+
+    fn tiers(key: &str) -> SourceTier {
         match key {
-            PATIENTS => Some(Tier::Own),
-            SEARCH => Some(Tier::Public),
-            _ => None,
+            PATIENTS => SourceTier::Known(Tier::Own),
+            SEARCH => SourceTier::Known(Tier::Public),
+            _ => SourceTier::Unknown,
+        }
+    }
+
+    /// [`tiers`], with `AWAITING` pending.
+    fn awaiting(key: &str) -> SourceTier {
+        match key {
+            AWAITING => SourceTier::Pending,
+            other => tiers(other),
+        }
+    }
+
+    /// [`awaiting`], once the administrator has confirmed `AWAITING` as public.
+    fn resolved_public(key: &str) -> SourceTier {
+        match key {
+            AWAITING => SourceTier::Known(Tier::Public),
+            other => tiers(other),
         }
     }
 
@@ -1051,6 +1114,100 @@ mod tier_tests {
         let mut weak = own_stats(6, 30);
         weak.identified = false;
         assert_eq!(judge_tier(&weak, thresholds()), None);
+    }
+
+    #[test]
+    fn a_public_list_that_one_unit_changed_is_high_below_the_agreement() {
+        // 137 of 141 values shared (971 per mille, below the agreement `high` needs), and the four values
+        // only one unit saw all sit on that one of 48 units.
+        let changed = ResponseStats {
+            identified: true,
+            units: 48,
+            values: 141,
+            shared: 137,
+            single_holders: 1,
+            ..ResponseStats::default()
+        };
+        let judged = judge_tier(&changed, thresholds()).unwrap();
+        assert_eq!(
+            (judged.tier, judged.reliability, judged.agreement_per_mille),
+            (Tier::Public, Reliability::High, 971)
+        );
+    }
+
+    #[test]
+    fn a_public_list_with_a_private_value_on_every_unit_stays_medium() {
+        // 380 of 400 values shared (950 per mille), and each of the 20 units holds one of the 20 values
+        // only it saw: the single holders are all of them.
+        let mixed = ResponseStats {
+            identified: true,
+            units: 20,
+            values: 400,
+            shared: 380,
+            single_holders: 20,
+            ..ResponseStats::default()
+        };
+        let judged = judge_tier(&mixed, thresholds()).unwrap();
+        assert_eq!(
+            (judged.tier, judged.reliability, judged.agreement_per_mille),
+            (Tier::Public, Reliability::Medium, 950)
+        );
+    }
+
+    #[test]
+    fn a_tenth_of_the_units_holding_single_values_is_still_few() {
+        let at_limit = ResponseStats {
+            identified: true,
+            units: 100,
+            values: 300,
+            shared: 290,
+            single_holders: 10,
+            ..ResponseStats::default()
+        };
+        assert_eq!(
+            judge_tier(&at_limit, thresholds()).map(|judged| judged.reliability),
+            Some(Reliability::High)
+        );
+        let over = ResponseStats {
+            single_holders: 11,
+            ..at_limit
+        };
+        assert_eq!(
+            judge_tier(&over, thresholds()).map(|judged| judged.reliability),
+            Some(Reliability::Medium)
+        );
+    }
+
+    #[test]
+    fn a_public_list_below_the_share_is_not_proposed_however_few_single_holders() {
+        // 850 per mille shared: below the public share, and with no complete single values, no self either.
+        let below = ResponseStats {
+            identified: true,
+            units: 48,
+            values: 100,
+            shared: 85,
+            single_holders: 0,
+            ..ResponseStats::default()
+        };
+        assert_eq!(judge_tier(&below, thresholds()), None);
+    }
+
+    #[test]
+    fn a_public_list_with_too_few_units_stays_medium_however_few_single_holders() {
+        // Nine units is below the twice the sessions `high` needs.
+        let few = ResponseStats {
+            identified: true,
+            units: 9,
+            values: 40,
+            shared: 39,
+            single_holders: 0,
+            ..ResponseStats::default()
+        };
+        let judged = judge_tier(&few, thresholds()).unwrap();
+        assert_eq!(
+            (judged.tier, judged.reliability),
+            (Tier::Public, Reliability::Medium)
+        );
     }
 
     #[test]
@@ -1210,6 +1367,79 @@ mod tier_tests {
             judge_accepts_public(&evidence, tiers, &no_admins(), false, thresholds()).unwrap();
         assert!(!judged.accepts_public);
         assert_eq!(judged.reliability, Reliability::Medium);
+    }
+
+    #[test]
+    fn pending_votes_block_the_conclusion_the_settled_ones_would_give() {
+        // 198 votes: 21 show a value at a position awaiting its kind, 177 show own values only. With the pending
+        // ones unknown the public share is 0 and the position refuses; with them pending, all 21 could be public,
+        // a share of 106 per mille, which gives no conclusion. Settled as public, the share is still 106.
+        let evidence = uses(198, 10, |index| {
+            if index < 21 {
+                vec![AWAITING]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        let unknown = |key: &str| match key {
+            AWAITING => SourceTier::Unknown,
+            other => tiers(other),
+        };
+        let before = judge_accepts_public(&evidence, unknown, &no_admins(), true, thresholds());
+        assert_eq!(before.map(|judged| judged.accepts_public), Some(false));
+        assert_eq!(
+            judge_accepts_public(&evidence, awaiting, &no_admins(), true, thresholds()),
+            None
+        );
+        assert_eq!(
+            judge_accepts_public(&evidence, resolved_public, &no_admins(), true, thresholds()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_vote_with_a_non_public_source_is_not_pending() {
+        // Each vote shows a pending position and an own one: the own one settles it as not public.
+        let evidence = uses(40, 10, |_| vec![AWAITING, PATIENTS]);
+        let judged =
+            judge_accepts_public(&evidence, awaiting, &no_admins(), true, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!((judged.votes, judged.public_per_mille), (40, 0));
+        assert_eq!(judged.reliability, Reliability::High);
+    }
+
+    #[test]
+    fn a_vote_with_a_public_and_a_pending_source_is_pending_not_public() {
+        // Were these votes public, their share would accept: pending, they give no conclusion yet.
+        let evidence = uses(40, 10, |_| vec![SEARCH, AWAITING]);
+        assert_eq!(
+            judge_accepts_public(&evidence, awaiting, &no_admins(), true, thresholds()),
+            None
+        );
+        let judged =
+            judge_accepts_public(&evidence, resolved_public, &no_admins(), true, thresholds())
+                .unwrap();
+        assert!(judged.accepts_public);
+        assert_eq!(judged.public_per_mille, 1_000);
+    }
+
+    #[test]
+    fn a_refusal_holds_when_every_pending_vote_is_public() {
+        // 1000 votes, 5 of them pending: were all five public, that is 5 per mille, still rarely public.
+        let evidence = uses(1_000, 20, |index| {
+            if index < 5 {
+                vec![AWAITING]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        let judged =
+            judge_accepts_public(&evidence, awaiting, &no_admins(), true, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!(
+            (judged.votes, judged.public_per_mille, judged.reliability),
+            (1_000, 0, Reliability::High)
+        );
     }
 
     /// Votes for `DELETE` from `sessions` sessions, each shown at `from`, where session `s<k>` belongs
@@ -1521,12 +1751,22 @@ pub fn response_stats(evidence: &TierEvidence, identified: bool) -> ResponseStat
             complete_single = complete_single.saturating_add(saturating_count(single));
         }
     }
+    let single_holders = evidence
+        .seen
+        .iter()
+        .filter(|unit| {
+            unit.fingerprints
+                .iter()
+                .any(|fingerprint| holders.get(fingerprint.as_str()) == Some(&1))
+        })
+        .count();
     ResponseStats {
         identified,
         units: saturating_count(evidence.seen.len()),
         values: saturating_count(holders.len()),
         shared: saturating_count(holders.values().filter(|count| **count >= 2).count()),
         complete_single,
+        single_holders: saturating_count(single_holders),
         admin_units: evidence.admin_units,
         refused_units: evidence.refused_units,
     }
@@ -2336,6 +2576,31 @@ mod tier_evidence_tests {
                 .collect(),
             complete,
         }
+    }
+
+    #[test]
+    fn a_unit_holding_a_value_only_it_saw_is_a_single_holder() {
+        // Unit a holds x and y, unit b holds y and z, unit c holds y only: x and z are seen by one unit each, y
+        // by three. Units a and b hold a single value; c does not.
+        let evidence = TierEvidence {
+            seen: vec![
+                unit(&["x", "y"], true),
+                unit(&["y", "z"], true),
+                unit(&["y"], true),
+            ],
+            admin_units: 0,
+            refused_units: 0,
+        };
+        let stats = response_stats(&evidence, true);
+        assert_eq!(
+            (
+                stats.units,
+                stats.values,
+                stats.shared,
+                stats.single_holders
+            ),
+            (3, 3, 1, 2)
+        );
     }
 
     #[test]
