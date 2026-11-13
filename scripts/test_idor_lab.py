@@ -521,7 +521,7 @@ def c4(lab: Lab) -> None:
               PASSWORD not in logged, "password in the decision record")
 
 
-@scenario("C5", "同一会话一分钟内超过调用上限：超出部分按 on_jev_unavailable 处理")
+@scenario("C5", "同一会话一分钟内超过调用上限：超出部分拒绝并回 429")
 def c5(lab: Lab) -> None:
     cookie = lab.login("limit.lab", "doctor_a")
     lab.expect("first judged call", lab.send(
@@ -530,9 +530,12 @@ def c5(lab: Lab) -> None:
     lab.expect("second judged call", lab.send(
         "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第二条"}),
         Expect(201, "jev_allow", "allowed", True))
-    lab.expect("third call is over the session limit", lab.send(
-        "limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"}),
-        Expect(403, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+    refused = lab.send("limit.lab", "POST", "/api/notes", cookie=cookie, form={"note": "第三条"})
+    lab.expect("third call is over the session limit", refused,
+               Expect(429, "jev_unavailable", "blocked", False, failure="JEV_CALL_LIMIT"))
+    lab.check("the refusal says rate_limited whatever on_jev_unavailable is",
+              refused.reply.json().get("error") == "rate_limited",
+              refused.reply.body[:200].decode("utf-8", "replace"))
 
 
 @scenario("W1", "声明了身份位置的站点：判定记录带会话的用户标签；换账号标签不同；未声明的站点不写身份")

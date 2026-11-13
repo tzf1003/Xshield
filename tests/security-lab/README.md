@@ -40,7 +40,7 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，记为未经判定 | `jev_unavailable`（`unjudged`） |
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |
 | C4 | 登录请求 | Jev 收到的是 `<redacted>`，判定日志里也没有口令 | `jev_allow` |
-| C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拦截，`JEV_CALL_LIMIT` | `jev_unavailable` |
+| C5 | 同一会话超过每分钟调用上限（站点设为 2） | 第三次拒绝并回 429（`{"error":"rate_limited"}`），`JEV_CALL_LIMIT`；不论 `on_jev_unavailable` | `jev_unavailable` |
 | W1 | 声明了 `GET /api/home doctor.id` 为用户身份的站点：医生 A、B 各自登录后，判定记录的 `trace.session.identity.user` 是各自的键控哈希标签，换账号不同，同一账号相同；没有声明身份的站点不写 `identity` | 放行，身份标签按上述规则 | `fast_allow` |
 | W4a | 管理员站点：管理员在管理档搜索（`GET /api/admin/search`）里搜到医生 B 的患者后删除 | 放行，删除的值核验为管理档来源，不是尝试 | `fast_allow` |
 | W4b | 管理员没在管理档搜索里见过的患者，直接删除 | 拦截，源站不收到请求；角色不是放行理由 | `jev_deny` |

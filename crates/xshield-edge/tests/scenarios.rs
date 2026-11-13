@@ -500,6 +500,34 @@ fn c1_c2_when_jev_is_down_the_site_policy_decides() {
 }
 
 #[test]
+fn c5_a_spent_call_limit_is_refused_with_429_even_where_the_site_allows() {
+    // The lenient site lets a request through when Jev fails, but not once the session has used
+    // its calls for the minute: the origin's session starts with the entry, then 60 judged calls.
+    let started = get("lenient.test", "/api/home", Some("s-c5"));
+    assert_eq!(started.status, 200);
+    for index in 0..60 {
+        let target = format!("/api/patients/limit{index}x");
+        let reply = get("lenient.test", &target, Some("s-c5"));
+        assert_eq!(reply.status, 200, "call {index} is within the limit");
+    }
+    let over = get("lenient.test", "/api/patients/limit60x", Some("s-c5"));
+    assert_eq!(over.status, 429);
+    let body: Value = serde_json::from_slice(&over.body).expect("a JSON refusal");
+    assert_eq!(body["error"], "rate_limited");
+    assert_eq!(body["request_id"], over.request_id.as_str());
+    assert_eq!(origin_saw("/api/patients/limit60x"), 0);
+    let row = record(&over);
+    assert_eq!(row.decision_path, DecisionPath::JevUnavailable);
+    assert_eq!(row.outcome, Outcome::Blocked);
+    assert_eq!(row.status, Some(429));
+    assert_eq!(row.trace.refused.as_deref(), Some("rate_limited"));
+    assert_eq!(
+        row.jev.as_ref().and_then(|jev| jev.failure.as_deref()),
+        Some("JEV_CALL_LIMIT")
+    );
+}
+
+#[test]
 fn c3_observe_mode_forwards_and_logs_would_block() {
     get("observe.test", "/api/patients?who=c3", Some("s-c3"));
     let reply = get("observe.test", "/api/patients/patient-D-c3", Some("s-c3"));
