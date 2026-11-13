@@ -81,8 +81,8 @@ class CommandTests(unittest.TestCase):
         status, _, _ = run_cli(*score_args("all-correct", self.out / "i", "--baseline", str(better)))
         self.assertEqual(status, 0)
 
-    def test_lab_and_site_are_not_built_yet_and_exit_2(self):
-        for args in (["lab"], [], ["site", "--decisions", "x.jsonl", "--suite-results", "dir"]):
+    def test_lab_is_not_built_yet_and_exits_2(self):
+        for args in (["lab"], []):
             with self.subTest(args=args):
                 status, _, err = run_cli(*args)
                 self.assertEqual(status, 2)
@@ -92,6 +92,15 @@ class CommandTests(unittest.TestCase):
         status, _, err = run_cli("site", "--suite-results", "dir")
         self.assertEqual(status, 2)
         self.assertIn("site 需要 --decisions", err)
+
+    def test_a_password_on_the_command_line_is_refused_without_echo(self):
+        for flag in ("--password", "--pass=s3cret-value"):
+            with self.subTest(flag=flag):
+                status, out, err = run_cli("site", "--control", "http://127.0.0.1:1", "--site", "x",
+                                           "--suite-results", "dir", flag)
+                self.assertEqual(status, 2)
+                self.assertIn("XSHIELD_CONSOLE_PASSWORD", err)
+                self.assertNotIn("s3cret-value", err + out)
 
     def test_a_usage_error_exits_2(self):
         status, _, _ = run_cli("score")
