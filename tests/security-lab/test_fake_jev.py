@@ -276,6 +276,12 @@ class FunctionTest(unittest.TestCase):
     def test_an_unknown_function_on_an_ordinary_path_is_judged_on_its_values(self) -> None:
         self.assertEqual(choices(self.with_function("/api/comments", {"known": False})), ("ALLOW", "BENIGN"))
 
+    def test_an_unknown_bulk_export_is_refused_and_an_export_of_one_record_is_not(self) -> None:
+        self.assertEqual(
+            choices(self.with_function("/api/patients/export-all", {"known": False})), ("DENY", "BENIGN"))
+        self.assertEqual(
+            choices(self.with_function("/api/patients/export-pdf", {"known": False})), ("ALLOW", "BENIGN"))
+
     def test_without_a_function_the_answer_is_the_same_as_before(self) -> None:
         plain = document("/api/admin/search", [])
         self.assertEqual(choices(plain), ("ALLOW", "BENIGN"))

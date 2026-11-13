@@ -57,6 +57,10 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | W4c | 管理员在公共搜索里搜到医生 B 的患者后删除 | 拦截，记为尝试越权：公共档的见过不证明删除 | `jev_deny` |
 | W4d | 管理员在管理档搜索里搜到患者后写备注（POST 子路径） | 放行，备注位置接受公共来源 | `fast_allow` |
 | W6 | 同一站点的评论接口：医生 A 读取自己患者的评论时，作者医生 B 的手机号和邮箱让判定记录的 `trace.response.exposure` 记一条告警（字段名 `phone`、`email`，记录里没有值）；读取本人资料、未声明身份的站点不告警 | 放行，告警按上述规则 | `fast_allow` |
+| F1 | 源站从未认可过的凭证（`SID=made-up`）访问非入口路径 | 拦截，401，源站未收到请求，不调用 Jev；判定记录的 `trace.unrecognized_credential` 为真。见下方说明 | `no_session` |
+| F2 | 身份站点（声明了用户身份）：未认可的凭证在 `/login` 拿到源站 200，随后访问非入口；对照站点（没有身份位置）同样的 200 | 身份站点：入口放行但不建立会话，非入口 401。对照站点：入口放行，非入口放行（源站答 401）。见下方说明 | `fast_allow`，`no_session`，`fast_allow`，`fast_allow` |
+| F3 | 源站直接发出、网关没见过的老会话（相当于网关重启后）：非入口先被拒；`GET /api/home` 声明医生身份之后，列表和列表里的患者放行 | 非入口 401；身份接口放行并建立会话；`/api/patients` 与患者详情放行 | `no_session`，`fast_allow`，`fast_allow`，`fast_allow` |
+| F4 | JSON 凭证站点（`Authorization` 头）：`POST /api/token-login` 登录后，带令牌的第一个请求落在非入口 `GET /api/comments` | 登录放行；第一个请求放行，会话的 `login_request_id` 为该次登录，没有 `login_unbound` | `jev_allow`，`fast_allow` |
 | F5 | 医生 A 登录后 `POST /api/admin/export`（功能表里的管理档功能） | 拦截，源站不收到请求。Jev 收到的 `state.request.function` 是 `{"tier":"admin","attempt":"over_privilege"}`，判定记录的 `trace.function.attempt` 为 `over_privilege`。见下方说明 | `jev_deny` |
 | F5b | 医生 A 新建患者后，对它 `POST /api/patients/{新编号}`，带请求头 `X-HTTP-Method-Override: DELETE` | 拦截，源站不收到请求。按更严的 `DELETE /api/patients/{id}` 判为越权尝试；`trace.function.key` 是 `POST /api/patients/{id}`，`entry` 是 `DELETE /api/patients/{id}` | `jev_deny` |
 | F6 | 管理员 `admin_root` 登录、访问首页（声明角色）后 `POST /api/admin/export` | 放行，源站收到，不新增 Jev 调用。`trace.function` 有 `tier`，没有 `attempt` | `fast_allow` |
@@ -67,6 +71,8 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | F11 | 不带凭证的 `DELETE /api/patients`（入口路径，基线里没有这个方法） | 交 Jev：`state.entry.matched` 为真，`function` 为 `{"known":false}`；Jev 放行，源站答 401 | `jev_allow` |
 | F12 | 没有功能表的站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 都快速放行（源站分别答 200、404），不新增 Jev 调用，判定记录没有 `trace.function`。与 F5、F9 对照 | `fast_allow`，`fast_allow` |
 | F13 | 观察模式的功能表站点：医生 A 的 `POST /api/admin/export`、`GET /metrics` | 两个都转发（源站收到），记为本应拦截 | `jev_deny`（`would_block`） |
+| F14 | 基线站点的医生 A `GET /api/patients/export-all`（功能表里的 `GET /api/patients/{id}` 不覆盖路由词） | 交 Jev：`state.request.function` 为 `{"known":false}`，Jev 判 DENY（假 Jev 的 `export-all` 规则），拦截，源站不收到请求 | `jev_deny` |
+| F15 | 基线站点（有角色身份位置，开关为真）的管理员 `admin_root` 访问首页后 `GET /metrics` | 放行，源站答 404，不新增 Jev 调用，判定记录没有 `trace.function`（管理员会话不被问未知功能） | `fast_allow` |
 | F16 | 医生 A 对自己新建的患者 `POST`，查询串排在 200 个值之后（第 231 个）带 `_method=DELETE` | 拦截，判定记录的 `trace.function.attempt` 为 `over_privilege`，源站不收到请求 | `jev_deny` |
 | F17 | 医生 A 对自己新建的患者 `POST`，`multipart/form-data` 的文本字段 `_method` 为 `DELETE` | 同 F16 | `jev_deny` |
 | F18 | 医生 A 对自己新建的患者 `POST`，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，不像表单） | 同 F16；网关按字段读到 `_method`，不走兜底 | `jev_deny` |
@@ -95,6 +101,10 @@ A9 的第一条删除原来预期放行（已知缺口），标注档位之后�
 ### W4a 至 W4d 说明：管理员会话
 
 `admin` 站点的对象表把管理员搜索标为管理档（`tier: admin`，可靠性高），把首页的 `role` 声明为身份位置（`identity: role`）。源站只对角色为 `admin` 的会话返回管理员搜索，首页对管理员标注 `"role": "admin"`，其他会话没有这个字段。管理员会话见过的管理档响应证明它展示的对象，所以 W4a 的删除快速放行；W4b 的患者没有被见过，仍拦截；W4c 的管理员在公共搜索里见到的患者，删除仍是尝试越权；W4d 的备注位置接受公共来源，管理档的见过同样有效。
+
+### F1 至 F4 说明：源站认可之前的凭证
+
+凭证只有源站答复过才算会话（[docs/01 §1.2](../../docs/01-request-flow.md)）。F1 的 `SID=made-up` 源站没有发过，所以不是会话：非入口直接 401，不交 Jev，也不建立上下文；判定记录里 `trace.unrecognized_credential` 为真。F2 的身份站点上，`/login` 的 200 不建立会话，身份要等 `GET /api/home` 声明医生身份才有；没有身份位置的对照站点，同样的 200 则建立会话，同一凭证的非入口请求放行，源站答 401，证明请求确实到了源站。F3 的老会话由源站直接发出，测试里不经过网关登录，网关没有见过，所以先被拒；身份接口认可之后才恢复。F4 的 JSON 令牌登录绑定会话，与落点无关，令牌的第一个请求即使落在非入口也能绑定。
 
 ### F5 至 F13 说明：功能表
 
@@ -154,10 +164,12 @@ python3 scripts/measure_effectiveness.py                                        
 python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   # 只跑这些类别，不与基线比较
 ```
 
-- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）在有 PostgreSQL 时运行：它从训练段的判定学到对象表，作为 `clinic-learned` 站点进入防护段（只跑旅程和探针，回归用例仍只在各自的站点上跑）；没有运行时报告写明 SKIP 的原因。完整模式（批次 7）和 `--jev record|replay`（批次 9）以退出码 2 拒绝。
+- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）在有 PostgreSQL 时运行：它从训练段的判定学到对象表，作为 `clinic-learned` 站点进入防护段（只跑旅程和探针，回归用例仍只在各自的站点上跑）；没有运行时报告写明 SKIP 的原因。完整模式（批次 7）以退出码 2 拒绝。
 - 防护段在 `clinic-none`、`clinic-truth`、带每会话 Jev 额度的 `clinic-truth-limit` 和观察模式的 `clinic-truth-observe` 上运行：攻击探针（`corpus/attacks.jsonl`）、良性文本（`corpus/benign.jsonl`）、良性旅程，以及 `effectiveness/regressions.py` 里方案 4.5 的回归用例。载荷含路径分隔符、放不进一个路径段的，不送到“路径段”注入点，报告里分别计数。
 - 理想模型是 `fake_jev.py` 传入攻击文本时的判定：攻击只看文本是否完整出现在路径或某个值里（两边先规范化）；访问规则与脚本相同，但值带 `object` 时，`seen_as` 里括号中类别不同的展示不算数。不传攻击文本时，判定与之前相同。
 - `--jev live` 改用真实 Jev，需要环境变量 `XSHIELD_JEV_ENDPOINT` 和 `XSHIELD_JEV_API_KEY`，缺一即以退出码 2 退出。密钥只从环境变量读取，不写入报告和日志。页码当处方号这条探针只在这个模式下发送，理想模型比较不了没有类别的位置。
+- `--jev record` 把判定转发到真实 Jev，需要同样的两个环境变量，缺一即退出码 2。每次应答按请求摘要写入输出目录的 `jev-recording.jsonl`。转发失败或应答含密钥的那次记为失败；录制不完整时以退出码 2 结束。`--jev replay` 不联网、不需要密钥，只从 `effectiveness/recordings/quick.jsonl` 答复；摘要不在录制里的调用收到 UNKNOWN，计入“回放未命中率”。录制文件不存在时以退出码 2 退出。步骤和格式见 `effectiveness/recordings/README.md`。
+- 真实模式（`live`、`record`、`replay`）和 `site` 模式的报告另有“置信度门槛扫描（3.4）”一节：同一批判定记录在 0.50 到 0.90 的门槛下重算，只给一阶估计，不重新发流量。
 - 用例可以带能力要求（`requires`）：`tiers`（档位）、`functions`（功能表）、`classes`（对象表）。配置缺少所需能力时，用例显示为“需要…”，不计分。`none` 没有对象表，需要对象表的用例只在 `clinic-truth` 上计分。
 - 已知缺口：判定器还不读功能表，所以 `clinic-truth` 也显示“需要功能表”的有 `p0-3-function-level`、医生的 `GET /api/admin/search`（旅程）。功能级判定合入后，补上 `clinic-truth` 的功能表并把 `p0-3-function-level` 改为 `must`。
 - 退出码：门槛全部通过为 0，有门槛失败为 1，用法或环境错误为 2。

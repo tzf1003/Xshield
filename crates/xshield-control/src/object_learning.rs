@@ -25,7 +25,7 @@ use xshield_core::context::learning::{
 };
 use xshield_core::context::objects::KEY_MAX;
 use xshield_core::context::position::PositionState;
-use xshield_core::context::{IdentityRole, LearningSettings, ObjectMap, SiteSpec, Tier};
+use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec, Tier};
 use xshield_core::kind::Rules;
 use xshield_postgres::key_seal::KeySealer;
 use xshield_postgres::object_agent_store::{self as runs, CALLS_KEEP_DAYS, Trigger};
@@ -608,9 +608,7 @@ async fn judge_accepts(
 /// Whether the site declares a user identity the responses show, so its response units are users
 /// and not sessions. A paused entry shows none, as the judge reads it.
 pub(crate) fn identified_by(map: &ObjectMap) -> bool {
-    map.slots()
-        .iter()
-        .any(|slot| !slot.paused && slot.identity == Some(IdentityRole::User))
+    map.declares_user_identity()
 }
 
 /// Judges the tier of each declared response position from the response evidence of the window: the
@@ -1491,9 +1489,13 @@ pub(crate) mod pass_tests {
             return;
         };
         let now = crate::params::now_millis();
-        site_spec_store::create(&pool, &clinic_with_two_flows(serde_json::Value::Null), None)
-            .await
-            .expect("create the site");
+        site_spec_store::create(
+            &pool,
+            &clinic_with_two_flows(serde_json::json!({"auto_tighten": true})),
+            None,
+        )
+        .await
+        .expect("create the site");
         partitions(&pool, now).await;
         record_two_flows(&pool, now).await;
         learn_once(&pool, None, now).await;
@@ -1568,15 +1570,52 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    async fn without_learning_settings_a_split_is_not_written() {
+        let Some((admin, pool, name)) = scratch("auto_tighten_absent").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic_with_two_flows(serde_json::Value::Null), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        record_two_flows(&pool, now).await;
+        learn_once(&pool, None, now).await;
+        let record = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists");
+        // The default is off: the pass writes no version and the document position keeps its class.
+        assert_eq!(record.version, 1);
+        assert_eq!(
+            record.spec.objects().class_of("GET /document/{id} path[1]"),
+            Some("entity")
+        );
+        let history = site_spec_store::history(&pool, "clinic", None, 10)
+            .await
+            .expect("read the history");
+        assert!(
+            history
+                .iter()
+                .all(|entry| entry.change != Change::AutoTighten)
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
     async fn a_split_the_administrator_undid_is_not_planned_again() {
         let Some((admin, pool, name)) = scratch("undone_split").await else {
             return;
         };
         let now = crate::params::now_millis();
-        let created =
-            site_spec_store::create(&pool, &clinic_with_two_flows(serde_json::Value::Null), None)
-                .await
-                .expect("create the site");
+        // Tightening is on here, so the split the administrator undid is one the pass would make.
+        let created = site_spec_store::create(
+            &pool,
+            &clinic_with_two_flows(serde_json::json!({"auto_tighten": true})),
+            None,
+        )
+        .await
+        .expect("create the site");
         partitions(&pool, now).await;
         record_two_flows(&pool, now).await;
         // The administrator undid the split of the document position, so the event is handled.

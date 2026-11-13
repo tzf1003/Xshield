@@ -63,6 +63,7 @@
         "values_truncated": {"type": "boolean", "description": "请求没有被完整拆成请求值（请求体不是结构化数据，整段作为一个文本判定；或 multipart 含文件部分，文件内容不拆值）。"},
         "values": {"type": "array", "items": {"$ref": "#/$defs/trace_value"}, "description": "请求拆出的全部请求值，按提取顺序，包括惰性值。"},
         "session": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/trace_session"}]},
+        "unrecognized_credential": {"type": "boolean", "description": "请求带了凭证，而源站没有认过它（没有活会话）时为真，请求按没有凭证处理（docs/01 1.2）。没有凭证或凭证已被认可时不写。"},
         "cache_source": {"type": ["string", "null"], "description": "放行缓存命中时，复用的那次 Jev 放行所对应的请求 ID。"},
         "function": {"$ref": "#/$defs/trace_function"},
         "timing": {

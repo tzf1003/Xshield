@@ -1001,8 +1001,18 @@ fn pairs(out: &mut ExtractedRequest, prefix: &str, text: &str) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key, true);
         let value = percent_decode(value, true);
+        // An origin may take the blanks off the ends of a name, and then the field is also read under
+        // the trimmed name. Its value is read as it is: the blanks at the ends of a value stay
+        // (docs/01 section 1.3).
+        let trimmed = key.trim().to_owned();
+        let blanks = trimmed != key;
         push_unusual_key(out, &format!("{prefix}.{key}"), &key);
-        push(out, format!("{prefix}.{key}"), Some(key), value);
+        if blanks {
+            push(out, format!("{prefix}.{key}"), Some(key), value.clone());
+            push(out, format!("{prefix}.{trimmed}"), Some(trimmed), value);
+        } else {
+            push(out, format!("{prefix}.{key}"), Some(key), value);
+        }
     }
 }
 
@@ -2086,6 +2096,35 @@ mod tests {
         assert!(located(&compact).contains(&("body.user", "bob")));
         assert!(located(&compact).contains(&("body.sig", "abc==")));
         assert_eq!(located(&compact).len(), 2);
+    }
+
+    #[test]
+    fn a_form_name_with_blanks_at_its_ends_is_also_read_trimmed() {
+        // An origin may take the blanks off the ends of a name, and then the field is the trimmed one.
+        // It is read under its trimmed name as well, with or without a type. Its value is read as it
+        // is, so the blank at the end of the value stays.
+        for content_type in [None, Some("application/x-www-form-urlencoded")] {
+            let request = extract_request("/", None, content_type, b" patient_id=8 ");
+            assert!(!request.truncated);
+            let found = located(&request);
+            assert!(found.contains(&("body. patient_id", "8 ")));
+            assert!(found.contains(&("body.patient_id", "8 ")));
+            assert!(!found.contains(&("body.patient_id", "8")));
+            assert!(request.values.iter().any(|value| {
+                value.at == "body.patient_id" && value.key.as_deref() == Some("patient_id")
+            }));
+        }
+    }
+
+    #[test]
+    fn a_form_value_with_a_line_break_at_its_end_is_read_once_as_it_is() {
+        // A name without blanks at its ends is read once, and its value is read as it is, line break
+        // and all (docs/01 section 1.3).
+        for content_type in [None, Some("application/x-www-form-urlencoded")] {
+            let request = extract_request("/", None, content_type, b"note=hello%0D%0A");
+            assert!(!request.truncated);
+            assert_eq!(located(&request), [("body.note", "hello\r\n")]);
+        }
     }
 
     #[test]

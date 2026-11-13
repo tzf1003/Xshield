@@ -120,7 +120,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | C5 | 同一会话一分钟内超过调用上限 | 超出部分拒绝，回 429（`rate_limited`），不论 `on_jev_unavailable` |
 | C6 | JSON 凭证站点：用户 A 登录后第一次进入入口，再读取自己的购物车（登录响应里的 `bid`） | 放行，登录响应的值已记入会话；读取他人购物车仍拦截 |
 | C7 | 同一地址的两个用户先后登录，两份登录响应的值不同，各自的请求只带各自的凭证 | 各自会话只记入自己的登录值，互不串值 |
-| C8 | 请求带的凭证没有对上任何待绑定登录（伪造，或登录来自别处） | 不绑定，判定日志注明 `login_unmatched`，之后的判定与现在相同 |
+| C8 | 请求带的凭证没有对上任何待绑定登录（伪造，或登录来自别处） | 不绑定，判定日志注明 `login_unmatched`，`trace.unrecognized_credential` 为真，`session` 为空：入口请求按来源地址判定，非入口请求直接 401，不调用 Jev（见 [01](01-request-flow.md) 1.2、1.7） |
 | C9 | 同一来源地址的 11 个会话（站点设为每会话 2 次，合计 20 次）各调用 | 前 10 个会话各调用 2 次放行；第 11 个会话一次没用过也拒绝，回 429（`rate_limited`），Jev 没有被调用；另一个地址的会话不受影响 |
 | G1 | JSON 凭证站点（凭证为 `Authorization` 头）：登录响应里超过 128 字符的长令牌绑定会话；列表放行；登录响应和列表都没给过的患者 D 交 Jev | 登录放行；列表的 `login_request_id` 为该次登录，没有 `login_unbound`；患者 D 拦截，源站不收到请求 |
 | G2 | 同一站点：源站没发过的长令牌访问入口 | 放行到源站（源站答 401），判定记录的 `login_unbound` 为 `login_unmatched` |
@@ -133,6 +133,10 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | W4f | 同一站点：医生 A 在公共搜索里搜到医生 B 的患者后删除 | 拦截（尝试越权，交 Jev 判 DENY；本人档不放行别人的患者） |
 | W4g | 同一站点：医生 A 先在搜索里搜到自己的患者，删除被拦；之后它出现在自己的列表里，再删除 | 第一次拦截（尝试越权）；列表之后再删除放行 |
 | W6 | 站点声明身份，评论接口返回另一位医生的手机号与邮箱（[07.9.17](07-console-architecture.md#7917-属性越权告警w6)） | 放行；判定记录的 `trace.response.exposure` 记一条告警且不含值；读取本人资料、未声明身份的站点不告警 |
+| F1 | 编造的凭证（`SID=made-up`）访问非入口路径：`GET /api/patients/7001`，以及不带请求值的 `GET /metrics` | 401（`no_session`），源站没收到，不调用 Jev；判定记录的 `trace.unrecognized_credential` 为真，`session` 为空 |
+| F2 | 身份站点：编造的凭证在入口 `GET /login` 拿到源站 2xx（这个站点的身份位置在 `/api/home`，`/login` 的 2xx 没有声明用户），之后访问非入口 | 入口照常放行；随后的非入口请求仍 401。对照：没有身份位置的站点上，同一个入口的 2xx 认可凭证，之后的非入口请求转到源站 |
+| F3 | 身份站点：绕过网关直接向源站登录拿到 `SID`（模拟网关重启后的老会话），经网关先访问非入口，再访问 `GET /api/home`，再访问患者列表里的一个患者 | 第一个请求 401；`/api/home` 放行并声明身份；之后列表里的患者快速放行，按会话正常判定 |
+| F4 | JSON 凭证站点（`token.lab`）：`POST /api/token-login` 登录，带令牌的第一个请求落在非入口 | 绑定成功并放行，`trace.session.login_request_id` 指向登录，没有 `login_unbound` |
 | F5 | 医生登录后 `POST /api/admin/export`（功能表里的管理档功能） | 拦截，交 Jev 判为越权尝试（Jev 收到的 `function.attempt` 为 `over_privilege`），源站没收到；判定记录的 `trace.function` 带 `tier` 和 `attempt` |
 | F5b | 医生新建患者后 `POST /api/patients/{新编号}`，并带请求头 `X-HTTP-Method-Override: DELETE` | 拦截，按更严的 `DELETE /api/patients/{id}` 判为越权尝试；`trace.function.key` 仍是 `POST /api/patients/{id}` |
 | F6 | 管理员登录、访问首页后 `POST /api/admin/export` | 放行，快速放行，不交 Jev；`trace.function` 有 `tier`，没有 `attempt` |
@@ -143,14 +147,16 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | F11 | 不带凭证的 `DELETE /api/patients`（入口路径，基线里没有这个方法） | 交 Jev：`state.entry.matched` 为真，`function` 为 `{"known":false}`；Jev 放行，源站答 401 |
 | F12 | 没有功能表的站点：医生 `POST /api/admin/export`、`GET /metrics` | 都快速放行，不交 Jev，判定记录没有 `trace.function`（与 F5、F9 对照） |
 | F13 | 观察模式的功能表站点：医生 `POST /api/admin/export`、`GET /metrics` | 都转发（源站收到），记为本应拦截 |
+| F14 | 基线站点（开关为真，功能表有 `GET /api/patients/{id}`）的医生 `GET /api/patients/export-all`（路由词，不被 `{id}` 覆盖） | 交 Jev：`function.known` 为 `false`，Jev 判 DENY（假 Jev 的 `export-all` 规则），拦截，源站没收到；有效性回归 `p0-3-function-route-word` 的同一请求 |
+| F15 | 基线站点（有角色身份位置，开关为真）的管理员 `admin_root` 登录、访问首页后 `GET /metrics` | 放行（源站答 404），不交 Jev，判定记录没有 `trace.function`：管理员会话不判未知功能 |
 | F16 | 医生 `POST` 自己新建的患者，查询串排在 200 个值之后（第 231 个）是 `_method=DELETE` | 拦截，判定记录的 `trace.function.attempt` 为 `over_privilege`，源站不收到请求 |
 | F17 | 医生 `POST` 自己新建的患者，`multipart/form-data` 的文本字段 `_method` 为 `DELETE` | 同 F16 |
 | F18 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，网关按字段读到 `_method`） | 同 F16 |
 | F19 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x&_method=DELETE`（像表单，网关按字段读） | 同 F16 |
 | F20 | 医生 `POST` 自己新建的患者，表单类型，请求体 `{"a":"&_method=DELETE&b="}`（能解析成 JSON，网关按 JSON 读，源站可能按表单读到 `_method`） | 同 F16 |
 | F21 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x;%5Fm%65thod=DELETE`（带分号，按文字读，`_method` 的一个字母做了百分号编码，解码一遍后是 `_method`） | 同 F16 |
-| F23 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&%5Fm%65thod=DELETE`（带空格，网关按字段读到解码后的 `_method`） | 同 F16 |
 | F22 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x;_method=DELETE`（带分号，不像表单，网关按文字读） | 同 F16 |
+| F23 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&%5Fm%65thod=DELETE`（带空格，网关按字段读到解码后的 `_method`） | 同 F16 |
 
 靶场的站点把地址限额设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。会话合计的总额度按来源地址算（[02](02-jev.md) 2.5），所以 `limit.lab` 上的 C5、C9 各自从回环的另一个地址（127.0.0.2、127.0.0.3、127.0.0.4）发请求，其他场景的会话不占它们的总额度。
 
@@ -160,6 +166,8 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 - **真实 Jev**：用同一组场景加一批正常业务流量调用真实 Jev，记录误拦和漏拦。没有实测数据之前，不对外宣称准确率。
 
   `crates/xshield-judge/tests/live_jev.rs` 是这组真实调用的测试（默认忽略）：`XSHIELD_JEV_ROUTE=direct XSHIELD_JEV_API_KEY=... cargo test -p xshield-judge --test live_jev -- --ignored --nocapture`，每个场景打印一行判定、概率和耗时。
+
+  功能表的真实调用是其中的 `live_function_table`：75 例加 2 条管理员会话的请求（期望放行，不带 `function`），发给四个站点（两个 emr 站点、一个带管理员身份位置的站点、一个商店），每条核对网关送给 Jev 的 `function`。其中 5 例是已知做不到的（`KnownGap`，只打印，不算失败）。同一文件里的 `function_cases_reach_jev_as_intended` 不需要密钥，CI 里用桩模型运行：它只核对每条请求是否带着用例写明的 `function` 送到了模型面前，不核对模型的结论。
 - **代码质量**：沿用 `cargo fmt`、`cargo clippy`、`cargo test` 和 `scripts/verify_all.sh`。
 
 v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回归已随对应功能一起删除。
@@ -210,3 +218,33 @@ v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回�
 第三轮修复后重跑同一套件：`fast_allow` 386、`cached_allow` 78、`jev_allow` 45、`jev_deny` 21、`no_session` 18，Jev 调用 66 次，中位数 0.55 秒，p95 0.9 秒，无失败、无限流。10 个正常业务请求全部放行，其中结算、注册各步（含 `SecurityAnswers`）和 `/hacking-instructor-*` 都不再误判，没有一条误报。24 个预期拦截探针里 19 个会被拦：7 个注入（2 个搜索、5 个登录）、跨账号读购物车和 11 个未登录访问 `/ftp/`、`/metrics`、`/redirect` 等；其余 5 个中，2 个因 `/assets/*` 绕过没有记录，3 个注册探针（缺 passwordRepeat、`role` 批量赋值、空用户，后者源站也返回 400）判为请求本身无害，属于业务规则校验，不在 IDOR 和攻击检测的范围。不在 24 个探针清单里的 `would_block` 行全是遍历他人购物车（`/rest/basket/N`）以及目录浏览（`/ftp/`、`/infrastructure/`），都是套件自己的探针。
 
 第四轮里 `/assets/*` 绕过掉的两个探针是 `GET /assets/i18n/tlh_AA.json`（源站真实存在的 35 KB 克林贡语翻译文件）和 `GET /assets/public/images/uploads/<未编码的文件名>`（源站对它返回单页应用首页）。两者都只是读静态资源，不涉及对象引用或注入内容，所以按设计跳过判定和记录。随后用 `/assets/../rest/basket/1`、`/assets/%2e%2e/rest/basket/1`、`/assets/..%2frest/basket/1`、`/assets/public/../../ftp/acquisitions.md` 实测：点段、编码的点和斜杠都不命中绕过，照常判定（未登录的记 `no_session`）；`/assets/..;/rest/basket/1`（Tomcat 一类容器把 `..;` 当作点段）原来会命中绕过，现在路径里出现 `;` 一律不命中绕过和入口。
+
+### 4.5.5 功能表回归（2026-11-13，三遍共 222 次调用）
+
+用 TypeSafe `jev-1.13.0` 的直连端点、提示词 `jq_77be488d34440d84`，把 4.4 的 `live_function_table` 连跑三遍。每遍 77 条请求，74 条调用模型，3 条快速放行。调用耗时 170 到 520 毫秒，中位数 210 毫秒，没有超时，也没有限流。
+
+69 条必须符合预期的请求，三遍全部符合：
+
+- 管理档功能上的尝试越权 4 条（`POST /api/admin/export`、`GET /api/audit-logs`、`PUT /api/staff/{id}/role`、`GET /api/settings/clinic`）全部被拦，DENY 概率不低于 0.98。最后一条的路径名看不出是管理功能，靠的是功能表里的管理档。
+- 功能表里没有、名字显示管理或运维功能的 29 条（`/metrics`、`/actuator/env`、`/.env`、`/backup.sql`、`/ftp/` 等）全部被拦。其中 `DELETE /api/patients`（DENY 0.64 到 0.73）和 `POST /api/permissions/grant`（0.63 到 0.77）离平局较近。
+- 功能表里没有的普通接口 30 条全部放行，DENY 概率最高的是 `GET /api/wards/occupancy`（0.21 到 0.37）。
+- 不带 `function` 的对照 6 条不受新指令影响：没展示过的病人编号仍被拦（DENY 1.00），其余 5 条放行。
+
+6 条已知做不到的（`KnownGap`，只记录，不算失败）：
+
+| 请求 | 想要的结论 | 三遍的结果 | 原因 |
+|---|---|---|---|
+| `GET /api/patients/export-all` | 拦 | 三遍都放行，没有问模型 | 功能表里 `GET /api/patients/{id}` 的 `{id}` 盖住了 `export-all` 这个路由词，请求被当成已知功能快速放行 |
+| `GET /trace` | 拦 | 拦了一遍（DENY 0.44 到 0.50） | 接近平局 |
+| `GET /api/accounts/all` | 拦 | 拦了两遍（DENY 0.47 到 0.53） | 接近平局 |
+| 商店 `GET /api/Users` | 拦 | 三遍都放行（DENY 0.05 到 0.07） | 路径名看不出是全部用户的列表 |
+| 商店 `GET /redirect?to=https://example.org/x` | 拦 | 三遍都放行（`access` 答 ALLOW 约 0.90，`attack` 的 ATTACK 概率 0.41 到 0.45） | 功能表管不到开放重定向，要靠 `attack` 问题，而它在这条上接近平局 |
+| `GET /api/config/ui` | 放行 | 三遍都被拦（DENY 0.92 到 0.95） | 普通接口，路径里的 `config` 被当成配置功能。这是误拦 |
+
+另外两条只记录的请求：被认作管理员的会话请求功能表里没有的 `GET /api/admin/reports` 和 `GET /api/admin/users/export`，三遍都被拦（DENY 0.99 和 1.00）。这说明打开“未知功能交 Jev”之后，管理员用到没有进功能表的管理接口也会被拦，打开之前要先把这些接口加进功能表。
+
+样本很小，只说明这组请求上的表现，不构成准确率。
+
+合入 PR 209 之后提示词变为 `jq_d5df87392a92b44d`，2026-11-13 在合并后的代码上又跑了一遍（74 次调用，耗时 179 到 370 毫秒）：69 条必须符合预期的请求全部符合。`DELETE /api/patients`（DENY 0.64）和 `POST /api/permissions/grant`（0.62）仍离平局较近；普通接口里 DENY 最高的仍是 `GET /api/wards/occupancy`（0.29）。6 条已知做不到的结果与前三遍在同一范围：`GET /trace` 这一遍被拦（DENY 0.53），`GET /api/accounts/all` 放行（0.44），商店 `/redirect?to=` 放行（ATTACK 0.37），`GET /api/config/ui` 仍被误拦（0.92），其余两条放行。
+
+合入 T4b 之后（`{id}` 不覆盖路由词，管理员会话不判未知功能），2026-11-13 在 PR 231 的代码上又跑了一遍（73 次调用，耗时 183 到 385 毫秒）：72 条必须符合预期的请求全部符合。`GET /api/patients/export-all` 现在作为未知功能交给模型并被拦（DENY 1.00），不再属于已知做不到的；带已核验编号的 `GET /api/patients/{id}/export-pdf` 放行（DENY 0.10）。管理员会话的 `GET /api/admin/reports` 和 `GET /api/admin/users/export` 快速放行，不调用模型，上面“另外两条只记录的请求”一段说的情况不再出现。`DELETE /api/patients`（DENY 0.58）和 `POST /api/permissions/grant`（0.66）仍离平局较近。其余 5 条已知做不到的与此前在同一范围：`GET /trace`（0.49）、`GET /api/accounts/all`（0.47）、商店 `GET /api/Users`（0.06）和 `/redirect?to=`（ATTACK 0.40）放行，`GET /api/config/ui` 仍被误拦（0.91）。
