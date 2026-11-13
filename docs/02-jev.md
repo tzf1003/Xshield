@@ -64,7 +64,7 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 - 单次调用超时默认 2 秒，部署时可用 `XSHIELD_JEV_TIMEOUT_MS` 改默认值，站点可用 `advanced.jev_timeout_ms` 覆盖（[07.6](07-console-architecture.md#76-站点级判定参数advanced)）；超时按 `on_jev_unavailable` 处理。
 - 配置来源：控制台保存的 Jev 配置（[03.3.1](03-admin-config-audit.md#331-模型配置在控制台保存)）优先，没有时读环境变量。两者都没有时网关照常启动，判定记为 `JEV_NOT_CONFIGURED`，不发出调用。
 - 快速放行和放行缓存（[01.4](01-request-flow.md#14-判定步骤) 第 4、5 步）用来减少调用次数。
-- 每个会话每分钟最多 60 次 Jev 调用；没有会话的请求按来源 IP 每分钟最多 30 次，凭证还没有会话的请求（源站尚未认过这个凭证，见 [01](01-request-flow.md) 1.2）也算在来源 IP 上。超出的请求不发出调用，直接返回 429 拒绝，不论 `on_jev_unavailable` 如何设置，防止有人用大量不同请求消耗模型额度。两个上限站点可用 `advanced.session_calls_per_minute`、`advanced.address_calls_per_minute` 调整。
+- 每个会话每分钟最多 60 次 Jev 调用；没有会话的请求按来源 IP 每分钟最多 30 次，凭证还没有会话的请求（源站尚未认过这个凭证，见 [01](01-request-flow.md) 1.2）也算在来源 IP 上。超出的请求不发出调用，直接返回 429 拒绝，不论 `on_jev_unavailable` 如何设置，防止有人用大量不同请求消耗模型额度。两个上限站点可用 `advanced.session_calls_per_minute`、`advanced.address_calls_per_minute` 调整。额度按凭证和来源 IP 计，不按站点分开：同一个凭证在各站点的请求共用它的额度；学到的上下文则按站点分开（[01](01-request-flow.md) 1.2）。
 - 这些数值是起点，需要用真实站点的观察模式数据校准。控制台在每个参数旁显示最近 24 小时的耗时、超时和触发上限的次数，并在观察模式下给出调整建议。
 
 ## 2.6 数据外发

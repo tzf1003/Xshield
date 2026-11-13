@@ -157,7 +157,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `edge` | string | 网关实例名，取 `HOSTNAME`（Windows 取 `COMPUTERNAME`），缺省 `edge`（新增） |
 | `host` | string | `Host` 头，小写，最长 253（新增） |
 | `client` | string | 客户端 IP（新增）；保留 7 天，用于按来源排查攻击 |
-| `session` | string | 上下文标签：会话键 HMAC 的前 8 字节，16 位十六进制（原来 4 字节）；无上下文为空串 |
+| `session` | string | 上下文标签：站点与凭证派生的会话键 HMAC 的前 8 字节，16 位十六进制（原来 4 字节）；无上下文为空串 |
 | `context` | `session` \| `address` \| null | 上下文来自会话凭证，还是未登录入口请求的客户端地址（新增） |
 | `method` / `path` | string | 请求方法、路径（不含查询） |
 | `query` | string \| null | 查询串，按 [7.4.4](#744-脱敏与上限) 脱敏，最长 2 KiB（新增） |
