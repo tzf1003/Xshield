@@ -1955,6 +1955,9 @@ mod tests {
     /// What a call to the fake answers: the two choices, or a failure.
     type Reply = Result<(&'static str, &'static str), JevFailure>;
 
+    /// A rule that answers a call from its body, or returns None to leave that call to the other answers.
+    type Rule = fn(&str) -> Option<(&'static str, &'static str)>;
+
     #[derive(Clone)]
     struct FakeJev {
         calls: Arc<AtomicUsize>,
@@ -1963,6 +1966,8 @@ mod tests {
         reply: Arc<Mutex<Reply>>,
         /// Replies for the calls whose body contains a marker, looked up before `reply`.
         marked: Arc<Mutex<Vec<(&'static str, Reply)>>>,
+        /// Rules that answer the calls whose body they pick, looked up before `marked` and `reply`.
+        rules: Arc<Mutex<Vec<Rule>>>,
         in_flight: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
     }
@@ -1975,6 +1980,7 @@ mod tests {
                 timeouts: Arc::default(),
                 reply: Arc::new(Mutex::new(Ok(("ALLOW", "BENIGN")))),
                 marked: Arc::default(),
+                rules: Arc::default(),
                 in_flight: Arc::default(),
                 peak: Arc::default(),
             }
@@ -1987,6 +1993,10 @@ mod tests {
         }
         fn fail(&self, failure: JevFailure) {
             *self.reply.lock().unwrap() = Err(failure);
+        }
+        /// The calls whose body `rule` picks answer what the rule returns; it returns None for the others.
+        fn answer_by(&self, rule: Rule) {
+            self.rules.lock().unwrap().push(rule);
         }
         /// The calls whose body contains `marker` answer `access` and `attack`.
         fn answer_marked(&self, marker: &'static str, access: &'static str, attack: &'static str) {
@@ -2050,6 +2060,13 @@ mod tests {
             // The call waits here, so that calls made together are in flight together.
             tokio::task::yield_now().await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            let ruled: Option<Reply> = self
+                .rules
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|rule| rule(&text))
+                .map(Ok);
             let marked = self
                 .marked
                 .lock()
@@ -2057,7 +2074,7 @@ mod tests {
                 .iter()
                 .find(|(marker, _)| text.contains(marker))
                 .map(|(_, reply)| reply.clone());
-            let reply = match marked {
+            let reply = match ruled.or(marked) {
                 Some(reply) => reply,
                 None => self.reply.lock().unwrap().clone(),
             };
@@ -6872,6 +6889,81 @@ mod tests {
                 index + 1
             );
         }
+    }
+
+    /// The scripted model of the lab (tests/security-lab/fake_jev.py, plan 3.5): a batch whose values
+    /// carry no verified id at the path position is denied, since the id has no evidence in it.
+    fn id_unshown_in_a_batch(body: &str) -> Option<(&'static str, &'static str)> {
+        let document: serde_json::Value = serde_json::from_str(body).ok()?;
+        let carried = document["state"]["request"]["values"]
+            .as_array()?
+            .iter()
+            .any(|value| value["at"] == "path[2]" && value["verified"] == true);
+        (!carried).then_some(("DENY", "BENIGN"))
+    }
+
+    /// A note of 24 fields of 420 characters and one of 1,500 (docs/02 section 2.4), as a JSON object:
+    /// its state is cut into two batches or more.
+    fn long_note() -> String {
+        let fields: Vec<String> = (0..24)
+            .map(|index| format!(r#""field{index:02}":"{}""#, "正常的文字".repeat(84)))
+            .collect();
+        format!(
+            r#"{{{},"remark":"{}"}}"#,
+            fields.join(","),
+            "正常的文字".repeat(300)
+        )
+    }
+
+    #[tokio::test]
+    async fn every_batch_of_a_note_on_an_id_route_carries_the_verified_id() {
+        // The public search showed patient 7005 to the session, and a note takes that sighting. The note
+        // is cut into batches (docs/02 section 2.4) and each one names the id in its path, so each one
+        // must carry the id with its verification, not only the first.
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        fake.answer_by(id_unshown_in_a_batch);
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let body = long_note();
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get("/api/patients/7005/notes", None, Some("alice"), 1_000)
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(verdict.forward, "{:?}", verdict.record.decision_path);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        let batches = verdict
+            .record
+            .jev
+            .as_ref()
+            .and_then(|jev| jev.batches)
+            .unwrap_or(0);
+        assert!(batches >= 2, "{batches} batches");
+        assert_eq!(fake.calls(), usize::from(batches));
+    }
+
+    #[tokio::test]
+    async fn the_same_note_on_a_patient_the_session_was_never_shown_is_refused() {
+        let fake = FakeJev::new();
+        fake.answer("ALLOW", "BENIGN");
+        fake.answer_by(id_unshown_in_a_batch);
+        let judge = judge(&fake);
+        let site = tiers_site("high");
+        judge.observe(&site, &shown_by("/api/search", SEARCH_BODY));
+        let body = long_note();
+        let request = RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body: body.as_bytes(),
+            ..get("/api/patients/7006/notes", None, Some("alice"), 1_000)
+        };
+        let verdict = judge.judge(&site, &request).await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
     }
 
     #[tokio::test]

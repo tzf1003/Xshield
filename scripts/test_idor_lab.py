@@ -516,6 +516,45 @@ def b2(lab: Lab) -> None:
         Expect(403, "jev_deny", "blocked", False))
 
 
+def long_note_form() -> dict:
+    """A note of 24 fields of 420 characters and one of 1,500: its state is cut into two batches or more
+    (docs/02 section 2.4), and the request names a patient id in its path."""
+    fields = {f"field{index:02d}": "正常的文字" * 84 for index in range(24)}
+    fields["remark"] = "正常的文字" * 300
+    return fields
+
+
+@scenario("B3", "医生 A 在搜到的自己新建患者上提交两批以上的长备注：放行，每一批都带着路径里的编号")
+def b3(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    patient = lab.expect("doctor A creates a patient", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "分批备注靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    query = "/api/search?q=" + urllib.parse.quote("分批备注靶患者", safe="")
+    found = lab.expect("doctor A searches the patient by name", lab.send(
+        "emr.lab", "GET", query, cookie=cookie), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the search shows the patient to doctor A", patient in shown, f"ids {shown}")
+    noted = lab.expect("doctor A sends the long note on the patient", lab.send(
+        "emr.lab", "POST", f"/api/patients/{patient}/notes", cookie=cookie, json_body=long_note_form()),
+        Expect(201, "jev_allow", "allowed", True))
+    batches = ((noted.record or {}).get("jev") or {}).get("batches") or 0
+    lab.check("the note was judged in at least two batches", batches >= 2, f"batches {batches}")
+
+
+@scenario("B4", "同样的长备注发给医生 B 的患者，医生 A 没见过这个编号：拦截")
+def b4(lab: Lab) -> None:
+    cookie_b = lab.login("emr.lab", "doctor_b")
+    other = lab.expect("doctor B creates a patient", lab.send(
+        "emr.lab", "POST", "/api/patients", cookie=cookie_b, json_body={"name": "他人分批靶患者"}),
+        Expect(201, "jev_allow", "allowed", True)).reply.json().get("id", "MISSING")
+    cookie_a = lab.login("emr.lab", "doctor_a")
+    lab.expect("doctor A sends the same long note on doctor B's patient", lab.send(
+        "emr.lab", "POST", f"/api/patients/{other}/notes", cookie=cookie_a, json_body=long_note_form()),
+        Expect(403, "jev_deny", "blocked", False))
+    lab.origin_direct("B4 patient of doctor B", "GET", f"/api/patients/{other}", cookie_a)
+
+
 @scenario("C1", "Jev 超时或不可用，on_jev_unavailable=deny：拦截并注明原因")
 def c1(lab: Lab) -> None:
     cookie = lab.login("deny.lab", "doctor_a")

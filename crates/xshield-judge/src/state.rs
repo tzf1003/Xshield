@@ -332,18 +332,24 @@ fn function_json(function: StateFunction) -> Value {
     rendered
 }
 
-/// The `state` text of `values` at one trim. The text is the same bytes for the same input, and
-/// its values and path are redacted by the caller; `seen_as` and `recent` quote earlier requests,
-/// so the finished text is checked for the credential once more.
-fn render(input: &StateInput<'_>, values: &[StateValue], trim: Trim) -> String {
+/// The `state` text of `shell` and `values` at one trim, the shell first. The text is the same bytes
+/// for the same input, and its values and path are redacted by the caller; `seen_as` and `recent`
+/// quote earlier requests, so the finished text is checked for the credential once more.
+fn render(
+    input: &StateInput<'_>,
+    shell: &[StateValue],
+    values: &[StateValue],
+    trim: Trim,
+) -> String {
     let recent: Vec<Value> = input
         .recent
         .iter()
         .skip(input.recent.len().saturating_sub(trim.recent))
         .map(|item| json!({ "method": item.method, "path": item.path, "status": item.status }))
         .collect();
-    let rendered: Vec<Value> = values
+    let rendered: Vec<Value> = shell
         .iter()
+        .chain(values)
         .map(|value| render_value(input, value, trim.seen))
         .collect();
     let (entries, path) = if trim.compact {
@@ -372,10 +378,15 @@ fn render(input: &StateInput<'_>, values: &[StateValue], trim: Trim) -> String {
     crate::trace::scrubbed(&state, input.credential).into_owned()
 }
 
-/// Cuts `values` into runs, in order, that each fit one `state` at `trim`. The sizes are counted
-/// from the rendered values; [`fit`] checks each run again on the text it sends.
-fn pack<'a>(input: &StateInput<'_>, values: &'a [StateValue], trim: Trim) -> Vec<&'a [StateValue]> {
-    let base = render(input, &[], trim).len();
+/// Cuts `values` into runs, in order, that each fit one `state` at `trim` with the `shell` in front of
+/// them. The sizes are counted from the rendered values; [`fit`] checks each run again on the text it sends.
+fn pack<'a>(
+    input: &StateInput<'_>,
+    shell: &[StateValue],
+    values: &'a [StateValue],
+    trim: Trim,
+) -> Vec<&'a [StateValue]> {
+    let base = render(input, shell, &[], trim).len();
     let mut runs = Vec::new();
     let mut start = 0;
     let mut size = base;
@@ -405,11 +416,12 @@ struct Batch {
 /// that fails only when even that does not fit.
 fn fit(
     input: &StateInput<'_>,
+    shell: &[StateValue],
     run: &[StateValue],
     trim: Trim,
     level: u8,
 ) -> Result<Vec<Batch>, JudgeError> {
-    let text = render(input, run, trim);
+    let text = render(input, shell, run, trim);
     if text.len() <= STATE_BYTES_MAX {
         return Ok(vec![Batch {
             text,
@@ -418,7 +430,7 @@ fn fit(
         }]);
     }
     if run.len() <= 1 {
-        let text = render(input, run, COMPACT);
+        let text = render(input, shell, run, COMPACT);
         return if text.len() <= STATE_BYTES_MAX {
             Ok(vec![Batch {
                 text,
@@ -430,16 +442,16 @@ fn fit(
         };
     }
     let (left, right) = run.split_at(run.len() / 2);
-    let mut batches = fit(input, left, trim, level)?;
-    batches.extend(fit(input, right, trim, level)?);
+    let mut batches = fit(input, shell, left, trim, level)?;
+    batches.extend(fit(input, shell, right, trim, level)?);
     Ok(batches)
 }
 
 /// The trim every batch is cut at (docs/02 section 2.4): level 3, or level 4 when the request
-/// without its values is already more than half a state. Then each batch could carry only a few
-/// values, so the entries and the path are cut as well.
-fn batch_trim(input: &StateInput<'_>) -> (Trim, u8) {
-    if render(input, &[], BATCH).len() > STATE_BYTES_MAX / 2 {
+/// without its values, shell included, is already more than half a state. Then each batch could carry
+/// only a few values, so the entries and the path are cut as well.
+fn batch_trim(input: &StateInput<'_>, shell: &[StateValue]) -> (Trim, u8) {
+    if render(input, shell, &[], BATCH).len() > STATE_BYTES_MAX / 2 {
         (COMPACT, COMPACT_LEVEL)
     } else {
         (BATCH, BATCH_LEVEL)
@@ -460,6 +472,31 @@ fn send_class(value: &StateValue) -> u8 {
     }
 }
 
+/// Whether a value is a whole value at a path position. Such a value names the request's own object,
+/// so every batch carries it, as it carries the function (plan 3.5). A piece of a long path value is
+/// not: its pieces are sent once each, so that the shell stays as small as the path values.
+fn is_path_shell(value: &StateValue) -> bool {
+    value.part.is_none() && value.at.starts_with("path[")
+}
+
+/// Splits the values of a batched request into the shell that every batch carries and the rest
+/// (plan 3.5). The shell is the whole path values, in their order. When even at level 4 the shell
+/// takes more than half a state, there is no shell: the path values are sent with the others, as before.
+fn split_shell(
+    input: &StateInput<'_>,
+    values: Vec<StateValue>,
+) -> (Vec<StateValue>, Vec<StateValue>) {
+    let shell: Vec<StateValue> = values
+        .iter()
+        .filter(|value| is_path_shell(value))
+        .cloned()
+        .collect();
+    if render(input, &shell, &[], COMPACT).len() > STATE_BYTES_MAX / 2 {
+        return (Vec::new(), values);
+    }
+    values.into_iter().partition(is_path_shell)
+}
+
 /// The `state` texts of one request, and the values that did not fit in them (docs/02 section 2.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Batched {
@@ -472,9 +509,9 @@ pub struct Batched {
 /// Builds the `state` texts of one request, each with its trim level (docs/07 section 7.5.3).
 /// When every value fits in one text at levels 0 to 3, that is the only text, and it is the same
 /// as before batches existed. Otherwise the values are sent in batches, each one call to Jev. The
-/// batches share the entry, the session, the method, the path and the truncation flag; only their
-/// values differ. Values are taken in [`send_class`] order, and only the first
-/// [`JEV_BATCHES_MAX`] batches are kept.
+/// batches share the entry, the session, the method, the path, the truncation flag and the whole
+/// path values ([`is_path_shell`]); only their other values differ. Those are taken in [`send_class`]
+/// order, and only the first [`JEV_BATCHES_MAX`] batches are kept.
 ///
 /// # Errors
 /// [`JudgeError::StateTooLarge`] when a class 1 value does not fit in the kept batches, or a single
@@ -482,7 +519,7 @@ pub struct Batched {
 pub fn build_states(input: &StateInput<'_>) -> Result<Batched, JudgeError> {
     let values = state_values(input);
     for (level, trim) in WHOLE_TRIMS.into_iter().enumerate() {
-        let text = render(input, &values, trim);
+        let text = render(input, &[], &values, trim);
         if text.len() <= STATE_BYTES_MAX {
             let level = u8::try_from(level).unwrap_or(u8::MAX);
             return Ok(Batched {
@@ -491,16 +528,16 @@ pub fn build_states(input: &StateInput<'_>) -> Result<Batched, JudgeError> {
             });
         }
     }
-    let (trim, level) = batch_trim(input);
-    let mut ordered = values;
+    let (shell, mut ordered) = split_shell(input, values);
+    let (trim, level) = batch_trim(input, &shell);
     ordered.sort_by_key(send_class);
     let must = ordered
         .iter()
         .filter(|value| send_class(value) == 1)
         .count();
     let mut batches = Vec::new();
-    for run in pack(input, &ordered, trim) {
-        batches.extend(fit(input, run, trim, level)?);
+    for run in pack(input, &shell, &ordered, trim) {
+        batches.extend(fit(input, &shell, run, trim, level)?);
     }
     let sent: usize = batches
         .iter()
@@ -1373,6 +1410,196 @@ mod tests {
                 parse_response(&body).unwrap_err(),
                 JudgeError::ResponseInvalid
             );
+        }
+    }
+
+    /// The `values` of one `state` text, in order.
+    fn shown_values(state: &str) -> Vec<Value> {
+        let json: Value = serde_json::from_str(state).unwrap();
+        json["request"]["values"].as_array().unwrap().clone()
+    }
+
+    /// The four values of `/api/patients/7005/notes`: the words `api`, `patients` and `notes`, and the id
+    /// `7005` with one source, verified when `verified` is set.
+    fn patient_path_values(verified: bool) -> Vec<StateValue> {
+        let mut id = value(
+            "path[2]",
+            "7005",
+            None,
+            &["id @ GET /api/patients [patient] (tier public, reliability high)"],
+        );
+        id.verified = verified;
+        vec![
+            value("path[0]", "api", None, &[]),
+            value("path[1]", "patients", None, &[]),
+            id,
+            value("path[3]", "notes", None, &[]),
+        ]
+    }
+
+    /// The body of plan 3.5: 24 fields of 420 characters and one of 1,500, which is cut into four pieces.
+    fn note_values() -> Vec<StateValue> {
+        let text = "正常的文字".repeat(84);
+        let mut values: Vec<StateValue> = (0..24)
+            .map(|index| {
+                let key = format!("field{index:02}");
+                value(&format!("body.{key}"), &text, Some(key.as_str()), &[])
+            })
+            .collect();
+        values.push(value(
+            "body.remark",
+            &"正常的文字".repeat(300),
+            Some("remark"),
+            &[],
+        ));
+        values
+    }
+
+    /// A request on `path` with `values`, from a session with no history.
+    fn request_on(path: &str, values: Vec<StateValue>) -> StateInput<'_> {
+        StateInput {
+            path,
+            ..input(values, None, vec![])
+        }
+    }
+
+    #[test]
+    fn every_batch_opens_with_the_path_values_and_each_body_value_is_sent_once() {
+        // Plan 3.5: a request cut into batches names its id in the path, so each batch carries all the
+        // path values in order, the verified id with its mark, and each body value only once.
+        let mut values = patient_path_values(true);
+        values.extend(note_values());
+        let batched = build_states(&request_on("/api/patients/7005/notes", values)).unwrap();
+        assert!(
+            batched.states.len() >= 2,
+            "{} batches",
+            batched.states.len()
+        );
+        assert_eq!(batched.left_out, 0);
+        let mut body: Vec<(String, Option<String>)> = Vec::new();
+        for (state, _) in &batched.states {
+            let items = shown_values(state);
+            let (path, rest) = items.split_at(4);
+            let at: Vec<&str> = path.iter().filter_map(|item| item["at"].as_str()).collect();
+            assert_eq!(at, ["path[0]", "path[1]", "path[2]", "path[3]"]);
+            assert_eq!(path[2]["value"], "7005");
+            assert_eq!(path[2]["verified"], true);
+            body.extend(rest.iter().map(|item| {
+                (
+                    item["at"].to_string(),
+                    item["part"].as_str().map(str::to_owned),
+                )
+            }));
+        }
+        assert_eq!(
+            body.len(),
+            28,
+            "24 fields and the four pieces of the last one"
+        );
+        let mut distinct = body.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), body.len(), "a body value was sent twice");
+    }
+
+    #[test]
+    fn an_unverified_path_id_is_in_every_batch_without_a_verified_mark() {
+        let mut values = patient_path_values(false);
+        values.extend(note_values());
+        let batched = build_states(&request_on("/api/patients/7005/notes", values)).unwrap();
+        assert!(
+            batched.states.len() >= 2,
+            "{} batches",
+            batched.states.len()
+        );
+        for (state, _) in &batched.states {
+            let id = &shown_values(state)[2];
+            assert_eq!(id["at"], "path[2]");
+            assert_eq!(id["value"], "7005");
+            assert!(id.get("verified").is_none(), "{id}");
+        }
+    }
+
+    #[test]
+    fn the_path_values_are_in_no_count_and_left_out_counts_only_the_pieces_not_sent() {
+        // Plan 3.5: a query value of 300,000 characters needs more than the 16 batches kept. The path values
+        // are in every batch and in no count, so left_out is the number of pieces that were not sent.
+        let long = "a ".repeat(150_000);
+        let mut values = patient_path_values(true);
+        values.push(value("query.q", &long, Some("q"), &[]));
+        let batched = build_states(&request_on("/api/patients/7005/notes", values)).unwrap();
+        assert_eq!(batched.states.len(), JEV_BATCHES_MAX);
+        let pieces = 1
+            + (long.chars().count() - VALUE_PART_CHARS)
+                .div_ceil(VALUE_PART_CHARS - VALUE_PART_OVERLAP);
+        let sent: usize = batched
+            .states
+            .iter()
+            .map(|(state, _)| shown_values(state).len() - 4)
+            .sum();
+        assert_eq!(usize::try_from(batched.left_out).unwrap(), pieces - sent);
+    }
+
+    #[test]
+    fn a_long_path_id_is_sent_in_pieces_and_each_piece_once() {
+        // Plan 3.5: a path segment of 600 characters is cut into two pieces. A piece is not a path value
+        // and is not carried by every batch: each piece is sent once.
+        let long_id = "7".repeat(600);
+        let mut values = patient_path_values(false);
+        values[2] = value("path[2]", &long_id, None, &[]);
+        values.extend(note_values());
+        let path = format!("/api/patients/{long_id}/notes");
+        let batched = build_states(&request_on(&path, values)).unwrap();
+        assert!(
+            batched.states.len() >= 2,
+            "{} batches",
+            batched.states.len()
+        );
+        assert_eq!(batched.left_out, 0);
+        let mut parts: Vec<String> = Vec::new();
+        for (state, _) in &batched.states {
+            parts.extend(
+                shown_values(state)
+                    .iter()
+                    .filter(|item| item["at"] == "path[2]")
+                    .filter_map(|item| item["part"].as_str().map(str::to_owned)),
+            );
+        }
+        assert_eq!(parts, ["1/2", "2/2"]);
+    }
+
+    #[test]
+    fn path_values_too_big_for_every_batch_are_each_sent_once() {
+        // Plan 3.5, item 5: twelve path segments of 500 characters are too much for the shell at level 4,
+        // so the path values are not carried in every batch, and each is sent once as before.
+        let segments: Vec<String> = (0..12)
+            .map(|index| format!("{index:02}{}", "x".repeat(498)))
+            .collect();
+        let path = format!("/{}", segments.join("/"));
+        let mut values: Vec<StateValue> = segments
+            .iter()
+            .enumerate()
+            .map(|(index, text)| value(&format!("path[{index}]"), text, None, &[]))
+            .collect();
+        values.extend(note_values());
+        let batched = build_states(&request_on(&path, values)).unwrap();
+        assert!(
+            batched.states.len() >= 2,
+            "{} batches",
+            batched.states.len()
+        );
+        for index in 0..segments.len() {
+            let at = format!("path[{index}]");
+            let carried = batched
+                .states
+                .iter()
+                .filter(|(state, _)| {
+                    shown_values(state)
+                        .iter()
+                        .any(|item| item["at"] == at.as_str())
+                })
+                .count();
+            assert_eq!(carried, 1, "{at}");
         }
     }
 }
