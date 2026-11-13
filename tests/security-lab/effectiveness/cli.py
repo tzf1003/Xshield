@@ -43,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", metavar="{lab,site,score}")
 
-    lab = commands.add_parser("lab", help="靶场：训练段和防护段，快速模式（学习段、完整模式尚未实现）")
+    lab = commands.add_parser("lab", help="靶场：训练段、学习段和防护段，快速模式（完整模式尚未实现）")
     lab.add_argument("--mode", choices=("quick", "full"), default="quick")
     lab.add_argument("--jev", choices=("ideal", "live", "record", "replay"), default="ideal")
     lab.add_argument("--seed", type=int, default=20261113)

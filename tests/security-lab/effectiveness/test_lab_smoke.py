@@ -206,6 +206,10 @@ class RefusalEvidenceTests(unittest.TestCase):
         self.assertEqual(self.refused_units(served=False), set())
 
 
+# The small run does not start the learning stage (it needs PostgreSQL); the learning stage has its own tests.
+SKIPPED_LEARNING = {"status": "skip", "why": "测试里不跑学习段", "learned_path": None, "final_spec": None}
+
+
 @unittest.skipUnless(labkit.EDGE.exists(), "xshield-edge is not built (cargo build -p xshield-edge)")
 class SmallLabRunTests(unittest.TestCase):
     def test_a_small_run_scores_the_gateway_segment_and_says_the_learning_is_skipped(self):
@@ -214,14 +218,15 @@ class SmallLabRunTests(unittest.TestCase):
             # The probes name three doctors (A, B and C, see probes.py), so the small run needs three.
             options = lab.Options(seed=DEFAULT_SEED, users=3, logins=1,
                                   only=frozenset({"injection_sqli", "no_session"}), out=out)
-            code = lab.execute(options)
+            with mock.patch.object(lab, "_learning", return_value=SKIPPED_LEARNING):
+                code = lab.execute(options)
             report = (out / "report.md").read_text(encoding="utf-8")
             document = json.loads((out / "report.json").read_text(encoding="utf-8"))
             observations = contracts.load_observations(out / "observations.jsonl")
             decisions = contracts.load_decisions(out / "decisions.jsonl")
             truth = contracts.load_truth(out / "truth.json")
         self.assertEqual(code, 0)
-        self.assertIn("学习段：SKIP", report)
+        self.assertIn("学习段：SKIP（测试里不跑学习段）", report)
         self.assertEqual(document["meta"]["unsent"], {
             "attack": sum(probes.splits_path(row["text"]) for row in probes.quick_attacks()),
             "benign": sum(probes.splits_path(row["text"]) for row in probes.quick_benign()),
@@ -236,3 +241,24 @@ class SmallLabRunTests(unittest.TestCase):
         records = {record["request_id"] for record in decisions}
         self.assertTrue(all(row["request_id"] in records for row in observations))
         self.assertEqual(score(observations, decisions, truth=truth)["passed"], code == 0)
+
+
+class LearningStageSeamTests(unittest.TestCase):
+    """The seam between the lab and the learning stage: a module that cannot be imported is a skip with the reason,
+    and the learned site takes the saved configuration under its own name, origin and mode."""
+
+    def test_a_learning_module_that_cannot_be_imported_is_a_skip_with_the_reason(self):
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict("sys.modules", {"effectiveness.learning": None}):
+            result = lab._learning({}, {}, Path(folder))
+        self.assertEqual(result["status"], "skip")
+        self.assertIn("导入失败", result["why"])
+        self.assertIsNone(result["final_spec"])
+
+    def test_the_learned_site_keeps_the_saved_configuration_under_its_own_name_origin_and_mode(self):
+        saved = {"name": "clinic-none", "hosts": ["clinic-none.lab"], "origin": "http://127.0.0.1:1111",
+                 "mode": "observe", "on_jev_unavailable": "deny", "objects": {"classes": [{"id": "patient"}]}}
+        spec = lab._learned_spec(saved, mock.Mock(port=2222))
+        self.assertEqual((spec["name"], spec["hosts"], spec["origin"], spec["mode"]),
+                         ("clinic-learned", ["clinic-learned.lab"], "http://127.0.0.1:2222", "enforce"))
+        self.assertEqual(spec["objects"], saved["objects"])
+        self.assertEqual(saved["name"], "clinic-none")  # the saved document is copied, not changed

@@ -110,7 +110,7 @@ python3 scripts/measure_effectiveness.py                                        
 python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   # 只跑这些类别，不与基线比较
 ```
 
-- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）尚未实现，报告写明 SKIP 的原因。完整模式（批次 7）和 `--jev record|replay`（批次 9）以退出码 2 拒绝。
+- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）在有 PostgreSQL 时运行：它从训练段的判定学到对象表，作为 `clinic-learned` 站点进入防护段（只跑旅程和探针，回归用例仍只在各自的站点上跑）；没有运行时报告写明 SKIP 的原因。完整模式（批次 7）和 `--jev record|replay`（批次 9）以退出码 2 拒绝。
 - 防护段在 `clinic-none`、`clinic-truth`、带每会话 Jev 额度的 `clinic-truth-limit` 和观察模式的 `clinic-truth-observe` 上运行：攻击探针（`corpus/attacks.jsonl`）、良性文本（`corpus/benign.jsonl`）、良性旅程，以及 `effectiveness/regressions.py` 里方案 4.5 的回归用例。载荷含路径分隔符、放不进一个路径段的，不送到“路径段”注入点，报告里分别计数。
 - 理想模型是 `fake_jev.py` 传入攻击文本时的判定：攻击只看文本是否完整出现在路径或某个值里（两边先规范化）；访问规则与脚本相同，但值带 `object` 时，`seen_as` 里括号中类别不同的展示不算数。不传攻击文本时，判定与之前相同。
 - `--jev live` 改用真实 Jev，需要环境变量 `XSHIELD_JEV_ENDPOINT` 和 `XSHIELD_JEV_API_KEY`，缺一即以退出码 2 退出。密钥只从环境变量读取，不写入报告和日志。页码当处方号这条探针只在这个模式下发送，理想模型比较不了没有类别的位置。

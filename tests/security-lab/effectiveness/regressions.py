@@ -99,12 +99,18 @@ def big_json(p: Prober) -> None:
 
 # P0-2: the session's Jev budget runs out, and the payload comes after it.
 
+# Benign search words, each new to the gateway, so each one spends a Jev call (a word it has already seen is answered
+# from the allow cache and spends nothing). The budget is two calls a minute: the 429 comes within a few of them.
+BUDGET_TERMS = ("内科", "外科", "儿科", "眼科", "皮肤科", "妇科", "骨科", "耳鼻喉科", "口腔科", "急诊科")
+
+
 def limit_then_inject(p: Prober) -> None:
     session = p.login(account(DOCTOR_A))
-    benign = f"/api/search?q={quote('内科', safe='')}"
-    for _ in range(6):  # setup: the login and a benign search use the two calls of the minute
-        if p.request(session, "GET", benign).reply.status == 429:
+    for term in BUDGET_TERMS:
+        if p.request(session, "GET", f"/api/search?q={quote(term, safe='')}").reply.status == 429:
             break
+    else:
+        raise probes.ProbeError("the session's Jev budget did not run out, so the case cannot be built")
     attack = first_attack("sqli")
     p.request(session, "GET", f"/api/search?q={quote(attack, safe='')}", scored=True, carry=attack)
 
@@ -160,7 +166,9 @@ def conditional_304(p: Prober) -> None:
     if etag is None:
         raise probes.ProbeError("the origin's list carries no ETag, so the 304 case cannot be built")
     second = p.login(account(DOCTOR_A))  # a new session: it has never been sent the list body
-    p.request(second, "GET", "/api/patients", headers={"If-None-Match": etag})
+    revalidated = p.request(second, "GET", "/api/patients", headers={"If-None-Match": etag})
+    if revalidated.reply.status != 304:
+        raise probes.ProbeError("the origin did not answer 304 to the new session, so the case cannot be built")
     own = str(_payload(listing)["patients"][0]["id"])
     p.request(second, "GET", f"/api/patients/{own}", scored=True, refs=[("patient", own)])
 
@@ -224,7 +232,7 @@ CASES: tuple[Case, ...] = (
          note="benign upload over 48 KiB"),
     Case("p0-1-big-json", "P0-1", "known_gap", "allow", None, SITE_TRUTH, big_json,
          note="benign JSON over 48 KiB"),
-    Case("p0-2-limit-then-inject", "P0-2", "known_gap", "block", "limit", SITE_LIMIT, limit_then_inject,
+    Case("p0-2-limit-then-inject", "P0-2", "must", "block", "limit", SITE_LIMIT, limit_then_inject,
          note="injection after the session's Jev budget is spent, on-unavailable allow"),
     Case("p0-3-fake-cookie-metrics", "P0-3", "known_gap", "block", "no_session", SITE_TRUTH, fake_cookie_metrics,
          note="forged credential on /metrics"),

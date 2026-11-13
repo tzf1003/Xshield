@@ -39,8 +39,10 @@ def build_edge() -> None:
 
 
 def free_port() -> int:
+    """A free port on the address the gateway binds (0.0.0.0). Probing 127.0.0.1 can miss a port that a simulated
+    user's socket on 127.0.1.x still holds in TIME_WAIT; the gateway then fails to bind and stays silent."""
     with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
+        probe.bind(("0.0.0.0", 0))
         return probe.getsockname()[1]
 
 
