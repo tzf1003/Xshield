@@ -2207,6 +2207,19 @@ mod judgement_pass_tests {
         SiteSpec::from_json(&spec.to_string()).expect("test spec")
     }
 
+    /// The uses [`traffic_as`] writes: `count` uses of `method path` from `sessions` sessions named `prefix`,
+    /// each shown at `value_slot` and at `source` (the request and the response position of the value).
+    struct TrafficBatch<'a> {
+        now: i64,
+        count: i64,
+        sessions: i64,
+        prefix: &'a str,
+        method: &'a str,
+        path: &'a str,
+        value_slot: &'a str,
+        source: (&'a str, &'a str),
+    }
+
     /// `count` allowed uses of `method path` from `sessions` sessions, each a day apart in turn and
     /// each shown at `source` (the request and the response position of the value).
     #[allow(clippy::too_many_arguments)]
@@ -2221,25 +2234,34 @@ mod judgement_pass_tests {
         source: (&str, &str),
     ) {
         traffic_as(
-            pool, now, count, sessions, "s", method, path, value_slot, source,
+            pool,
+            TrafficBatch {
+                now,
+                count,
+                sessions,
+                prefix: "s",
+                method,
+                path,
+                value_slot,
+                source,
+            },
         )
         .await;
     }
 
     /// [`traffic`], with the sessions named `prefix` and their index. Two batches of one day that name their
     /// sessions alike vote once per session and day between them, so the second names its own.
-    #[allow(clippy::too_many_arguments)]
-    async fn traffic_as(
-        pool: &PgPool,
-        now: i64,
-        count: i64,
-        sessions: i64,
-        prefix: &str,
-        method: &str,
-        path: &str,
-        value_slot: &str,
-        source: (&str, &str),
-    ) {
+    async fn traffic_as(pool: &PgPool, batch: TrafficBatch<'_>) {
+        let TrafficBatch {
+            now,
+            count,
+            sessions,
+            prefix,
+            method,
+            path,
+            value_slot,
+            source,
+        } = batch;
         for index in 0..count {
             let at_millis = now - (1 + index / sessions) * DAY_MILLIS;
             let trace = json!({
@@ -2599,14 +2621,16 @@ mod judgement_pass_tests {
         .await;
         traffic_as(
             &pool,
-            now,
-            21,
-            21,
-            "t",
-            "DELETE",
-            "/api/patients/8",
-            DELETE,
-            ("GET /api/search", SEARCH),
+            TrafficBatch {
+                now,
+                count: 21,
+                sessions: 21,
+                prefix: "t",
+                method: "DELETE",
+                path: "/api/patients/8",
+                value_slot: DELETE,
+                source: ("GET /api/search", SEARCH),
+            },
         )
         .await;
         learn_once(&pool, None, now).await;
