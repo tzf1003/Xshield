@@ -290,7 +290,11 @@ export interface TraceResponse {
   issued_session: string | null;
   /** The response made the session pass an entry for the first time. */
   entry_passed: boolean;
-  /** The request was "would block" but forwarded, and its response was still learned (7.4.6). */
+  /**
+   * The request would be refused in enforce mode but was forwarded in observe mode. Its response is not
+   * read and teaches nothing (observed "skipped", docs/07 7.4.6). Records written before that change
+   * were read and did teach the session.
+   */
   after_would_block: boolean;
   /**
    * Response structure (field paths and types, never values). Present only when the route's
