@@ -360,8 +360,6 @@ pub struct ReadinessBody {
     pub jev_p95_ms: Option<i64>,
     /// Timeouts over calls, from 0 to 1; null when the window has no Jev call.
     pub jev_timeout_ratio: Option<f64>,
-    /// How often a value learned from a would-be refused request was cited later.
-    pub after_would_block_refs: i64,
     /// Requests of the window whose values were attempts to act on another user's object (docs/07
     /// section 7.4.7). Once the site enforces, the judge sends each to Jev, which is asked to refuse it.
     pub attempts: i64,
@@ -1420,8 +1418,6 @@ async fn readiness_of(
         i64::from(Effective::of(&record.spec).jev_timeout_ms),
         last.len() == 5 && last.iter().all(Option::is_some),
     );
-    let refs =
-        decision_stats::after_would_block_references(pool, name, now - hours * HOUR_MILLIS).await?;
     let attempts = decision_stats::attempt_requests(pool, name, now - hours * HOUR_MILLIS).await?;
     let ratio = (stats.calls > 0).then(|| stats.timeouts as f64 / stats.calls as f64);
     Ok(ReadinessBody {
@@ -1431,7 +1427,6 @@ async fn readiness_of(
         jev_health: health.as_str().to_owned(),
         jev_p95_ms: whole_ms(stats.p95_ms),
         jev_timeout_ratio: ratio,
-        after_would_block_refs: refs,
         attempts,
         on_jev_unavailable: record.spec.on_jev_unavailable(),
     })
