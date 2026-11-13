@@ -87,7 +87,13 @@ export function trimNote(trim: number): string | null {
   if (trim === 1) return "为满足 8 KiB 上限，最近访问从 10 条减到 3 条";
   if (trim === 2) return "为满足 8 KiB 上限，最近访问已全部去掉";
   if (trim === 3) return "为满足 8 KiB 上限，每个值只保留 1 个来源";
-  return "为满足 8 KiB 上限，长值只保留前 128 个字符";
+  return "为满足 8 KiB 上限，入口列表被去掉，路径截到 256 字符，这个值不列来源";
+}
+
+/** The note for a record whose state was cut into batches (docs/07 7.5.1 and 7.5.2); null for one call. */
+export function batchNote(batches: number | undefined, batch: number | undefined): string | null {
+  if (batches === undefined || batches < 2) return null;
+  return `第 ${batch ?? 1} 批，共 ${batches} 批：这次请求分成 ${batches} 批送判，本批的 state 只含其中一部分值，来源链接不可用`;
 }
 
 export type ValueHint = { tone: "ok" | "bad" | "warn" | "none"; text: string };

@@ -204,7 +204,7 @@ test("the state's recent list is the tail of the trace's list", () => {
 test("trim levels say what was dropped", () => {
   assert.equal(trimNote(0), null);
   assert.equal(trimNote(1), "为满足 8 KiB 上限，最近访问从 10 条减到 3 条");
-  assert.match(trimNote(4) ?? "", /128/);
+  assert.match(trimNote(4) ?? "", /入口列表被去掉，路径截到 256 字符/);
 });
 
 test("the reading of a value follows the verified and seen flags", () => {

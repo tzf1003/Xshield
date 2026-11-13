@@ -364,8 +364,12 @@ export interface JevRecord {
   route: JevRoute;
   /** Timeout this call actually used (site setting or deployment default). */
   timeout_ms: number;
-  /** Trim level 0 to 4 (7.5.3). */
+  /** Trim level 0 to 4 (7.5.3); with several batches, the level of the batch shown. */
   trim: number;
+  /** How many calls the state was cut into; present only when there were several (7.5.1). */
+  batches?: number;
+  /** The batch this record shows, from 1; present only together with `batches`. */
+  batch?: number;
   request_bytes: number | null;
   http_status: number | null;
   /** Raw provider response, at most 8 KiB; null on timeout and connection failure. */

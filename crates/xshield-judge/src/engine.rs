@@ -4,8 +4,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use futures_util::{StreamExt, stream};
 use xshield_core::context::{
     Conclusion, ContextKind, DecisionPath, DecisionRecord, FINGERPRINT_SLOTS_MAX,
     FINGERPRINTS_PER_SLOT_MAX, FieldCount, JevRecord, Mode, ObjectMap, ObservationSummary,
@@ -27,7 +29,7 @@ use crate::slots::{
     route_template, tier_name,
 };
 use crate::state::{
-    Answers, JudgeError, Prompt, StateInput, StateValue, build_state, conclude, parse_response,
+    Answers, JudgeError, Prompt, StateInput, StateValue, build_states, conclude, parse_response,
     request_body,
 };
 use crate::tiers;
@@ -46,6 +48,9 @@ const LIMITER_MAX: usize = 50_000;
 const RECENT_IN_STATE: usize = 10;
 /// Field names listed in a response summary (docs/07 section 7.4.3).
 const FIELDS_IN_SUMMARY: usize = 12;
+/// Calls to Jev in flight at once for one request whose state is cut into batches (docs/02
+/// section 2.5).
+pub const JEV_PARALLEL_MAX: usize = 8;
 
 /// One request as the gateway sees it, before forwarding.
 #[derive(Debug, Clone)]
@@ -628,6 +633,7 @@ impl<J: JevPort> Judge<J> {
                     verified,
                     at: value.at.clone(),
                     value: value.value.clone(),
+                    part: None,
                     key: value.key.clone(),
                     seen_as: ranked
                         .iter()
@@ -716,22 +722,106 @@ impl<J: JevPort> Judge<J> {
             credential: turn.secret,
             secret_words: tuning.secret_words,
         };
-        let (state, trim) = match build_state(&input) {
-            Ok(built) => built,
-            // A state that does not fit even trimmed is refused with 403 whatever the site allows.
-            // No call is made, and `on_jev_unavailable` does not apply (docs/02 section 2.4).
+        let states = match build_states(&input) {
+            Ok(states) => states,
+            // A state that does not fit even in batches is refused with 403 whatever the site
+            // allows. No call is made, and `on_jev_unavailable` does not apply (docs/02 section 2.4).
             Err(error @ JudgeError::StateTooLarge) => {
                 row.failure = Some(error.to_string());
                 return (Verdict::Unsafe(DecisionPath::JevUnavailable), row);
             }
             Err(error) => return unjudged(row, &error.to_string()),
         };
-        let body = request_body(&self.jev.model(), &state, &self.prompt);
-        row.trim = Some(trim);
-        row.request_bytes = u32::try_from(body.len()).ok();
-        row.state = Some(state);
+        self.call_batches(turn, &row, states).await
+    }
+
+    /// Makes one call per batch, at most [`JEV_PARALLEL_MAX`] at a time, and merges the answers
+    /// (docs/02 section 2.5). The verdict does not depend on the order the calls finish in. A
+    /// denial decides the request at once: the calls still waiting are dropped, not awaited.
+    async fn call_batches(
+        &self,
+        turn: &Turn<'_>,
+        template: &JevRecord,
+        states: Vec<(String, u8)>,
+    ) -> (Verdict, JevRecord) {
         let started = Instant::now();
-        let reply = self.jev.ask(body, tuning.jev_timeout).await;
+        let sent = AtomicU64::new(0);
+        let timeout = turn.tuning.jev_timeout;
+        let total = states.len();
+        let mut calls = stream::iter(states.into_iter().enumerate())
+            .map(|(index, (state, trim))| {
+                self.call_batch(index, state, trim, template, timeout, &sent)
+            })
+            .buffer_unordered(JEV_PARALLEL_MAX);
+        let mut answers = Vec::with_capacity(total);
+        while let Some(answer) = calls.next().await {
+            let denied = answer.kind == Kind::Deny;
+            answers.push(answer);
+            if denied {
+                break;
+            }
+        }
+        drop(calls);
+        let Some(position) = decisive(&answers) else {
+            return unjudged(template.clone(), "JEV_UNKNOWN");
+        };
+        let usage = if total > 1 {
+            merged_usage(&answers, position)
+        } else {
+            None
+        };
+        let BatchAnswer {
+            index,
+            kind,
+            mut row,
+        } = answers.swap_remove(position);
+        row.request_bytes = u32::try_from(sent.load(Ordering::Relaxed)).ok();
+        row.millis = elapsed_millis(started);
+        if total > 1 {
+            row.batches = u16::try_from(total).ok();
+            row.batch = u16::try_from(index + 1).ok();
+            row.usage = usage;
+        }
+        match kind {
+            Kind::Allow => {
+                self.remember_allow(turn);
+                (Verdict::Safe(DecisionPath::JevAllow), row)
+            }
+            Kind::Deny => (Verdict::Unsafe(DecisionPath::JevDeny), row),
+            Kind::Unknown | Kind::Failed => {
+                let code = row
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "JEV_UNKNOWN".to_owned());
+                unjudged(row, &code)
+            }
+        }
+    }
+
+    /// One call for one batch: its state goes to Jev, and the reply is read into the batch's
+    /// record, which fills the same fields a single call always filled.
+    async fn call_batch(
+        &self,
+        index: usize,
+        state: String,
+        trim: u8,
+        template: &JevRecord,
+        timeout: Duration,
+        sent: &AtomicU64,
+    ) -> BatchAnswer {
+        let body = request_body(&self.jev.model(), &state, &self.prompt);
+        let mut row = JevRecord {
+            trim: Some(trim),
+            state: Some(state),
+            request_bytes: u32::try_from(body.len()).ok(),
+            ..template.clone()
+        };
+        sent.fetch_add(
+            u64::try_from(body.len()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        let started = Instant::now();
+        let reply = self.jev.ask(body, timeout).await;
         row.millis = elapsed_millis(started);
         let reply = match reply {
             Ok(reply) => reply,
@@ -740,14 +830,26 @@ impl<J: JevPort> Judge<J> {
                     row.http_status = Some(status);
                     row.response = Some(lenient_text(body));
                 }
-                return unjudged(row, failure_code(&failure));
+                row.failure = Some(failure_code(&failure).to_owned());
+                return BatchAnswer {
+                    index,
+                    kind: Kind::Failed,
+                    row,
+                };
             }
         };
         row.http_status = Some(200);
         row.response = Some(lenient_text(&reply));
         let answers = match parse_response(&reply) {
             Ok(answers) => answers,
-            Err(error) => return unjudged(row, &error.to_string()),
+            Err(error) => {
+                row.failure = Some(error.to_string());
+                return BatchAnswer {
+                    index,
+                    kind: Kind::Failed,
+                    row,
+                };
+            }
         };
         let conclusion = conclude(&answers);
         let Answers {
@@ -759,15 +861,15 @@ impl<J: JevPort> Judge<J> {
         row.attack = attack;
         row.usage = usage;
         row.conclusion = Some(conclusion);
-        let verdict = match conclusion {
-            Conclusion::Allow => {
-                self.remember_allow(turn);
-                Verdict::Safe(DecisionPath::JevAllow)
+        let kind = match conclusion {
+            Conclusion::Allow => Kind::Allow,
+            Conclusion::Deny => Kind::Deny,
+            Conclusion::Unknown => {
+                row.failure = Some("JEV_UNKNOWN".to_owned());
+                Kind::Unknown
             }
-            Conclusion::Deny => Verdict::Unsafe(DecisionPath::JevDeny),
-            Conclusion::Unknown => return unjudged(row, "JEV_UNKNOWN"),
         };
-        (verdict, row)
+        BatchAnswer { index, kind, row }
     }
 
     /// Keeps Jev's allow for the cache window under the session that asked (docs/01 section 1.4
@@ -1379,6 +1481,102 @@ fn unjudged(mut row: JevRecord, code: &str) -> (Verdict, JevRecord) {
     (Verdict::Unjudged(DecisionPath::JevUnavailable), row)
 }
 
+/// How one batch's call ended, for the merge in [`Judge::call_batches`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Jev allowed the batch: `access` is ALLOW and `attack` is BENIGN.
+    Allow,
+    /// Jev denied the batch: `access` is DENY or `attack` is ATTACK.
+    Deny,
+    /// The top option of a question is UNKNOWN, or two options tie.
+    Unknown,
+    /// No usable answer: a timeout, a transport or HTTP failure, or an invalid reply.
+    Failed,
+}
+
+/// What one batch's call came to: the batch's place in the request, how the call ended, and the
+/// record of the call.
+struct BatchAnswer {
+    index: usize,
+    kind: Kind,
+    row: JevRecord,
+}
+
+impl BatchAnswer {
+    /// The weaker of the two probabilities an allow rests on: `min(P(ALLOW), P(BENIGN))`.
+    fn assurance(&self) -> f64 {
+        let access = self.row.access.get("ALLOW").copied().unwrap_or(0.0);
+        let attack = self.row.attack.get("BENIGN").copied().unwrap_or(0.0);
+        access.min(attack)
+    }
+}
+
+/// The position in `answers` of the batch whose answer decides the request (docs/02 section 2.5).
+/// A denial decides first, then a failure, then an UNKNOWN; among several of one kind the lowest
+/// batch wins. When every batch allows, the least assured one decides, the lowest batch on a tie.
+fn decisive(answers: &[BatchAnswer]) -> Option<usize> {
+    let first = |kind: Kind| {
+        answers
+            .iter()
+            .enumerate()
+            .filter(|(_, answer)| answer.kind == kind)
+            .min_by_key(|(_, answer)| answer.index)
+            .map(|(position, _)| position)
+    };
+    first(Kind::Deny)
+        .or_else(|| first(Kind::Failed))
+        .or_else(|| first(Kind::Unknown))
+        .or_else(|| {
+            answers
+                .iter()
+                .enumerate()
+                .filter(|(_, answer)| answer.kind == Kind::Allow)
+                .min_by(|(_, left), (_, right)| {
+                    left.assurance()
+                        .total_cmp(&right.assurance())
+                        .then(left.index.cmp(&right.index))
+                })
+                .map(|(position, _)| position)
+        })
+}
+
+/// The usage of several calls: each top-level number is added up by name, and every other field
+/// is the one the decisive batch reports (docs/02 section 2.5).
+fn merged_usage(answers: &[BatchAnswer], decisive: usize) -> Option<serde_json::Value> {
+    let shown = answers.get(decisive)?.row.usage.as_ref()?.as_object()?;
+    let mut merged = serde_json::Map::new();
+    for usage in answers
+        .iter()
+        .filter_map(|answer| answer.row.usage.as_ref()?.as_object())
+    {
+        for (name, amount) in usage {
+            let Some(number) = amount.as_number() else {
+                continue;
+            };
+            let total = match merged.get(name).and_then(serde_json::Value::as_number) {
+                Some(sum) => add_numbers(sum, number),
+                None => number.clone(),
+            };
+            merged.insert(name.clone(), serde_json::Value::Number(total));
+        }
+    }
+    for (name, value) in shown {
+        if !value.is_number() {
+            merged.insert(name.clone(), value.clone());
+        }
+    }
+    Some(serde_json::Value::Object(merged))
+}
+
+/// The sum of two JSON numbers: exact for whole numbers, floating point otherwise.
+fn add_numbers(left: &serde_json::Number, right: &serde_json::Number) -> serde_json::Number {
+    if let (Some(a), Some(b)) = (left.as_u64(), right.as_u64()) {
+        return serde_json::Number::from(a.saturating_add(b));
+    }
+    let sum = left.as_f64().unwrap_or(0.0) + right.as_f64().unwrap_or(0.0);
+    serde_json::Number::from_f64(sum).unwrap_or_else(|| left.clone())
+}
+
 /// The status and the start of the reply a refused call got back, if any.
 fn failure_reply(failure: &JevFailure) -> Option<(u16, &[u8])> {
     match failure {
@@ -1577,12 +1775,19 @@ mod tests {
     /// The gateway id of the origin responses the tests observe.
     const RID: &str = "req_00000000000000000000000000000001";
 
+    /// What a call to the fake answers: the two choices, or a failure.
+    type Reply = Result<(&'static str, &'static str), JevFailure>;
+
     #[derive(Clone)]
     struct FakeJev {
         calls: Arc<AtomicUsize>,
         sent: Arc<Mutex<Vec<String>>>,
         timeouts: Arc<Mutex<Vec<Duration>>>,
-        reply: Arc<Mutex<Result<(&'static str, &'static str), JevFailure>>>,
+        reply: Arc<Mutex<Reply>>,
+        /// Replies for the calls whose body contains a marker, looked up before `reply`.
+        marked: Arc<Mutex<Vec<(&'static str, Reply)>>>,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
     }
 
     impl FakeJev {
@@ -1592,6 +1797,9 @@ mod tests {
                 sent: Arc::default(),
                 timeouts: Arc::default(),
                 reply: Arc::new(Mutex::new(Ok(("ALLOW", "BENIGN")))),
+                marked: Arc::default(),
+                in_flight: Arc::default(),
+                peak: Arc::default(),
             }
         }
         fn timeouts(&self) -> Vec<Duration> {
@@ -1603,8 +1811,27 @@ mod tests {
         fn fail(&self, failure: JevFailure) {
             *self.reply.lock().unwrap() = Err(failure);
         }
+        /// The calls whose body contains `marker` answer `access` and `attack`.
+        fn answer_marked(&self, marker: &'static str, access: &'static str, attack: &'static str) {
+            self.marked
+                .lock()
+                .unwrap()
+                .push((marker, Ok((access, attack))));
+        }
+        /// The calls whose body contains `marker` fail with `failure`.
+        fn fail_marked(&self, marker: &'static str, failure: JevFailure) {
+            self.marked.lock().unwrap().push((marker, Err(failure)));
+        }
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+        /// The bodies sent, in arrival order.
+        fn sent(&self) -> Vec<String> {
+            self.sent.lock().unwrap().clone()
+        }
+        /// The most calls that were in flight at the same time.
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
         }
     }
 
@@ -1639,11 +1866,25 @@ mod tests {
         async fn ask(&self, body: Vec<u8>, timeout: Duration) -> Result<Vec<u8>, JevFailure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.timeouts.lock().unwrap().push(timeout);
-            self.sent
+            let text = String::from_utf8(body).unwrap();
+            self.sent.lock().unwrap().push(text.clone());
+            let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(in_flight, Ordering::SeqCst);
+            // The call waits here, so that calls made together are in flight together.
+            tokio::task::yield_now().await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            let marked = self
+                .marked
                 .lock()
                 .unwrap()
-                .push(String::from_utf8(body).unwrap());
-            let (access, attack) = self.reply.lock().unwrap().clone()?;
+                .iter()
+                .find(|(marker, _)| text.contains(marker))
+                .map(|(_, reply)| reply.clone());
+            let reply = match marked {
+                Some(reply) => reply,
+                None => self.reply.lock().unwrap().clone(),
+            };
+            let (access, attack) = reply?;
             Ok(json!({"model":"fake","answers":{
                 "access":{"type":"choice","choice":access,"probabilities":probabilities(crate::state::ACCESS_OPTIONS, access)},
                 "attack":{"type":"choice","choice":attack,"probabilities":probabilities(crate::state::ATTACK_OPTIONS, attack)},
@@ -3276,39 +3517,232 @@ mod tests {
         format!("{{{},\"done\":\"1\"}}", answers.join(","))
     }
 
+    /// A survey request of `alice`, sent with a JSON body.
+    fn survey_request(body: &[u8], now_ms: u64) -> RequestFacts<'_> {
+        RequestFacts {
+            method: "POST",
+            content_type: Some("application/json"),
+            body,
+            ..get("/api/survey", None, Some("alice"), now_ms)
+        }
+    }
+
+    /// [`oversized_survey`] with its last answer set to `last`, so a marker lands in the last batch.
+    fn survey_ending_with(last: &str) -> String {
+        oversized_survey().replace("\"done\":\"1\"", &format!("\"done\":\"{last}\""))
+    }
+
     #[tokio::test]
-    async fn a_state_that_cannot_fit_is_refused_with_403_whatever_the_site_allows() {
+    async fn a_large_survey_is_judged_in_batches_and_allowed_when_every_batch_allows() {
         let fake = FakeJev::new();
         let judge = judge(&fake);
         let body = oversized_survey();
-        let survey = RequestFacts {
-            method: "POST",
-            content_type: Some("application/json"),
-            body: body.as_bytes(),
-            ..get("/api/survey", None, Some("alice"), 1_000)
-        };
         let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
-        let verdict = judge.judge(&lenient, &survey).await;
+        let verdict = judge
+            .judge(&lenient, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevAllow);
+        assert!(fake.calls() >= 2, "{} calls", fake.calls());
+        let jev = verdict.record.jev.as_ref().unwrap();
+        assert_eq!(jev.batches, u16::try_from(fake.calls()).ok());
+        assert_eq!(
+            jev.batch,
+            Some(1),
+            "all allow: the first batch is the least assured"
+        );
+        assert!(jev.failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_large_request_counts_once_against_the_call_limit() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let limited = site(r#","mode":"enforce","advanced":{"session_calls_per_minute":1}"#);
+        confirm(&judge, &limited, "alice");
+        let body = oversized_survey();
+        let first = judge
+            .judge(&limited, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(first.forward);
+        assert!(fake.calls() >= 2);
+        let next = judge
+            .judge(
+                &limited,
+                &get("/api/search", Some("q=next1x"), Some("alice"), 1_500),
+            )
+            .await;
+        assert!(!next.forward);
+        assert_eq!(next.refuse_status, 429);
+        assert_eq!(next.record.trace.refused.as_deref(), Some("rate_limited"));
+    }
+
+    #[tokio::test]
+    async fn an_injection_past_the_first_piece_of_a_long_value_is_sent_and_refused() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let query = format!("comment={}%27%20OR%201%3D1--", "A".repeat(600));
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/comments", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        assert!(fake.sent().iter().any(|body| body.contains("OR 1=1")));
+    }
+
+    #[tokio::test]
+    async fn one_denying_batch_refuses_the_request_and_the_record_shows_that_batch() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("DENY_HERE", "DENY", "BENIGN");
+        let enforced = site(r#","mode":"enforce""#);
+        let body = survey_ending_with("DENY_HERE");
+        let verdict = judge
+            .judge(&enforced, &survey_request(body.as_bytes(), 1_000))
+            .await;
         assert!(!verdict.forward);
         assert_eq!(verdict.refuse_status, 403);
-        assert_eq!(verdict.record.outcome, Outcome::Blocked);
-        assert_eq!(verdict.record.decision_path, DecisionPath::JevUnavailable);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let jev = verdict.record.jev.as_ref().unwrap();
+        let batches = jev.batches.unwrap();
+        assert!(batches >= 2);
         assert_eq!(
-            verdict
-                .record
-                .jev
-                .as_ref()
-                .and_then(|jev| jev.failure.as_deref()),
-            Some("JEV_STATE_TOO_LARGE")
+            jev.batch,
+            Some(batches),
+            "the last batch holds the denied value"
         );
-        assert_eq!(fake.calls(), 0);
-        // Observe mode forwards the same request and notes that it would have been refused.
-        let watched = judge
-            .judge(&site(r#","on_jev_unavailable":"allow""#), &survey)
+        assert!(
+            jev.state
+                .as_deref()
+                .unwrap_or_default()
+                .contains("DENY_HERE")
+        );
+        assert_eq!(jev.conclusion, Some(Conclusion::Deny));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_batch_follows_the_site_policy_and_a_denial_in_another_batch_wins() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.fail_marked("TIMEOUT_HERE", JevFailure::Timeout);
+        let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
+        let strict = site(r#","mode":"enforce""#);
+        let body = survey_ending_with("TIMEOUT_HERE");
+        let survey = survey_request(body.as_bytes(), 1_000);
+        let forwarded = judge.judge(&lenient, &survey).await;
+        assert!(forwarded.forward);
+        assert_eq!(forwarded.record.outcome, Outcome::Unjudged);
+        let jev = forwarded.record.jev.as_ref().unwrap();
+        assert_eq!(jev.failure.as_deref(), Some("JEV_TIMEOUT"));
+        assert_eq!(
+            jev.batch, jev.batches,
+            "the timed out batch is the last one"
+        );
+        let refused = judge.judge(&strict, &survey).await;
+        assert!(!refused.forward);
+        assert_eq!(refused.refuse_status, 403);
+        // A denial in the first batch wins over the timeout in the last one.
+        fake.answer_marked("DENY_HERE", "DENY", "BENIGN");
+        let both = oversized_survey()
+            .replace("\"done\":\"1\"", "\"done\":\"TIMEOUT_HERE\"")
+            .replace("number 0 typed", "DENY_HERE number 0 typed");
+        let verdict = judge
+            .judge(&lenient, &survey_request(both.as_bytes(), 2_000))
             .await;
-        assert!(watched.forward);
-        assert_eq!(watched.record.outcome, Outcome::WouldBlock);
-        assert_eq!(fake.calls(), 0);
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        let shown = verdict.record.jev.as_ref().unwrap();
+        assert!(
+            shown
+                .state
+                .as_deref()
+                .unwrap_or_default()
+                .contains("DENY_HERE")
+        );
+    }
+
+    #[tokio::test]
+    async fn batches_are_asked_together_and_never_more_than_eight_at_once() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        // Words are inert and never reach the state, so each value has spaces: 2000 characters.
+        // Twenty-five of them stay under the 64 KiB the body is parsed up to.
+        let fields: Vec<String> = (0..25)
+            .map(|n| format!("\"f{n}\":\"{}\"", "x ".repeat(1_000)))
+            .collect();
+        let body = format!("{{{}}}", fields.join(","));
+        let verdict = judge
+            .judge(&enforced, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(verdict.forward);
+        let batches = usize::from(verdict.record.jev.as_ref().unwrap().batches.unwrap());
+        assert!(batches > JEV_PARALLEL_MAX, "{batches} batches");
+        assert_eq!(fake.calls(), batches);
+        assert_eq!(fake.peak(), JEV_PARALLEL_MAX);
+    }
+
+    #[tokio::test]
+    async fn a_request_allowed_in_batches_is_served_from_the_cache_next_time() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let body = oversized_survey();
+        let survey = survey_request(body.as_bytes(), 1_000);
+        assert!(judge.judge(&enforced, &survey).await.forward);
+        let calls = fake.calls();
+        assert!(calls >= 2);
+        let again = judge.judge(&enforced, &survey).await;
+        assert!(again.forward);
+        assert_eq!(again.record.decision_path, DecisionPath::CachedAllow);
+        assert_eq!(fake.calls(), calls);
+    }
+
+    #[tokio::test]
+    async fn the_largest_body_of_distinct_short_numbers_is_judged_in_batches() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        let numbers: Vec<String> = (0..8_000).map(|n| n.to_string()).collect();
+        let body = format!("[{}]", numbers.join(","));
+        assert!(body.len() <= 48 * 1024, "{} bytes", body.len());
+        let verdict = judge
+            .judge(&enforced, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(verdict.forward, "{:?}", verdict.record.decision_path);
+        let batches = verdict
+            .record
+            .jev
+            .as_ref()
+            .and_then(|jev| jev.batches)
+            .map_or(1, usize::from);
+        assert_eq!(fake.calls(), batches);
+        // The extraction takes 200 values of this body, and 200 short values fill two batches.
+        assert_eq!(batches, 2);
+    }
+
+    #[tokio::test]
+    async fn a_single_call_record_has_no_batch_fields() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/search", Some("q=one1x"), Some("alice"), 1_000),
+            )
+            .await;
+        assert_eq!(fake.calls(), 1);
+        let json = serde_json::to_value(verdict.record.jev.as_ref().unwrap()).unwrap();
+        assert!(json.get("batches").is_none() && json.get("batch").is_none());
     }
 
     #[tokio::test]

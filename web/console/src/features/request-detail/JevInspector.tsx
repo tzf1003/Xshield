@@ -10,6 +10,7 @@ import { useJevStatus, usePrompt } from "../../api/queries.ts";
 import type { JevPrompt, RequestDetail } from "../../api/types.ts";
 import { useSetSearch } from "../../app/scope.ts";
 import type { JevDoc, JevView } from "../../app/search-schema.ts";
+import { batchNote } from "../../lib/align.ts";
 import { isSiteName } from "../../lib/ids.ts";
 import { Card, Empty, Notice } from "../../ui/Page.tsx";
 import {
@@ -54,7 +55,10 @@ export function JevInspector({ detail, requestId, view, doc, hl }: Props) {
 
   const parsed: ParsedState = parseState(jev.state);
   const state = parsed.status === "ok" ? parsed.state : null;
-  const alignment: Alignment | null = state === null ? null : alignState(state, trace);
+  // A state cut into batches holds only one batch's values, so no source link can be checked against the trace.
+  const alignment: Alignment | null =
+    state === null ? null : (jev.batches ?? 1) > 1 ? { aligned: false } : alignState(state, trace);
+  const batched = batchNote(jev.batches, jev.batch);
   const rows = sentRows(trace, state, alignment);
   const session = sessionView(trace, state, alignment);
   const body =
@@ -122,6 +126,8 @@ export function JevInspector({ detail, requestId, view, doc, hl }: Props) {
         {jev.state !== null ? <CopyAction text={jev.state} label="复制 state" /> : null}
         {bodyText !== null ? <CopyAction text={bodyText} label="复制完整请求体" /> : null}
       </div>
+
+      {batched !== null ? <Notice tone="info">{batched}</Notice> : null}
 
       {stateNote !== null ? (
         <Notice tone="info">
@@ -192,7 +198,7 @@ function bodyNoteOf(parsed: ParsedState, prompt: UseQueryResult<JevPrompt, Error
 function noStateText(failure: string | null): string {
   if (failure === "JEV_CALL_LIMIT") return "调用次数达到上限，这次没有发出调用，所以没有 state。";
   if (failure === "JEV_STATE_TOO_LARGE")
-    return "上下文超过 8 KiB 且裁剪后仍然过大，这次没有发出调用，所以没有 state。";
+    return "上下文分批后仍有单个值超过 8 KiB，这次没有发出调用，所以没有 state。";
   return "这次调用没有 state。";
 }
 

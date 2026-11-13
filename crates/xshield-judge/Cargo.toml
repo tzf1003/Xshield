@@ -9,6 +9,9 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+# `buffer_unordered` keeps at most JEV_PARALLEL_MAX calls to Jev in flight without spawning them,
+# so the calls can borrow the judge. Already in Cargo.lock (MIT OR Apache-2.0).
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
