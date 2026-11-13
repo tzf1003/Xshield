@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use xshield_core::context::learning::{
     DecisionFacts, Evidence, FUNCTION_KEYS_MAX, FunctionEvidence, KEEP_RETIRED_DAYS, RETIRE_DAYS,
-    Thresholds, WINDOW_DAYS, contradicts, day_of, judge_accepts_public, judge_function, judge_tier,
-    kind_share, merge_functions, observe, observe_functions, observe_tiers, propose,
+    SourceTier, Thresholds, WINDOW_DAYS, contradicts, day_of, judge_accepts_public, judge_function,
+    judge_tier, kind_share, merge_functions, observe, observe_functions, observe_tiers, propose,
     propose_source, response_stats,
 };
 use xshield_core::context::objects::KEY_MAX;
@@ -248,8 +248,10 @@ async fn learn_site(
     judge_sources(run, pool, site, generation, oldest_day, now_millis).await?;
     pause_drifted(run, pool, site, generation).await?;
     tighten_split(run, pool, site, generation, oldest_day).await?;
-    judge_accepts(pool, site, generation, oldest_day, now_millis).await?;
+    // The tiers come first: the acceptance judgement reads the tier this pass gives a response position
+    // that the configuration does not carry yet (docs/07 section 7.9.16).
     judge_tiers(pool, site, generation, oldest_day, now_millis).await?;
+    judge_accepts(pool, site, generation, oldest_day, now_millis).await?;
     judge_functions(
         pool,
         site,
@@ -641,6 +643,31 @@ async fn judge_accepts(
     // sessions are left out (docs/07 section 7.9.16). Elsewhere the units are the sessions, and
     // reliability drops one step, as before.
     let identified = identified_by(map);
+    // What the rules know of the response positions the votes were shown at (docs/07 section 7.9.16): the
+    // tier the configuration gives, else the tier this pass proposes and no administrator dismissed, and a
+    // position still awaiting its kind's confirmation (section 7.9.21), whose tier is not judged yet.
+    let proposed: BTreeMap<String, Tier> = tier_judgements::proposals(pool, site)
+        .await?
+        .into_iter()
+        .map(|proposal| (proposal.slot, proposal.tier))
+        .collect();
+    let awaiting: BTreeSet<String> = store::positions(pool, site)
+        .await?
+        .into_iter()
+        .filter(|row| row.side == "response" && row.state == PositionState::Proposed)
+        .map(|row| row.slot)
+        .collect();
+    let source_of = |position: &str| {
+        if let Some(tier) = map.tier_of(position) {
+            SourceTier::Known(tier)
+        } else if let Some(tier) = proposed.get(position) {
+            SourceTier::Known(*tier)
+        } else if awaiting.contains(position) {
+            SourceTier::Pending
+        } else {
+            SourceTier::Unknown
+        }
+    };
     for slot in &slots {
         let Some(evidence) = evidence.get(slot) else {
             judgements::withdraw(pool, site, generation, slot, None).await?;
@@ -651,13 +678,7 @@ async fn judge_accepts(
         } else {
             BTreeSet::new()
         };
-        match judge_accepts_public(
-            evidence,
-            |position| map.tier_of(position),
-            &admins,
-            identified,
-            thresholds,
-        ) {
+        match judge_accepts_public(evidence, source_of, &admins, identified, thresholds) {
             Some(judged)
                 if map.accepts_public_of(slot) != Some(judged.accepts_public)
                     || map.reliability_of(slot) != Some(judged.reliability) =>
@@ -1977,6 +1998,35 @@ mod judgement_pass_tests {
         json!({"auto_tighten": false, "auto_pause": false})
     }
 
+    /// `clinic` without the search position: undeclared, so the kind the rules propose for it waits for an
+    /// administrator (docs/07 section 7.9.21) and its tier is not judged.
+    fn clinic_undeclared_search(requests: &[(&str, Value)], learning: &Value) -> SiteSpec {
+        let mut slots =
+            vec![json!({"key": OWN, "class": "patient", "source": "admin", "tier": "self"})];
+        for (key, judgement) in requests {
+            let mut entry = json!({"key": key, "class": "patient", "source": "admin"});
+            if let Value::Object(fields) = judgement {
+                for (field, value) in fields {
+                    entry[field] = value.clone();
+                }
+            }
+            slots.push(entry);
+        }
+        let spec = json!({
+            "name": "clinic",
+            "hosts": ["clinic.example.com"],
+            "origin": "http://10.0.0.5:8080",
+            "session": {"cookie": "SESSIONID"},
+            "entries": ["/login"],
+            "objects": {
+                "classes": [{"id": "patient", "name": "患者"}],
+                "slots": slots,
+                "learning": learning.clone()
+            }
+        });
+        SiteSpec::from_json(&spec.to_string()).expect("test spec")
+    }
+
     /// `count` allowed uses of `method path` from `sessions` sessions, each a day apart in turn and
     /// each shown at `source` (the request and the response position of the value).
     #[allow(clippy::too_many_arguments)]
@@ -1985,6 +2035,26 @@ mod judgement_pass_tests {
         now: i64,
         count: i64,
         sessions: i64,
+        method: &str,
+        path: &str,
+        value_slot: &str,
+        source: (&str, &str),
+    ) {
+        traffic_as(
+            pool, now, count, sessions, "s", method, path, value_slot, source,
+        )
+        .await;
+    }
+
+    /// [`traffic`], with the sessions named `prefix` and their index. Two batches of one day that name their
+    /// sessions alike vote once per session and day between them, so the second names its own.
+    #[allow(clippy::too_many_arguments)]
+    async fn traffic_as(
+        pool: &PgPool,
+        now: i64,
+        count: i64,
+        sessions: i64,
+        prefix: &str,
         method: &str,
         path: &str,
         value_slot: &str,
@@ -2015,7 +2085,7 @@ mod judgement_pass_tests {
             )
             .bind(at_millis)
             .bind(format!("req_{method}{}_{index:08}", path.replace('/', "_")))
-            .bind(format!("s{}", index % sessions))
+            .bind(format!("{prefix}{}", index % sessions))
             .bind(method)
             .bind(path)
             .bind(trace)
@@ -2315,6 +2385,66 @@ mod judgement_pass_tests {
             "a self-fed position refuses public sources"
         );
         assert_eq!(delete.public_per_mille, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_vote_shown_at_a_position_awaiting_its_kind_is_pending_not_refused() {
+        let Some((admin, pool, name)) = scratch("accepts_pending").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic_undeclared_search(&[(DELETE, json!({}))], &quiet()),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        // 177 uses take their value from the patient list and 21 from search results no administrator has
+        // declared. Those 21 are pending: were they public, their share would be 106 per mille, neither refusal
+        // nor acceptance. Left out, the 177 alone would refuse public sources.
+        // Thirty-six sessions keep the 177 uses within the five days the test partitions cover.
+        traffic(
+            &pool,
+            now,
+            177,
+            36,
+            "DELETE",
+            "/api/patients/7",
+            DELETE,
+            ("GET /api/patients", OWN),
+        )
+        .await;
+        traffic_as(
+            &pool,
+            now,
+            21,
+            21,
+            "t",
+            "DELETE",
+            "/api/patients/8",
+            DELETE,
+            ("GET /api/search", SEARCH),
+        )
+        .await;
+        learn_once(&pool, None, now).await;
+
+        let search = xshield_postgres::object_learning_store::positions(&pool, "clinic")
+            .await
+            .expect("read the positions")
+            .into_iter()
+            .find(|row| row.slot == SEARCH)
+            .expect("the search position is listed");
+        assert_eq!(
+            search.state,
+            xshield_core::context::position::PositionState::Proposed
+        );
+        assert!(
+            proposal_of(&pool, DELETE).await.is_none(),
+            "a pending vote gives no conclusion for the delete"
+        );
         drop_scratch(admin, pool, name).await;
     }
 
