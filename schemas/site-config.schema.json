@@ -190,6 +190,24 @@
             "then": {"anyOf": [{"required": ["tier"]}, {"required": ["accepts_public"]}]}
           }
         },
+        "functions": {
+          "type": "array",
+          "maxItems": 2048,
+          "description": "功能表：本站的接口功能，见 docs/07 7.9.18。本版只读入和保存，网关还不按它判定。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "source"],
+            "properties": {
+              "key": {"type": "string", "pattern": "^[A-Z]{3,7} /[^ ]*$", "description": "方法（大写）、一个空格、路由模板，如 POST /api/admin/export。模板须为规范拼写，{id} 是唯一的占位符；HEAD、OPTIONS 和 256 字节的上限由网关检查。"},
+              "source": {"type": "string", "enum": ["admin", "rule", "agent"]},
+              "tier": {"type": "string", "enum": ["admin"], "description": "只接受 admin：管理功能。省略表示对所有会话开放。"},
+              "reliability": {"type": "string", "enum": ["low", "medium", "high"], "description": "tier 的可靠性；只能与 tier 同在。"}
+            },
+            "if": {"required": ["reliability"]},
+            "then": {"required": ["tier"]}
+          }
+        },
         "learning": {
           "type": "object",
           "additionalProperties": false,

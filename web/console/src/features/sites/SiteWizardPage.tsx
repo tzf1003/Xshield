@@ -86,7 +86,7 @@ export function SiteWizardPage() {
       : undefined;
   const remoteFailed = validate.isError && sameJson(validate.variables, spec);
   const remoteProblem =
-    remote && !remote.valid ? serverProblem(remote.error, remote.field, spec) : null;
+    remote && !remote.valid ? serverProblem(remote.error, remote.field, spec, remote.reason) : null;
   const canCreate = localOk && !yamlBroken && remote?.valid === true && !create.isPending;
   // A step's own errors keep "下一步" disabled; the other steps' errors are shown in the check card.
   const stepErrors = issues.errors.filter((issue) =>
