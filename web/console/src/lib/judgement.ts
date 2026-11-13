@@ -8,6 +8,7 @@ import type {
   ObjectJudgement,
   ObjectReliability,
   ObjectSlotEntry,
+  ObjectSlotRow,
   ObjectTier,
 } from "../api/types.ts";
 import { OBJECT_JUDGEMENT } from "./vocab.ts";
@@ -97,7 +98,9 @@ export function proposalWords(proposal: ObjectJudgement): string {
   return `${OBJECT_JUDGEMENT.field.tier} ${OBJECT_JUDGEMENT.tier[proposal.tier].name} · ${reliability}`;
 }
 
-/** The figures a proposal rests on, in short phrases: `票 1234`, `会话 56`, `公共票 0.4%`; for a tier, `单位 12`. */
+/** The figures a proposal rests on, in short phrases: `票 1234`, `会话 56`, `公共票 0.4%`; for a tier, `单位 12`.
+ *  An administrator's tier rests on who was refused, not on the counts of what ordinary users saw, so it has one
+ *  sentence in their place (LQ-7). */
 export function proposalFigures(proposal: ObjectJudgement): string[] {
   if (isAcceptance(proposal)) {
     return [
@@ -106,11 +109,31 @@ export function proposalFigures(proposal: ObjectJudgement): string[] {
       `公共票 ${shareOfMille(proposal.public_per_mille)}`,
     ];
   }
+  if (proposal.tier === "admin") return [OBJECT_JUDGEMENT.adminBasis];
   return [
     `单位 ${proposal.units}`,
     `不同值 ${proposal.seen_values}`,
     `一致 ${shareOfMille(proposal.agreement_per_mille)}`,
   ];
+}
+
+/** The note a proposal carries on a site that declares no user identity (LQ-7): the judge does not tighten an acceptance
+ *  there, since its units are sessions. Null when the site declares identity, or the proposal is no acceptance. */
+export function unidentifiedNoteOfProposal(
+  proposal: ObjectJudgement,
+  identified: boolean,
+): string | null {
+  return !identified && isAcceptance(proposal) ? OBJECT_JUDGEMENT.unidentified : null;
+}
+
+/** The note a declared position's judgement carries on a site that declares no user identity (LQ-7): an acceptance the
+ *  learning gave medium reliability, which the judge does not tighten there. */
+export function unidentifiedNoteOfEntry(
+  entry: Pick<ObjectSlotRow, "accepts_public" | "reliability">,
+  identified: boolean,
+): string | null {
+  const acceptance = entry.accepts_public !== undefined && entry.reliability === "medium";
+  return !identified && acceptance ? OBJECT_JUDGEMENT.unidentified : null;
 }
 
 /** Whether a proposal is an acceptance judgement of a request position (it has `accepts_public`). */

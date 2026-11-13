@@ -15,6 +15,8 @@ import {
   proposalFigures,
   proposalWords,
   shareOfMille,
+  unidentifiedNoteOfEntry,
+  unidentifiedNoteOfProposal,
   withJudgement,
 } from "../src/lib/judgement.ts";
 import { checkObjects, objectChanges, parseObjects } from "../src/lib/objects-validate.ts";
@@ -200,4 +202,34 @@ test("a change of a position's judgement is listed as the change it makes, both 
   const after: ObjectsSpec = { classes, slots: [{ ...doctor, identity: "user" }] };
   assert.deepEqual(objectChanges(before, after), ["GET /api/doctors [].id 判断 无 → 身份 用户"]);
   assert.deepEqual(objectChanges(after, before), ["GET /api/doctors [].id 判断 身份 用户 → 无"]);
+});
+
+test("an administrator's tier proposal says who got the data, in place of the counts of the ordinary units", () => {
+  const admin: ObjectTierJudgement = { ...tier, tier: "admin", reliability: "high" };
+  assert.deepEqual(proposalFigures(admin), ["只有管理员拿到了数据，其他用户被拒绝"]);
+  // A tier of ordinary users keeps its counts.
+  assert.deepEqual(proposalFigures(tier), ["单位 12", "不同值 3", "一致 95%"]);
+});
+
+test("a site that declares no user identity says that its acceptance judgements at medium are not tightened", () => {
+  const note =
+    "本站点没有声明用户身份，这一条不会自动收紧，需要收紧时请声明用户身份的位置，或手动把这个请求位置设为不接受公共来源。";
+  // A proposal of public sources carries the note there; a tier proposal does not, and an identified site has none.
+  assert.equal(unidentifiedNoteOfProposal(acceptance, false), note);
+  assert.equal(unidentifiedNoteOfProposal(acceptance, true), null);
+  assert.equal(unidentifiedNoteOfProposal(tier, false), null);
+  // A declared position's acceptance at medium carries it; at high it does not, nor does a position with no acceptance.
+  assert.equal(
+    unidentifiedNoteOfEntry({ accepts_public: false, reliability: "medium" }, false),
+    note,
+  );
+  assert.equal(
+    unidentifiedNoteOfEntry({ accepts_public: false, reliability: "high" }, false),
+    null,
+  );
+  assert.equal(unidentifiedNoteOfEntry({ reliability: "medium" }, false), null);
+  assert.equal(
+    unidentifiedNoteOfEntry({ accepts_public: false, reliability: "medium" }, true),
+    null,
+  );
 });

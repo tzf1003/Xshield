@@ -814,8 +814,9 @@ fn valid_learning(learning: &LearningSettings) -> bool {
 }
 
 /// `lower-case` letters only, 3 to 24 bytes, as the kind rules of the
-/// field-kind declarations use.
-pub(crate) fn valid_class_id(id: &str) -> bool {
+/// field-kind declarations use. The candidates of the cold start check a kind word with it (LQ-7).
+#[must_use]
+pub fn valid_class_id(id: &str) -> bool {
     (CLASS_ID_MIN..=CLASS_ID_MAX).contains(&id.len())
         && id.bytes().all(|byte| byte.is_ascii_lowercase())
 }
