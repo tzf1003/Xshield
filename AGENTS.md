@@ -28,7 +28,7 @@
 |---|---|
 | 任何改动 | `python3 scripts/validate_library.py`、`python3 scripts/check_env_docs.py`、`python3 scripts/check_secrets.py` |
 | Rust（`crates/`、`Cargo.*`） | `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --all-targets`、`cargo test --workspace --doc` |
-| 判定路径（`xshield-core`、`xshield-judge`、`xshield-edge`） | 另加 `python3 scripts/test_idor_lab.py`（可用 `--only A2,C4` 只跑相关场景） |
+| 判定路径（`xshield-core`、`xshield-judge`、`xshield-edge`），以及学习代码（`xshield-control` 的 `object_learning.rs`、`object_agent.rs`、`tightening.rs`，`xshield-core` 的 `context/learning.rs`） | 另加 `python3 scripts/test_idor_lab.py`（可用 `--only A2,C4` 只跑相关场景）和 `python3 scripts/measure_effectiveness.py`（快速模式，需要 PostgreSQL，见 docs/04 4.6） |
 | `xshield-postgres`、`xshield-control`、`migrations/` | 另加 `scripts/test_postgres.sh`（需要 PostgreSQL 和 `PG*` 环境变量） |
 | `xshield-core`、`fuzz/` | 另加在 `fuzz/` 下执行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`（独立工作区） |
 | `web/console/` | 在该目录执行 `npm ci`、`npm run lint`、`npm test`、`npm run build`、`npm run test:e2e` |

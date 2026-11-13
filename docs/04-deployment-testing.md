@@ -140,6 +140,7 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 - **真实 Jev**：用同一组场景加一批正常业务流量调用真实 Jev，记录误拦和漏拦。没有实测数据之前，不对外宣称准确率。
 
   `crates/xshield-judge/tests/live_jev.rs` 是这组真实调用的测试（默认忽略）：`XSHIELD_JEV_ROUTE=direct XSHIELD_JEV_API_KEY=... cargo test -p xshield-judge --test live_jev -- --ignored --nocapture`，每个场景打印一行判定、概率和耗时。
+- **防护有效性**：`scripts/measure_effectiveness.py` 经真实的网关跑训练、学习和防护三段，度量防护的效果和学习的质量。快速模式在 CI 的 `validate` 作业里跑；指标、怎么读报告和已知缺口的约定见 4.6。
 - **代码质量**：沿用 `cargo fmt`、`cargo clippy`、`cargo test` 和 `scripts/verify_all.sh`。
 
 v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回归已随对应功能一起删除。
@@ -190,3 +191,50 @@ v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回�
 第三轮修复后重跑同一套件：`fast_allow` 386、`cached_allow` 78、`jev_allow` 45、`jev_deny` 21、`no_session` 18，Jev 调用 66 次，中位数 0.55 秒，p95 0.9 秒，无失败、无限流。10 个正常业务请求全部放行，其中结算、注册各步（含 `SecurityAnswers`）和 `/hacking-instructor-*` 都不再误判，没有一条误报。24 个预期拦截探针里 19 个会被拦：7 个注入（2 个搜索、5 个登录）、跨账号读购物车和 11 个未登录访问 `/ftp/`、`/metrics`、`/redirect` 等；其余 5 个中，2 个因 `/assets/*` 绕过没有记录，3 个注册探针（缺 passwordRepeat、`role` 批量赋值、空用户，后者源站也返回 400）判为请求本身无害，属于业务规则校验，不在 IDOR 和攻击检测的范围。不在 24 个探针清单里的 `would_block` 行全是遍历他人购物车（`/rest/basket/N`）以及目录浏览（`/ftp/`、`/infrastructure/`），都是套件自己的探针。
 
 第四轮里 `/assets/*` 绕过掉的两个探针是 `GET /assets/i18n/tlh_AA.json`（源站真实存在的 35 KB 克林贡语翻译文件）和 `GET /assets/public/images/uploads/<未编码的文件名>`（源站对它返回单页应用首页）。两者都只是读静态资源，不涉及对象引用或注入内容，所以按设计跳过判定和记录。随后用 `/assets/../rest/basket/1`、`/assets/%2e%2e/rest/basket/1`、`/assets/..%2frest/basket/1`、`/assets/public/../../ftp/acquisitions.md` 实测：点段、编码的点和斜杠都不命中绕过，照常判定（未登录的记 `no_session`）；`/assets/..;/rest/basket/1`（Tomcat 一类容器把 `..;` 当作点段）原来会命中绕过，现在路径里出现 `;` 一律不命中绕过和入口。
+
+## 4.6 防护有效性度量
+
+度量代码在 `tests/security-lab/effectiveness/`，入口是 `scripts/measure_effectiveness.py`。它经真实的 `xshield-edge` 跑靶场的三段：训练段、学习段（需要 PostgreSQL）和防护段。靶场的数据、攻击和良性文本都是合成的。
+
+### 怎么跑
+
+- `python3 scripts/measure_effectiveness.py`：快速模式、理想模型，约一分钟。学习段由 `XSHIELD_TEST_DATABASE_BASE_URL`（或 `PGHOST` 等环境变量）指定 PostgreSQL；没有时该段显示 SKIP 和原因，依赖它的门槛不计。
+- `--only 类别,用例`：只跑这些类别或用例。这种运行不与基线比较，也不检查已知缺口清单是否过期。
+- `--jev live`：用真实 Jev，需要环境变量 `XSHIELD_JEV_ENDPOINT` 和 `XSHIELD_JEV_API_KEY`。缺一即以退出码 2 退出，不退回模拟。密钥只从环境变量读取，不写入报告和日志。
+- `--update-baseline`：把本次指标写入基线文件。只在全部门槛通过、且没有指标变差时写入；不能与 `--only` 或 `--jev live` 同用。
+- 完整模式（批次 7）和 `--jev record|replay`（批次 9）尚未实现，传入时以退出码 2 拒绝。
+
+CI 里，`ci.yml` 的 `validate` 作业先跑 `tests/security-lab` 下的单元测试，再跑快速模式。报告追加到步骤摘要，输出目录作为制品上传，不论成败。`effectiveness.yml` 在 `main` 上有判定、学习或靶场代码的改动时跑一次，也可以手动触发（`jev` 选 `ideal` 或 `live`）。没有定时运行。
+
+### 指标与门槛
+
+- S1 到 S4：防护的核验和放行。S2 误核验数必须为 0；P4 未判定率必须为 0；P5 被拦请求到达源站数必须为 0。
+- L0 到 L3：学习的冷启动候选、请求位置类别、响应位置档位、请求位置接受公共来源。误学数必须为 0，只算没有登记在已知缺口清单里的误学。
+- 学习稳定性：最后两轮学习的结论相同。
+- 未模板化的位置：真值里没有的键，按模式合并计数（例如分享码 `SHR-…` 逐个变化的路径），必须为 0。
+- P1、P2、P3、P7：拦截率、误拦率、拦截原因正确率，以及回归用例的通过情况。
+- 基线比较只进不退：任何指标比基线变差都失败。基线文件是 `tests/security-lab/effectiveness-baseline.json`，有快速组。缺基线时流水线以失败退出，并说明原因。
+
+### 怎么读报告
+
+报告 `report.md`（内容相同的 `report.json`）依次是：结论、记分表、防护明细、学习明细（含学习的已知缺口清单）、回归用例、失败清单、成本、未执行的部分。
+
+- 记分表的“是否通过”列：“必须”的门槛有一条不过，退出码为 1。“不低于基线”的指标在没有基线时显示“—”。
+- 学习明细每个真值位置一行。学到的与真值不同，写出差别；没学到的，写出原因，例如规则学不到、被拒绝记录挡住、被自动暂停、接受公共来源未提议。
+
+### 回归用例与 known_gap
+
+回归用例（`regressions.py`，方案 4.5）有两种状态：
+
+- `must`：网关必须通过。失败即门槛失败。
+- `known_gap`：评审已经列出、修复尚未合入。它失败时不计门槛。如果它通过了，就是“意外通过”，流水线失败，并提示把状态改为 `must`。
+
+修复的 PR 在同一个改动里翻状态，并在 PR 描述里写明依据哪次实跑。
+
+### 学习的已知缺口清单
+
+`tests/security-lab/effectiveness-known-gaps.json` 登记学习质量的已知问题：错误的提议（误学）、未模板化的位置、没学到的位置，以及学到的配置上的失败。每条写明学到的值、评审编号和修法批次（LQ-1 到 LQ-7）。
+
+- 清单里的问题只出现在报告的“学习的已知缺口清单”一节，不让门槛失败；清单之外的问题让门槛失败。
+- 条目不再出现时算过期，门槛失败，提示删掉这一条。修复批次合入的同一个 PR 删掉它对应的条目。
+- 缺少学习段、或探针没有全部跑完时，不检查过期。

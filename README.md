@@ -33,6 +33,7 @@ Xshield 部署在源站前面，记住每个登录会话正常走过的路（从
 ```bash
 python3 -m pip install -r scripts/requirements.txt
 python3 scripts/validate_library.py     # Schema、样例与文档链接
+python3 scripts/measure_effectiveness.py # 防护有效性快速测量，学习段需要 PostgreSQL（docs/04 4.6）
 scripts/verify_all.sh                    # fmt、clippy、测试、PostgreSQL 与控制台
 ./dev.sh                                 # 本地开发栈
 docker compose up -d --build             # 参考部署（先按 docs/04 4.1.1 准备 .env）

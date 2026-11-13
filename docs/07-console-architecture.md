@@ -691,7 +691,7 @@ CREATE TABLE jev_prompts (
 | `GET /api/sites/{name}/objects/functions` | 功能表：配置里的功能及其证据、没有进表的候选、管理档提议，以及最近一天没有学到的流量（7.9.20） |
 | `POST /api/sites/{name}/objects/functions/changes` | 管理员对功能表的一批变更（删除、取消管理档、确认管理档提议、新增），写成一个新版本，成功返回 204。错误码：`FUNCTION_CHANGED`、`FUNCTION_ON_ENTRY`、`JUDGEMENT_CHANGED`、`VERSION_CONFLICT`（409）；`JUDGEMENT_NOT_FOUND`（404）；`INVALID_BODY`、`SITE_CONFIG_OBJECTS_INVALID`（400）（7.9.20） |
 | `POST /api/sites/{name}/objects/functions/proposals/dismiss` | 驳回一条功能的管理档提议，成功返回 204；`JUDGEMENT_NOT_FOUND`（404）、`INVALID_BODY`（400）（7.9.20） |
-| `GET /api/sites/{name}/objects/bootstrap` | 冷启动的类别候选（24 小时窗口）；候选尚未计算，当前为空 |
+| `GET /api/sites/{name}/objects/bootstrap` | 冷启动的类别候选（24 小时窗口） |
 | `GET /api/status` | 顶栏状态灯和“配置生效”需要的轻量状态，每 15 秒轮询一次（7.9.13） |
 | `GET /api/system` | 网关实例、日志存储、运行参数（7.9.8）；只在系统页按需读取，不轮询 |
 | `GET /api/system/models`、`PUT /api/system/models/{group}`、`POST …/test`、`DELETE /api/system/models/jev`、`GET …/history` | 模型页：Jev 判定模型和学习代理模型的配置、测试、改回环境变量和变更记录（7.9.14） |
