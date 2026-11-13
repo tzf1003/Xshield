@@ -88,10 +88,10 @@ test("the values note names a trim, a cleared record and an unread request", () 
   );
   assert.equal(
     valuesNotice(trace([], { values_truncated: true })),
-    "请求体未结构化或值数达到上限，只拆出了部分值。",
+    "请求体不是结构化数据，或含有文件部分（文件内容不拆值），拆出的值没有覆盖全部内容。",
   );
   assert.equal(
     valuesNotice(trace([traceValue("query.q")], { trimmed: true, values_truncated: true })),
-    "已裁剪：为满足 16 KiB 上限，这条记录的部分内容被去掉了。请求体未结构化或值数达到上限，只拆出了部分值。",
+    "已裁剪：为满足 16 KiB 上限，这条记录的部分内容被去掉了。请求体不是结构化数据，或含有文件部分（文件内容不拆值），拆出的值没有覆盖全部内容。",
   );
 });

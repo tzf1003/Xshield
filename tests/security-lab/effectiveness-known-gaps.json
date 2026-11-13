@@ -1,0 +1,22 @@
+{
+  "entries": [
+    {
+      "id": "miss-admin-export-patients",
+      "kind": "miss",
+      "key": "GET /api/admin/export patients[].id",
+      "learned": "",
+      "ref": "学习质量设计稿 2.1",
+      "lq": null,
+      "note": "训练流量里值来自这个位置的使用只有 1 次、1 个会话（这条路由共 2 次请求），学习输出标为“使用次数少，请确认”，远低于学习门槛（20 票、5 个会话），规则按设计不提议"
+    },
+    {
+      "id": "miss-admin-search-results",
+      "kind": "miss",
+      "key": "GET /api/admin/search results[].id",
+      "learned": "",
+      "ref": "学习质量设计稿 2.1",
+      "lq": null,
+      "note": "训练流量里值来自这个位置的使用只有 2 次、2 个会话（这条路由共 14 次请求，其中 12 次被源站 403、不产生值），低于学习门槛（20 票、5 个会话），规则按设计不提议（学习输出里为 pending）"
+    }
+  ]
+}

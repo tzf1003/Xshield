@@ -178,8 +178,8 @@ pub struct LearningSettings {
     /// Off: the learning pass reads nothing for the site, and only hand-declared
     /// and confirmed positions apply.
     pub auto_learn: bool,
-    /// Tightening changes apply on their own; off sends them to the proposal queue
-    /// too. Stored now, acted on once the judge reads the learned states.
+    /// Splits a class whose window votes show groups of positions that never share a
+    /// value, one new configuration version per pass. Off by default: no class is split.
     pub auto_tighten: bool,
     /// Confirmed positions that turn abnormal are paused on their own. Stored now,
     /// acted on once the judge reads the learned states.
@@ -215,7 +215,7 @@ impl Default for LearningSettings {
     fn default() -> Self {
         Self {
             auto_learn: true,
-            auto_tighten: true,
+            auto_tighten: false,
             auto_pause: true,
             thresholds: LearningThresholds::default(),
             agent: LearningAgent::default(),
@@ -353,6 +353,16 @@ impl ObjectMap {
         self.slot(key)
             .filter(|slot| !slot.paused)
             .and_then(|slot| slot.identity)
+    }
+
+    /// Whether the site has a user identity position: an entry that states the user and is not paused.
+    /// Only such a site asks an identity response to declare the user before it recognizes a credential
+    /// (docs/01 section 1.2).
+    #[must_use]
+    pub fn declares_user_identity(&self) -> bool {
+        self.slots()
+            .iter()
+            .any(|slot| !slot.paused && slot.identity == Some(IdentityRole::User))
     }
 
     /// The map with the entries of `keys` paused. A key the map does not declare, and an
@@ -2158,13 +2168,14 @@ mod tests {
         let loaded = map(VALID).unwrap();
         assert_eq!(loaded.learning(), &LearningSettings::default());
         assert!(loaded.learning().auto_learn);
+        assert!(!loaded.learning().auto_tighten);
         assert_eq!(loaded.learning().thresholds.uses, VOTES_MIN);
         assert_eq!(loaded.learning().thresholds.sessions, SESSIONS_MIN);
         assert_eq!(loaded.learning().agent.daily_limit, 200);
         assert!(!loaded.learning().agent.enabled);
         // The defaults written out in full are the same settings.
         let written = map(
-            r#"{"learning":{"auto_learn":true,"auto_tighten":true,"auto_pause":true,
+            r#"{"learning":{"auto_learn":true,"auto_tighten":false,"auto_pause":true,
             "thresholds":{"uses":20,"sessions":5},"agent":{"enabled":false,"daily_limit":200}}}"#,
         )
         .unwrap();
@@ -2184,6 +2195,11 @@ mod tests {
         let back: ObjectMap = serde_json::from_str(&text).unwrap();
         assert_eq!(back, changed);
         assert!(!back.is_empty());
+        // Turning tightening on is a setting of its own, so it is written back too.
+        let tightening = map(r#"{"learning":{"auto_tighten":true}}"#).unwrap();
+        assert!(!tightening.is_empty());
+        let text = serde_json::to_string(&tightening).unwrap();
+        assert!(text.contains(r#""auto_tighten":true"#), "{text}");
     }
 
     #[test]
@@ -2250,6 +2266,29 @@ mod tests {
         assert_eq!(paused.slots()[0].identity, Some(IdentityRole::User));
         let added = paused.with_entry("GET /api/me id", "doctor", SlotSource::Admin);
         assert_eq!(added.identity_of("GET /api/me id"), None);
+    }
+
+    #[test]
+    fn a_site_declares_a_user_identity_only_with_an_unpaused_user_position() {
+        let user = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"}]}"#)
+        .unwrap();
+        assert!(user.declares_user_identity());
+        let paused = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"}]}"#)
+        .unwrap()
+        .with_paused(&["GET /api/home doctor.id".to_owned()]);
+        assert!(!paused.declares_user_identity());
+        // An organization or a role is not the user, and a map without any identity declares none.
+        let org_and_role = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home org.id","class":"doctor","source":"admin","identity":"org"},
+            {"key":"GET /api/home role","class":"doctor","source":"admin","identity":"role"}]}"#)
+        .unwrap();
+        assert!(!org_and_role.declares_user_identity());
+        let none = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"}]}"#)
+        .unwrap();
+        assert!(!none.declares_user_identity());
     }
 
     #[test]

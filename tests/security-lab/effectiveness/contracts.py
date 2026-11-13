@@ -50,6 +50,10 @@ def _is_str(value: Any) -> bool:
     return isinstance(value, str)
 
 
+def _is_str_or_none(value: Any) -> bool:
+    return value is None or isinstance(value, str)
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -197,7 +201,27 @@ JUDGEMENT_VALUE: Fields = {
     "accepts_public": (_is_bool, "true 或 false"),
 }
 
-BASELINE: Fields = {"values": (_is_dict, "对象（指标名到数值）")}
+BASELINE: Fields = {"groups": (_is_dict, "对象（模式名 quick 或 full 到该模式的基线）")}
+BASELINE_GROUP: Fields = {
+    "seed": (_is_int, "整数"),
+    "commit": (_is_str, "字符串"),
+    "values": (_is_dict, "对象（指标名到数值）"),
+}
+BASELINE_MODES = frozenset({"quick", "full"})
+KNOWN_GAP_KINDS = frozenset({"wrong", "unmodeled", "miss", "failure"})
+KNOWN_GAP_BASE: Fields = {
+    "id": (_is_str, "字符串"),
+    "kind": (_one_of(KNOWN_GAP_KINDS), "wrong、unmodeled、miss 或 failure"),
+    "ref": (_is_str, "字符串"),
+    "lq": (_is_str_or_none, "字符串（修法批次 LQ-1 到 LQ-7），长期条目为 null"),
+}
+KNOWN_GAP_BY_KIND: dict[str, Fields] = {
+    "wrong": {"metric": (_one_of(frozenset({"L0", "L1", "L2", "L3"})), "L0、L1、L2 或 L3"),
+              "key": (_position_key, "位置键")},
+    "unmodeled": {"pattern": (_is_str, "字符串")},
+    "miss": {"key": (_position_key, "位置键")},
+    "failure": {"case": (_is_str, "字符串"), "config": (_is_str, "字符串")},
+}
 
 
 def _check_fields(obj: Any, where: str, fields: Fields) -> None:
@@ -317,12 +341,50 @@ def load_learned(path: Path) -> dict[str, Any]:
 
 
 def load_baseline(path: Path) -> dict[str, Any]:
+    """The baseline file: one group per mode (quick, full), each with the metric values of that mode on the ideal
+    model (plan 8). A mode without a group has no baseline yet."""
     doc = _read_json(path)
     _check_fields(doc, path.name, BASELINE)
-    for metric, value in doc["values"].items():
-        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
-            raise ContractError(f"{path.name}: 指标 {metric} 的基线应为数字或 null")
+    for mode, group in doc["groups"].items():
+        where = f"{path.name}:{mode}"
+        if mode not in BASELINE_MODES:
+            raise ContractError(f"{where}: 只认 quick 和 full 两组")
+        _check_fields(group, where, BASELINE_GROUP)
+        for metric, value in group["values"].items():
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                raise ContractError(f"{where}: 指标 {metric} 的基线应为数字或 null")
     return doc
+
+
+def baseline_group(doc: dict[str, Any] | None, mode: str) -> dict[str, Any] | None:
+    """The group of one mode, or None when the file has none."""
+    if doc is None:
+        return None
+    return doc["groups"].get(mode)
+
+
+def write_baseline(path: Path, mode: str, group: dict[str, Any]) -> None:
+    """Writes one mode's group, keeping the other modes that the file already has."""
+    doc = _read_json(path) if path.exists() else {"groups": {}}
+    doc.setdefault("groups", {})[mode] = group
+    doc["groups"] = {name: doc["groups"][name] for name in ("quick", "full") if name in doc["groups"]}
+    dump_json(path, doc)
+
+
+def load_known_gaps(path: Path) -> list[dict[str, Any]]:
+    """The learning known-gap list (known_gaps.py): one object per entry, with the fields its kind needs."""
+    doc = _read_json(path)
+    _check_fields(doc, path.name, {"entries": (_list_of(_is_dict), "对象数组")})
+    seen: set[str] = set()
+    for index, entry in enumerate(doc["entries"]):
+        where = f"{path.name}:entries[{index}]"
+        _check_fields(entry, where, KNOWN_GAP_BASE)
+        _check_fields(entry, where, KNOWN_GAP_BY_KIND[entry["kind"]])
+        _check_present(entry, where, {"learned": (_is_str, "字符串"), "note": (_is_str, "字符串")})
+        if entry["id"] in seen:
+            raise ContractError(f"{where}: 编号 {entry['id']} 重复")
+        seen.add(entry["id"])
+    return doc["entries"]
 
 
 def dump_json(path: Path, document: Any) -> None:

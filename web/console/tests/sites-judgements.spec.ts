@@ -6,7 +6,7 @@ import { expect, type Page, test } from "@playwright/test";
 import type { ObjectJudgement, ObjectsResponse } from "../src/api/types.ts";
 import { type MockOptions, mockApi, reply } from "./helpers/mock-api.ts";
 import { objectsEmr } from "./helpers/fixtures.ts";
-import { callsTo, freezeClock } from "./helpers/sites-flow.ts";
+import { callsTo, freezeClock, untilModalSettled } from "./helpers/sites-flow.ts";
 
 const PROPOSAL_ID = "s4";
 const CONFIRM = `/api/sites/emr/objects/slots/${PROPOSAL_ID}/judgement/confirm`;
@@ -61,6 +61,7 @@ test("a judged position names its judgement, and the proposal is confirmed throu
   await expect(panel).toContainText("票 1234 · 会话 56 · 公共票 0.4%");
 
   await panel.getByRole("button", { name: "确认…" }).click();
+  await untilModalSettled(page, "确认这条判断？");
   const dialog = page.getByRole("dialog", { name: "确认这条判断？" });
   await expect(dialog).toContainText(
     "位置 GET /doctor/{id} path[1] 将被判为：不接受公共来源 · 可靠性 高",

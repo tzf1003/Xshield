@@ -65,6 +65,9 @@ export function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** The longest function key a sentence shows whole (docs/06 6.4.4). A longer key is cut and marked with an ellipsis. */
+export const FUNCTION_KEY_MAX = 80;
+
 export function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many.replace("{n}", fmtInt(count));
 }
