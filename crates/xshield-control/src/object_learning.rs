@@ -566,8 +566,9 @@ fn pause_note(
     note
 }
 
-/// The clause a paused position's note carries: its kind, the other kind its values show now, and the response
-/// position that gives the most votes of that kind. `None` when the evidence no longer shows another kind.
+/// The clause a paused position's note carries: its kind, the share of all votes that the other kind now has, and
+/// the response position of that kind that gives the most votes. The share is the kind's, not the one position's,
+/// so a kind with two positions is not put on one of them (LQ-7). `None` when the evidence shows no other kind.
 fn pause_clause(
     map: &ObjectMap,
     key: &str,
@@ -582,10 +583,10 @@ fn pause_clause(
         .find(|flow| map.class_of(&flow.from) == Some(other))?;
     let percent = (share_per_mille + 5) / 10;
     Some(format!(
-        "{key}（{}）的值 {percent}% 来自 {}（{}），错的可能是后者",
+        "{key}（{}）的值 {percent}% 来自{}类的位置，其中最多的是 {}，错的可能在来源一侧",
         class_name(map, class),
-        source.from,
         class_name(map, other),
+        source.from,
     ))
 }
 
@@ -1082,7 +1083,48 @@ mod tests {
         assert_eq!(
             note,
             "学习任务自动暂停了 1 个位置：GET /doctor/{id} path[1] 等，证据已转向其他类别。\
-             GET /doctor/{id} path[1]（医生）的值 100% 来自 GET /api/docs [].id（文档），错的可能是后者。"
+             GET /doctor/{id} path[1]（医生）的值 100% 来自文档类的位置，其中最多的是 GET /api/docs [].id，错的可能在来源一侧。"
+        );
+    }
+
+    #[test]
+    fn two_positions_of_one_kind_share_one_percentage_and_the_one_with_most_votes_is_named() {
+        const NOTES_FROM: &str = "GET /api/notes [].id";
+        let map = serde_json::from_str::<ObjectMap>(
+            r#"{"classes": [{"id": "doctor", "name": "医生"}, {"id": "document", "name": "文档"}],
+                "slots": [
+                    {"key": "GET /doctor/{id} path[1]", "class": "doctor", "source": "admin"},
+                    {"key": "GET /api/appointments [].doc_id", "class": "doctor", "source": "admin"},
+                    {"key": "GET /api/docs [].id", "class": "document", "source": "admin"},
+                    {"key": "GET /api/notes [].id", "class": "document", "source": "admin"}]}"#,
+        )
+        .unwrap();
+        // Ten votes from one document position, nine from the other and one from a doctor position: 19 of the 20
+        // votes are documents, and the first document position has the most of them.
+        let froms = std::iter::repeat_n(DOCUMENT_FROM, 10)
+            .chain(std::iter::repeat_n(NOTES_FROM, 9))
+            .chain(std::iter::once(DOCTOR_FROM));
+        let mut found = Evidence::default();
+        for (day, from) in (0_u64..).zip(froms) {
+            found.add_vote(xshield_core::context::learning::Vote {
+                slot: SLOT.to_owned(),
+                session: format!("s{}", day % 5),
+                day,
+                from: vec![from.to_owned()],
+                user: None,
+                admin: false,
+            });
+        }
+        let note = pause_note(
+            &map,
+            &[SLOT.to_owned()],
+            &HashMap::from([(SLOT.to_owned(), found)]),
+            Thresholds::default(),
+        );
+        assert_eq!(
+            note,
+            "学习任务自动暂停了 1 个位置：GET /doctor/{id} path[1] 等，证据已转向其他类别。\
+             GET /doctor/{id} path[1]（医生）的值 95% 来自文档类的位置，其中最多的是 GET /api/docs [].id，错的可能在来源一侧。"
         );
     }
 
@@ -1137,7 +1179,7 @@ mod tests {
         assert!(note.contains("GET /r0/{id} path[1]（医生）的值 100%"));
         // The first clauses fit and the last does not, so the note ends with a clause it names.
         assert!(!note.contains("GET /r11/{id} path[1]"));
-        assert!(note.ends_with("错的可能是后者。"));
+        assert!(note.ends_with("错的可能在来源一侧。"));
     }
 
     #[test]
@@ -1902,7 +1944,7 @@ pub(crate) mod pass_tests {
             history[0].note.as_deref(),
             Some(
                 "学习任务自动暂停了 1 个位置：GET /doctor/{id} path[1] 等，证据已转向其他类别。\
-                 GET /doctor/{id} path[1]（医生）的值 100% 来自 GET /api/docs [].id（文档），错的可能是后者。"
+                 GET /doctor/{id} path[1]（医生）的值 100% 来自文档类的位置，其中最多的是 GET /api/docs [].id，错的可能在来源一侧。"
             )
         );
         let state: String = sqlx::query_scalar(

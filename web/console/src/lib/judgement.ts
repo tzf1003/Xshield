@@ -117,23 +117,39 @@ export function proposalFigures(proposal: ObjectJudgement): string[] {
   ];
 }
 
-/** The note a proposal carries on a site that declares no user identity (LQ-7): the judge does not tighten an acceptance
- *  there, since its units are sessions. Null when the site declares identity, or the proposal is no acceptance. */
+/** Whether a judgement carries the note of a site that declares no user identity (LQ-7): an acceptance of no public
+ *  source at medium. The judge tightens an acceptance only at high, and a site without identity reaches medium only, so
+ *  the note says that the judge does not tighten it there. An acceptance of public sources is no tightening, and a
+ *  high one is tightened, so neither carries the note. */
+function unidentifiedTightening(
+  acceptsPublic: boolean | undefined,
+  reliability: ObjectReliability | undefined,
+  identified: boolean,
+): boolean {
+  return !identified && acceptsPublic === false && reliability === "medium";
+}
+
+/** The note a proposal carries on a site that declares no user identity (LQ-7). Null for a tier, and on a site that
+ *  declares identity. */
 export function unidentifiedNoteOfProposal(
   proposal: ObjectJudgement,
   identified: boolean,
 ): string | null {
-  return !identified && isAcceptance(proposal) ? OBJECT_JUDGEMENT.unidentified : null;
+  if (!isAcceptance(proposal)) return null;
+  return unidentifiedTightening(proposal.accepts_public, proposal.reliability, identified)
+    ? OBJECT_JUDGEMENT.unidentified
+    : null;
 }
 
-/** The note a declared position's judgement carries on a site that declares no user identity (LQ-7): an acceptance the
- *  learning gave medium reliability, which the judge does not tighten there. */
+/** The note a declared position's judgement carries on a site that declares no user identity (LQ-7): the same
+ *  condition as a proposal's, on the fields the entry carries. */
 export function unidentifiedNoteOfEntry(
   entry: Pick<ObjectSlotRow, "accepts_public" | "reliability">,
   identified: boolean,
 ): string | null {
-  const acceptance = entry.accepts_public !== undefined && entry.reliability === "medium";
-  return !identified && acceptance ? OBJECT_JUDGEMENT.unidentified : null;
+  return unidentifiedTightening(entry.accepts_public, entry.reliability, identified)
+    ? OBJECT_JUDGEMENT.unidentified
+    : null;
 }
 
 /** Whether a proposal is an acceptance judgement of a request position (it has `accepts_public`). */

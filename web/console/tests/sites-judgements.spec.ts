@@ -12,11 +12,12 @@ const PROPOSAL_ID = "s4";
 const CONFIRM = `/api/sites/emr/objects/slots/${PROPOSAL_ID}/judgement/confirm`;
 const DISMISS = `/api/sites/emr/objects/slots/${PROPOSAL_ID}/judgement/dismiss`;
 
-/** One proposal the rules made for a request position: not accepting public sources, with 1234 votes from 56 sessions. */
+/** One proposal the rules made for a request position: not accepting public sources at medium (a site without identity
+ *  reaches no high), with 1234 votes from 56 sessions. */
 const ACCEPTANCE: ObjectJudgement = {
   id: PROPOSAL_ID,
   key: "GET /doctor/{id} path[1]",
-  reliability: "high",
+  reliability: "medium",
   last_seen: null,
   accepts_public: false,
   votes: 1234,
@@ -75,13 +76,13 @@ test("a judged position names its judgement, and the proposal is confirmed throu
 
   const panel = page.locator(".obj-judgements");
   await expect(panel).toContainText("判断提议 1");
-  await expect(panel).toContainText("不接受公共来源 · 可靠性 高");
+  await expect(panel).toContainText("不接受公共来源 · 可靠性 中");
   await expect(panel).toContainText("票 1234 · 会话 56 · 公共票 0.4%");
 
   await panel.getByRole("button", { name: "确认…" }).click();
   const dialog = page.getByRole("dialog", { name: "确认这条判断？" });
   await expect(dialog).toContainText(
-    "位置 GET /doctor/{id} path[1] 将被判为：不接受公共来源 · 可靠性 高",
+    "位置 GET /doctor/{id} path[1] 将被判为：不接受公共来源 · 可靠性 中",
   );
   await dialog.getByRole("button", { name: "确认并保存版本" }).click();
 
@@ -110,7 +111,7 @@ test("an administrator's tier proposal says who got the data, and an acceptance 
   await expect(panel).toContainText("归属 管理 · 可靠性 高");
   await expect(panel).toContainText("只有管理员拿到了数据，其他用户被拒绝");
   await expect(panel).not.toContainText("不同值");
-  await expect(panel).toContainText("不接受公共来源 · 可靠性 高");
+  await expect(panel).toContainText("不接受公共来源 · 可靠性 中");
   await expect(panel).toContainText("本站点没有声明用户身份，这一条不会自动收紧");
 });
 
@@ -131,6 +132,34 @@ test("a learned acceptance at medium reliability carries the same note in the ob
 test("a site that declares a user identity shows no such note", async ({ page }) => {
   await openJudgedMap(page, {}, { ...judgedObjects(), identified: true });
 
-  await expect(page.locator(".obj-judgements")).toContainText("不接受公共来源 · 可靠性 高");
+  await expect(page.locator(".obj-judgements")).toContainText("不接受公共来源 · 可靠性 中");
   await expect(page.locator(".obj-judgements")).not.toContainText("本站点没有声明用户身份");
+});
+
+test("a proposal that accepts public sources, or one at high reliability, carries no such note", async ({
+  page,
+}) => {
+  const accepting: ObjectJudgement = {
+    id: "p-accepting",
+    key: "GET /doctor/{id} path[1]",
+    reliability: "medium",
+    last_seen: null,
+    accepts_public: true,
+    votes: 1234,
+    sessions: 56,
+    public_per_mille: 4,
+  };
+  const high: ObjectJudgement = {
+    ...accepting,
+    id: "p-high",
+    reliability: "high",
+    accepts_public: false,
+  };
+  await openJudgedMap(page, {}, judgedObjects([accepting, high]));
+
+  const panel = page.locator(".obj-judgements");
+  await expect(panel).toContainText("判断提议 2");
+  await expect(panel).toContainText("接受公共来源 · 可靠性 中");
+  await expect(panel).toContainText("不接受公共来源 · 可靠性 高");
+  await expect(panel).not.toContainText("本站点没有声明用户身份");
 });
