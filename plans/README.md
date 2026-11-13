@@ -36,9 +36,8 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 
 | Finding | Category | Effort | Risk of fix | Evidence |
 |---|---|---|---|---|
-| JSON request bodies with duplicate keys: the gateway judges the last one, an origin may use the first. | security | S | LOW | `crates/xshield-judge/src/values.rs:336`, cf. `crates/xshield-core/src/context/route.rs:623` |
-| Session and address contexts are not keyed by site, unlike held logins and shapes. | security | S | LOW | `engine.rs:325,439,912` |
-| The requests and Jev lists reset to a skeleton every 30 s because the preset window moves with the clock and is part of the query key. | bug | S–M | MED | `web/console/src/app/scope.ts:18-24`, `src/api/queries.ts:114-121`, `src/features/requests/RequestsPage.tsx:116-120,458` |
+| ~~JSON request bodies with duplicate keys: the gateway judges the last one, an origin may use the first.~~ Fixed on 2026-11-13, see CHANGELOG.md. | security | S | LOW | ~~`crates/xshield-judge/src/values.rs:336`, cf. `crates/xshield-core/src/context/route.rs:623`~~ |
+| ~~Session and address contexts are not keyed by site, unlike held logins and shapes.~~ Fixed on 2026-11-13, see CHANGELOG.md. | security | S | LOW | ~~`engine.rs:325,439,912`~~ |
 | Routes and `yaml` are imported eagerly although docs/07 §7.10.1/§7.10.7 require lazy loading; the request list is not virtualised although the doc says it is. | perf / docs | M | LOW–MED | `web/console/src/app/router.tsx:20-29`, `src/lib/yaml.ts:4`, `src/features/requests/RequestTable.tsx:137` |
 | The object list issues one evidence query per suspended row and one full-spec query per automatic version. | perf | S | LOW | `crates/xshield-control/src/object_map.rs:548,1264,1533` |
 | Slot-drawer queries filter `decision_log.trace @> …` with no supporting index (verify with EXPLAIN first). | perf | M | MED | `crates/xshield-postgres/src/object_learning_store.rs:986,1013,1057,1077` |

@@ -11,6 +11,7 @@ import {
 } from "@tanstack/react-query";
 import { api } from "./client.ts";
 import { sendAll } from "../lib/settle.ts";
+import { sameListOtherWindow } from "../lib/window-key.ts";
 import type {
   AgentModelValues,
   JevModelValues,
@@ -109,13 +110,21 @@ export function useRequests(query: string) {
   });
 }
 
-/** The request list, one page at a time (cursor paging, docs/06 6.4.3). */
+/** The request list, one page at a time (cursor paging, docs/06 6.4.3). When only the window has moved (a preset
+ *  range follows the clock), the rows already shown stay until the new window's rows arrive; a change of filter
+ *  starts empty, so rows of a filter the page has left are never shown under the new one. */
 export function useRequestPages(query: string) {
   return useInfiniteQuery({
     queryKey: keys.requestPages(query),
     queryFn: ({ pageParam }) => api.requests(withCursor(query, pageParam)),
     initialPageParam: null as string | null,
     getNextPageParam: (page) => page.next_cursor,
+    placeholderData: (previous, previousQuery) => {
+      const before = previousQuery?.queryKey[1];
+      return typeof before === "string" && sameListOtherWindow(before, query)
+        ? previous
+        : undefined;
+    },
     staleTime: 10_000,
   });
 }
