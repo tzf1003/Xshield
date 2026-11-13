@@ -37,6 +37,12 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | A12 | 医生 A 在搜索结果里看到医生 B 的患者 D（慢速 id `PT-7004`），然后按这个 id 删除 | 拦截，记为尝试越权：慢速 id 按声明的 `DELETE /api/patients/{id}` 位置判定，源站不收到请求。见下方说明 | `jev_deny` |
 | B1 | 搜索框、表单里的中英文文本 | 放行；重复的搜索走放行缓存 | `jev_allow`，`cached_allow` |
 | B2 | 参数里的 SQL 注入、命令执行、路径穿越 | 拦截 | `jev_deny` |
+| B10 | 查询串里垫 200 个惰性参数，后面是医生 B 的患者编号 `PT-7004` | 拦截；Jev 收到的 `query.patient_id` 是 `reference` | `jev_deny` |
+| B11 | multipart 表单的字段 `patient_id` 引用医生 B 的患者 `PT-7004` | 拦截；Jev 收到的 `body.patient_id` 是 `reference` | `jev_deny` |
+| B12 | 一个值里 600 个字符的填充之后是 `' OR 1=1 --` | 拦截 | `jev_deny` |
+| B13 | 120 个字段的正常表单 | 源站答 201，Jev 放行 | `jev_allow` |
+| B14 | 没有 `Content-Type` 的表单，字段 `patient_id` 引用医生 B 的患者 `PT-7004` | 拦截；Jev 收到的 `body.patient_id` 是 `reference` | `jev_deny` |
+| B15 | 表单类型的请求体同时是能解析的 JSON（`{"a":"&note=x&patient_id=PT-7004&b="}`），字段 `patient_id` 引用医生 B 的患者 `PT-7004` | 拦截；Jev 收到的 `body.patient_id` 是 `reference` | `jev_deny` |
 | C1 | Jev 返回 503 或超时，`on_jev_unavailable=deny` | 拦截，注明 `JEV_HTTP_ERROR` / `JEV_TIMEOUT` | `jev_unavailable` |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，记为未经判定 | `jev_unavailable`（`unjudged`） |
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |

@@ -186,14 +186,14 @@ class Lab:
         self.scenario = ""
 
     def send(self, host: str, method: str, target: str, *, cookie: str | None = None,
-             form: dict[str, str] | None = None, json_body: dict | None = None,
+             form: dict[str, str] | None = None, json_body: dict | None = None, body: bytes | None = None,
              headers: dict[str, str] | None = None, authorization: str | None = None,
              source: str | None = None) -> Sent:
         """One request through the edge, from the loopback address `source` when one is given."""
         if authorization:
             headers = {**(headers or {}), "Authorization": authorization}
         return exchange(self.edge, self.origin_was_served, host, method, target, source=source,
-                        cookie=cookie, form=form, json_body=json_body, headers=headers)
+                        cookie=cookie, form=form, json_body=json_body, body=body, headers=headers)
 
     def origin_was_served(self, request_id: str) -> bool:
         return any(served_id == request_id for _, _, served_id in self.origin_served())
@@ -570,6 +570,77 @@ def b4(lab: Lab) -> None:
         "emr.lab", "POST", f"/api/patients/{other}/notes", cookie=cookie_a, json_body=long_note_form()),
         Expect(403, "jev_deny", "blocked", False))
     lab.origin_direct("B4 patient of doctor B", "GET", f"/api/patients/{other}", cookie_a)
+
+
+@scenario("B10", "查询串里垫 200 个惰性参数，后面是别的医生的患者编号：拦截")
+def b10(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    padding = "&".join(f"pad{index}=x" for index in range(200))
+    lab.expect("a patient number of another doctor behind 200 inert parameters", lab.send(
+        "emr.lab", "GET", f"/api/search?{padding}&patient_id=PT-7004", cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+    asked = judged_value(judged_request(lab, "GET", "/api/search"), "PT-7004")
+    lab.check("Jev was shown the number as a reference behind the padding",
+              asked.get("kind") == "reference" and asked.get("at") == "query.patient_id", f"asked {asked}")
+
+
+@scenario("B11", "multipart 表单的字段引用别的医生的患者编号：拦截")
+def b11(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    boundary = "xshieldlab"
+    fields = (("patient_id", "PT-7004"), ("note", "今天复诊，血压平稳"))
+    text = "".join(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
+                   for name, value in fields) + f"--{boundary}--\r\n"
+    lab.expect("multipart form naming another doctor's patient", lab.send(
+        "emr.lab", "POST", "/api/notes", cookie=cookie, body=text.encode("utf-8"),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}),
+        Expect(403, "jev_deny", "blocked", False))
+    asked = judged_value(judged_request(lab, "POST", "/api/notes"), "PT-7004")
+    lab.check("Jev was shown the field as a reference",
+              asked.get("kind") == "reference" and asked.get("at") == "body.patient_id", f"asked {asked}")
+
+
+@scenario("B12", "一个值里 600 个字符的填充之后是注入串：拦截")
+def b12(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    value = "a" * 600 + "' OR 1=1 --"
+    lab.expect("an injection after 600 characters of one value", lab.send(
+        "emr.lab", "GET", "/api/search?q=" + urllib.parse.quote(value, safe=""), cookie=cookie),
+        Expect(403, "jev_deny", "blocked", False))
+
+
+@scenario("B13", "120 个字段的正常表单：放行到源站")
+def b13(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    fields = {f"field{index:03d}": "正常的值" for index in range(120)}
+    lab.expect("a normal form with 120 fields", lab.send(
+        "emr.lab", "POST", "/api/notes", cookie=cookie, form=fields),
+        Expect(201, "jev_allow", "allowed", True))
+
+
+@scenario("B14", "没有 Content-Type 的表单，字段引用别的医生的患者编号：拦截")
+def b14(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    lab.expect("a form with no content type naming another doctor's patient", lab.send(
+        "emr.lab", "POST", "/api/notes", cookie=cookie, body=b"note=routine&patient_id=PT-7004"),
+        Expect(403, "jev_deny", "blocked", False))
+    asked = judged_value(judged_request(lab, "POST", "/api/notes"), "PT-7004")
+    lab.check("Jev was shown the field as a reference",
+              asked.get("kind") == "reference" and asked.get("at") == "body.patient_id", f"asked {asked}")
+
+
+@scenario("B15", "表单类型的请求体同时是能解析的 JSON，表单字段引用别的医生的患者编号：拦截")
+def b15(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a")
+    # The body is JSON and also a form. The origin reads it as a form, so `patient_id` is a field of it.
+    lab.expect("a form-typed body that is also JSON names another doctor's patient", lab.send(
+        "emr.lab", "POST", "/api/notes", cookie=cookie,
+        body=b'{"a":"&note=x&patient_id=PT-7004&b="}',
+        headers={"Content-Type": "application/x-www-form-urlencoded"}),
+        Expect(403, "jev_deny", "blocked", False))
+    asked = judged_value(judged_request(lab, "POST", "/api/notes"), "PT-7004")
+    lab.check("Jev was shown the field as a reference",
+              asked.get("kind") == "reference" and asked.get("at") == "body.patient_id", f"asked {asked}")
 
 
 @scenario("C1", "Jev 超时或不可用，on_jev_unavailable=deny：拦截并注明原因")
