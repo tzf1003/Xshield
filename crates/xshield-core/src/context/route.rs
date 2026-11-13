@@ -18,6 +18,7 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 use serde::{Deserializer, Serialize, Serializer};
 
 use super::config::PathPattern;
+use crate::hex::hex_digit;
 
 /// Most routes one site may declare.
 pub const ROUTES_MAX: usize = 32;
@@ -562,11 +563,11 @@ fn decode(text: &str) -> String {
     while index < bytes.len() {
         match bytes[index] {
             b'%' if index + 2 < bytes.len()
-                && hex(bytes[index + 1]).is_some()
-                && hex(bytes[index + 2]).is_some() =>
+                && hex_digit(bytes[index + 1]).is_some()
+                && hex_digit(bytes[index + 2]).is_some() =>
             {
-                let high = hex(bytes[index + 1]).unwrap_or(0);
-                let low = hex(bytes[index + 2]).unwrap_or(0);
+                let high = hex_digit(bytes[index + 1]).unwrap_or(0);
+                let low = hex_digit(bytes[index + 2]).unwrap_or(0);
                 out.push(high * 16 + low);
                 index += 3;
             }
@@ -581,15 +582,6 @@ fn decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// The media type of a `Content-Type`, lower case, without parameters.

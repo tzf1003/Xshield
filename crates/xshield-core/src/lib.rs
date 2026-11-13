@@ -9,6 +9,7 @@
 
 pub mod constant_time;
 pub mod context;
+pub mod hex;
 pub mod kind;
 pub mod model;
 pub mod path_template;
