@@ -1,0 +1,81 @@
+# Reference deployment (docs/04 section 4.1): one machine, three services.
+#
+#   postgres          site configuration, its history and the decision log
+#   xshield-control   console and API; applies migrations/ before it serves
+#   xshield-edge      the gateway in front of the origin
+#
+# Settings come from a `.env` file next to this file; `.env.example` lists them
+# and says how to make each value. Then:
+#
+#   docker compose up -d --build
+#
+# The console listens on 127.0.0.1:8081 only. Its administrator cookie is
+# `Secure`, so open it as http://localhost:8081 on the machine itself or through
+# an SSH tunnel, or put an HTTPS reverse proxy in front (docs/07 section 7.2.3).
+# The gateway listens on every interface. One instance only: session context
+# lives in the gateway's memory (docs/01 section 1.2).
+name: xshield
+
+services:
+  postgres:
+    # Pinned by digest, as the Dockerfile pins its base images.
+    image: postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: xshield
+      POSTGRES_USER: xshield
+      POSTGRES_PASSWORD: ${XSHIELD_POSTGRES_PASSWORD:?set XSHIELD_POSTGRES_PASSWORD in .env}
+    # No published port: only the two services below reach the database. The
+    # schema is not loaded here; xshield-control applies migrations/ at start-up.
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xshield -d xshield"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  xshield-control:
+    build:
+      context: .
+      target: control
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      XSHIELD_DATABASE_URL: postgresql://xshield:${XSHIELD_POSTGRES_PASSWORD:?set XSHIELD_POSTGRES_PASSWORD in .env}@postgres:5432/xshield
+      XSHIELD_CONTROL_LISTEN: 0.0.0.0:8081
+      # Empty until `hash-password` has printed one (docs/04 4.1.1). Optional here so that
+      # the command runs before the hash exists; the control refuses to start without one.
+      XSHIELD_ADMIN_PASSWORD_HASH: ${XSHIELD_ADMIN_PASSWORD_HASH:-}
+      XSHIELD_CONTEXT_KEY_HEX: ${XSHIELD_CONTEXT_KEY_HEX:?set XSHIELD_CONTEXT_KEY_HEX in .env}
+    ports:
+      - "127.0.0.1:${XSHIELD_CONTROL_PORT:-8081}:8081"
+
+  xshield-edge:
+    build:
+      context: .
+      target: edge
+    restart: unless-stopped
+    # The gateway's name in the decision log and on the system page.
+    hostname: xshield-edge
+    # The gateway exits when the tables are not there yet; it is restarted until
+    # xshield-control has applied the migrations.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      xshield-control:
+        condition: service_started
+    environment:
+      XSHIELD_DATABASE_URL: postgresql://xshield:${XSHIELD_POSTGRES_PASSWORD:?set XSHIELD_POSTGRES_PASSWORD in .env}@postgres:5432/xshield
+      XSHIELD_EDGE_LISTEN_PORTS: "8080"
+      XSHIELD_CONTEXT_KEY_HEX: ${XSHIELD_CONTEXT_KEY_HEX:?set XSHIELD_CONTEXT_KEY_HEX in .env}
+      # Optional, from .env or the shell. When neither sets it, the variable is not passed
+      # on. A key saved on the console's model page takes precedence (docs/03 3.3.1).
+      AI_GATEWAY_API_KEY:
+    ports:
+      - "${XSHIELD_EDGE_PORT:-8080}:8080"
+
+volumes:
+  postgres-data:
