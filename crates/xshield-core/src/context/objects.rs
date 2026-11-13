@@ -178,8 +178,8 @@ pub struct LearningSettings {
     /// Off: the learning pass reads nothing for the site, and only hand-declared
     /// and confirmed positions apply.
     pub auto_learn: bool,
-    /// Tightening changes apply on their own; off sends them to the proposal queue
-    /// too. Stored now, acted on once the judge reads the learned states.
+    /// Splits a class whose window votes show groups of positions that never share a
+    /// value, one new configuration version per pass. Off by default: no class is split.
     pub auto_tighten: bool,
     /// Confirmed positions that turn abnormal are paused on their own. Stored now,
     /// acted on once the judge reads the learned states.
@@ -215,7 +215,7 @@ impl Default for LearningSettings {
     fn default() -> Self {
         Self {
             auto_learn: true,
-            auto_tighten: true,
+            auto_tighten: false,
             auto_pause: true,
             thresholds: LearningThresholds::default(),
             agent: LearningAgent::default(),
@@ -2001,13 +2001,14 @@ mod tests {
         let loaded = map(VALID).unwrap();
         assert_eq!(loaded.learning(), &LearningSettings::default());
         assert!(loaded.learning().auto_learn);
+        assert!(!loaded.learning().auto_tighten);
         assert_eq!(loaded.learning().thresholds.uses, VOTES_MIN);
         assert_eq!(loaded.learning().thresholds.sessions, SESSIONS_MIN);
         assert_eq!(loaded.learning().agent.daily_limit, 200);
         assert!(!loaded.learning().agent.enabled);
         // The defaults written out in full are the same settings.
         let written = map(
-            r#"{"learning":{"auto_learn":true,"auto_tighten":true,"auto_pause":true,
+            r#"{"learning":{"auto_learn":true,"auto_tighten":false,"auto_pause":true,
             "thresholds":{"uses":20,"sessions":5},"agent":{"enabled":false,"daily_limit":200}}}"#,
         )
         .unwrap();
@@ -2027,6 +2028,11 @@ mod tests {
         let back: ObjectMap = serde_json::from_str(&text).unwrap();
         assert_eq!(back, changed);
         assert!(!back.is_empty());
+        // Turning tightening on is a setting of its own, so it is written back too.
+        let tightening = map(r#"{"learning":{"auto_tighten":true}}"#).unwrap();
+        assert!(!tightening.is_empty());
+        let text = serde_json::to_string(&tightening).unwrap();
+        assert!(text.contains(r#""auto_tighten":true"#), "{text}");
     }
 
     #[test]
