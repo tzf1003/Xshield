@@ -307,6 +307,43 @@ def _failure_rows(failures: list[dict[str, Any]]) -> list[list[str]]:
     ] for item in failures]
 
 
+def _share(num: int, den: int) -> str:
+    return "—" if not den else _pct(num / den)
+
+
+def _scan_block(scan: dict[str, Any] | None) -> list[str]:
+    """The confidence threshold scan of plan 3.4, printed only for a run with a real model (score.confidence_scan)."""
+    if scan is None:
+        return []
+    rows = [[
+        f"{item['threshold']:.2f}",
+        f"{item['benign_blocks']}（{_share(item['benign_blocks'], scan['benign_total'])}）",
+        f"{item['leaks_closed']} / {scan['probe_allows']}",
+        f"{item['unanswered']}（{_share(item['unanswered'], scan['judgements'])}）",
+    ] for item in scan["thresholds"]]
+    lines = ["", "### 置信度门槛扫描（3.4）", "",
+             "同一批判定记录按门槛重算，不重新发流量。放行的置信度与决策日志的 jev_confidence 同一算法"
+             "（两问各自最高概率中较小的一个）；恰好等于门槛的放行保留，低于门槛的放行按“答不上来”处理，"
+             "站点按 on_jev_unavailable: deny 计。", ""]
+    lines += _md_table(["门槛", "新增误拦（良性请求）", "减少的漏拦（探针：条 / 原被放行的）", "答不上来的 Jev 判定"], rows)
+    lines += ["", f"分母：良性请求 {scan['benign_total']} 条，有置信度的放行 {scan['allows']} 条，"
+              f"Jev 判定 {scan['judgements']} 次（分批的判定计一次）。只改判 jev_allow 的记录，以及复用了这类放行的 cached_allow；"
+              "fast_allow 和拦截不受影响；已知缺口的回归用例不计入（按记分表规则只在 P7 里计）。",
+              "这是一阶估计：一个请求改判后，后面的请求会少见到一些值，这部分连带影响没有算。"]
+    if scan["cache_unresolved"]:
+        lines.append(f"有 {scan['cache_unresolved']} 条缓存放行找不到它复用的放行记录，没有改判。")
+    return lines
+
+
+def _relay_line(relay: dict[str, Any]) -> str:
+    """The record or replay line of the cost section (plan 6 and batch 9)."""
+    if relay["mode"] == "replay":
+        return (f"- 回放未命中率：{relay['misses']} / {relay['calls']} 次调用（{_share(relay['misses'], relay['calls'])}），"
+                "未命中的调用收到 UNKNOWN，计为无法判定")
+    return (f"- 录制：{relay['recorded']} 条应答写入录制文件（转发 {relay['calls']} 次，"
+            f"没有得到可用应答 {relay['failures']} 次）")
+
+
 def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
     gates = result["gates"]
     passed = sum(gate["ok"] is True for gate in gates)
@@ -319,6 +356,7 @@ def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
                        [list(row) for row in score_rows(result)])
     lines += ["", *_baseline_lines(result["baseline"])]
     lines += ["", f"## 3 {SECTION_TITLES[2]}", ""] + _defence_lines(result, meta) + ["", *_label_lines(result["label_checks"])]
+    lines += _scan_block(result.get("confidence_scan"))
     lines += ["", f"## 4 {SECTION_TITLES[3]}", ""] + _learning_lines(result)
 
     must_failures = [item for item in result["failures"]
@@ -353,6 +391,7 @@ def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
               f"{_ratio(costs['calls_per_judged_request'])}",
               f"- 判定耗时：中位数 {_count(costs['judge_ms_median'])} ms，p95 {_count(costs['judge_ms_p95'])} ms",
               f"- Jev 失败码：{failures}",
+              *([_relay_line(meta["jev_relay"])] if meta.get("jev_relay") else []),
               "", f"## 8 {SECTION_TITLES[7]}", ""]
     lines += [f"- {item['section']}：{item['why']}" for item in result["skipped"]] or ["没有。"]
     return "\n".join(lines) + "\n"
@@ -386,5 +425,6 @@ def report_document(result: dict[str, Any], meta: dict[str, Any]) -> dict[str, A
         "costs": result["costs"],
         "counts": result["counts"],
         "needs": result["needs"],
+        "confidence_scan": result.get("confidence_scan"),
         "passed": result["passed"],
     }
