@@ -254,6 +254,16 @@ async fn buffer_body(session: &mut Session) -> Result<Option<Bytes>> {
     Ok(Some(Bytes::from(body)))
 }
 
+/// The session credential the request carries, where the site says it is.
+fn request_credential<J: JevPort>(site: &SiteSpec, header: &RequestHeader) -> Option<String> {
+    let cookies = cookie_header(&header.headers);
+    let from_header = match site.session() {
+        SessionCredential::Header(name) => header_text(&header.headers, name),
+        SessionCredential::Cookie(_) => None,
+    };
+    Judge::<J>::credential_from(site, cookies.as_deref(), from_header).map(str::to_owned)
+}
+
 impl<J: JevPort + 'static> EdgeProxy<J> {
     /// The row of a request refused before judging (docs/07 section 7.4.1): no
     /// site owns its host, or its body cannot be inspected. Nothing was judged,
@@ -269,6 +279,8 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
     ) -> DecisionRecord {
         let header = session.req_header();
         let names = request_header_names(header);
+        // The row still redacts the session credential from the path and the query.
+        let credential = site.and_then(|site| request_credential::<J>(site, header));
         let facts = RequestFacts {
             request_id: &ctx.request_id,
             method: header.method.as_str(),
@@ -276,7 +288,7 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
             query: header.uri.query(),
             content_type: header_text(&header.headers, "content-type"),
             body: &[],
-            credential: None,
+            credential: credential.as_deref(),
             client: &ctx.client,
             now_ms: now_ms(),
             route,
@@ -415,13 +427,7 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
         let names = request_header_names(session.req_header());
 
         let header = session.req_header();
-        let cookies = cookie_header(&header.headers);
-        let from_header = match site.spec().session() {
-            SessionCredential::Header(name) => header_text(&header.headers, name),
-            SessionCredential::Cookie(_) => None,
-        };
-        let credential = Judge::<J>::credential_from(site.spec(), cookies.as_deref(), from_header)
-            .map(str::to_owned);
+        let credential = request_credential::<J>(site.spec(), header);
         let method = header.method.as_str().to_owned();
         let path = header.uri.path().to_owned();
         let query = header.uri.query().map(str::to_owned);

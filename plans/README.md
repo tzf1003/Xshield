@@ -36,7 +36,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 
 | Finding | Category | Effort | Risk of fix | Evidence |
 |---|---|---|---|---|
-| ✔ A header credential is redacted only together with its scheme (`Bearer …`); the bare token in a body, query or path reaches Jev and the decision log. Refusal rows redact nothing. Violates the AGENTS.md rule on session credentials. | security | S–M | LOW | `crates/xshield-judge/src/state.rs:129`, `trace.rs:114`, `engine.rs:1099-1117,1202`, `crates/xshield-edge/src/proxy.rs:279,419` |
 | Any non-empty credential creates a session before anything is judged: random cookies evict real sessions (20 000 cap), cost a full scan under the global lock, and each gets its own 60/min Jev budget. | security | M | MED | `engine.rs:347,443,724-751`, `context.rs:861-872` |
 | ✔ The Jev limiter map is pruned at its cap but then inserts anyway, so it grows without bound and scans on every insert. | bug | S | LOW | `engine.rs:143-150` |
 | Body-less POSTs and `/api/import` do not enforce the documented "writes require `Content-Type: application/json`" CSRF rule; `SameSite=Lax` does not stop same-site origins. | security | S | LOW–MED | `docs/07-console-architecture.md:638,1125`, `crates/xshield-control/src/requests.rs:953`, `object_agent_api.rs:513,548`, `object_map.rs:747,772,1064,1157` |
@@ -75,6 +74,8 @@ Found while executing the plans (not yet investigated):
 
 Rows about README/docs v3 status statements, the `verify_all.sh` header, the deleted-variable list
 in docs/05 and the unused console dependencies were dropped on 2026-11-13: main fixed them in #180 and #181.
+
+The first backlog row (a header credential redacted only together with its scheme) was fixed on 2026-11-13 without a plan file: see `redaction_secret` in `crates/xshield-judge/src/engine.rs` and `scrubbed` / `redacted_path` in `trace.rs`. Not covered by that fix: a row for an unknown host (404) has no site and therefore no credential to redact.
 
 ### Direction (options, not defects)
 

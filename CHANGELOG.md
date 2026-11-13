@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 会话凭证脱敏补全（[docs/02](docs/02-jev.md) 2.4）：凭证取自 `Authorization` 头时按去掉 `Bearer` 等认证方案后的令牌比对，此前只比对整个头值，令牌单独出现在查询、请求体或路径里时会原样发给 Jev 并写入判定日志。路径中含凭证的一段现在在发给 Jev 的 `path`、`recent` 和判定日志的 `path`、`logical_path` 里写成 `<redacted>`，百分号编码的写法同样识别；`seen_as` 与判定记录里引用早先请求的位置在发出和写入前整体再检查一遍。请求体无法检查（413）的拒绝记录也按会话凭证脱敏。
 - 新增参考部署 `docker-compose.yml`（[docs/04](docs/04-deployment-testing.md) 4.1.1）：PostgreSQL、控制台和网关三个服务，设置来自 `.env`（样例见 `.env.example`）。控制台只监听本机 8081，网关监听 8080。
 - [docs/05](docs/05-v3-removal.md) 5.3 把 `XSHIELD_ALLOWED_UPSTREAM_CIDRS`、`XSHIELD_ALLOW_LOOPBACK_UPSTREAM`、`XSHIELD_CONTROL_OPS_LISTEN` 记为有意不实现：单管理员自己填写源站地址，网关不按网段限制。
 - `validation/report.*` 不再入库：它是 `scripts/validate_library.py` 每次运行的输出，文档一改就落后，CI 本来就重新计算。
