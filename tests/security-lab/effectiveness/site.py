@@ -31,7 +31,7 @@ from .adapters.browser_suite import Conversion, SuiteError, executed_window, rea
 from .cli import PASSWORD_ENV, _commit
 from .contracts import ContractError, dump_json, load_decisions, load_learned, load_truth
 from .report import render_markdown, render_terminal, report_document
-from .score import score
+from .score import confidence_scan, score
 
 WINDOW_MARGIN_MILLIS = 5 * 60 * 1000
 EXPORT_LIMIT = 100_000  # the console's cap on one export (crates/xshield-control/src/requests.rs)
@@ -103,6 +103,7 @@ def _score_site(args: argparse.Namespace, started: datetime, clock: float) -> in
 
     result = score(converted.observations, decisions, truth=truth, learned=learned,
                    exclude_suspicious=True, probe_values_from_record=True)
+    result["confidence_scan"] = confidence_scan(converted.observations, decisions)  # a site's Jev is a real model
     _apply_real_site_rules(result, has_learning=learned is not None)
     result["label_checks"]["business_error"] = converted.business_error
     result["label_checks"]["conflict"] = converted.conflicts
