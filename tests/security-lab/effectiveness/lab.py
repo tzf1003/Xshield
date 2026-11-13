@@ -12,8 +12,13 @@ The learning segment (batch 5, effectiveness.learning) runs between the training
 PostgreSQL is available. The object map it learns from the training decisions becomes a third protection site,
 clinic-learned, which gets the journeys and the probes of the object-map configurations. Without PostgreSQL, or when
 the module cannot be imported, the report says the segment did not run and why, and no learned column appears. The
-full mode (batch 7) is refused with exit status 2, as are --keep (the console comes with the learning segment) and
---update-baseline (the baseline file comes with batch 8).
+full mode (batch 7) is refused with exit status 2, as is --keep (the
+console comes with the learning segment).
+
+The quick run compares with the quick group of tests/security-lab/effectiveness-baseline.json (plan 8): a missing
+group fails the run, and the run's learning problems are checked against tests/security-lab/effectiveness-known-gaps.json
+(known_gaps.py). --update-baseline writes the quick group, after the run passed every gate and no number went down;
+it is refused with --only (part of the probes) and with a real Jev (the baseline is for the ideal model).
 
 `--jev live` points the protection segment at the real Jev named by XSHIELD_JEV_ENDPOINT, with the key from
 XSHIELD_JEV_API_KEY, and repeats every scored request three times. A missing endpoint or key is an error: the run
@@ -47,13 +52,17 @@ from clinic_traffic import Evidence, run_training
 from fake_jev import FakeJev
 
 from . import jev_relay, probes, regressions
-from .cli import _commit
-from .contracts import dump_json
+from .cli import KNOWN_GAPS_PATH, _commit
+from .contracts import (
+    ContractError, baseline_group, dump_json, load_baseline, load_known_gaps, write_baseline,
+)
 from .report import render_markdown, render_terminal, report_document
-from .score import confidence_scan, score
+from .score import baseline_values, confidence_scan, score
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUT = ROOT / "target" / "effectiveness" / "latest"
+BASELINE_PATH = ROOT / "tests" / "security-lab" / "effectiveness-baseline.json"
+BASELINE_MODE = "quick"  # the group this run reads and writes; the full group comes with batch 7
 LIVE_ENDPOINT_VARIABLE = "XSHIELD_JEV_ENDPOINT"
 LIVE_KEY_VARIABLE = "XSHIELD_JEV_API_KEY"
 LIVE_REPEATS = 3
@@ -80,6 +89,9 @@ class Options:
     only: frozenset[str] = frozenset()
     out: Path = DEFAULT_OUT
     jev: str = "ideal"  # ideal, live, record or replay
+    update_baseline: bool = False
+    baseline: Path = BASELINE_PATH
+    known_gaps: Path = KNOWN_GAPS_PATH
 
 
 def run(args: argparse.Namespace) -> int:
@@ -88,15 +100,18 @@ def run(args: argparse.Namespace) -> int:
         return _not_built("完整模式（--mode full）是批次 7")
     if args.keep:
         return _not_built("--keep 要的控制台随学习段进来（批次 5）")
-    if args.update_baseline:
-        return _not_built("--update-baseline 要的基线文件在批次 8 建立")
+    only = frozenset(name.strip() for name in args.only.split(",") if name.strip())
+    if args.update_baseline and only:
+        return _not_built("--update-baseline 不能和 --only 同用：只跑了一部分探针，写下的数字不完整")
+    if args.update_baseline and args.jev != "ideal":
+        return _not_built("--update-baseline 只写理想模型下的基线")
     live: Live | None = None
     if args.jev in ("live", "record"):
         live = _live_settings(args.jev)
         if live is None:
             return 2
-    only = frozenset(name.strip() for name in args.only.split(",") if name.strip())
-    return execute(Options(seed=args.seed, only=only, out=args.out, jev=args.jev), live=live)
+    return execute(Options(seed=args.seed, only=only, out=args.out, jev=args.jev,
+                           update_baseline=args.update_baseline), live=live)
 
 
 def _not_built(what: str) -> int:
@@ -150,7 +165,16 @@ def execute(options: Options, *, live: Live | None = None) -> int:
         observations = [*train_rows, *protect_rows]
         decisions = [*train_records, *protect_records]
         _write_inputs(out, observations, decisions, truth)
-        result = score(observations, decisions, truth=truth, learned=_learned_document(learning))
+        # The baseline is for the ideal model, and for a run that sends every probe (--only sends some of them).
+        # A missing group fails the gate, unless this run is the one that writes it (--update-baseline).
+        compared = not real and not options.only
+        document = load_baseline(options.baseline) if compared and options.baseline.exists() else None
+        group = baseline_group(document, BASELINE_MODE) if compared else None
+        result = score(observations, decisions, truth=truth, learned=_learned_document(learning),
+                       baseline=group, gap_entries=_gap_entries(options),
+                       check_gaps=not options.only,
+                       require_baseline=compared and group is None and not options.update_baseline,
+                       training=train_records)
         _mark_unrun(result, real=real, learning_why=learning["why"])
         if real:  # the scan needs a real model's probabilities; the ideal model's are fixed (plan 10, batch 9)
             result["confidence_scan"] = confidence_scan(protect_rows, protect_records)
@@ -165,7 +189,12 @@ def execute(options: Options, *, live: Live | None = None) -> int:
         print(f"报告：{out / 'report.md'}")
         if _recording_incomplete(relay):
             return 2
+        if options.update_baseline:
+            return _update_baseline(options, result, meta)
         return 0 if result["passed"] else 1
+    except ContractError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"error: {error}", file=sys.stderr)
         _recording_incomplete(relay)  # a run cut short by an error still says that its recording is incomplete
@@ -174,6 +203,26 @@ def execute(options: Options, *, live: Live | None = None) -> int:
         ideal.stop()
         if relay is not None:
             relay.stop()
+
+
+def _gap_entries(options: Options) -> list[dict[str, Any]]:
+    """The learning known-gap list. A missing file is an empty list, so every learning problem then counts."""
+    return load_known_gaps(options.known_gaps) if options.known_gaps.exists() else []
+
+
+def _update_baseline(options: Options, result: dict[str, Any], meta: dict[str, Any]) -> int:
+    """Writes the quick group, when the run passed every gate and no number went down (plan 10, --update-baseline)."""
+    if not result["passed"]:
+        print("error: 门槛未通过，没有写基线（失败的门槛见报告）", file=sys.stderr)
+        return 1
+    if result["baseline"]["regressions"]:
+        names = "、".join(item["name"] for item in result["baseline"]["regressions"])
+        print(f"error: 有指标比基线差（{names}），没有写基线", file=sys.stderr)
+        return 1
+    group = {"seed": options.seed, "commit": meta["commit"], "values": baseline_values(result["metrics"])}
+    write_baseline(options.baseline, BASELINE_MODE, group)
+    print(f"基线已写入：{options.baseline}（{BASELINE_MODE} 组，提交 {meta['commit']}）")
+    return 0
 
 
 def _say(message: str) -> None:

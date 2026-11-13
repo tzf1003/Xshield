@@ -27,6 +27,7 @@ import type {
   ObjectJudgementConfirmation,
   ObjectRunDetail,
   ObjectRunsResponse,
+  FunctionChanges,
   ObjectsFilter,
   ObjectSlotDetail,
   ObjectsResponse,
@@ -37,6 +38,7 @@ import type {
   SessionState,
   SessionTimeline,
   SiteDetail,
+  SiteFunctions,
   SiteListResponse,
   SiteRollbackBody,
   SiteSpec,
@@ -191,6 +193,14 @@ export const api = {
   dismissJudgement: (site: string, id: string) =>
     post<void>(`/sites/${name(site)}/objects/slots/${encodeURIComponent(id)}/judgement/dismiss`),
   bootstrap: (site: string) => get<BootstrapResponse>(`/sites/${name(site)}/objects/bootstrap`),
+  /** The function table: its functions, the candidates the learning saw, the proposals and the unlearned traffic (7.9.20). */
+  functions: (site: string) => get<SiteFunctions>(`/sites/${name(site)}/objects/functions`),
+  /** Applies one batch of changes to the table as one new version of the site. Only after an administrator confirms (7.9.20). */
+  changeFunctions: (site: string, body: FunctionChanges) =>
+    post<void>(`/sites/${name(site)}/objects/functions/changes`, body),
+  /** Dismisses the administrator proposal of a function: the rules propose it again only with other evidence (7.9.20). */
+  dismissFunctionProposal: (site: string, key: string) =>
+    post<void>(`/sites/${name(site)}/objects/functions/proposals/dismiss`, { key }),
   /** The learning task's changes and anomalies (console design 6 C2). */
   objectEvents: (site: string, filter: ObjectEventsFilter) =>
     get<ObjectEventsResponse>(`/sites/${name(site)}/objects/events${qs({ ...filter })}`),

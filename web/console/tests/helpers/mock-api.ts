@@ -31,6 +31,7 @@ import type {
   RequestRow,
   SessionRow,
   SiteDetail,
+  SiteFunctions,
   SiteSpec,
   SiteSummary,
   SiteVersion,
@@ -347,6 +348,23 @@ const ROUTES: Array<[method: string, pattern: RegExp, handler: Handler]> = [
           s,
         ),
       ),
+  ],
+  // The function table answers an empty list unless a spec overrides it, so the other object views are not affected.
+  // The two writes answer 204; a spec that checks them reads the calls the page made (docs/07 7.9.20).
+  [
+    "GET",
+    /^\/api\/sites\/([^/]+)\/objects\/functions$/,
+    (m, _c, s) => siteOr(s, m, () => ok(NO_FUNCTIONS)),
+  ],
+  [
+    "POST",
+    /^\/api\/sites\/([^/]+)\/objects\/functions\/changes$/,
+    (m, _c, s) => siteOr(s, m, () => empty()),
+  ],
+  [
+    "POST",
+    /^\/api\/sites\/([^/]+)\/objects\/functions\/proposals\/dismiss$/,
+    (m, _c, s) => siteOr(s, m, () => empty()),
   ],
   ["GET", /^\/api\/status$/, () => ok(status)],
   ["GET", /^\/api\/system$/, () => ok(system)],
@@ -737,6 +755,20 @@ function specOf(call: Call): SiteSpec {
     throw new ApiFailure(400, "SITE_CONFIG_MALFORMED");
   return spec;
 }
+
+/** The function table of a site that has none learned yet (docs/07 7.9.20): every list empty, every count zero. */
+const NO_FUNCTIONS: SiteFunctions = {
+  status: "ok",
+  window_days: 7,
+  threshold_units: 5,
+  identified: true,
+  ordinary_units: 0,
+  admin_units: 0,
+  functions: [],
+  candidates: [],
+  proposals: [],
+  unlearned: { requests: 0, unkeyed_requests: 0, complete: true, top: [] },
+};
 
 function siteOr(
   state: State,

@@ -1,0 +1,91 @@
+name: Effectiveness
+
+# The protection-effectiveness measurement (docs/04 section 4.6, plan section 8). It runs on a push to main that
+# changes judgement or learning code or the lab itself, and by hand. There is no nightly run. Only the quick mode
+# exists so far; the full mode comes with its own batch and is then added here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/xshield-core/**"
+      - "crates/xshield-judge/**"
+      - "crates/xshield-edge/**"
+      - "crates/xshield-control/**"
+      - "tests/security-lab/**"
+      - ".github/workflows/effectiveness.yml"
+  workflow_dispatch:
+    inputs:
+      jev:
+        description: >-
+          ideal: the scripted model (the default). live: the real model, which needs the repository secrets
+          XSHIELD_JEV_ENDPOINT and XSHIELD_JEV_API_KEY and fails without them; it never falls back to the script.
+        type: choice
+        options: [ideal, live]
+        default: ideal
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      XSHIELD_TEST_DATABASE_BASE_URL: postgresql://postgres:postgres@localhost:5432
+      # The learning segment builds xshield-edge and xshield-control. Line tables keep the binaries small.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      # The hosted runner ships tens of GB of toolchains this job never uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      # Pinned to rust-toolchain.toml's channel, as in ci.yml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Measure with the scripted model
+        if: inputs.jev != 'live'
+        run: python scripts/measure_effectiveness.py --mode quick --out "$RUNNER_TEMP/effectiveness"
+      - name: Measure with the real model
+        if: inputs.jev == 'live'
+        env:
+          XSHIELD_JEV_ENDPOINT: ${{ secrets.XSHIELD_JEV_ENDPOINT }}
+          XSHIELD_JEV_API_KEY: ${{ secrets.XSHIELD_JEV_API_KEY }}
+        run: python scripts/measure_effectiveness.py --mode quick --jev live --out "$RUNNER_TEMP/effectiveness"
+      - name: Effectiveness report
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/effectiveness/report.md" ]; then
+            cat "$RUNNER_TEMP/effectiveness/report.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "The measurement wrote no report.md; see the step log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload effectiveness output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: effectiveness-${{ inputs.jev || 'ideal' }}
+          path: ${{ runner.temp }}/effectiveness
+          if-no-files-found: warn

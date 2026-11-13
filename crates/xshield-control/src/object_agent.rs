@@ -652,6 +652,8 @@ mod tests {
                 session: format!("s{}", index % 5),
                 day: index / 5,
                 from: flows.clone(),
+                user: None,
+                admin: false,
             });
         }
         // The rules' earlier proposal: an agent proposal of a document the rules now contradict.

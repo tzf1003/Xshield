@@ -50,6 +50,7 @@
     "jev_p95_ms": 760,
     "jev_timeout_ratio": 0.0,
     "attempts": 2,
+    "functions": {"attempts": 1, "unknown": 4},
     "on_jev_unavailable": "deny"
   },
   "complete": true

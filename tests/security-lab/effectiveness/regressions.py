@@ -4,7 +4,8 @@ A case runs on one site: the truth site for most findings, the site with a per-s
 observation-mode site for P1-5. Its status is fixed here: must when the gateway passes the case on main, known_gap
 when it fails and the review lists the finding. A known_gap case that passes is an unexpected pass, and the pipeline
 fails until the same change turns the case into must (plan 4.5, risk 4 of plan 12). The statuses below were taken
-from a run of this file on main; the pull request lists them with the decision path of each case.
+from runs on main at b48c711 (WAF batch 2, PR #209) and from the batch 8 run on top of it, and the forged-session case from the run on main at 8af2b5fa (WAF batch 11a, PR #218); the pull request lists
+them with the decision path of each case and says which run each change follows.
 
 P2-6 (eviction) is not here: it needs a list of about two thousand distinct values, and the clinic origin answers
 at most seven items with about sixty patients in all, so the case cannot be built on this origin.
@@ -13,10 +14,12 @@ at most seven items with about sixty patients in all, so the case cannot be buil
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import quote
 
+import labkit
 from . import probes
 from .probes import (
     DOCTOR_A, DOCTOR_B, Prober, Score, _header, _payload, account, dept_of, first_attack, first_patient, public_patient,
@@ -235,14 +238,82 @@ def method_override(p: Prober) -> None:
               headers={"X-HTTP-Method-Override": "DELETE"})
 
 
+# WAF batch 11 (PR #218): one source address may spend model calls in total across its sessions, not only two a
+# session. The two cases send from addresses of their own, 127.0.2.1 and 127.0.2.2: outside the probe pool
+# (127.0.1.20 to .99) and the training journeys, so no other probe spends from them.
+
+SESSION_ADDRESS = 1  # the sessions of the total-cap case send from 127.0.2.1
+OTHER_ADDRESS = 2  # a real doctor sends from 127.0.2.2, whatever the first address has spent
+SESSIONS = 11  # the first ten spend the address total (two calls each); the eleventh is refused
+# Benign words, each new to the gateway: a word it has seen is answered from the allow cache and spends nothing. The
+# first twenty fill the total of the first address; the twenty-first is the real doctor's.
+B11_TERMS = (
+    "心血管科", "呼吸科", "消化科", "神经科", "肾内科", "内分泌科", "血液科", "风湿科", "肿瘤科", "感染科", "泌尿科",
+    "康复科", "麻醉科", "放射科", "检验科", "病理科", "营养科", "精神科", "中医科", "疼痛科", "预防保健科",
+)
+SETUP_LIMIT_SECONDS = 30.0  # the setup takes well under a second; a longer one is an error, not a score
+
+
+def _source_of(index: int) -> str:
+    source = labkit.loopback_source(index, net=2)
+    if source is None:
+        raise probes.ProbeError(f"this system cannot send from 127.0.2.{index}, which the WAF batch 11 cases need "
+                                "(Linux routes 127/8 to loopback; macOS needs an alias on lo0)")
+    return source
+
+
+def _model_calls(p: Prober) -> int | None:
+    """The calls the ideal model has answered so far; None in a live run, where they are not counted here."""
+    return len(p.jev.states) if p.jev is not None else None
+
+
+def _second_sqli() -> str:
+    """A quick SQL injection other than the one P0-2 sends, so the two cases do not share a cached answer."""
+    texts = [row["text"] for row in probes.quick_attacks() if row["class"] == "sqli"]
+    if len(texts) < 2:
+        raise probes.ProbeError("the quick corpus needs two SQL injections for the WAF batch 11 cases")
+    return texts[1]
+
+
+def session_total_cap(p: Prober) -> None:
+    """Eleven sessions from one address, each made by a real login of the same doctor. Since PR #232 a
+    credential the origin never issued makes no session, so these are issued sessions. The first ten spend two model
+    calls each, the address total of 20. The eleventh's injection must then be refused at the limit (429) before the
+    model is called: the row's `delivered` is false, so the payload never reached the model."""
+    source = _source_of(SESSION_ADDRESS)
+    started = time.monotonic()
+    sessions = [p.login(account(DOCTOR_A), source=source) for _ in range(SESSIONS)]
+    before = _model_calls(p)
+    for index, session in enumerate(sessions[:-1]):
+        for term in B11_TERMS[2 * index:2 * index + 2]:
+            if p.request(session, "GET", f"/api/search?q={quote(term, safe='')}").reply.status == 429:
+                raise probes.ProbeError(f"session {index + 1} was refused during setup, so the address total was not "
+                                        "spent as planned; the case is not scored")
+    spent = None if before is None else _model_calls(p) - before
+    if spent is not None and spent != 2 * (SESSIONS - 1):
+        raise probes.ProbeError(f"the setup spent {spent} model calls, not {2 * (SESSIONS - 1)}; "
+                                "the case is not scored")
+    if time.monotonic() - started > SETUP_LIMIT_SECONDS:
+        raise probes.ProbeError("the setup took longer than 30 seconds; the case is not scored")
+    attack = _second_sqli()
+    p.request(sessions[-1], "GET", f"/api/search?q={quote(attack, safe='')}", scored=True, carry=attack)
+
+
+def other_address_unaffected(p: Prober) -> None:
+    """After the first address has spent its total, a real doctor on another address still gets the model's answer."""
+    session = p.login(account(DOCTOR_A), source=_source_of(OTHER_ADDRESS))
+    term = B11_TERMS[2 * (SESSIONS - 1)]
+    p.request(session, "GET", f"/api/search?q={quote(term, safe='')}", scored=True)
+
+
 CASES: tuple[Case, ...] = (
-    Case("p0-1-pad-200", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, pad_200,
+    Case("p0-1-pad-200", "P0-1", "must", "block", "attack", SITE_TRUTH, pad_200,
          note="injection after 200 query values"),
-    Case("p0-1-multipart", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, multipart,
+    Case("p0-1-multipart", "P0-1", "must", "block", "attack", SITE_TRUTH, multipart,
          note="injection in multipart/form-data after 600 bytes of filler"),
     Case("p0-1-text-plain", "P0-1", "must", "block", "attack", SITE_TRUTH, text_plain,
          note="JSON sent as text/plain"),
-    Case("p0-1-long-value", "P0-1", "known_gap", "block", "attack", SITE_TRUTH, long_value,
+    Case("p0-1-long-value", "P0-1", "must", "block", "attack", SITE_TRUTH, long_value,
          note="injection after 600 characters of one value"),
     Case("p0-1-big-upload", "P0-1", "known_gap", "allow", None, SITE_TRUTH, big_upload,
          note="benign upload over 48 KiB"),
@@ -270,7 +341,7 @@ CASES: tuple[Case, ...] = (
          note="a new session gets 304 and then opens the patient"),
     Case("p1-5-observe-learns-would-block", "P1-5", "must", "block", "access", SITE_OBSERVE,
          observe_learns_would_block, note="a visit id from a would-block answer, in observation mode"),
-    Case("p1-9-big-form", "P1-9", "known_gap", "allow", None, SITE_TRUTH, big_form,
+    Case("p1-9-big-form", "P1-9", "must", "allow", None, SITE_TRUTH, big_form,
          note="benign form with 120 fields"),
     Case("p1-9-big-form-on-object", "P1-9", "must", "allow", None, SITE_TRUTH, big_form_on_object,
          note="benign note of two batches on the session's own patient, id in the path"),
@@ -282,6 +353,12 @@ CASES: tuple[Case, ...] = (
          note="a note that tells the model what to answer, on another doctor's patient"),
     Case("p3-method-override", "P3", "known_gap", "block", "access", SITE_TRUTH, method_override,
          requires=("tiers",), note="POST with X-HTTP-Method-Override: DELETE on a publicly found patient"),
+    Case("b11-session-total-cap", "WAF 批次 11（PR #218）", "must", "block", "limit", SITE_LIMIT,
+         session_total_cap,
+         note="eleven sessions from one address; the eleventh is refused once the address has spent 20 calls"),
+    Case("b11-other-address-unaffected", "WAF 批次 11（PR #218）", "must", "allow", None, SITE_LIMIT,
+         other_address_unaffected,
+         note="a real doctor on another address still gets the model's answer after that address spent its total"),
 )
 
 

@@ -37,6 +37,12 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | A12 | 医生 A 在搜索结果里看到医生 B 的患者 D（慢速 id `PT-7004`），然后按这个 id 删除 | 拦截，记为尝试越权：慢速 id 按声明的 `DELETE /api/patients/{id}` 位置判定，源站不收到请求。见下方说明 | `jev_deny` |
 | B1 | 搜索框、表单里的中英文文本 | 放行；重复的搜索走放行缓存 | `jev_allow`，`cached_allow` |
 | B2 | 参数里的 SQL 注入、命令执行、路径穿越 | 拦截 | `jev_deny` |
+| B10 | 查询串里垫 200 个惰性参数，后面是医生 B 的患者编号 `PT-7004` | 拦截；Jev 收到的 `query.patient_id` 是 `reference` | `jev_deny` |
+| B11 | multipart 表单的字段 `patient_id` 引用医生 B 的患者 `PT-7004` | 拦截；Jev 收到的 `body.patient_id` 是 `reference` | `jev_deny` |
+| B12 | 一个值里 600 个字符的填充之后是 `' OR 1=1 --` | 拦截 | `jev_deny` |
+| B13 | 120 个字段的正常表单 | 源站答 201，Jev 放行 | `jev_allow` |
+| B14 | 没有 `Content-Type` 的表单，字段 `patient_id` 引用医生 B 的患者 `PT-7004` | 拦截；Jev 收到的 `body.patient_id` 是 `reference` | `jev_deny` |
+| B15 | 表单类型的请求体同时是能解析的 JSON（`{"a":"&note=x&patient_id=PT-7004&b="}`），字段 `patient_id` 引用医生 B 的患者 `PT-7004` | 拦截；Jev 收到的 `body.patient_id` 是 `reference` | `jev_deny` |
 | C1 | Jev 返回 503 或超时，`on_jev_unavailable=deny` | 拦截，注明 `JEV_HTTP_ERROR` / `JEV_TIMEOUT` | `jev_unavailable` |
 | C2 | 同上，`on_jev_unavailable=allow` | 放行，记为未经判定 | `jev_unavailable`（`unjudged`） |
 | C3 | 观察模式下的 A2 | 转发，记为本应拦截 | `jev_deny`（`would_block`） |
@@ -152,7 +158,9 @@ python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   
 - 真实模式（`live`、`record`、`replay`）和 `site` 模式的报告另有“置信度门槛扫描（3.4）”一节：同一批判定记录在 0.50 到 0.90 的门槛下重算，只给一阶估计，不重新发流量。
 - 用例可以带能力要求（`requires`）：`tiers`（档位）、`functions`（功能表）、`classes`（对象表）。配置缺少所需能力时，用例显示为“需要…”，不计分。`none` 没有对象表，需要对象表的用例只在 `clinic-truth` 上计分。
 - 已知缺口：判定器还不读功能表，所以 `clinic-truth` 也显示“需要功能表”的有 `p0-3-function-level`、医生的 `GET /api/admin/search`（旅程）。功能级判定合入后，补上 `clinic-truth` 的功能表并把 `p0-3-function-level` 改为 `must`。
-- 退出码：门槛全部通过为 0，有门槛失败为 1，用法或环境错误为 2。
+- 退出码：门槛全部通过为 0，有门槛失败为 1，用法或环境错误为 2。基线文件缺失也以 1 退出，报告里写明原因。
+- 学习的已知缺口清单（`effectiveness-known-gaps.json`）登记学习质量的已知问题，规则见 `docs/04` 4.6。报告的“学习的已知缺口清单”一节列出每一条和它本次的出现次数。
+- 同一地址会话额度的两条回归用例（WAF 批次 11，PR #218）：`b11-session-total-cap` 用同一医生账号从 `127.0.2.1` 真实登录 11 次，前 10 个会话各花两次模型调用，第 11 个会话的注入被 limit 拒绝。它不用伪造凭证：#232 之后源站没有签发过的凭证不建会话。`b11-other-address-unaffected` 是 `must`，从 `127.0.2.2` 发请求。Linux 上 127/8 都是回环地址，可以直接绑定；macOS 要先给 lo0 加上这两个别名，否则这两条用例报错、不计分。
 
 ## 边界
 

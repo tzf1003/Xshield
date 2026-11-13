@@ -386,3 +386,25 @@ test("the related rail offers to declare the field's class and to name this path
     /\/sites\/juice\?tab=config&route=%2Frest%2Fbasket%2F6$/,
   );
 });
+
+/** A synthetic record: an ordinary session asks for an administrator's function on emr (docs/06 6.4.4). */
+const FUNCTION_ID = "req_c0ffee00c0ffee00c0ffee00c0ffee00";
+
+test("a request that asks for an administrator's function says why, in the explanation and in a functions step", async ({
+  page,
+}) => {
+  await useFixtures(page);
+  await page.goto(`/requests/${FUNCTION_ID}`);
+  await expect(heading(page, "/api/admin/export")).toBeVisible();
+
+  await expect(page.locator(".explain")).toContainText(
+    "请求的是管理档功能 POST /api/admin/export，这个会话不是管理员。",
+  );
+  const step = page
+    .getByRole("list", { name: "判定步骤" })
+    .locator("li")
+    .filter({ hasText: "管理档功能 POST /api/admin/export" });
+  await expect(step).toHaveCount(1);
+  await expect(step.getByText("功能", { exact: true })).toBeVisible();
+  await expect(step).toContainText("这个会话不是管理员，算尝试越权，交 Jev 并要求拒绝");
+});

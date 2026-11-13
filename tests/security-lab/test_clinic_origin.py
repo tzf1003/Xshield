@@ -243,6 +243,32 @@ class ClinicOriginTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             site_spec("half", 18080)
 
+    def test_the_login_page_answers_any_credential_with_200(self) -> None:
+        # WAF batch 11 (plan 4.5): the public page is how the gateway starts a session of a credential the origin
+        # never issued. Nothing else opens to such a credential.
+        forged = "forged-" + "0" * 23 + "1"
+        for token in (None, forged):
+            reply = _send(self.origin, "GET", "/login", token=token)
+            self.assertEqual(reply.status, 200)
+            self.assertIn("text/html", {name.lower(): value for name, value in reply.headers}["content-type"])
+        self.assertEqual(_send(self.origin, "GET", "/api/home", token=forged).status, 401)
+
+    def test_the_four_positions_the_traffic_never_uses_are_not_learnable_and_say_why(self) -> None:
+        # Design 2.9: the benign traffic never uses these values, so the learning cannot see them; the truth says so.
+        keys = {
+            "GET /api/directory doctors[].id", "GET /api/directory doctors[].org",
+            "GET /api/visits/{id} id", "GET /api/prescriptions/{id} id",
+        }
+        marked = {item["key"]: item for item in self.origin.truth()["response_positions"] if not item["learnable"]}
+        self.assertTrue(keys <= set(marked))
+        for key in keys:
+            self.assertIn("why", marked[key], key)
+        declared = {slot["key"] for slot in site_spec("truth", 18080)["objects"]["slots"]}
+        self.assertFalse(keys & declared)
+
+    def test_the_login_route_is_in_the_function_table(self) -> None:
+        self.assertIn("GET /login", [item["key"] for item in self.origin.truth()["functions"]])
+
 
 class TrainingTrafficTest(unittest.TestCase):
     def direct_run(self, seed: int) -> tuple[list[dict[str, Any]], Evidence]:

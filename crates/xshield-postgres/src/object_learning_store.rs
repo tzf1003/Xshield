@@ -286,6 +286,8 @@ pub async fn record_evidence(
             day: day_i64(vote.day),
             kind: "vote",
             from: distinct(&vote.from),
+            user: vote.user.as_deref(),
+            admin: vote.admin,
         })
         .chain(denials.iter().map(|denial| EvidenceRow {
             slot: denial.slot.as_str(),
@@ -293,6 +295,8 @@ pub async fn record_evidence(
             day: day_i64(denial.day),
             kind: "denial",
             from: Vec::new(),
+            user: None,
+            admin: false,
         }))
         .collect();
     for chunk in rows.chunks(EVIDENCE_CHUNK) {
@@ -300,8 +304,8 @@ pub async fn record_evidence(
         // vote's response positions are a list, not one value. The casts type each
         // value, since a SELECT over VALUES does not take the column types as INSERT does.
         let mut builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO object_evidence (site, slot, session, day, kind, from_slots)
-             SELECT site, slot, session, day, kind, from_slots FROM (",
+            "INSERT INTO object_evidence (site, slot, session, day, kind, from_slots, user_label, admin)
+             SELECT site, slot, session, day, kind, from_slots, user_label, admin FROM (",
         );
         builder.push_values(chunk, |mut values, row| {
             values.push_bind(site);
@@ -316,12 +320,16 @@ pub async fn record_evidence(
             values.push_unseparated("::text");
             values.push_bind(row.from.clone());
             values.push_unseparated("::text[]");
+            values.push_bind(row.user);
+            values.push_unseparated("::text");
+            values.push_bind(row.admin);
+            values.push_unseparated("::boolean");
         });
         // The rows land only while the site still has the configuration of this
         // generation. The share lock holds that row, so a deletion of the site waits
         // for this statement.
         builder.push(
-            ") AS v(site, slot, session, day, kind, from_slots)
+            ") AS v(site, slot, session, day, kind, from_slots, user_label, admin)
              WHERE EXISTS (SELECT 1 FROM site_configs WHERE name = ",
         );
         builder.push_bind(site);
@@ -520,6 +528,10 @@ struct EvidenceRow<'a> {
     kind: &'static str,
     /// The response positions of a vote, in the order its record names them; empty for a denial.
     from: Vec<String>,
+    /// The user label a vote's session showed; `None` for a denial and for a session that showed none.
+    user: Option<&'a str>,
+    /// Whether a vote's session showed the administrator role; `false` for a denial.
+    admin: bool,
 }
 
 /// The evidence of the given positions on or after `oldest_day`, keyed by position. A position an
@@ -535,7 +547,8 @@ pub async fn load_evidence(
     oldest_day: u64,
 ) -> Result<HashMap<String, Evidence>, LearningStoreError> {
     let rows = sqlx::query(
-        "SELECT e.slot, e.session, e.day, e.kind, e.from_slots FROM object_evidence e
+        "SELECT e.slot, e.session, e.day, e.kind, e.from_slots, e.user_label, e.admin
+         FROM object_evidence e
          LEFT JOIN object_positions p ON p.site = e.site AND p.slot = e.slot
          WHERE e.site = $1 AND e.slot = ANY($2) AND e.day >= $3
            AND (p.baseline_day IS NULL OR e.day >= p.baseline_day)",
@@ -552,6 +565,8 @@ pub async fn load_evidence(
         let day = u64::try_from(row.try_get::<i64, _>("day")?).unwrap_or(0);
         let kind: String = row.try_get("kind")?;
         let from: Vec<String> = row.try_get("from_slots")?;
+        let user: Option<String> = row.try_get("user_label")?;
+        let admin: bool = row.try_get("admin")?;
         let entry = evidence.entry(slot.clone()).or_default();
         match kind.as_str() {
             "vote" => entry.add_vote(Vote {
@@ -559,12 +574,62 @@ pub async fn load_evidence(
                 session,
                 day,
                 from,
+                user,
+                admin,
             }),
             "denial" => entry.add_denial(Denial { slot, session, day }),
             _ => {}
         }
     }
     Ok(evidence)
+}
+
+/// The votes of the given response positions on or after `oldest_day`, keyed by the response position. Each vote
+/// names the request position that used the value and every response position the value was shown at
+/// (`Vote::from`), so the rules can see the other sources of the same use. A position an administrator
+/// confirmed again counts only the votes from its baseline day on, as [`load_evidence`] does.
+///
+/// # Errors
+/// Returns [`LearningStoreError`] on a database failure.
+pub async fn load_source_evidence(
+    pool: &PgPool,
+    site: &str,
+    positions: &[String],
+    oldest_day: u64,
+) -> Result<HashMap<String, Vec<Vote>>, LearningStoreError> {
+    let rows = sqlx::query(
+        "SELECT s.response, e.slot, e.session, e.day, e.from_slots, e.user_label, e.admin
+         FROM object_evidence e
+         CROSS JOIN LATERAL unnest(e.from_slots) AS s(response)
+         LEFT JOIN object_positions p ON p.site = e.site AND p.slot = s.response
+         WHERE e.site = $1 AND e.kind = 'vote' AND e.day >= $2
+           AND s.response = ANY($3)
+           AND (p.baseline_day IS NULL OR e.day >= p.baseline_day)",
+    )
+    .bind(site)
+    .bind(day_i64(oldest_day))
+    .bind(positions.to_vec())
+    .fetch_all(pool)
+    .await?;
+    let mut votes: HashMap<String, Vec<Vote>> = HashMap::new();
+    for row in &rows {
+        let response: String = row.try_get("response")?;
+        let slot: String = row.try_get("slot")?;
+        let session: String = row.try_get("session")?;
+        let day = u64::try_from(row.try_get::<i64, _>("day")?).unwrap_or(0);
+        let from: Vec<String> = row.try_get("from_slots")?;
+        let user: Option<String> = row.try_get("user_label")?;
+        let admin: bool = row.try_get("admin")?;
+        votes.entry(response).or_default().push(Vote {
+            slot,
+            session,
+            day,
+            from,
+            user,
+            admin,
+        });
+    }
+    Ok(votes)
 }
 
 /// The distinct votes of `site` on or after `oldest_day`: each request position with the response
@@ -777,13 +842,15 @@ pub async fn advance_cursor(
     Ok(())
 }
 
-/// The positions that hold a proposal, in order.
+/// The request positions with a proposal, in key order. A response position's proposal is judged by its own
+/// rules (`learning::propose_source`), so it is left out here.
 ///
 /// # Errors
 /// Returns [`LearningStoreError`] on a database failure.
 pub async fn proposed_slots(pool: &PgPool, site: &str) -> Result<Vec<String>, LearningStoreError> {
     let slots = sqlx::query_scalar(
-        "SELECT slot FROM object_positions WHERE site = $1 AND state = 'proposed' ORDER BY slot",
+        "SELECT slot FROM object_positions
+         WHERE site = $1 AND state = 'proposed' AND side = 'request' ORDER BY slot",
     )
     .bind(site)
     .fetch_all(pool)
@@ -1521,6 +1588,8 @@ mod tests {
             session: session.to_owned(),
             day,
             from: from.iter().map(|position| (*position).to_owned()).collect(),
+            user: None,
+            admin: false,
         }
     }
 
@@ -1559,6 +1628,63 @@ mod tests {
         assert_eq!(evidence.votes(), 1);
         // The first position still names the doctor kind, so the vote counts toward it.
         assert_eq!(evidence.kinds(&doctor_map()).get("doctor"), Some(&1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_vote_keeps_the_user_and_the_role_its_session_showed() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("evidence_identity");
+        let generation = with_site(&pool, &site).await;
+        let from = "GET /api/appointments [].doc_id";
+        let mut admin = vote("admin", 3, &[from]);
+        admin.user = Some("aaaaaaaaaaaaaaaa".to_owned());
+        admin.admin = true;
+        let mut doctor = vote("doctor", 3, &[from]);
+        doctor.user = Some("bbbbbbbbbbbbbbbb".to_owned());
+        let anonymous = vote("anon", 3, &[from]);
+        record_evidence(&pool, &site, generation, &[admin, doctor, anonymous], &[])
+            .await
+            .unwrap();
+        let rows = sqlx::query(
+            "SELECT session, user_label, admin FROM object_evidence
+             WHERE site = $1 ORDER BY session",
+        )
+        .bind(&site)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let kept: Vec<(String, Option<String>, bool)> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("session"),
+                    row.get::<Option<String>, _>("user_label"),
+                    row.get::<bool, _>("admin"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (
+                    "admin".to_owned(),
+                    Some("aaaaaaaaaaaaaaaa".to_owned()),
+                    true
+                ),
+                ("anon".to_owned(), None, false),
+                (
+                    "doctor".to_owned(),
+                    Some("bbbbbbbbbbbbbbbb".to_owned()),
+                    false
+                ),
+            ]
+        );
+        let loaded = load_evidence(&pool, &site, &[SLOT.to_owned()], 0)
+            .await
+            .unwrap();
+        let admins = std::collections::BTreeSet::from(["admin".to_owned()]);
+        assert_eq!(loaded[SLOT].admin_sessions(), admins);
     }
 
     #[tokio::test]
