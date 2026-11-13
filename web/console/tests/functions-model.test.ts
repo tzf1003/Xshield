@@ -6,6 +6,7 @@ import {
   changesOf,
   defaultPending,
   emptiesTable,
+  isDefaultPick,
   NO_PENDING,
   type Pending,
   place,
@@ -162,4 +163,22 @@ test("a key takes one change at a time, and the switch writes or removes its key
   const off = withAskUnknown(on, false);
   assert.equal("ask_unknown_functions" in (off.objects ?? {}), false);
   assert.deepEqual(off.objects?.functions, spec.objects?.functions);
+});
+
+test("a default pick is suggested, not sensitive and not proposed", () => {
+  const candidate: SiteFunctions["candidates"][number] = {
+    key: "POST /api/orders/{id}/refund",
+    ordinary_units: 0,
+    admin_units: 6,
+    refused_units: 0,
+    last_seen: "2026-11-10T00:00:00.000Z",
+    requests_24h: 3,
+    suggested: true,
+    sensitive: false,
+    on_entry: false,
+  };
+  assert.equal(isDefaultPick(candidate, new Set()), true);
+  assert.equal(isDefaultPick(candidate, new Set([candidate.key])), false);
+  assert.equal(isDefaultPick({ ...candidate, sensitive: true }, new Set()), false);
+  assert.equal(isDefaultPick({ ...candidate, suggested: false }, new Set()), false);
 });

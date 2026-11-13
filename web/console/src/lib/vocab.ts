@@ -26,6 +26,7 @@ import type {
   UpstreamError,
   ValueKind,
 } from "../api/types.ts";
+import { fmtInt } from "./format.ts";
 import type { ParseFailure } from "./logical-path.ts";
 
 export type Tone = "blocked" | "would" | "unjudged" | "ok" | "neutral";
@@ -1317,7 +1318,7 @@ export const FUNCTION_VIEW = {
   radio: (proposals: number) => (proposals > 0 ? `功能 ${proposals}` : "功能"),
   status: {
     summary: (days: number, ordinary: number, admin: number, identified: boolean) =>
-      `最近 ${days} 天：普通单位 ${ordinary}，管理员单位 ${admin}。单位是${identified ? "用户" : "会话"}。`,
+      `最近 ${days} 天：普通单位 ${fmtInt(ordinary)}，管理员单位 ${fmtInt(admin)}。单位是${identified ? "用户" : "会话"}。`,
     overLimit: "功能键超过上限，学习这一轮没有判断：候选不可用，已有的提议是之前的结果。",
     learningOff: "自动学习已关闭：下面是已有的证据，不会再更新。",
     noAdmin: (days: number) =>
@@ -1328,7 +1329,7 @@ export const FUNCTION_VIEW = {
     title: (count: number) => `管理档提议 ${count}`,
     lead: "学习发现只有管理员走过的功能。确认后非管理员会话请求它算尝试越权：交 Jev 判定并要求拒绝。",
     evidence: (admin: number, refused: number | null, reliability: string) =>
-      `管理员单位 ${admin} · 被源站拒绝的普通单位 ${refused ?? "—"} · 可靠性 ${reliability}`,
+      `管理员单位 ${fmtInt(admin)} · 被源站拒绝的普通单位 ${fmtInt(refused)} · 可靠性 ${reliability}`,
     inTable: "已在功能表里",
     confirm: "确认为管理档",
     mediumNote: "可靠性为中的管理档只记在功能表里，判定不按管理档处理。",
@@ -1409,12 +1410,12 @@ export const FUNCTION_VIEW = {
       unkeyed: number,
       complete: boolean,
     ) =>
-      `最近 24 小时里现在被快速放行或缓存放行的请求中，功能不在功能表里的有 ${total} 个${complete ? "" : "以上"}。打开后它们改为交 Jev 判定：${candidates} 个候选功能上 ${candidateRequests} 个，没学到的路径上 ${unlearned} 个${unkeyed > 0 ? `，另有至多 ${unkeyed} 个算不出功能键（预检或写法不规范的路径）` : ""}。${complete ? "" : "分组超过一次读取的上限，数字是下限。"}`,
+      `最近 24 小时里现在被快速放行或缓存放行的请求中，功能不在功能表里的有 ${fmtInt(total)} 个${complete ? "" : "以上"}。打开后它们改为交 Jev 判定：${fmtInt(candidates)} 个候选功能上 ${fmtInt(candidateRequests)} 个，没学到的路径上 ${fmtInt(unlearned)} 个${unkeyed > 0 ? `，另有至多 ${fmtInt(unkeyed)} 个算不出功能键（预检或写法不规范的路径）` : ""}。${complete ? "" : "分组超过一次读取的上限，数字是下限。"}`,
     impactOn: (total: number) =>
-      `开关已打开。按现在的功能表，最近 24 小时里还有 ${total} 个放行过的请求属于未知功能。缓存放行过的未知功能请求仍会计入，这是预期的。`,
+      `开关已打开。按现在的功能表，最近 24 小时里还有 ${fmtInt(total)} 个放行过的请求属于未知功能。缓存放行过的未知功能请求仍会计入，这是预期的。`,
     impactNone: "最近 24 小时没有功能表之外的放行请求。",
     candidatesPending: (count: number) =>
-      `还有 ${count} 个建议加入的候选没有确认，打开后它们的请求都会交 Jev。`,
+      `还有 ${fmtInt(count)} 个建议加入的候选没有确认，打开后它们的请求都会交 Jev。`,
     observe: "观察模式下这些请求照常转发，只记为本应拦截。",
     unlearned: {
       title: "没学到的流量",
@@ -1424,7 +1425,7 @@ export const FUNCTION_VIEW = {
   },
   bar: {
     pending: (add: number, admin: number, open: number, remove: number) =>
-      `待确认：加入 ${add} · 管理档 ${admin} · 取消管理档 ${open} · 删除 ${remove}`,
+      `待确认：加入 ${fmtInt(add)} · 管理档 ${fmtInt(admin)} · 取消管理档 ${fmtInt(open)} · 删除 ${fmtInt(remove)}`,
     confirm: "确认变更…",
     none: "没有待确认的变更",
   },

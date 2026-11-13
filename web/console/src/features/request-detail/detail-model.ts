@@ -39,7 +39,7 @@ import {
 } from "../../lib/api-name.ts";
 import { topOf } from "../../lib/explain.ts";
 import { lostReasons } from "../../lib/health.ts";
-import { fmtBytes, fmtElapsed, fmtInt, pct } from "../../lib/format.ts";
+import { clip, fmtBytes, fmtElapsed, fmtInt, FUNCTION_KEY_MAX, pct } from "../../lib/format.ts";
 import {
   isRequestId,
   isSessionLabel,
@@ -485,19 +485,21 @@ function functionStep(trace: Trace): StepInit | null {
   if (fn === undefined) return null;
   const sentences: string[] = [];
   let warn = false;
+  // The keys are compared whole and cut only for the sentence, so two keys that share their first characters stay apart.
   if (fn.attempt === "over_privilege") {
     const entry = fn.entry ?? fn.key;
+    const shown = clip(entry, FUNCTION_KEY_MAX);
     sentences.push(
       fn.key === entry
-        ? FUNCTION_VIEW.detail.attempt(entry)
-        : FUNCTION_VIEW.detail.attemptRouted(fn.key, entry),
+        ? FUNCTION_VIEW.detail.attempt(shown)
+        : FUNCTION_VIEW.detail.attemptRouted(clip(fn.key, FUNCTION_KEY_MAX), shown),
     );
     warn = true;
   } else if (fn.entry !== undefined) {
-    sentences.push(FUNCTION_VIEW.detail.admin(fn.entry));
+    sentences.push(FUNCTION_VIEW.detail.admin(clip(fn.entry, FUNCTION_KEY_MAX)));
   }
   if (fn.known === false) {
-    sentences.push(FUNCTION_VIEW.detail.unknown(fn.key));
+    sentences.push(FUNCTION_VIEW.detail.unknown(clip(fn.key, FUNCTION_KEY_MAX)));
     warn = true;
   }
   if (sentences.length === 0) return null;

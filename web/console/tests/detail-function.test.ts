@@ -106,6 +106,41 @@ test("a request that reaches the entry under another spelling says which key it 
   );
 });
 
+test("a long function key is cut in the step, and keys that differ still route the request", () => {
+  const long = `GET /api/admin/${"x".repeat(100)}`;
+  const cut = `${long.slice(0, 80)}…`;
+  const attempt = stepNamed(
+    stepsOf({
+      ...base,
+      function: { key: long, entry: long, tier: "admin", attempt: "over_privilege" },
+    }),
+    "function",
+  );
+  assert.equal(
+    attempt?.reason,
+    `管理档功能 ${cut}：这个会话不是管理员，算尝试越权，交 Jev 并要求拒绝`,
+  );
+
+  // The two keys share their first 80 characters, so their cut texts are equal: the request is still routed.
+  const routed = stepNamed(
+    stepsOf({
+      ...base,
+      function: { key: long, entry: `${long}y`, tier: "admin", attempt: "over_privilege" },
+    }),
+    "function",
+  );
+  assert.equal(
+    routed?.reason,
+    `请求是 ${cut}，按 ${cut} 处理：这个会话不是管理员，算尝试越权，交 Jev 并要求拒绝`,
+  );
+
+  const unknown = stepNamed(
+    stepsOf({ ...base, function: { key: long, known: false } }),
+    "function",
+  );
+  assert.equal(unknown?.reason, `${cut} 不在功能表里，按未知功能交 Jev`);
+});
+
 test("a record without a function has no function step, and an old record has none either", () => {
   assert.equal(stepNamed(stepsOf(base), "function"), undefined);
   assert.equal(

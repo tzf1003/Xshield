@@ -48,6 +48,13 @@ function emrWithTable(): SiteDetail {
   return emr;
 }
 
+/** emrWithTable with the switch for unknown functions on, as a site that asks about them keeps it (docs/07 7.9.20). */
+function emrAsking(): SiteDetail {
+  const emr = emrWithTable();
+  emr.spec.objects = { ...emr.spec.objects, ask_unknown_functions: true };
+  return emr;
+}
+
 /** The function table of emr with the given changes to the sample. */
 function withSample(changes: Partial<SiteFunctions>): SiteFunctions {
   return { ...structuredClone(siteFunctions), ...changes };
@@ -60,6 +67,7 @@ async function dropDefaultPick(page: Page): Promise<void> {
 
 test("the functions view lists the table, the candidates and the proposals", async ({ page }) => {
   await openView(page);
+  await expect(page.getByRole("radio", { name: "功能 2" })).toBeChecked();
 
   await expect(page.getByRole("table", { name: "功能表 2" }).locator("tbody tr")).toHaveCount(2);
   await expect(page.getByRole("table", { name: "候选 3" }).locator("tbody tr")).toHaveCount(3);
@@ -217,4 +225,64 @@ test("the over-limit state shows its warning and no candidates", async ({ page }
 test("the functions view has no accessibility violations", async ({ page }) => {
   await openView(page);
   await expectNoAxeViolations(page);
+});
+
+test("a refresh of the list keeps the picks the administrator made", async ({ page }) => {
+  await openView(page);
+  await dropDefaultPick(page);
+  await page.getByRole("checkbox", { name: "加入功能表 GET /api/admin/reports" }).check();
+  await page.getByRole("checkbox", { name: "加入功能表 GET /api/system/metrics" }).check();
+
+  // The next read of the list has lost the metrics candidate and the refund proposal, which the dismissal below removes.
+  const next = withSample({
+    candidates: siteFunctions.candidates.filter((item) => item.key !== "GET /api/system/metrics"),
+    proposals: siteFunctions.proposals.filter(
+      (item) => item.key !== "POST /api/orders/{id}/refund",
+    ),
+  });
+  await page.route(
+    (url) => url.pathname === FUNCTIONS,
+    async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({ json: next });
+      } else {
+        await route.fallback();
+      }
+    },
+  );
+  await page.getByRole("button", { name: "驳回 POST /api/orders/{id}/refund" }).click();
+
+  await expect(page.getByText("已驳回，同一提议不再出现，除非证据得出另一个结论。")).toBeVisible();
+  await expect(
+    page.getByRole("checkbox", { name: "加入功能表 GET /api/system/metrics" }),
+  ).toHaveCount(0);
+  // The list was read again: the default does not come back over the administrator's picks.
+  await expect(
+    page.getByRole("checkbox", { name: "加入功能表 GET /api/reports/{id}" }),
+  ).not.toBeChecked();
+  await expect(
+    page.getByRole("checkbox", { name: "加入功能表 GET /api/admin/reports" }),
+  ).toBeChecked();
+  await expect(page.getByText("待确认：加入 1 · 管理档 0 · 取消管理档 0 · 删除 0")).toBeVisible();
+});
+
+test("the table cannot be emptied while the unknown functions are asked about", async ({
+  page,
+}) => {
+  await openView(page, { overrides: { "GET /api/sites/emr": emrAsking() } });
+  await expect(page.getByRole("switch", { name: "未知功能交 Jev" })).toBeChecked();
+
+  // The default pick would add a function, so it goes first: the batch then has only removals.
+  await dropDefaultPick(page);
+  await page.getByRole("button", { name: "删除 POST /api/admin/export" }).click();
+  await expect(page.getByRole("button", { name: "确认变更…" })).toBeEnabled();
+  await page.getByRole("button", { name: "删除 GET /api/products/{id}" }).click();
+
+  // Both entries go and nothing is added: the gateway would refuse the empty table, so the confirmation waits.
+  await expect(page.getByRole("button", { name: "确认变更…" })).toBeDisabled();
+  await expect(page.getByText("未知功能判定开着时功能表不能删空。先关掉开关。")).toBeVisible();
+
+  await page.getByRole("button", { name: "删除 GET /api/products/{id}" }).click();
+  await expect(page.getByRole("button", { name: "确认变更…" })).toBeEnabled();
+  await expect(page.getByText("未知功能判定开着时功能表不能删空。先关掉开关。")).toHaveCount(0);
 });

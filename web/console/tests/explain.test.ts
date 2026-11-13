@@ -239,3 +239,39 @@ test("an administrator's session on an entry is not named in the explanation", (
   });
   assert.equal(text, "Jev 判定访问有依据（ALLOW 97%）、内容无攻击（BENIGN 99%）。");
 });
+
+test("a long function key is cut in the explanation", () => {
+  const long = `POST /api/admin/${"x".repeat(100)}`;
+  const attempt = explainRecord({
+    decision_path: "jev_deny",
+    outcome: "blocked",
+    status: 403,
+    host: "emr.example.com",
+    jev: jev({}),
+    trace: {
+      v: 1,
+      values: [],
+      function: { key: long, entry: long, tier: "admin", attempt: "over_privilege" },
+    },
+  });
+  assert.equal(
+    attempt,
+    `请求的是管理档功能 ${long.slice(0, 80)}…，这个会话不是管理员。Jev 判定越权（DENY 86%）。返回 403。`,
+  );
+
+  const unknown = explainRecord({
+    decision_path: "jev_allow",
+    outcome: "allowed",
+    status: 200,
+    host: "emr.example.com",
+    jev: jev({
+      access: { ALLOW: 0.97, DENY: 0.02, UNKNOWN: 0.01 },
+      attack: { BENIGN: 0.99, ATTACK: 0.01, UNKNOWN: 0 },
+    }),
+    trace: { v: 1, values: [], function: { key: long, known: false } },
+  });
+  assert.equal(
+    unknown,
+    `功能 ${long.slice(0, 80)}… 不在功能表里。Jev 判定访问有依据（ALLOW 97%）、内容无攻击（BENIGN 99%）。`,
+  );
+});

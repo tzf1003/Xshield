@@ -20,6 +20,7 @@ import {
   dayText,
   defaultPending,
   emptiesTable,
+  isDefaultPick,
   keyOfField,
   NO_PENDING,
   noAdminWarning,
@@ -157,8 +158,9 @@ export function FunctionsView({ site, working, data, failure, onRetry, dirty, on
       estimate.unkeyed,
       estimate.complete,
     );
-  const suggestedPending = data.candidates.filter(
-    (item) => item.suggested && !item.sensitive,
+  const proposedKeys = new Set(data.proposals.map((proposal) => proposal.key));
+  const suggestedPending = data.candidates.filter((item) =>
+    isDefaultPick(item, proposedKeys),
   ).length;
 
   const addRows = data.candidates.filter((item) => pending.add.has(item.key));

@@ -34,12 +34,21 @@ export const NO_PENDING: Pending = {
   remove: new Set(),
 };
 
-/** The default selection: the suggested candidates that are not sensitive. A key the rules propose as an administrator's
- *  function is left to the proposal, because adding it as a known function would open it to every session. */
+/** Whether a candidate is picked by default: suggested, not sensitive, and not proposed as an administrator's function.
+ *  The count of suggested candidates in the view follows the same rule. */
+export function isDefaultPick(
+  item: SiteFunctions["candidates"][number],
+  proposed: ReadonlySet<string>,
+): boolean {
+  return item.suggested && !item.sensitive && !proposed.has(item.key);
+}
+
+/** The default selection: the candidates `isDefaultPick` takes. A key the rules propose as an administrator's function is
+ *  left to the proposal, because adding it as a known function would open it to every session. */
 export function defaultPending(data: SiteFunctions): Pending {
   const proposed = new Set(data.proposals.map((proposal) => proposal.key));
   const add = data.candidates
-    .filter((item) => item.suggested && !item.sensitive && !proposed.has(item.key))
+    .filter((item) => isDefaultPick(item, proposed))
     .map((item) => item.key);
   return { ...NO_PENDING, add: new Set(add) };
 }

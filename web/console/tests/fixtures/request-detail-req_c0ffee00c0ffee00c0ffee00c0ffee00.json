@@ -150,7 +150,7 @@
     "trim": 0,
     "request_bytes": 3412,
     "http_status": 200,
-    "response": "{\"access\":{\"ALLOW\":0.1203,\"DENY\":0.8612,\"UNKNOWN\":0.0185},\"attack\":{\"BENIGN\":0.9901,\"ATTACK\":0.0071,\"UNKNOWN\":0.0028}}",
+    "response": "{\"access\":{\"ALLOW\":0.02,\"DENY\":0.97,\"UNKNOWN\":0.01},\"attack\":{\"BENIGN\":0.99,\"ATTACK\":0.005,\"UNKNOWN\":0.005}}",
     "usage": {
       "input_tokens": 1021,
       "output_tokens": 12

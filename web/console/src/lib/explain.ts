@@ -19,7 +19,7 @@ import {
   isNameValue,
   unknownTitle,
 } from "./api-name.ts";
-import { clip } from "./format.ts";
+import { clip, FUNCTION_KEY_MAX } from "./format.ts";
 import { shortRequestId } from "./ids.ts";
 import { FUNCTION_VIEW } from "./vocab.ts";
 
@@ -111,8 +111,11 @@ function functionLineOf(trace: Trace): string {
   const fn = trace.function;
   if (fn === undefined) return "";
   const attempt =
-    fn.attempt === "over_privilege" ? FUNCTION_VIEW.detail.explainAttempt(fn.entry ?? fn.key) : "";
-  const unknown = fn.known === false ? FUNCTION_VIEW.detail.explainUnknown(fn.key) : "";
+    fn.attempt === "over_privilege"
+      ? FUNCTION_VIEW.detail.explainAttempt(clip(fn.entry ?? fn.key, FUNCTION_KEY_MAX))
+      : "";
+  const unknown =
+    fn.known === false ? FUNCTION_VIEW.detail.explainUnknown(clip(fn.key, FUNCTION_KEY_MAX)) : "";
   return `${attempt}${unknown}`;
 }
 
