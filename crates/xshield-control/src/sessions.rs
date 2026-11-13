@@ -195,17 +195,15 @@ fn session_row(session: &SessionRow, issued_by: Option<&str>) -> SessionRowBody 
 
 /// A timeline row: the request row as the request list shows it (docs/07 section
 /// 7.9.3), then what its response taught the session (section 7.4.3). `learned` is
-/// the count of new values, or null when the trace has no response section.
-/// `entry_passed` and `after_would_block` are false and `issued_session` is null in
-/// that case.
+/// the count of new values, or null when the response was not read (see
+/// `learned_count`). `entry_passed` and `after_would_block` are false and
+/// `issued_session` is null when the trace has no response section.
 #[must_use]
 fn timeline_row(row: &TimelineRow) -> TimelineRowBody {
     let response = row.trace.get("response");
     TimelineRowBody {
         request: RequestRow::from(&row.summary),
-        learned: response
-            .and_then(|response| response.get("new_values"))
-            .and_then(Value::as_i64),
+        learned: learned_count(response),
         entry_passed: response
             .and_then(|response| response.get("entry_passed"))
             .and_then(Value::as_bool)
@@ -219,6 +217,15 @@ fn timeline_row(row: &TimelineRow) -> TimelineRowBody {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     }
+}
+
+/// The count of new values a response taught the session, or null when the response
+/// was not read. Observe mode skips a response to a request it would refuse, and such
+/// a response taught nothing, so it has no count rather than a zero (section 7.4.6).
+fn learned_count(response: Option<&Value>) -> Option<i64> {
+    let read = response
+        .filter(|response| response.get("observed").and_then(Value::as_str) != Some("skipped"))?;
+    read.get("new_values").and_then(Value::as_i64)
 }
 
 /// The request that issued each of `sessions`, keyed by session label. Sessions
@@ -286,6 +293,22 @@ mod tests {
         assert!(!label_is_valid(&"a".repeat(65)));
         assert!(!label_is_valid("a/b"));
         assert!(!label_is_valid("a b"));
+    }
+
+    #[test]
+    fn a_response_that_was_not_read_has_no_learned_count() {
+        let refused = serde_json::json!({
+            "observed": "skipped",
+            "skip": "would_block",
+            "new_values": 0,
+            "after_would_block": true,
+        });
+        assert_eq!(learned_count(Some(&refused)), None);
+        let read = serde_json::json!({ "observed": "json", "new_values": 0 });
+        assert_eq!(learned_count(Some(&read)), Some(0));
+        let read_with_new = serde_json::json!({ "observed": "json", "new_values": 9 });
+        assert_eq!(learned_count(Some(&read_with_new)), Some(9));
+        assert_eq!(learned_count(None), None);
     }
 
     #[test]
