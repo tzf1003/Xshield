@@ -70,6 +70,11 @@ pub struct Vote {
     pub day: u64,
     /// The response positions the value was shown at, as the record names them.
     pub from: Vec<String>,
+    /// The user label the session showed, when it showed one. The acceptance judgement counts
+    /// users with it, and only on a site that declares identities (docs/07 section 7.9.16).
+    pub user: Option<String>,
+    /// Whether the session showed the administrator role (docs/07 section 7.4.7).
+    pub admin: bool,
 }
 
 /// One refusal by Jev of a request that used a position.
@@ -147,6 +152,8 @@ pub fn observe(record: &DecisionFacts) -> Observed {
                 session: record.session.clone(),
                 day,
                 from,
+                user: user_label(record).map(str::to_owned),
+                admin: is_admin(record),
             });
         }
         if refused {
@@ -164,18 +171,28 @@ pub fn observe(record: &DecisionFacts) -> Observed {
 /// per session and day at most.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Evidence {
-    /// The response positions each (session, day) vote was shown at.
-    votes: BTreeMap<(String, u64), Vec<String>>,
+    /// What each (session, day) vote keeps: the response positions it was shown at, and who used it.
+    votes: BTreeMap<(String, u64), Used>,
     /// The (session, day) pairs that were refused.
     denials: BTreeSet<(String, u64)>,
+}
+
+/// What the window keeps of one vote: the response positions it was shown at, and who used it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Used {
+    from: Vec<String>,
+    user: Option<String>,
+    admin: bool,
 }
 
 impl Evidence {
     /// Adds a vote. A second vote from the same session on the same day changes nothing.
     pub fn add_vote(&mut self, vote: Vote) {
-        self.votes
-            .entry((vote.session, vote.day))
-            .or_insert(vote.from);
+        self.votes.entry((vote.session, vote.day)).or_insert(Used {
+            from: vote.from,
+            user: vote.user,
+            admin: vote.admin,
+        });
     }
 
     /// Adds a denial. A session refused twice on one day counts once.
@@ -214,8 +231,9 @@ impl Evidence {
     #[must_use]
     pub fn kinds<'a>(&'a self, map: &'a ObjectMap) -> BTreeMap<&'a str, u32> {
         let mut kinds = BTreeMap::new();
-        for positions in self.votes.values() {
-            let mut named = positions
+        for used in self.votes.values() {
+            let mut named = used
+                .from
                 .iter()
                 .filter_map(|position| map.class_of(position));
             let Some(first) = named.next() else {
@@ -232,8 +250,8 @@ impl Evidence {
     #[must_use]
     pub fn flows(&self) -> Vec<FlowShare> {
         let mut counts: BTreeMap<&str, (u32, BTreeSet<&str>)> = BTreeMap::new();
-        for ((session, _), positions) in &self.votes {
-            for position in positions.iter().collect::<BTreeSet<&String>>() {
+        for ((session, _), used) in &self.votes {
+            for position in used.from.iter().collect::<BTreeSet<&String>>() {
                 let entry = counts.entry(position.as_str()).or_default();
                 entry.0 = entry.0.saturating_add(1);
                 entry.1.insert(session.as_str());
@@ -262,11 +280,14 @@ impl Evidence {
         self.votes.keys().map(|(_, day)| *day).max()
     }
 
-    /// One (session, response positions) pair per vote in the window, in session order.
-    pub fn uses(&self) -> impl Iterator<Item = (&str, &[String])> {
+    /// The sessions that showed the administrator role on a vote in the window.
+    #[must_use]
+    pub fn admin_sessions(&self) -> BTreeSet<String> {
         self.votes
             .iter()
-            .map(|((session, _), positions)| (session.as_str(), positions.as_slice()))
+            .filter(|(_, used)| used.admin)
+            .map(|((session, _), _)| session.clone())
+            .collect()
     }
 
     /// The sessions refused at this position in the window.
@@ -588,7 +609,7 @@ pub struct AcceptJudgement {
     pub reliability: Reliability,
     /// The votes judged: those with at least one response position of a known tier.
     pub votes: u32,
-    /// The distinct sessions among them.
+    /// The distinct units among them: users where the site declares identities, sessions otherwise.
     pub sessions: u32,
     /// The share of judged votes, in thousandths, whose values came from public positions only.
     pub public_per_mille: u32,
@@ -598,11 +619,13 @@ pub struct AcceptJudgement {
 /// of the response positions the votes were shown at.
 ///
 /// A vote is judged when at least one of its response positions has a tier, and it counts as
-/// public when every such position is `public`. Votes of admin sessions are left out: an
-/// admin's use of public objects says nothing about ordinary users. So are votes of sessions
+/// public when every such position is `public`. Votes of the sessions in `admin_sessions` are left
+/// out: an admin's use of public objects says nothing about ordinary users. So are votes of sessions
 /// refused at the position, since a refused session is what the judge is there to stop.
 ///
-/// Without identities the sessions count as users, so the reliability drops one step.
+/// With identities (`identified`) the units are the users: the sessions of one user count once, and a
+/// vote that shows no user counts by its session. Without them the units are the sessions, and the
+/// reliability drops one step.
 #[must_use]
 pub fn judge_accepts_public(
     evidence: &Evidence,
@@ -614,12 +637,13 @@ pub fn judge_accepts_public(
     let refused = evidence.refused_sessions();
     let mut votes = 0_u32;
     let mut public = 0_u32;
-    let mut sessions = BTreeSet::new();
-    for (session, positions) in evidence.uses() {
-        if admin_sessions.contains(session) || refused.contains(session) {
+    let mut unit_keys = BTreeSet::new();
+    for ((session, _), used) in &evidence.votes {
+        if admin_sessions.contains(session) || refused.contains(session.as_str()) {
             continue;
         }
-        let mut tiers = positions
+        let mut tiers = used
+            .from
             .iter()
             .filter_map(|position| tier_of(position.as_str()))
             .peekable();
@@ -627,12 +651,15 @@ pub fn judge_accepts_public(
             continue;
         }
         votes = votes.saturating_add(1);
-        sessions.insert(session);
+        unit_keys.insert(match (identified, &used.user) {
+            (true, Some(user)) => (true, user.as_str()),
+            _ => (false, session.as_str()),
+        });
         if tiers.all(|tier| tier == Tier::Public) {
             public = public.saturating_add(1);
         }
     }
-    let sessions = saturating_count(sessions.len());
+    let sessions = saturating_count(unit_keys.len());
     if votes < thresholds.votes || sessions < thresholds.sessions {
         return None;
     }
@@ -730,6 +757,8 @@ mod source_tests {
                 session: format!("{tag}{}", index % sessions),
                 day: first_day + index,
                 from: from.iter().map(|position| (*position).to_owned()).collect(),
+                user: None,
+                admin: false,
             })
             .collect()
     }
@@ -824,12 +853,16 @@ mod source_tests {
             session: "m".to_owned(),
             day: 0,
             from: vec![SEARCH.to_owned()],
+            user: None,
+            admin: false,
         });
         votes.push(Vote {
             slot: PRESCRIPTION_USE.to_owned(),
             session: "m".to_owned(),
             day: 0,
             from: vec![SEARCH.to_owned()],
+            user: None,
+            admin: false,
         });
         assert_eq!(judged(SEARCH, &votes, &map), Some(patient(20, 950)));
     }
@@ -842,6 +875,8 @@ mod source_tests {
                 session: format!("s{}", index % 5),
                 day: 0,
                 from: vec![SEARCH.to_owned()],
+                user: None,
+                admin: false,
             })
             .collect();
         assert_eq!(judged(SEARCH, &votes, &map_with(None)), None);
@@ -1044,6 +1079,8 @@ mod tier_tests {
                 session: format!("s{}", index % sessions),
                 day: index / sessions,
                 from: from(index).into_iter().map(str::to_owned).collect(),
+                user: None,
+                admin: false,
             });
         }
         evidence
@@ -1156,6 +1193,82 @@ mod tier_tests {
         assert!(!judged.accepts_public);
         assert_eq!(judged.reliability, Reliability::Medium);
     }
+
+    /// Votes for `DELETE` from `sessions` sessions, each shown at `from`, where session `s<k>` belongs
+    /// to the user `u<k % users>`. Spread as `uses` spreads them.
+    fn identified_uses(count: u64, sessions: u64, users: u64, from: &str) -> Evidence {
+        let mut evidence = Evidence::default();
+        for index in 0..count {
+            let session = index % sessions;
+            evidence.add_vote(Vote {
+                slot: DELETE.to_owned(),
+                session: format!("s{session}"),
+                day: index / sessions,
+                from: vec![from.to_owned()],
+                user: Some(format!("u{}", session % users)),
+                admin: false,
+            });
+        }
+        evidence
+    }
+
+    #[test]
+    fn with_identities_the_sessions_of_each_user_count_once() {
+        // Forty votes from twenty sessions of ten users: ten units, enough for high.
+        let evidence = identified_uses(40, 20, 10, PATIENTS);
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()).unwrap();
+        assert!(!judged.accepts_public);
+        assert_eq!(judged.sessions, 10);
+        assert_eq!(judged.reliability, Reliability::High);
+    }
+
+    #[test]
+    fn the_sessions_of_one_user_are_one_unit() {
+        // Forty votes from twenty sessions of one user: one unit, below the five the thresholds need.
+        let evidence = identified_uses(40, 20, 1, PATIENTS);
+        assert_eq!(
+            judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()),
+            None
+        );
+    }
+
+    #[test]
+    fn without_identities_the_same_votes_count_by_session_and_drop_a_step() {
+        let evidence = identified_uses(40, 20, 1, PATIENTS);
+        let judged =
+            judge_accepts_public(&evidence, tiers, &no_admins(), false, thresholds()).unwrap();
+        assert_eq!(judged.sessions, 20);
+        assert_eq!(judged.reliability, Reliability::Medium);
+    }
+
+    #[test]
+    fn an_administrator_session_on_an_identified_site_is_left_out() {
+        // Sessions s0 to s9 are the administrator's: their twenty votes are left out, and the
+        // other twenty count from ten users, one medium judgement.
+        let evidence = identified_uses(40, 20, 10, PATIENTS);
+        let admins: BTreeSet<String> = (0..10).map(|index| format!("s{index}")).collect();
+        let judged = judge_accepts_public(&evidence, tiers, &admins, true, thresholds()).unwrap();
+        assert_eq!((judged.votes, judged.sessions), (20, 10));
+        assert_eq!(judged.reliability, Reliability::Medium);
+    }
+
+    #[test]
+    fn the_administrator_sessions_are_those_that_showed_the_role() {
+        let mut evidence = uses(4, 2, |_| vec![PATIENTS]);
+        evidence.add_vote(Vote {
+            slot: DELETE.to_owned(),
+            session: "boss".to_owned(),
+            day: 9,
+            from: vec![PATIENTS.to_owned()],
+            user: Some("u9".to_owned()),
+            admin: true,
+        });
+        assert_eq!(
+            evidence.admin_sessions(),
+            BTreeSet::from(["boss".to_owned()])
+        );
+    }
 }
 
 /// Most fingerprints a unit's evidence keeps at one response position on one UTC day. The smallest
@@ -1262,14 +1375,19 @@ fn identity_of(record: &DecisionFacts) -> Option<&TraceIdentity> {
         .and_then(|session| session.identity.as_ref())
 }
 
+/// The user label the record's session showed, when it showed one.
+fn user_label(record: &DecisionFacts) -> Option<&str> {
+    identity_of(record)
+        .and_then(|identity| identity.user.as_deref())
+        .filter(|user| !user.is_empty())
+}
+
 /// The unit a record counts as: the user, when the site declares user identities, and the session
 /// otherwise. `None` when there is nothing to count: an anonymous session, or a site with users where
 /// the session has shown none.
 fn unit_of(record: &DecisionFacts, identified: bool) -> Option<&str> {
     if identified {
-        identity_of(record)
-            .and_then(|identity| identity.user.as_deref())
-            .filter(|user| !user.is_empty())
+        user_label(record)
     } else {
         Some(record.session.as_str()).filter(|session| !session.is_empty())
     }
@@ -1782,6 +1900,8 @@ mod tests {
             session: session.to_owned(),
             day,
             from: from.map(str::to_owned).into_iter().collect(),
+            user: None,
+            admin: false,
         }
     }
 
@@ -1973,6 +2093,8 @@ mod tests {
                 "GET /api/docs [].id".to_owned(),
                 "GET /api/appointments [].doc_id".to_owned(),
             ],
+            user: None,
+            admin: false,
         });
         assert_eq!(evidence.votes(), 1);
         assert!(evidence.kinds(&map).is_empty());
@@ -1985,6 +2107,8 @@ mod tests {
                 "GET /api/other [].id".to_owned(),
                 "GET /api/appointments [].doc_id".to_owned(),
             ],
+            user: None,
+            admin: false,
         });
         assert_eq!(evidence.kinds(&map).get("doctor"), Some(&1));
     }
@@ -2138,6 +2262,35 @@ mod tier_evidence_tests {
             path: "/api/patients/7".to_owned(),
             client: "10.0.0.1".to_owned(),
         }
+    }
+
+    #[test]
+    fn a_vote_keeps_the_user_and_the_role_its_session_showed() {
+        let admin = facts(
+            "s1",
+            &json!({"user": "0123456789abcdef", "role": "admin"}),
+            Some(200),
+            DecisionPath::FastAllow,
+            None,
+        );
+        let admin_vote = &observe(&admin).votes[0];
+        assert_eq!(admin_vote.user.as_deref(), Some("0123456789abcdef"));
+        assert!(admin_vote.admin);
+        let doctor = facts(
+            "s2",
+            &json!({"user": "fedcba9876543210"}),
+            Some(200),
+            DecisionPath::JevAllow,
+            None,
+        );
+        let doctor_vote = &observe(&doctor).votes[0];
+        assert_eq!(doctor_vote.user.as_deref(), Some("fedcba9876543210"));
+        assert!(!doctor_vote.admin);
+        // A session that showed no identity keeps neither.
+        let anonymous = facts("s3", &Value::Null, Some(200), DecisionPath::FastAllow, None);
+        let anonymous_vote = &observe(&anonymous).votes[0];
+        assert_eq!(anonymous_vote.user, None);
+        assert!(!anonymous_vote.admin);
     }
 
     fn answer(positions: &[(&str, &[&str])]) -> Value {

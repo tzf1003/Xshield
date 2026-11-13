@@ -2575,6 +2575,8 @@ mod tests {
                 session: format!("session-{index}"),
                 day: 1,
                 from: from.iter().map(|key| (*key).to_owned()).collect(),
+                user: None,
+                admin: false,
             })
             .collect()
     }
@@ -2964,6 +2966,8 @@ mod tests {
                 session: session.to_owned(),
                 day: 1,
                 from: vec![from.to_owned()],
+                user: None,
+                admin: false,
             });
         }
         let shares = shares_of(&votes, spec.objects());
@@ -3369,6 +3373,8 @@ mod live_tests {
             session: "a".to_owned(),
             day: today,
             from: vec![APPOINTMENTS.to_owned()],
+            user: None,
+            admin: false,
         }];
         store::record_evidence(&state.pool, &name, generation, &votes, &[])
             .await
