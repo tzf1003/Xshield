@@ -2014,7 +2014,7 @@ fn route_of(key: &str) -> &str {
 }
 
 /// The start of a UTC day, the time a position's last day is shown as.
-fn last_seen(last_day: i64) -> Option<String> {
+pub(crate) fn last_seen(last_day: i64) -> Option<String> {
     rfc3339(last_day.saturating_mul(DAY_MILLIS))
 }
 
