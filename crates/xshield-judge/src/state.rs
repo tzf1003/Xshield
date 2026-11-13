@@ -1602,4 +1602,44 @@ mod tests {
             assert_eq!(carried, 1, "{at}");
         }
     }
+
+    #[test]
+    fn an_unverified_path_value_in_the_fallback_is_never_left_out() {
+        // Plan 3.5, item 5 and docs/02 section 2.5: when the path values are too big for the shell, they are
+        // sent with the other values. An unverified one is in the first class, so it is sent and never in
+        // left_out, while the body values that do not fit are.
+        let segments: Vec<String> = (0..12)
+            .map(|index| format!("{index:02}{}", "x".repeat(498)))
+            .collect();
+        let path = format!("/{}", segments.join("/"));
+        let mut values: Vec<StateValue> = segments
+            .iter()
+            .enumerate()
+            .map(|(index, text)| value(&format!("path[{index}]"), text, None, &[]))
+            .collect();
+        for index in 0..400 {
+            let key = format!("field{index:03}");
+            values.push(value(
+                &format!("body.{key}"),
+                &"正常的文字".repeat(84),
+                Some(key.as_str()),
+                &[],
+            ));
+        }
+        let batched = build_states(&request_on(&path, values)).unwrap();
+        assert!(batched.left_out > 0, "the body values do not all fit");
+        for index in 0..segments.len() {
+            let at = format!("path[{index}]");
+            let carried = batched
+                .states
+                .iter()
+                .filter(|(state, _)| {
+                    shown_values(state)
+                        .iter()
+                        .any(|item| item["at"] == at.as_str())
+                })
+                .count();
+            assert_eq!(carried, 1, "{at}");
+        }
+    }
 }
