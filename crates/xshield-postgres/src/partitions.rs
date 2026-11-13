@@ -16,6 +16,15 @@ pub const RETENTION_DAYS: u64 = 7;
 /// be down this long without the gateway's inserts failing (docs/07 section 7.8.2).
 pub const DAYS_AHEAD: u64 = 7;
 
+/// How long a statement that creates a partition waits for the lock it needs on
+/// `decision_log` before it gives up. Only another partition statement (an attach or
+/// a detach) holds that lock, so the wait is short (see [`ensure_partition`]).
+const LOCK_TIMEOUT: &str = "2s";
+
+/// How many times the creation of one partition is tried when its lock wait runs
+/// out. Each try waits up to [`LOCK_TIMEOUT`], so a retry needs no pause of its own.
+const CREATE_ATTEMPTS: u32 = 3;
+
 /// Milliseconds in a UTC day.
 const MILLIS_PER_DAY: i64 = 86_400_000;
 
@@ -128,17 +137,93 @@ impl From<sqlx::Error> for PartitionError {
 
 /// Creates the partition for `day` if it does not exist yet. Idempotent.
 ///
+/// A partition that exists is found in the catalog, and nothing runs on
+/// `decision_log`. A missing one is built as a table of its own, with the parent's
+/// columns and indexes and a CHECK that states its bounds, and then attached with
+/// `ALTER TABLE … ATTACH PARTITION`. The attach takes `SHARE UPDATE EXCLUSIVE` on the
+/// parent, a lock that no read or write of the table conflicts with: a long reader
+/// does not hold the creation back, and the creation does not queue the reads and
+/// writes behind it. `CREATE TABLE … PARTITION OF` takes `ACCESS EXCLUSIVE` instead.
+/// A wait for the lock gives up after [`LOCK_TIMEOUT`] and is tried again. A day that
+/// another run attached in the meantime counts as created.
+///
 /// # Errors
-/// Returns [`PartitionError`] when the day is out of range or the statement fails.
+/// Returns [`PartitionError`] when the day is out of range or a statement fails for
+/// another reason.
 pub async fn ensure_partition(pool: &PgPool, day: NaiveDate) -> Result<(), PartitionError> {
     let (start, end) = day_bounds_millis(day).ok_or(PartitionError::OutOfRange)?;
     let name = partition_name(day);
+    if is_partition(pool, &name).await? {
+        return Ok(());
+    }
+    let mut attempt = 1;
+    loop {
+        let Err(error) = attach_new_partition(pool, &name, start, end).await else {
+            return Ok(());
+        };
+        if is_partition(pool, &name).await? {
+            return Ok(());
+        }
+        if attempt == CREATE_ATTEMPTS || !is_lock_timeout(&error) {
+            return Err(error.into());
+        }
+        attempt += 1;
+    }
+}
+
+/// Builds the partition `name` as a table of its own and attaches it to
+/// `decision_log`, in one transaction: when the attach fails, no table is left behind.
+async fn attach_new_partition(
+    pool: &PgPool,
+    name: &str,
+    start: i64,
+    end: i64,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"
+    )))
+    .execute(&mut *transaction)
+    .await?;
+    // LIKE copies the columns, defaults and indexes of the parent, as PARTITION OF
+    // does. The CHECK states the bounds, so the attach does not scan the table to
+    // verify them.
     let create = format!(
-        "CREATE TABLE IF NOT EXISTS \"{name}\" PARTITION OF decision_log \
-         FOR VALUES FROM ({start}) TO ({end})"
+        "CREATE TABLE \"{name}\" (LIKE decision_log INCLUDING DEFAULTS INCLUDING INDEXES, \
+         CHECK (at_millis >= {start} AND at_millis < {end}))"
     );
-    sqlx::query(AssertSqlSafe(create)).execute(pool).await?;
-    Ok(())
+    sqlx::query(AssertSqlSafe(create))
+        .execute(&mut *transaction)
+        .await?;
+    let attach = format!(
+        "ALTER TABLE decision_log ATTACH PARTITION \"{name}\" FOR VALUES FROM ({start}) TO ({end})"
+    );
+    sqlx::query(AssertSqlSafe(attach))
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await
+}
+
+/// Whether `name` is a partition of `decision_log`, a pending detach included.
+async fn is_partition(pool: &PgPool, name: &str) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_inherits i
+             JOIN pg_class c ON c.oid = i.inhrelid
+             JOIN pg_class p ON p.oid = i.inhparent
+         WHERE p.relname = 'decision_log' AND c.relname = $1)",
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await
+}
+
+/// Whether `error` is a lock wait of [`LOCK_TIMEOUT`] running out (SQLSTATE `55P03`).
+fn is_lock_timeout(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .as_deref()
+        == Some("55P03")
 }
 
 /// Drops every daily partition whose end is at or before `cutoff_millis`: first
@@ -275,6 +360,7 @@ pub async fn purge_edges_seen_before(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn a_daily_partition_is_named_by_its_utc_day() {
@@ -569,5 +655,140 @@ mod tests {
             .await
             .expect("insert");
         assert_eq!(written, 1);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_partition_pass_completes_while_a_reader_holds_the_parent() {
+        let _turn = RETENTION.lock().await;
+        let pool = connect_test_pool().await;
+        // 1964 is used by no other test, so no day of this window has a partition yet.
+        let today = NaiveDate::from_ymd_opt(1964, 6, 10).expect("date");
+        let days = partition_days(today);
+        // A reader holds ACCESS SHARE on the parent until it ends. Creating a partition
+        // used to wait for that lock, and the inserts behind it waited too.
+        let mut reader = pool.begin().await.expect("begin");
+        sqlx::query("SELECT count(*) FROM decision_log")
+            .execute(&mut *reader)
+            .await
+            .expect("read");
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for &day in &days {
+                ensure_partition(&pool, day).await.expect("ensure");
+            }
+        })
+        .await
+        .expect("the pass waited for the reader");
+        let (start, _) = day_bounds_millis(today).expect("bounds");
+        let written = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::decision_log_store::insert_many(&pool, &[probe_row(start + 1_000)]),
+        )
+        .await
+        .expect("the insert waited for the reader")
+        .expect("insert");
+        assert_eq!(written, 1);
+        reader.rollback().await.expect("rollback");
+
+        let (_, end) = day_bounds_millis(*days.last().expect("a day")).expect("bounds");
+        drop_partitions_ended_before(&pool, end)
+            .await
+            .expect("cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_creation_waiting_for_its_lock_gives_up_and_blocks_no_read_or_write() {
+        let _turn = RETENTION.lock().await;
+        let pool = connect_test_pool().await;
+        // 1965 is used by no other test.
+        let existing = NaiveDate::from_ymd_opt(1965, 3, 1).expect("date");
+        let missing = NaiveDate::from_ymd_opt(1965, 3, 2).expect("date");
+        ensure_partition(&pool, existing).await.expect("create");
+        let (existing_start, _) = day_bounds_millis(existing).expect("bounds");
+
+        // Another partition statement holds SHARE UPDATE EXCLUSIVE on the parent, the
+        // lock an attach needs. The creation waits for it and gives up; reads and
+        // writes of the parent do not conflict with that lock, so they go on.
+        let mut holder = pool.begin().await.expect("begin");
+        sqlx::query("LOCK TABLE decision_log IN SHARE UPDATE EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("lock");
+        let creating = {
+            let pool = pool.clone();
+            tokio::spawn(async move { ensure_partition(&pool, missing).await })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !creating.is_finished(),
+            "the creation did not wait for the lock"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::decision_log_store::insert_many(&pool, &[probe_row(existing_start + 1_000)]),
+        )
+        .await
+        .expect("the insert waited for the creation")
+        .expect("insert");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM decision_log").fetch_one(&pool),
+        )
+        .await
+        .expect("the read waited for the creation")
+        .expect("read");
+
+        let outcome = creating.await.expect("join");
+        assert!(
+            matches!(&outcome, Err(PartitionError::Database(error)) if is_lock_timeout(error)),
+            "{outcome:?}"
+        );
+        holder.rollback().await.expect("rollback");
+        ensure_partition(&pool, missing)
+            .await
+            .expect("the next run creates it");
+
+        let (_, end) = day_bounds_millis(missing).expect("bounds");
+        drop_partitions_ended_before(&pool, end)
+            .await
+            .expect("cleanup");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn concurrent_creations_of_one_day_leave_one_partition() {
+        let _turn = RETENTION.lock().await;
+        let pool = connect_test_pool().await;
+        // 1965 is used by no other test.
+        let day = NaiveDate::from_ymd_opt(1965, 3, 3).expect("date");
+        let creations: Vec<_> = (0..4)
+            .map(|_| {
+                let pool = pool.clone();
+                tokio::spawn(async move { ensure_partition(&pool, day).await })
+            })
+            .collect();
+        for creation in creations {
+            creation.await.expect("join").expect("create");
+        }
+
+        assert!(
+            is_partition(&pool, &partition_name(day))
+                .await
+                .expect("attached")
+        );
+        let relations: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class WHERE relname = $1")
+            .bind(partition_name(day))
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(relations, 1);
+
+        let (_, end) = day_bounds_millis(day).expect("bounds");
+        drop_partitions_ended_before(&pool, end)
+            .await
+            .expect("cleanup");
     }
 }
