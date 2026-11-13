@@ -9,9 +9,9 @@
                              [--training FILE] [--out DIR]
 
 Without a subcommand the command is `lab`. `lab` (effectiveness.lab) runs the training, learning and
-protection segments in quick mode. `--jev record` and `--jev replay` (batch 9) use the relay of jev_relay.py.
-`--mode full` and `--keep` are not built yet and exit 2. `site` (effectiveness.site) reads
-the suite output and the decision records and sends no traffic.
+protection segments; `--mode full` adds the full mode of batch 7 (full.py), which needs PostgreSQL and the ideal model.
+`--jev record` and `--jev replay` (batch 9) use the relay of jev_relay.py. `--keep` is not built yet and exits 2.
+`site` (effectiveness.site) reads the suite output and the decision records and sends no traffic.
 
 Exit status: 0 when every gate passes (a gate with no data does not fail), 1 when a gate
 fails, 2 for a usage or environment error.
@@ -52,8 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", metavar="{lab,site,score}")
 
-    lab = commands.add_parser("lab", help="靶场：训练段、学习段和防护段，快速模式（完整模式尚未实现）")
-    lab.add_argument("--mode", choices=("quick", "full"), default="quick")
+    lab = commands.add_parser("lab", help="靶场：训练段、学习段和防护段；--mode full 为完整模式（需要 PostgreSQL）")
+    lab.add_argument("--mode", choices=("quick", "full"), default="quick",
+                     help="quick：快速模式（默认）；full：完整模式，48 个医生、全部语料，并多跑 L4、L5、P6，整套跑两遍")
     lab.add_argument("--jev", choices=("ideal", "live", "record", "replay"), default="ideal")
     lab.add_argument("--seed", type=int, default=20261113)
     lab.add_argument("--only", default="", help="只跑这些类别或用例，逗号分隔（不与基线比较）")

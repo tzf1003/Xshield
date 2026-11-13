@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .full import CONSISTENCY_GATE, LAYER_TITLES
 from .score import CONFIG_ORDER, LEARNING_GATE_NAMES
 
 FAILURES_IN_TERMINAL = 10
@@ -173,6 +174,9 @@ def score_rows(result: dict[str, Any]) -> list[tuple[str, str, str, str, str, st
     count("P5 被拦请求到达源站数", p5["value"], "必须为 0", _verdict(gates, "P5 被拦请求到达源站数"))
     rate("P7 must 用例通过率", "P7", p7["value"], "必须 100%", _verdict(gates, "P7 must 用例通过率"))
     count("P7 意外通过数", p7["unexpected_pass"], "必须为 0", _verdict(gates, "P7 意外通过数"))
+    p6 = metrics.get("P6")
+    if p6 is not None and p6["den"]:  # the full mode only: a gate, which must be 0 (plan 3.3)
+        count("P6 观察与拦截不一致的请求数", p6["num"], "必须为 0", _verdict(gates, CONSISTENCY_GATE))
     return rows
 
 
@@ -390,20 +394,142 @@ def _relay_line(relay: dict[str, Any]) -> str:
             f"没有得到可用应答 {relay['failures']} 次）")
 
 
+def _convergence_lines(convergence: dict[str, Any] | None) -> list[str]:
+    """L4 (plan 3.2, full mode): per layer and number of users, the wrong proposals, the learnable positions learned
+    right (and the high ones, for the layers whose proposals carry a reliability), and the first number of users at which
+    the layer is at its top (plan 3.2: no wrong proposal, and the right positions with the reliabilities the largest
+    user count learned)."""
+    if convergence is None:
+        return []
+    points = convergence["points"]
+    rows = []
+    for layer in ("L0", "L1", "L2", "L3"):
+        cells = [_convergence_cell(point["layers"][layer]) for point in points]
+        first = convergence["first_top"][layer]
+        rows.append([f"{layer} {LAYER_TITLES[layer]}", *cells, "未达到" if first is None else f"{first} 用户"])
+    header = ["层", *[f"{point['users']} 用户" for point in points], "首次到顶"]
+    return ["", "### 收敛成本（L4）", "",
+            "每格是这个用户数下的误学数，以及可学的真值位置里学对的个数；有可靠性的层（L2、L3）另写学对的里面 high 的个数。"
+            "“首次到顶”是没有误学、学对的位置和各自的可靠性都与最大用户数那一次相同的最少用户数。"
+            "这里不拿真值作标准，已知缺口清单里的条目也不排除；最大用户数那一次与真值还差什么，由学习明细给出。",
+            "", *_md_table(header, rows)]
+
+
+def _convergence_cell(summary: dict[str, Any]) -> str:
+    text = f"误学 {summary['wrong']}，学对 {summary['right']}/{summary['learnable']}"
+    if "high" in summary:
+        text += f"（high {summary['high']}）"
+    return text
+
+
+def _pollution_lines(pollution: dict[str, Any] | None) -> list[str]:
+    """L5 (plan 3.2, full mode). The wrong proposals are findings, not a gate; the lost positions are reported, and the
+    attack requests are counted by what the observation run did with them."""
+    if pollution is None:
+        return []
+    rows = [[f"{layer} {LAYER_TITLES[layer]}", str(item["wrong_clean"]), str(item["wrong_polluted"]),
+             str(len(item["lost"])), str(len(item["weaker"]))] for layer, item in pollution["layers"].items()]
+    lines = ["", "### 抗污染（L5）", "",
+             f"训练流量混入攻击会话 {pollution['attackers']} 个，占全部会话 {_pct(pollution['share'])}"
+             f"（良性会话 {pollution['benign_sessions']} 个）。误学数是发现，不计门槛；“学不到”只报告。"
+             "“学不到”包括两种：干净训练学对了、混入后没有学对，或学对了但可靠性比干净训练低（表中“其中可靠性下降”）。",
+             "", *_md_table(["层", "干净训练的误学数", "混入攻击后的误学数", "本来能学到却学不到", "其中可靠性下降"], rows)]
+    if pollution["false_learns"]:
+        lines.append(f"- 发现：混入攻击后误学 {pollution['false_learns']} 个位置。")
+    return [*lines, *_attack_request_lines(pollution.get("attack_requests") or {})]
+
+
+ATTACK_CATEGORY_TITLES = {
+    "pollution_walk": "遍历 id",
+    "pollution_read": "搜索后打开",
+    "pollution_delete": "搜索后删除",
+}
+
+
+def _attack_request_lines(table: dict[str, dict[str, int]]) -> list[str]:
+    """The attack sessions' requests by category (plan 3.2, L5). Each one should be blocked; the columns say how many the
+    observation run would have blocked, and how many it let through, so that their responses were learned."""
+    if not table:
+        return []
+    rows = [[ATTACK_CATEGORY_TITLES.get(category, category), str(item["requests"]), str(item["would_block"]),
+             str(item["allowed"]), str(item["other"])] for category, item in sorted(table.items())]
+    return ["", "攻击会话的请求：每个都本应拦截。观察模式下会被拦的、被放行的（响应进入学习）各有多少：", "",
+            *_md_table(["类别", "请求数", "会被拦", "放行", "其他"], rows)]
+
+
+def _natural_order_lines(natural: dict[str, Any] | None) -> list[str]:
+    """The deletions in the order of the day (plan 10, batch 7): the search result under the two orders, beside each other,
+    with the tier and reliability each one learned and the consequence for the judge. Report only, no gate."""
+    if natural is None:
+        return []
+
+    def learned(side: dict[str, Any]) -> str:
+        if side.get("tier") is None:
+            return "没有学到"
+        return f"{side['tier']}，可靠性 {side.get('reliability') or '—'}"
+
+    def agreement(side: dict[str, Any]) -> str:
+        return "没有学到" if side.get("agreement") is None else f"{side['agreement']}‰"
+
+    ordered, in_order = natural["ordered"], natural["natural"]
+    rows = [["删除排在最后（快速顺序）", learned(ordered), agreement(ordered)],
+            ["删除穿插在别人的搜索之间（自然顺序）", learned(in_order), agreement(in_order)]]
+    lines = ["", "### 删除穿插在搜索之间（自然顺序，只报告）", "",
+             f"公共搜索结果 `{natural['key']}` 在两种顺序下学到的档位和可靠性，以及它的一致程度"
+             f"（high 要 {natural['threshold']}‰，不设门槛）：", "",
+             *_md_table(["顺序", "学到的档位与可靠性", "一致程度"], rows)]
+    reliability = in_order.get("reliability")
+    if in_order.get("tier") is not None and reliability != "high":
+        lines.append(f"- 后果：自然顺序下这个位置只学到 {reliability or '—'}，判定器只在 high 时收紧，"
+                     "这份配置不拦搜索后删除。")
+    return lines
+
+
+def _consistency_line(p6: dict[str, Any] | None) -> list[str]:
+    """P6 (plan 3.3, full mode): the number of requests on which the two modes disagree. A gate of the full mode: 0."""
+    if p6 is None or not p6["den"]:
+        return []
+    return [f"- P6 观察与拦截一致性：同一批 {p6['den']} 个请求里，观察模式的“本应拦截”与拦截模式的“已拦截”"
+            f"不一致的有 {p6['num']} 个（完整模式门槛，必须为 0）"]
+
+
+def _two_pass_line(two_pass: dict[str, Any] | None) -> str | None:
+    if two_pass is None:
+        return None
+    first, second = two_pass["seconds"]
+    if two_pass["differing"]:
+        return f"两遍核对：不同，不同的部分是 {'、'.join(two_pass['differing'])}（用时 {first:.0f} 秒和 {second:.0f} 秒）"
+    return f"两遍核对：两遍的记分、门槛、失败项和学习明细逐位相同（用时 {first:.0f} 秒和 {second:.0f} 秒）"
+
+
+def _eviction_line(timings: dict[str, Any] | None) -> list[str]:
+    """The time the session-table case took (plan 10, batch 7): above 90 seconds it is raised with the coordinator."""
+    eviction = (timings or {}).get("b11-session-eviction")
+    if not eviction:
+        return []
+    return [f"- 会话表填满的用例（b11-session-eviction）：{eviction['logins']} 次登录，用时 "
+            f"{eviction['seconds']:.1f} 秒（超过 90 秒需要另行提出）"]
+
+
 def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
     gates = result["gates"]
     passed = sum(gate["ok"] is True for gate in gates)
     failed = sum(gate["ok"] is False for gate in gates)
     unexecuted = sum(gate["ok"] is None for gate in gates)
+    two_pass = _two_pass_line(meta.get("two_pass"))
     lines = ["# 防护有效性报告", "", f"## 1 {SECTION_TITLES[0]}", "", conclusion(result, meta), "",
              f"门槛共 {len(gates)} 项：通过 {passed}，失败 {failed}，未执行 {unexecuted}。",
+             *([two_pass, ""] if two_pass else []),
              "", f"## 2 {SECTION_TITLES[1]}", ""]
     lines += _md_table(["指标", "本次", "基线", "变化", "门槛", "是否通过"],
                        [list(row) for row in score_rows(result)])
     lines += ["", *_baseline_lines(result["baseline"])]
     lines += ["", f"## 3 {SECTION_TITLES[2]}", ""] + _defence_lines(result, meta) + ["", *_label_lines(result["label_checks"])]
+    lines += _consistency_line(result["metrics"].get("P6"))
     lines += _scan_block(result.get("confidence_scan"))
     lines += ["", f"## 4 {SECTION_TITLES[3]}", ""] + _learning_lines(result)
+    lines += _convergence_lines(result.get("convergence")) + _pollution_lines(result.get("pollution"))
+    lines += _natural_order_lines(result.get("natural_order"))
 
     must_failures = [item for item in result["failures"]
                      if item["group"] == "regression" and item["status"] == "must"]
@@ -438,6 +564,7 @@ def render_markdown(result: dict[str, Any], meta: dict[str, Any]) -> str:
               f"- 判定耗时：中位数 {_count(costs['judge_ms_median'])} ms，p95 {_count(costs['judge_ms_p95'])} ms",
               f"- Jev 失败码：{failures}",
               *([_relay_line(meta["jev_relay"])] if meta.get("jev_relay") else []),
+              *_eviction_line(meta.get("timings")),
               "", f"## 8 {SECTION_TITLES[7]}", ""]
     lines += [f"- {item['section']}：{item['why']}" for item in result["skipped"]] or ["没有。"]
     return "\n".join(lines) + "\n"
@@ -473,5 +600,8 @@ def report_document(result: dict[str, Any], meta: dict[str, Any]) -> dict[str, A
         "counts": result["counts"],
         "needs": result["needs"],
         "confidence_scan": result.get("confidence_scan"),
+        "convergence": result.get("convergence"),
+        "pollution": result.get("pollution"),
+        "natural_order": result.get("natural_order"),
         "passed": result["passed"],
     }

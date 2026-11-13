@@ -150,7 +150,7 @@ python3 scripts/measure_effectiveness.py                                        
 python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   # 只跑这些类别，不与基线比较
 ```
 
-- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）在有 PostgreSQL 时运行：它从训练段的判定学到对象表，作为 `clinic-learned` 站点进入防护段（只跑旅程和探针，回归用例仍只在各自的站点上跑）；没有运行时报告写明 SKIP 的原因。完整模式（批次 7）以退出码 2 拒绝。
+- 训练段在 `clinic-none` 的观察模式下经网关运行。学习段（批次 5）在有 PostgreSQL 时运行：它从训练段的判定学到对象表，作为 `clinic-learned` 站点进入防护段（只跑旅程和探针，回归用例仍只在各自的站点上跑）；没有运行时报告写明 SKIP 的原因。
 - 防护段在 `clinic-none`、`clinic-truth`、带每会话 Jev 额度的 `clinic-truth-limit` 和观察模式的 `clinic-truth-observe` 上运行：攻击探针（`corpus/attacks.jsonl`）、良性文本（`corpus/benign.jsonl`）、良性旅程，以及 `effectiveness/regressions.py` 里方案 4.5 的回归用例。载荷含路径分隔符、放不进一个路径段的，不送到“路径段”注入点，报告里分别计数。
 - 理想模型是 `fake_jev.py` 传入攻击文本时的判定：攻击只看文本是否完整出现在路径或某个值里（两边先规范化）；访问规则与脚本相同，但值带 `object` 时，`seen_as` 里括号中类别不同的展示不算数。不传攻击文本时，判定与之前相同。
 - `--jev live` 改用真实 Jev，需要环境变量 `XSHIELD_JEV_ENDPOINT` 和 `XSHIELD_JEV_API_KEY`，缺一即以退出码 2 退出。密钥只从环境变量读取，不写入报告和日志。页码当处方号这条探针只在这个模式下发送，理想模型比较不了没有类别的位置。
@@ -160,6 +160,7 @@ python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   
 - 已知缺口：判定器还不读功能表，所以 `clinic-truth` 也显示“需要功能表”的有 `p0-3-function-level`、医生的 `GET /api/admin/search`（旅程）。功能级判定合入后，补上 `clinic-truth` 的功能表并把 `p0-3-function-level` 改为 `must`。
 - 退出码：门槛全部通过为 0，有门槛失败为 1，用法或环境错误为 2。基线文件缺失也以 1 退出，报告里写明原因。
 - 学习的已知缺口清单（`effectiveness-known-gaps.json`）登记学习质量的已知问题，规则见 `docs/04` 4.6。报告的“学习的已知缺口清单”一节列出每一条和它本次的出现次数。
+- 完整模式（`--mode full`，批次 7，`effectiveness/full.py`）：48 位医生，良性文本取全部语料，攻击和良性探针取全集。学习段另外跑用户数 3、6、12、24 的收敛段（L4）、混入 10% 攻击会话的抗污染段（L5），以及删除穿插在搜索之间的自然顺序变体（只报告，不设门槛）。防护段多一个观察模式站点上的同批流量（P6，门槛：必须为 0），以及专用网关上的会话表用例 `b11-session-eviction`（快速模式不跑）。整套跑两遍，两遍的确定部分必须逐位相同。只用理想模型，需要 PostgreSQL；缺了以退出码 2 退出，不写任何输出。完整组的基线用 `--update-baseline` 生成。
 - 同一地址会话额度的两条回归用例（WAF 批次 11，PR #218）：`b11-session-total-cap` 用同一医生账号从 `127.0.2.1` 真实登录 11 次，前 10 个会话各花两次模型调用，第 11 个会话的注入被 limit 拒绝。它不用伪造凭证：#232 之后源站没有签发过的凭证不建会话。`b11-other-address-unaffected` 是 `must`，从 `127.0.2.2` 发请求。Linux 上 127/8 都是回环地址，可以直接绑定；macOS 要先给 lo0 加上这两个别名，否则这两条用例报错、不计分。
 
 ## 边界

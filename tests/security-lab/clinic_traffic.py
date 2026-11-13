@@ -43,7 +43,7 @@ UNJUDGED_OUTCOMES = ("blocked", "would_block", "unjudged")
 # The training runs in observation mode (plan 9.1): the edge forwards and logs what it would block.
 TRAINING_MODE = "observe"
 
-# Free text comes from the corpus of plan 4.4, its quick subset (the full mode will take all of it).
+# Free text comes from the corpus of plan 4.4: its quick subset, or all of it in the full mode (plan 5.2).
 CORPUS = Path(__file__).resolve().parent / "corpus"
 
 
@@ -58,6 +58,14 @@ def _attack_texts() -> tuple[str, ...]:
 
 BENIGN_TEXTS = tuple(row["text"] for row in _corpus_rows("benign.jsonl") if row["quick"])
 BENIGN_NAMES = tuple(row["text"] for row in _corpus_rows("benign.jsonl") if row["quick"] and row["class"] == "name")
+FULL_BENIGN_TEXTS = tuple(row["text"] for row in _corpus_rows("benign.jsonl"))
+FULL_BENIGN_NAMES = tuple(row["text"] for row in _corpus_rows("benign.jsonl") if row["class"] == "name")
+# Attack sessions (plan 3.2, L5) log in as doctors from addresses of their own: ATTACKER_SOURCE plus their number,
+# on the loopback net 127.0.1.x (see _source), so the most of them the last octet allows is 254 - ATTACKER_SOURCE.
+ATTACKER_SOURCE = 150
+ATTACKERS_MAX = 254 - ATTACKER_SOURCE
+ATTACKER_WALKS = 6  # patients of other doctors that one attack session asks for by id
+ATTACKER_OPENS = 3  # patients of other doctors that one attack session opens after its search (plan 3.2, L5)
 
 
 @dataclass
@@ -81,8 +89,14 @@ class _Session:
 
 def run_training(send: Send, origin: ClinicOrigin, seed: int, users: int, logins: int, *,
                  config: str = "truth", mode: str = TRAINING_MODE,
-                 evidence: Evidence | None = None) -> list[dict[str, Any]]:
+                 evidence: Evidence | None = None, full: bool = False,
+                 attackers: int = 0, natural_order: bool = False) -> list[dict[str, Any]]:
     """The training observations of `logins` logins for each of the first `users` doctors.
+
+    `full` takes the whole free-text corpus. `attackers` mixes that many attack sessions (plan 3.2, L5) into the
+    benign ones, at places the seed chooses; with none, the traffic is the same as before. `natural_order` runs each
+    doctor's own deletions between the other doctors' sessions instead of after all of them (plan 10, batch 7: the
+    full mode's report-only variant, see full.py).
 
     `send(host, method, target, **options)` returns a labkit.Sent: the edge's answer in the lab, or the
     origin's own answer in the unit tests. The same seed sends the same requests in the same order.
@@ -95,35 +109,59 @@ def run_training(send: Send, origin: ClinicOrigin, seed: int, users: int, logins
         raise ValueError("every doctor logs in at least once")
     if mode not in ("observe", "enforce"):
         raise ValueError(f"unknown mode {mode!r}")
-    driver = _Driver(send, origin, config, mode, evidence if evidence is not None else Evidence())
-    driver.run(users, logins)
+    if not 0 <= attackers <= ATTACKERS_MAX:
+        raise ValueError(f"attackers must be between 0 and {ATTACKERS_MAX}")
+    driver = _Driver(send, origin, config, mode, evidence if evidence is not None else Evidence(), full=full,
+                     natural_order=natural_order)
+    driver.run(users, logins, attackers)
     return driver.rows
 
 
 class _Driver:
-    def __init__(self, send: Send, origin: ClinicOrigin, config: str, mode: str, evidence: Evidence) -> None:
+    def __init__(self, send: Send, origin: ClinicOrigin, config: str, mode: str, evidence: Evidence,
+                 *, full: bool = False, natural_order: bool = False) -> None:
         self.send = send
         self.origin = origin
         self.config = config
         self.mode = mode
         self.host = f"clinic-{config}.lab"
         self.evidence = evidence
+        self.texts = FULL_BENIGN_TEXTS if full else BENIGN_TEXTS
+        self.names = FULL_BENIGN_NAMES if full else BENIGN_NAMES
+        self.natural_order = natural_order
         self.doctor_ids: list[str] = []
         self.origins: dict[str, list[str]] = {}  # doctor -> the patients it had at its first login
         self.pending_deletes: list[tuple[_Session, str, str]] = []  # (session, label, patient) for later
         self.rows: list[dict[str, Any]] = []
 
-    def run(self, users: int, logins: int) -> None:
+    def run(self, users: int, logins: int, attackers: int = 0) -> None:
         self.doctor_ids = list(self.origin.doctors)[:users]
-        for index, doctor_id in enumerate(self.doctor_ids):
-            for login_no in range(logins):
-                self.doctor_session(index, doctor_id, login_no)
+        benign = [(index, doctor_id, login_no)
+                  for index, doctor_id in enumerate(self.doctor_ids) for login_no in range(logins)]
+        # The attack sessions take seeded places among the benign ones. With none, the order is the one of old.
+        total = len(benign) + attackers
+        places = set(random.Random(f"{self.origin.seed}:attack-places").sample(range(total), attackers))
+        benign_order = iter(benign)
+        attacker_number = 0
+        for position in range(total):
+            if position in places:
+                self.attacker_session(attacker_number)
+                attacker_number += 1
+            else:
+                if self.natural_order:
+                    self.flush_deletes()  # the natural-order variant: a delete lands between two other sessions
+                self.doctor_session(*next(benign_order))
+        self.flush_deletes()
+        for offset, (username, admin_id) in enumerate(ADMINS.items()):
+            self.administrator_session(offset + 100, username, admin_id)
+
+    def flush_deletes(self) -> None:
+        """Runs the deletions the doctors' sessions queued, in the order they were queued, and empties the queue."""
         for session, label, pid in self.pending_deletes:
             deleted = self.step(session, "delete-own", "DELETE", f"/api/patients/{pid}", refs=(("patient", pid),))
             if deleted.reply.status == 200:
                 self.evidence.deleted_sessions.add(label)
-        for offset, (username, admin_id) in enumerate(ADMINS.items()):
-            self.administrator_session(offset + 100, username, admin_id)
+        self.pending_deletes.clear()
 
     def login(self, label: str, account: str, source_index: int) -> _Session:
         session = _Session(label=label, source=_source(source_index))
@@ -208,16 +246,16 @@ class _Driver:
         if others:
             target = rng.choice(others)
             noted = self.step(session, "note-other", "POST", f"/api/patients/{target}/notes", expect=(201,),
-                              refs=(("patient", target),), json_body={"text": rng.choice(BENIGN_TEXTS)})
+                              refs=(("patient", target),), json_body={"text": rng.choice(self.texts)})
             if noted.reply.status == 201:
                 self.evidence.noted_sessions.add(label)
         self.step(session, "directory", "GET", "/api/directory")
         if mine:
             first = mine[0]
             self.step(session, "update-own", "PUT", f"/api/patients/{first}", refs=(("patient", first),),
-                      json_body={"name": rng.choice(BENIGN_NAMES)})
+                      json_body={"name": rng.choice(self.names)})
             created = _payload(self.step(session, "create", "POST", "/api/patients", expect=(201,),
-                                         json_body={"name": rng.choice(BENIGN_NAMES)}))
+                                         json_body={"name": rng.choice(self.names)}))
             if "id" in created:
                 self.step(session, "open-created", "GET", f"/api/patients/{created['id']}",
                           refs=(("patient", created["id"]),))
@@ -228,6 +266,7 @@ class _Driver:
         # Session k of a doctor deletes the k-th of the patients the doctor had at the first login, counting
         # from the end. The deletions run after every doctor has searched (see run), so that each search
         # result is seen by the same doctors and the public evidence of plan 4.2 is not cut short by them.
+        # The natural-order variant (full mode) runs them in the order of the day instead (see run).
         originals = self.origins.get(doctor_id, [])
         if login_no < len(originals):
             self.pending_deletes.append((session, label, originals[-1 - login_no]))
@@ -251,6 +290,34 @@ class _Driver:
         if found:
             self.step(session, "admin-delete", "DELETE", f"/api/patients/{found[0]}",
                       refs=(("patient", found[0]),))
+
+    def attacker_session(self, number: int) -> None:
+        """An attack session of the polluted training traffic (plan 3.2, L5). It is a doctor's real login, and like a
+        doctor's it opens the home page, so the session shows the doctor's identity. It then asks by id for patients of
+        other doctors it has never been shown, searches a department, opens ATTACKER_OPENS of the patients the search
+        showed that belong to other doctors, and deletes one of them. Every request of it expects a block, so the rows
+        are attack rows; the learning must not learn from the responses a block would have kept back. Who it asks for
+        and what it searches comes from the seed."""
+        rng = random.Random(f"{self.origin.seed}:attacker:{number}")
+        doctor_id = self.doctor_ids[number % len(self.doctor_ids)]
+        others = [pid for pid, patient in self.origin.patients.items()
+                  if not patient["deleted"] and patient["owner"] != doctor_id]
+        session = self.login(f"attacker/{number}", f"doctor_{doctor_id}", ATTACKER_SOURCE + number)
+        self.step(session, "home", "GET", "/api/home")
+        for pid in rng.sample(others, min(ATTACKER_WALKS, len(others))):
+            self.step(session, "walk-id", "GET", f"/api/patients/{pid}", expect=(200, 403, 404),
+                      refs=(("patient", pid),), verdict="block", reason="access", category="pollution_walk")
+        dept = rng.choice(DEPARTMENTS)
+        results = _payload(self.step(session, "search", "GET", f"/api/search?q={quote(dept, safe='')}"))
+        victims = [item["id"] for item in results.get("results", [])
+                   if self.origin.owner_of("patient", item["id"]) != doctor_id]
+        for pid in victims[:ATTACKER_OPENS]:
+            self.step(session, "search-then-open", "GET", f"/api/patients/{pid}", expect=(200, 403, 404),
+                      refs=(("patient", pid),), verdict="block", reason="access", category="pollution_read")
+        if victims:
+            self.step(session, "search-then-delete", "DELETE", f"/api/patients/{victims[0]}",
+                      expect=(200, 403, 404), refs=(("patient", victims[0]),), verdict="block", reason="access",
+                      category="pollution_delete")
 
 
 def _source(index: int) -> str | None:

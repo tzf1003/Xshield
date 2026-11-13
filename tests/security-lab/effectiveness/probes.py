@@ -52,6 +52,15 @@ def quick_benign() -> list[dict[str, Any]]:
     return [row for row in corpus("benign.jsonl") if row["quick"]]
 
 
+def attacks(*, full: bool) -> list[dict[str, Any]]:
+    """The attack rows of a run: the whole corpus in the full mode (plan 5.2), its quick subset otherwise."""
+    return corpus("attacks.jsonl") if full else quick_attacks()
+
+
+def benign(*, full: bool) -> list[dict[str, Any]]:
+    return corpus("benign.jsonl") if full else quick_benign()
+
+
 def attack_texts() -> tuple[str, ...]:
     """The whole attack corpus: the ideal model of plan 6 knows every attack text, quick or not."""
     return tuple(row["text"] for row in corpus("attacks.jsonl"))
@@ -127,6 +136,7 @@ class Prober:
         self.run = run
         self.only = only
         self.rows: list[dict[str, Any]] = []
+        self.notes: dict[str, Any] = {}  # what a probe measured about the run itself, e.g. the time of a setup
         self.setup: list[str] = []
         self.meta: Score | None = None
         # Payloads that were not sent at the path point, by group, because they do not fit one segment.

@@ -81,6 +81,19 @@ class _NoDatabase(RuntimeError):
     """There is no PostgreSQL to learn on. The stage is skipped with this reason."""
 
 
+def unavailable_reason() -> str | None:
+    """Why the learning stage cannot run here (the client tools are missing, or the server refuses), or None when it can.
+    It creates and drops a throwaway database to find out, so a run that needs the stage can stop before any work."""
+    if shutil.which("createdb") is None or shutil.which("dropdb") is None:
+        return "找不到 createdb 或 dropdb，PATH 里没有 PostgreSQL 客户端"
+    try:
+        with _TemporaryDatabase(_database_base_url()):
+            pass
+    except _NoDatabase as error:
+        return str(error)
+    return None
+
+
 def run(decisions_path: Path, base_spec: dict[str, Any], truth: dict[str, Any] | None, out_dir: Path, *,
         log: Log = print) -> dict[str, Any]:
     """Runs the learning stage over the training decisions (the module docstring says how).

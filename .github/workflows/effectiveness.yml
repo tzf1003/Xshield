@@ -1,8 +1,8 @@
 name: Effectiveness
 
 # The protection-effectiveness measurement (docs/04 section 4.6, plan section 8). It runs on a push to main that
-# changes judgement or learning code or the lab itself, and by hand. There is no nightly run. Only the quick mode
-# exists so far; the full mode comes with its own batch and is then added here.
+# changes judgement or learning code or the lab itself, and by hand. There is no nightly run. A push runs the quick
+# mode. By hand, the mode input picks the full mode (plan 5.2, batch 7), which uses the scripted model only.
 
 on:
   push:
@@ -16,6 +16,14 @@ on:
       - ".github/workflows/effectiveness.yml"
   workflow_dispatch:
     inputs:
+      mode:
+        description: >-
+          quick: the default, the same run as a push. full: 48 doctors, the whole corpus, the convergence and
+          anti-pollution measures, the observation-mode comparison, the session-table case and a second pass of the
+          whole run. It needs PostgreSQL and the scripted model; with the real model it exits 2.
+        type: choice
+        options: [quick, full]
+        default: quick
       jev:
         description: >-
           ideal: the scripted model (the default). live: the real model, which needs the repository secrets
@@ -67,13 +75,13 @@ jobs:
           python-version: "3.13"
       - name: Measure with the scripted model
         if: inputs.jev != 'live'
-        run: python scripts/measure_effectiveness.py --mode quick --out "$RUNNER_TEMP/effectiveness"
+        run: python scripts/measure_effectiveness.py --mode ${{ inputs.mode || 'quick' }} --out "$RUNNER_TEMP/effectiveness"
       - name: Measure with the real model
         if: inputs.jev == 'live'
         env:
           XSHIELD_JEV_ENDPOINT: ${{ secrets.XSHIELD_JEV_ENDPOINT }}
           XSHIELD_JEV_API_KEY: ${{ secrets.XSHIELD_JEV_API_KEY }}
-        run: python scripts/measure_effectiveness.py --mode quick --jev live --out "$RUNNER_TEMP/effectiveness"
+        run: python scripts/measure_effectiveness.py --mode ${{ inputs.mode || 'quick' }} --jev live --out "$RUNNER_TEMP/effectiveness"
       - name: Effectiveness report
         if: always()
         run: |
@@ -86,6 +94,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: effectiveness-${{ inputs.jev || 'ideal' }}
+          name: effectiveness-${{ inputs.mode || 'quick' }}-${{ inputs.jev || 'ideal' }}
           path: ${{ runner.temp }}/effectiveness
           if-no-files-found: warn
