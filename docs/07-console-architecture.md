@@ -316,6 +316,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `timeout_ms` | 这次调用实际使用的超时：站点 `advanced.jev_timeout_ms`，没写时取 `XSHIELD_JEV_TIMEOUT_MS`（新增） |
 | `trim` | `state` 裁剪级别 0–4（新增，见 7.5.3）。分批时是展示那一批的级别 |
 | `batches` / `batch` | 分批时才有（新增，单批记录不带这两个字段）：`batches` 是 `state` 分成的批数，`batch` 是本记录展示的第几批，从 1 起。其余字段描述 `batch` 那一批：判拒的、失败的或 UNKNOWN 的，取序号最小的一批；全部放行时取把握最小的一批（`min(P(ALLOW), P(BENIGN))` 最小，相同取序号最小）。`millis` 是全部调用的墙上时间，`request_bytes` 是已发出各批之和，`usage` 把各批的数值字段相加、其他字段取展示的那一批 |
+| `left_out` | 分批超过 16 批时才有（新增，`None` 时不写出）：没有送出的值和片段数（[02.4](02-jev.md#24-输入上限与脱敏)）。有值时，结论只依据送出的部分，放行也不写放行缓存 |
 | `request_bytes` | 完整请求体字节数（新增） |
 | `http_status` | 模型服务的 HTTP 状态；超时和连接失败为 null（新增） |
 | `response` | 模型服务原始响应体，按 UTF-8 宽松解码，最多 8 KiB（新增）；超时和连接失败为 null |
@@ -347,15 +348,15 @@ GET /api/patients ──响应里出现 id=7──┐
 
 ### 7.5.3 裁剪级别
 
-`build_states` 依次尝试级别 0 至 3，取第一个不超过 8 KiB 的：值都放在这一份里，记录的 `trim` 就是这个级别。都放不下时，请求值按顺序分批，每批按级别 3 装（[7.5.1](#751-jevrecord-v2) 的 `batches`）。级别 4 只用在一个值独占一批、按级别 3 仍放不下的情况（现有代码 `state.rs`）：
+`build_states` 依次尝试级别 0 至 3，取第一个不超过 8 KiB 的：值都放在这一份里，记录的 `trim` 就是这个级别。都放不下时，请求值分批，每批按级别 3 装（[7.5.1](#751-jevrecord-v2) 的 `batches`）。但不含值的空壳（级别 3 的 `state` 去掉所有值）超过 4 KiB 时，所有批都按级别 4 装，让每批能装下的值不至于只有几个。分批最多 16 批（`JEV_BATCHES_MAX`）：先送没核验的非输入值，再送其余整值，最后送其余片段（[02.5](02-jev.md#25-延迟费用与限流)）；没送出的记在 `left_out`。级别 4 只用在空壳过大的分批，或一个值独占一批、按级别 3 仍放不下的情况（现有代码 `state.rs`）：
 
 | `trim` | 最近访问条数 | 每个值的来源数 | 其他 |
 |---|---|---|---|
 | 0 | 10 | 3 | |
 | 1 | 3 | 3 | |
 | 2 | 0 | 3 | |
-| 3 | 0 | 1 | 分批时每批都用这一级 |
-| 4 | 0 | 0 | 去掉 `session.entries_passed`，`path` 截到 256 字符；只用于一个值独占一批仍放不下 |
+| 3 | 0 | 1 | 分批时每批用这一级，空壳超过 4 KiB 时改用级别 4 |
+| 4 | 0 | 0 | 去掉 `session.entries_passed`，`path` 截到 256 字符；只用于空壳过大的分批，或一个值独占一批仍放不下 |
 
 请求值不再截断，因此没有“单值最长字符”一列：超过 512 个字符的值切成片（[02.2](02-jev.md#22-调用内容)）。`at` 和每条 `seen_as` 超过 256 字符时截到 256 并加 `...`。控制台在 Jev 视图顶部写明“为满足 8 KiB 上限，最近访问从 10 条减到 3 条”这类说明；分批时写明“分 N 批送判”。
 
@@ -371,7 +372,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 | 按 `on_jev_unavailable` |
 | `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 | 按 `on_jev_unavailable` |
 | `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 | 按 `on_jev_unavailable` |
-| `JEV_STATE_TOO_LARGE` | 分批后仍有单个值放不进 8 KiB（级别 4 也放不下）。防御性，正常不出现。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
+| `JEV_STATE_TOO_LARGE` | 分批后仍有单个值放不进 8 KiB（级别 4 也放不下），或没核验的非输入值（含片段）在 16 批内装不完。正常不出现。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
 | `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调）。没有发出调用 | 无 | 429（`rate_limited`），不论 `on_jev_unavailable` |
 
 ### 7.5.5 指令版本表
@@ -460,7 +461,7 @@ advanced:
 - `RequestFacts` 已有 `request_id`，判定时把它解析为 `u128` 用于写入缓存来源。
 - `Judgement.record` 对绕过路径不再是 `None`，而是简记录；判定记录填写 `trace.values`、`trace.session`、`trace.cache_source`、`trace.entry`、`trace.bypass`。
 - `Observation` 增加 `request_id` 和这次请求的结论；`Judge::observe` 返回 `ObservationSummary`（7.4.3 的 `response` 对象），代理把它写进同一请求的记录。
-- `build_states` 返回 `Vec<(String, trim)>`，装得下一份时只有一项，超过 8 KiB 时分批（7.5.3）；`request_body` 改为使用启动时构建一次的 `questions`，并暴露 `prompt_id()`。
+- `build_states` 返回 `Batched`：`states` 是 `(String, trim)` 的列表，装得下一份时只有一项，超过 8 KiB 时分批（7.5.3），最多 16 批；`left_out` 是没送出的值数；`request_body` 改为使用启动时构建一次的 `questions`，并暴露 `prompt_id()`。
 - 判定层在 `JEV_RESPONSE_INVALID`、`JEV_HTTP_ERROR` 时保存响应体前 8 KiB 和状态码。
 
 ### 7.7.3 代理

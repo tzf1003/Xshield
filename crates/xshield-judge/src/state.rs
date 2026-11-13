@@ -18,6 +18,8 @@ pub const STATE_BYTES_MAX: usize = 8 * 1024;
 pub const VALUE_PART_CHARS: usize = 512;
 /// Characters that two neighbouring pieces of one value share.
 pub const VALUE_PART_OVERLAP: usize = 64;
+/// Most batches one request is judged in (docs/02 section 2.4). The values after them are left out.
+pub const JEV_BATCHES_MAX: usize = 16;
 /// Longest location or source text sent; a longer one is cut and marked with `...`.
 const TEXT_CHARS_MAX: usize = 256;
 /// Largest Jev response read.
@@ -43,7 +45,7 @@ pub const ACCESS_OPTIONS: [&str; 3] = ["ALLOW", "DENY", "UNKNOWN"];
 /// The `attack` question options.
 pub const ATTACK_OPTIONS: [&str; 3] = ["BENIGN", "ATTACK", "UNKNOWN"];
 
-const ACCESS_INSTRUCTIONS: &str = "You are a web application firewall. state.request is one HTTP request from a logged-in browser session. state.session and state.recent describe what the origin server already showed this session. For every value in state.request.values that selects or names an existing business object (record id, account, owner, file, order), check state.request.values[].seen_as: it lists where the origin showed that same value to this session, with the field name. Answer ALLOW only if every object-selecting value was shown earlier as that kind of object, or if state.entry.matched is true and the values are only the input that entry needs (login form, share code, search text). Each value has kind: reference when it looks like an object reference (an id in the path, or a field named like an id, owner or file), route for a plain word in the URL path, input otherwise. A route word that is a collection name (Addresss, Cards, Users) selects no object and never needs to have been shown; it selects one only when it is plainly a person or record name. A value of kind input (couponData, cardNum, expMonth, message) is form content and does not need to have been shown, unless it plainly names someone else's account or record. seen_as may list unrelated fields because small numbers repeat everywhere: a match only counts when the field or request in seen_as is the same kind of object as the one the request selects. A field may name the object by its role instead of by the endpoint that showed it (paymentId for an id shown by /api/Cards, deliveryMethodId for /api/Deliverys, owner for a user list); that still counts as the same kind of object. A value with verified true was already matched by the gateway with a response that showed this exact value as the same kind of object: treat it as shown and judge only the other values. A value may carry object: the kind of object the site's object map gives its position. A seen_as entry in brackets gives the kind of the position that showed it. A value shown only as a different kind of object was never shown as this kind, even when its field name looks similar. Free text that a user writes (note, title, comment, message, description, search words, names typed into a new record, dates, amounts, drug names) does not select any object and never needs to have been shown. A seen_as entry may end with the tier of the response that showed the value and how sure the map is of it. Tier public is a search or listing that any logged-in session receives, so a sighting there proves no right to the object it names. Tier self and tier org are the session's own records or its organisation's. Tier admin is a response that only administrator sessions receive. Reliability low is weak evidence. A value may carry public_access: accepts false marks a position that never takes a value from a public sighting, such as a write or a private read. A value with attempt over_privilege was shown to this session only by public responses, and its position takes none of them, so answer DENY for that value. Answer DENY if any object-selecting value was never shown to this session, or was shown only as an unrelated field (for example a number that appeared only as an age, now used as a patient id), or if an entry request tries to name someone else's object. Answer UNKNOWN only if the evidence is insufficient. A request may come as several documents: this one lists only some of its values, so judge only the values listed. A value with a part field (for example part 2/5) is one piece of a long text and selects no object.";
+const ACCESS_INSTRUCTIONS: &str = "You are a web application firewall. state.request is one HTTP request from a logged-in browser session. state.session and state.recent describe what the origin server already showed this session. For every value in state.request.values that selects or names an existing business object (record id, account, owner, file, order), check state.request.values[].seen_as: it lists where the origin showed that same value to this session, with the field name. Answer ALLOW only if every object-selecting value was shown earlier as that kind of object, or if state.entry.matched is true and the values are only the input that entry needs (login form, share code, search text). Each value has kind: reference when it looks like an object reference (an id in the path, or a field named like an id, owner or file), route for a plain word in the URL path, input otherwise. A route word that is a collection name (Addresss, Cards, Users) selects no object and never needs to have been shown; it selects one only when it is plainly a person or record name. A value of kind input (couponData, cardNum, expMonth, message) is form content and does not need to have been shown, unless it plainly names someone else's account or record. seen_as may list unrelated fields because small numbers repeat everywhere: a match only counts when the field or request in seen_as is the same kind of object as the one the request selects. A field may name the object by its role instead of by the endpoint that showed it (paymentId for an id shown by /api/Cards, deliveryMethodId for /api/Deliverys, owner for a user list); that still counts as the same kind of object. A value with verified true was already matched by the gateway with a response that showed this exact value as the same kind of object: treat it as shown and judge only the other values. A value may carry object: the kind of object the site's object map gives its position. A seen_as entry in brackets gives the kind of the position that showed it. A value shown only as a different kind of object was never shown as this kind, even when its field name looks similar. Free text that a user writes (note, title, comment, message, description, search words, names typed into a new record, dates, amounts, drug names) does not select any object and never needs to have been shown. A seen_as entry may end with the tier of the response that showed the value and how sure the map is of it. Tier public is a search or listing that any logged-in session receives, so a sighting there proves no right to the object it names. Tier self and tier org are the session's own records or its organisation's. Tier admin is a response that only administrator sessions receive. Reliability low is weak evidence. A value may carry public_access: accepts false marks a position that never takes a value from a public sighting, such as a write or a private read. A value with attempt over_privilege was shown to this session only by public responses, and its position takes none of them, so answer DENY for that value. Answer DENY if any object-selecting value was never shown to this session, or was shown only as an unrelated field (for example a number that appeared only as an age, now used as a patient id), or if an entry request tries to name someone else's object. Answer UNKNOWN only if the evidence is insufficient. A request may come as several documents: this one lists only some of its values, so judge only the values listed. A value with a part field (for example part 2/5) is one piece of a longer value: judge it like a short value at the same position and of the same kind. Long free text selects no object, but a long value in an object position (a number in a path, an identifier-like field) is a reference to an object this session was never shown.";
 const ATTACK_INSTRUCTIONS: &str = "You are a web application firewall. Inspect every value in state.request.values and the request path for attack content: SQL injection, NoSQL injection, command or code execution, path traversal, template injection, XSS, SSRF, header or log injection. Values marked <redacted> are secrets and are not attack content. A value with a part field (for example part 2/5) is one piece of a long value, and neighbouring pieces overlap a little: check each piece, and count a payload that starts or ends at the edge of a piece as present. Answer ATTACK if any value carries attack content, BENIGN if none does, UNKNOWN only if the evidence is insufficient.";
 
 /// Why a state could not be built or an answer could not be used.
@@ -90,6 +92,18 @@ pub struct StateValue {
     /// Set when the value is one piece of a longer value: the piece's number and the number of
     /// pieces, from 1. A piece shows no source and is never verified (docs/02 section 2.2).
     pub part: Option<(u16, u16)>,
+    /// The kind of the whole value, kept on each of its pieces so that they agree. Absent for a
+    /// value that is not cut: its kind is read from its own text.
+    pub whole_kind: Option<&'static str>,
+}
+
+impl StateValue {
+    /// `reference`, `route` or `input`: the kind Jev is told (docs/02 section 2.2).
+    fn kind(&self) -> &'static str {
+        self.whole_kind.unwrap_or_else(|| {
+            crate::values::value_kind(&self.at, self.key.as_deref(), &self.value)
+        })
+    }
 }
 
 /// Everything the `state` document is made of.
@@ -183,6 +197,8 @@ fn value_pieces(input: &StateInput<'_>, value: &StateValue) -> Vec<StateValue> {
         start += VALUE_PART_CHARS - VALUE_PART_OVERLAP;
     }
     let total = u16::try_from(texts.len()).unwrap_or(u16::MAX);
+    // The pieces keep the kind of the whole value, not the kind their own text would give.
+    let whole_kind = value.kind();
     texts
         .into_iter()
         .enumerate()
@@ -196,6 +212,7 @@ fn value_pieces(input: &StateInput<'_>, value: &StateValue) -> Vec<StateValue> {
             public_access: value.public_access,
             attempt: None,
             part: Some((u16::try_from(index + 1).unwrap_or(u16::MAX), total)),
+            whole_kind: Some(whole_kind),
         })
         .collect()
 }
@@ -213,7 +230,7 @@ fn render_value(input: &StateInput<'_>, value: &StateValue, seen_per_value: usiz
         .take(seen_per_value)
         .map(|source| clip(source, TEXT_CHARS_MAX))
         .collect();
-    let kind = crate::values::value_kind(&value.at, value.key.as_deref(), &value.value);
+    let kind = value.kind();
     let mut rendered = json!({
         "at": clip(&value.at, TEXT_CHARS_MAX),
         "kind": kind,
@@ -322,16 +339,16 @@ fn render(input: &StateInput<'_>, values: &[StateValue], trim: Trim) -> String {
     crate::trace::scrubbed(&state, input.credential).into_owned()
 }
 
-/// Cuts `values` into runs, in order, that each fit one `state` at the batch trim. The sizes are
-/// counted from the rendered values; [`fit`] checks each run again on the text it sends.
-fn pack<'a>(input: &StateInput<'_>, values: &'a [StateValue]) -> Vec<&'a [StateValue]> {
-    let base = render(input, &[], BATCH).len();
+/// Cuts `values` into runs, in order, that each fit one `state` at `trim`. The sizes are counted
+/// from the rendered values; [`fit`] checks each run again on the text it sends.
+fn pack<'a>(input: &StateInput<'_>, values: &'a [StateValue], trim: Trim) -> Vec<&'a [StateValue]> {
+    let base = render(input, &[], trim).len();
     let mut runs = Vec::new();
     let mut start = 0;
     let mut size = base;
     for (index, value) in values.iter().enumerate() {
         // One value's text and the comma that follows it.
-        let cost = render_value(input, value, BATCH.seen).to_string().len() + 1;
+        let cost = render_value(input, value, trim.seen).to_string().len() + 1;
         if index > start && size + cost > STATE_BYTES_MAX {
             runs.push(&values[start..index]);
             start = index;
@@ -343,50 +360,130 @@ fn pack<'a>(input: &StateInput<'_>, values: &'a [StateValue]) -> Vec<&'a [StateV
     runs
 }
 
-/// The `state` texts of one run: the run whole at the batch trim when it fits, else each half of
-/// it, until a single value is left. A single value that does not fit at the batch trim is sent at
-/// the compact trim; that fails only when even that does not fit.
-fn fit(input: &StateInput<'_>, run: &[StateValue]) -> Result<Vec<(String, u8)>, JudgeError> {
-    let text = render(input, run, BATCH);
+/// One `state` text of a batch, with its trim level and the number of values it carries.
+struct Batch {
+    text: String,
+    level: u8,
+    values: usize,
+}
+
+/// The `state` texts of one run: the run whole at `trim` when it fits, else each half of it, until
+/// a single value is left. A single value that does not fit at `trim` is sent at the compact trim;
+/// that fails only when even that does not fit.
+fn fit(
+    input: &StateInput<'_>,
+    run: &[StateValue],
+    trim: Trim,
+    level: u8,
+) -> Result<Vec<Batch>, JudgeError> {
+    let text = render(input, run, trim);
     if text.len() <= STATE_BYTES_MAX {
-        return Ok(vec![(text, BATCH_LEVEL)]);
+        return Ok(vec![Batch {
+            text,
+            level,
+            values: run.len(),
+        }]);
     }
     if run.len() <= 1 {
         let text = render(input, run, COMPACT);
         return if text.len() <= STATE_BYTES_MAX {
-            Ok(vec![(text, COMPACT_LEVEL)])
+            Ok(vec![Batch {
+                text,
+                level: COMPACT_LEVEL,
+                values: run.len(),
+            }])
         } else {
             Err(JudgeError::StateTooLarge)
         };
     }
     let (left, right) = run.split_at(run.len() / 2);
-    let mut states = fit(input, left)?;
-    states.extend(fit(input, right)?);
-    Ok(states)
+    let mut batches = fit(input, left, trim, level)?;
+    batches.extend(fit(input, right, trim, level)?);
+    Ok(batches)
+}
+
+/// The trim every batch is cut at (docs/02 section 2.4): level 3, or level 4 when the request
+/// without its values is already more than half a state. Then each batch could carry only a few
+/// values, so the entries and the path are cut as well.
+fn batch_trim(input: &StateInput<'_>) -> (Trim, u8) {
+    if render(input, &[], BATCH).len() > STATE_BYTES_MAX / 2 {
+        (COMPACT, COMPACT_LEVEL)
+    } else {
+        (BATCH, BATCH_LEVEL)
+    }
+}
+
+/// The order values are sent in when a request is batched (docs/02 section 2.4). Class 1 is a value
+/// that was not shown and is not form input, with its pieces: Jev must judge it, so it goes first.
+/// Class 2 is the other whole values and class 3 the other pieces. A value left out is one of the
+/// last ones.
+fn send_class(value: &StateValue) -> u8 {
+    if value.kind() != "input" && !value.verified {
+        1
+    } else if value.part.is_none() {
+        2
+    } else {
+        3
+    }
+}
+
+/// The `state` texts of one request, and the values that did not fit in them (docs/02 section 2.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Batched {
+    /// The texts in send order, each with its trim level. At most [`JEV_BATCHES_MAX`].
+    pub states: Vec<(String, u8)>,
+    /// Values and pieces that are in none of `states`.
+    pub left_out: u32,
 }
 
 /// Builds the `state` texts of one request, each with its trim level (docs/07 section 7.5.3).
 /// When every value fits in one text at levels 0 to 3, that is the only text, and it is the same
-/// as before batches existed. Otherwise the values are cut in order into batches at level 3, and
-/// each batch is one call to Jev. The batches share the entry, the session, the method, the path
-/// and the truncation flag; only their values differ.
+/// as before batches existed. Otherwise the values are sent in batches, each one call to Jev. The
+/// batches share the entry, the session, the method, the path and the truncation flag; only their
+/// values differ. Values are taken in [`send_class`] order, and only the first
+/// [`JEV_BATCHES_MAX`] batches are kept.
 ///
 /// # Errors
-/// [`JudgeError::StateTooLarge`] only when a single value does not fit even at level 4, which the
-/// sizes of the request rule out (docs/02 section 2.4).
-pub fn build_states(input: &StateInput<'_>) -> Result<Vec<(String, u8)>, JudgeError> {
+/// [`JudgeError::StateTooLarge`] when a class 1 value does not fit in the kept batches, or a single
+/// value does not fit even at level 4 (docs/02 section 2.4). Nothing is sent in either case.
+pub fn build_states(input: &StateInput<'_>) -> Result<Batched, JudgeError> {
     let values = state_values(input);
     for (level, trim) in WHOLE_TRIMS.into_iter().enumerate() {
         let text = render(input, &values, trim);
         if text.len() <= STATE_BYTES_MAX {
-            return Ok(vec![(text, u8::try_from(level).unwrap_or(u8::MAX))]);
+            let level = u8::try_from(level).unwrap_or(u8::MAX);
+            return Ok(Batched {
+                states: vec![(text, level)],
+                left_out: 0,
+            });
         }
     }
-    let mut states = Vec::new();
-    for run in pack(input, &values) {
-        states.extend(fit(input, run)?);
+    let (trim, level) = batch_trim(input);
+    let mut ordered = values;
+    ordered.sort_by_key(send_class);
+    let must = ordered
+        .iter()
+        .filter(|value| send_class(value) == 1)
+        .count();
+    let mut batches = Vec::new();
+    for run in pack(input, &ordered, trim) {
+        batches.extend(fit(input, run, trim, level)?);
     }
-    Ok(states)
+    let sent: usize = batches
+        .iter()
+        .take(JEV_BATCHES_MAX)
+        .map(|batch| batch.values)
+        .sum();
+    if sent < must {
+        return Err(JudgeError::StateTooLarge);
+    }
+    let left_out = u32::try_from(ordered.len() - sent).unwrap_or(u32::MAX);
+    let states = batches
+        .into_iter()
+        .take(JEV_BATCHES_MAX)
+        .map(|batch| (batch.text, batch.level))
+        .collect();
+    Ok(Batched { states, left_out })
 }
 
 fn choice_question(instructions: &str, options: [&str; 3], meanings: [&str; 3]) -> Value {
@@ -584,12 +681,13 @@ mod tests {
             public_access: None,
             attempt: None,
             part: None,
+            whole_kind: None,
         }
     }
 
     /// The one `state` of an input that fits a single call.
     fn build_state(input: &StateInput<'_>) -> Result<(String, u8), JudgeError> {
-        let mut states = build_states(input)?;
+        let mut states = build_states(input)?.states;
         assert_eq!(states.len(), 1, "the input fits one call");
         states.pop().ok_or(JudgeError::StateTooLarge)
     }
@@ -817,7 +915,9 @@ mod tests {
         let values: Vec<StateValue> = (0..200)
             .map(|i| value(&format!("query.k{i}"), &"v".repeat(120), Some("k"), &[]))
             .collect();
-        let states = build_states(&input(values.clone(), None, vec![])).unwrap();
+        let states = build_states(&input(values.clone(), None, vec![]))
+            .unwrap()
+            .states;
         assert!(
             states.len() >= 2,
             "200 values of 120 characters need several calls"
@@ -858,7 +958,7 @@ mod tests {
         );
         heavy.entries_passed = &entries;
         heavy.path = &long_path;
-        let states = build_states(&heavy).unwrap();
+        let states = build_states(&heavy).unwrap().states;
         assert_eq!(states.len(), 1);
         let (state, trim) = &states[0];
         assert_eq!(*trim, 4);
@@ -964,9 +1064,80 @@ mod tests {
     #[test]
     fn the_prompt_id_is_fixed_and_follows_the_questions() {
         let prompt = Prompt::new();
-        assert_eq!(prompt.id(), "jq_a937de40418de5c0");
+        assert_eq!(prompt.id(), "jq_48ed46f9d3afd6a8");
         assert_eq!(Prompt::new().id(), prompt.id());
         assert!(prompt.questions_json().contains("\"access\""));
+    }
+
+    #[test]
+    fn the_pieces_of_a_value_keep_the_kind_of_the_whole_value() {
+        // Judged by its own text, the first piece of "000…07" would be a reference and the first
+        // piece of "aaa…a7" a route word; the whole value is a reference in both.
+        let digits = format!("{}7", "0".repeat(600));
+        let letters = format!("{}7", "a".repeat(600));
+        let values = vec![
+            value("path[2]", &digits, None, &[]),
+            value("path[3]", &letters, None, &[]),
+        ];
+        let (state, _) = build_state(&input(values, None, vec![])).unwrap();
+        let json: Value = serde_json::from_str(&state).unwrap();
+        let pieces: Vec<&Value> = json["request"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.get("part").is_some())
+            .collect();
+        assert_eq!(pieces.len(), 4);
+        assert!(
+            pieces.iter().all(|item| item["kind"] == "reference"),
+            "{pieces:?}"
+        );
+    }
+
+    #[test]
+    fn a_long_value_beyond_the_batch_limit_leaves_the_rest_out_after_the_short_value() {
+        let long = "a".repeat(300_000);
+        let values = vec![
+            value("query.comment", &long, Some("comment"), &[]),
+            value("query.tail", "' OR 1=1--", Some("tail"), &[]),
+        ];
+        let built = build_states(&input(values, None, vec![])).unwrap();
+        assert_eq!(built.states.len(), JEV_BATCHES_MAX);
+        assert!(built.left_out > 0);
+        assert!(
+            built.states[0].0.contains("OR 1=1"),
+            "the short value is sent in the first batch"
+        );
+        assert!(
+            built
+                .states
+                .iter()
+                .all(|(text, _)| text.len() <= STATE_BYTES_MAX)
+        );
+    }
+
+    #[test]
+    fn a_path_number_that_does_not_fit_the_batches_is_too_large() {
+        let digits = "7".repeat(200_000);
+        let values = vec![value("path[2]", &digits, None, &[])];
+        assert_eq!(
+            build_states(&input(values, None, vec![])).err(),
+            Some(JudgeError::StateTooLarge)
+        );
+    }
+
+    #[test]
+    fn a_request_whose_own_shell_is_large_is_batched_at_level_four() {
+        let long_path = format!("/share/{}", "x".repeat(7_400));
+        let values: Vec<StateValue> = (0..150)
+            .map(|index| value(&format!("query.p{index}"), "abcdefgh", Some("p"), &[]))
+            .collect();
+        let mut request = input(values, None, vec![]);
+        request.path = &long_path;
+        let built = build_states(&request).unwrap();
+        assert!(built.states.len() <= 4, "{} batches", built.states.len());
+        assert_eq!(built.left_out, 0);
+        assert!(built.states.iter().all(|(_, level)| *level == 4));
     }
 
     #[test]

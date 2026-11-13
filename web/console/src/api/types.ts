@@ -370,6 +370,8 @@ export interface JevRecord {
   batches?: number;
   /** The batch this record shows, from 1; present only together with `batches`. */
   batch?: number;
+  /** Values and pieces not sent because the batches allowed no more (docs/02 2.4); present only when some. */
+  left_out?: number;
   request_bytes: number | null;
   http_status: number | null;
   /** Raw provider response, at most 8 KiB; null on timeout and connection failure. */

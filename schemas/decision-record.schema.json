@@ -192,6 +192,7 @@
         "trim": {"type": ["integer", "null"], "minimum": 0, "maximum": 4, "description": "state 的裁剪级别，0 到 4；没有构造 state 时为 null。分批时是展示那一批的级别。"},
         "batches": {"type": "integer", "minimum": 2, "description": "state 分成的批数；只有分成多批时才有。"},
         "batch": {"type": "integer", "minimum": 1, "description": "本记录展示的是第几批，从 1 起；只有分成多批时才有。"},
+        "left_out": {"type": "integer", "minimum": 1, "description": "没有送判的值和片段数，超过 16 批的上限时才有（docs/02 2.4）。"},
         "request_bytes": {"type": ["integer", "null"], "minimum": 0},
         "http_status": {"type": ["integer", "null"], "minimum": 100, "maximum": 599, "description": "供应商的 HTTP 状态码；超时和传输失败时为 null。"},
         "response": {"type": ["string", "null"], "maxLength": 8192, "description": "供应商的回答，最多 8 KiB。"},

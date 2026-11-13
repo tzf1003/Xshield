@@ -10,7 +10,7 @@ import { useJevStatus, usePrompt } from "../../api/queries.ts";
 import type { JevPrompt, RequestDetail } from "../../api/types.ts";
 import { useSetSearch } from "../../app/scope.ts";
 import type { JevDoc, JevView } from "../../app/search-schema.ts";
-import { batchNote } from "../../lib/align.ts";
+import { batchNote, leftOutNote } from "../../lib/align.ts";
 import { isSiteName } from "../../lib/ids.ts";
 import { Card, Empty, Notice } from "../../ui/Page.tsx";
 import {
@@ -59,6 +59,7 @@ export function JevInspector({ detail, requestId, view, doc, hl }: Props) {
   const alignment: Alignment | null =
     state === null ? null : (jev.batches ?? 1) > 1 ? { aligned: false } : alignState(state, trace);
   const batched = batchNote(jev.batches, jev.batch);
+  const leftOut = leftOutNote(jev.left_out);
   const rows = sentRows(trace, state, alignment);
   const session = sessionView(trace, state, alignment);
   const body =
@@ -128,6 +129,7 @@ export function JevInspector({ detail, requestId, view, doc, hl }: Props) {
       </div>
 
       {batched !== null ? <Notice tone="info">{batched}</Notice> : null}
+      {leftOut !== null ? <Notice tone="warn">{leftOut}</Notice> : null}
 
       {stateNote !== null ? (
         <Notice tone="info">
@@ -198,7 +200,7 @@ function bodyNoteOf(parsed: ParsedState, prompt: UseQueryResult<JevPrompt, Error
 function noStateText(failure: string | null): string {
   if (failure === "JEV_CALL_LIMIT") return "调用次数达到上限，这次没有发出调用，所以没有 state。";
   if (failure === "JEV_STATE_TOO_LARGE")
-    return "上下文分批后仍有单个值超过 8 KiB，这次没有发出调用，所以没有 state。";
+    return "分批（最多 16 批）后仍装不下，这次没有发出调用，所以没有 state。";
   return "这次调用没有 state。";
 }
 

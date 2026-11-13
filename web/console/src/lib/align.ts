@@ -96,6 +96,12 @@ export function batchNote(batches: number | undefined, batch: number | undefined
   return `第 ${batch ?? 1} 批，共 ${batches} 批：这次请求分成 ${batches} 批送判，本批的 state 只含其中一部分值，来源链接不可用`;
 }
 
+/** The notice for a request whose judgement left values or pieces out (docs/02 2.5); null when none were. */
+export function leftOutNote(leftOut: number | undefined): string | null {
+  if (leftOut === undefined || leftOut < 1) return null;
+  return `攻击判定不完整：有 ${leftOut} 个值或片段没有送判（分批超过 16 批的上限），结论只依据送出的部分`;
+}
+
 export type ValueHint = { tone: "ok" | "bad" | "warn" | "none"; text: string };
 
 /** The reading shown next to each value in the structured view (docs/06 6.4.5). */

@@ -29,8 +29,8 @@ use crate::slots::{
     route_template, tier_name,
 };
 use crate::state::{
-    Answers, JudgeError, Prompt, StateInput, StateValue, build_states, conclude, parse_response,
-    request_body,
+    Answers, Batched, JudgeError, Prompt, StateInput, StateValue, build_states, conclude,
+    parse_response, request_body,
 };
 use crate::tiers;
 use crate::trace::{Place, entry_trace, recent_trace, redacted_path, redacted_query, value_entry};
@@ -644,6 +644,7 @@ impl<J: JevPort> Judge<J> {
                     object: request_object.map(str::to_owned),
                     public_access: access,
                     attempt,
+                    whole_kind: None,
                 });
             }
             let place = Place {
@@ -722,8 +723,8 @@ impl<J: JevPort> Judge<J> {
             credential: turn.secret,
             secret_words: tuning.secret_words,
         };
-        let states = match build_states(&input) {
-            Ok(states) => states,
+        let batched = match build_states(&input) {
+            Ok(batched) => batched,
             // A state that does not fit even in batches is refused with 403 whatever the site
             // allows. No call is made, and `on_jev_unavailable` does not apply (docs/02 section 2.4).
             Err(error @ JudgeError::StateTooLarge) => {
@@ -732,18 +733,20 @@ impl<J: JevPort> Judge<J> {
             }
             Err(error) => return unjudged(row, &error.to_string()),
         };
-        self.call_batches(turn, &row, states).await
+        self.call_batches(turn, &row, batched).await
     }
 
     /// Makes one call per batch, at most [`JEV_PARALLEL_MAX`] at a time, and merges the answers
     /// (docs/02 section 2.5). The verdict does not depend on the order the calls finish in. A
-    /// denial decides the request at once: the calls still waiting are dropped, not awaited.
+    /// denial decides the request at once: the calls still waiting are dropped, not awaited. Values
+    /// left out of the batches are counted in the record and keep the request out of the cache.
     async fn call_batches(
         &self,
         turn: &Turn<'_>,
         template: &JevRecord,
-        states: Vec<(String, u8)>,
+        batched: Batched,
     ) -> (Verdict, JevRecord) {
+        let Batched { states, left_out } = batched;
         let started = Instant::now();
         let sent = AtomicU64::new(0);
         let timeout = turn.tuning.jev_timeout;
@@ -782,9 +785,13 @@ impl<J: JevPort> Judge<J> {
             row.batch = u16::try_from(index + 1).ok();
             row.usage = usage;
         }
+        row.left_out = (left_out > 0).then_some(left_out);
         match kind {
             Kind::Allow => {
-                self.remember_allow(turn);
+                // A verdict that judged only part of the request is not kept for the cache window.
+                if left_out == 0 {
+                    self.remember_allow(turn);
+                }
                 (Verdict::Safe(DecisionPath::JevAllow), row)
             }
             Kind::Deny => (Verdict::Unsafe(DecisionPath::JevDeny), row),
@@ -3724,7 +3731,8 @@ mod tests {
             .and_then(|jev| jev.batches)
             .map_or(1, usize::from);
         assert_eq!(fake.calls(), batches);
-        // The extraction takes 200 values of this body, and 200 short values fill two batches.
+        // The 200-value cap (REQUEST_VALUES_MAX) keeps this body to two batches. That is not the worst
+        // case: without the cap the same body takes JEV_BATCHES_MAX calls, and the rest is left out.
         assert_eq!(batches, 2);
     }
 
@@ -3743,6 +3751,126 @@ mod tests {
         assert_eq!(fake.calls(), 1);
         let json = serde_json::to_value(verdict.record.jev.as_ref().unwrap()).unwrap();
         assert!(json.get("batches").is_none() && json.get("batch").is_none());
+        assert!(json.get("left_out").is_none());
+    }
+
+    /// A query whose `comment` is `length` characters of `A`, followed by `tail` (already encoded).
+    fn long_comment_query(length: usize, tail: &str) -> String {
+        format!("comment={}&tail={tail}", "A".repeat(length))
+    }
+
+    #[tokio::test]
+    async fn a_long_value_past_the_batch_limit_leaves_out_the_rest_and_still_sends_the_short_value()
+    {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        fake.answer_marked("OR 1=1", "ALLOW", "ATTACK");
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let query = long_comment_query(300_000, "%27%20OR%201%3D1--");
+        let verdict = judge
+            .judge(
+                &enforced,
+                &get("/api/comments", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevDeny);
+        // The denial comes from the first batch, where the short value is, so the calls not yet
+        // started are never made (docs/02 section 2.5): the first wave ran, and nothing past the cap.
+        assert!(
+            (JEV_PARALLEL_MAX..=crate::state::JEV_BATCHES_MAX).contains(&fake.calls()),
+            "{} calls",
+            fake.calls()
+        );
+        assert!(fake.sent().iter().any(|body| body.contains("OR 1=1")));
+    }
+
+    #[tokio::test]
+    async fn a_request_judged_in_part_of_its_batches_is_allowed_but_not_cached() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let query = long_comment_query(300_000, "plain1x");
+        let first = judge
+            .judge(
+                &enforced,
+                &get("/api/comments", Some(query.as_str()), Some("alice"), 1_000),
+            )
+            .await;
+        assert!(first.forward);
+        assert_eq!(first.record.decision_path, DecisionPath::JevAllow);
+        let jev = first.record.jev.as_ref().unwrap();
+        assert_eq!(
+            jev.batches,
+            u16::try_from(crate::state::JEV_BATCHES_MAX).ok()
+        );
+        assert!(jev.left_out.is_some_and(|left| left > 0));
+        let calls = fake.calls();
+        let second = judge
+            .judge(
+                &enforced,
+                &get("/api/comments", Some(query.as_str()), Some("alice"), 1_500),
+            )
+            .await;
+        assert!(second.forward);
+        assert_eq!(second.record.decision_path, DecisionPath::JevAllow);
+        assert_eq!(
+            fake.calls(),
+            2 * calls,
+            "the second request is judged again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_path_number_too_long_for_the_batches_is_refused_without_a_call() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
+        confirm(&judge, &lenient, "alice");
+        let path = format!("/api/patients/{}", "7".repeat(200_000));
+        let verdict = judge
+            .judge(&lenient, &get(&path, None, Some("alice"), 1_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 403);
+        assert_eq!(fake.calls(), 0);
+        assert_eq!(
+            verdict
+                .record
+                .jev
+                .as_ref()
+                .and_then(|jev| jev.failure.as_deref()),
+            Some("JEV_STATE_TOO_LARGE")
+        );
+    }
+
+    #[tokio::test]
+    async fn every_piece_of_a_long_path_number_is_judged_as_a_reference() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        confirm(&judge, &enforced, "alice");
+        let path = format!("/api/patients/{}7", "a".repeat(600));
+        let verdict = judge
+            .judge(&enforced, &get(&path, None, Some("alice"), 1_000))
+            .await;
+        let state = verdict
+            .record
+            .jev
+            .as_ref()
+            .and_then(|jev| jev.state.clone())
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&state).unwrap();
+        let pieces: Vec<&serde_json::Value> = json["request"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item.get("part").is_some())
+            .collect();
+        assert!(pieces.len() >= 2, "{} pieces", pieces.len());
+        assert!(pieces.iter().all(|item| item["kind"] == "reference"));
     }
 
     #[tokio::test]

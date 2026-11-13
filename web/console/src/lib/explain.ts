@@ -41,7 +41,7 @@ const FAILURE_REASON: Record<string, string> = {
   JEV_RESPONSE_TOO_LARGE: "Jev 响应超过 64 KiB",
   JEV_RESPONSE_INVALID: "Jev 响应格式不符合约定",
   JEV_UNKNOWN: "Jev 答不上来",
-  JEV_STATE_TOO_LARGE: "上下文分批后仍有单个值超过 8 KiB，没有调用 Jev（正常不出现）",
+  JEV_STATE_TOO_LARGE: "分批（最多 16 批）后仍装不下，没有调用 Jev（正常不出现）",
   JEV_CALL_LIMIT: "调用次数已达上限，没有调用 Jev",
 };
 

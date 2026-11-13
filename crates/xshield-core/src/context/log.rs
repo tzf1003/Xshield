@@ -98,6 +98,11 @@ pub struct JevRecord {
     /// The batch this record shows, from 1; set only together with `batches`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<u16>,
+    /// How many values and pieces were not sent, because the request needed more than the
+    /// batches allowed (docs/02 section 2.4). Set only when there were some; the verdict then
+    /// rests on the values that were sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_out: Option<u32>,
     /// Size of the whole request body sent to the provider.
     pub request_bytes: Option<u32>,
     /// The provider's HTTP status; `None` for timeouts and transport failures.
