@@ -25,7 +25,7 @@ use xshield_core::context::learning::{
 };
 use xshield_core::context::objects::KEY_MAX;
 use xshield_core::context::position::PositionState;
-use xshield_core::context::{IdentityRole, LearningSettings, ObjectMap, SiteSpec, Tier};
+use xshield_core::context::{LearningSettings, ObjectMap, SiteSpec, Tier};
 use xshield_core::kind::Rules;
 use xshield_postgres::key_seal::KeySealer;
 use xshield_postgres::object_agent_store::{self as runs, CALLS_KEEP_DAYS, Trigger};
@@ -608,9 +608,7 @@ async fn judge_accepts(
 /// Whether the site declares a user identity the responses show, so its response units are users
 /// and not sessions. A paused entry shows none, as the judge reads it.
 pub(crate) fn identified_by(map: &ObjectMap) -> bool {
-    map.slots()
-        .iter()
-        .any(|slot| !slot.paused && slot.identity == Some(IdentityRole::User))
+    map.declares_user_identity()
 }
 
 /// Judges the tier of each declared response position from the response evidence of the window: the

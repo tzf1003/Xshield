@@ -355,6 +355,16 @@ impl ObjectMap {
             .and_then(|slot| slot.identity)
     }
 
+    /// Whether the site has a user identity position: an entry that states the user and is not paused.
+    /// Only such a site asks an identity response to declare the user before it recognizes a credential
+    /// (docs/01 section 1.2).
+    #[must_use]
+    pub fn declares_user_identity(&self) -> bool {
+        self.slots()
+            .iter()
+            .any(|slot| !slot.paused && slot.identity == Some(IdentityRole::User))
+    }
+
     /// The map with the entries of `keys` paused. A key the map does not declare, and an
     /// entry already paused, change nothing. The index stays valid: keys and places do not move.
     #[must_use]
@@ -2093,6 +2103,29 @@ mod tests {
         assert_eq!(paused.slots()[0].identity, Some(IdentityRole::User));
         let added = paused.with_entry("GET /api/me id", "doctor", SlotSource::Admin);
         assert_eq!(added.identity_of("GET /api/me id"), None);
+    }
+
+    #[test]
+    fn a_site_declares_a_user_identity_only_with_an_unpaused_user_position() {
+        let user = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"}]}"#)
+        .unwrap();
+        assert!(user.declares_user_identity());
+        let paused = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home doctor.id","class":"doctor","source":"admin","identity":"user"}]}"#)
+        .unwrap()
+        .with_paused(&["GET /api/home doctor.id".to_owned()]);
+        assert!(!paused.declares_user_identity());
+        // An organization or a role is not the user, and a map without any identity declares none.
+        let org_and_role = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /api/home org.id","class":"doctor","source":"admin","identity":"org"},
+            {"key":"GET /api/home role","class":"doctor","source":"admin","identity":"role"}]}"#)
+        .unwrap();
+        assert!(!org_and_role.declares_user_identity());
+        let none = map(r#"{"classes":[{"id":"doctor","name":"医生"}],"slots":[
+            {"key":"GET /doctor/{id} path[1]","class":"doctor","source":"admin"}]}"#)
+        .unwrap();
+        assert!(!none.declares_user_identity());
     }
 
     #[test]
