@@ -1,16 +1,6 @@
 {
   "entries": [
     {
-      "id": "wrong-l1-patient-split",
-      "kind": "wrong",
-      "metric": "L1",
-      "key": "GET /api/patients/{id} path[2]",
-      "learned": "patients",
-      "ref": "学习质量设计稿 2.2",
-      "lq": "LQ-1",
-      "note": "自动拆分把读详情的请求位置拆进了类别 patients（真值是患者）"
-    },
-    {
       "id": "miss-admin-export-patients",
       "kind": "miss",
       "key": "GET /api/admin/export patients[].id",
@@ -45,26 +35,6 @@
       "ref": "学习质量设计稿 2.6",
       "lq": "LQ-4b",
       "note": "接受公共来源没有提议：判断只能到 medium，到不了 high"
-    },
-    {
-      "id": "fail-benign-open-created-101",
-      "kind": "failure",
-      "case": "train/101/0/open-created",
-      "config": "learned",
-      "learned": "",
-      "ref": "学习质量设计稿 2.2",
-      "lq": "LQ-1",
-      "note": "良性训练流程（打开刚新建的患者）被学到的配置拦下，拆分给出了拒绝的依据"
-    },
-    {
-      "id": "fail-benign-open-created-102",
-      "kind": "failure",
-      "case": "train/102/0/open-created",
-      "config": "learned",
-      "learned": "",
-      "ref": "学习质量设计稿 2.2",
-      "lq": "LQ-1",
-      "note": "同上（第二位医生）"
     },
     {
       "id": "fail-public-source-delete",
