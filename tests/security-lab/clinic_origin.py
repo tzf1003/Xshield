@@ -48,7 +48,7 @@ CLASSES = (
 # The request positions of the object map, as the edge writes them (docs/07 section 7.4.7). An
 # accepts_public of True means normal traffic may act on a value the public search showed.
 REQUEST_POSITIONS: tuple[dict[str, Any], ...] = (
-    {"key": "GET /api/patients/{id} path[2]", "class": "patient", "accepts_public": True, "learnable": True},
+    {"key": "GET /api/patients/{id} path[2]", "class": "patient", "accepts_public": False, "learnable": True},
     {"key": "PUT /api/patients/{id} path[2]", "class": "patient", "accepts_public": False, "learnable": True},
     {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "accepts_public": False, "learnable": True},
     {"key": "POST /api/patients/{id}/notes path[2]", "class": "patient", "accepts_public": True, "learnable": True},
@@ -81,6 +81,7 @@ RESPONSE_POSITIONS: tuple[dict[str, Any], ...] = (
     {"key": "POST /api/patients id", "class": "patient", "tier": "self", "learnable": True},
     {"key": "GET /api/search results[].id", "class": "patient", "tier": "public", "learnable": True},
     {"key": "GET /api/directory doctors[].id", "class": "doctor", "tier": "public", "learnable": True},
+    {"key": "GET /api/directory doctors[].org", "class": "org", "tier": "public", "learnable": True},
     {"key": "GET /api/admin/search results[].id", "class": "patient", "tier": "admin", "learnable": True},
     {"key": "GET /api/admin/export patients[].id", "class": "patient", "tier": "admin", "learnable": True},
     {"key": "GET /share/{code} patient.id", "class": "patient", "tier": None, "learnable": False,
@@ -99,10 +100,22 @@ IDENTITY: tuple[dict[str, Any], ...] = (
     {"key": "GET /api/home role", "class": "staff", "identity": "role"},
 )
 
-# Response positions that carry no object, listed so the truth is complete.
+# Request and response fields that carry no object, spelled as the edge records them (plan 9.3): a body or
+# query field as `body.<name>` or `query.<name>`, a response field by its path. --check requires every key
+# here to appear in the decision records. Not listed: the share redemption fields (the edge spells them per
+# share code, so no template matches) and the JSON credential route POST /api/token (the cookie site never
+# calls it, so no record can show its spelling).
 NON_OBJECTS = (
+    "POST /login body.username",
+    "POST /login body.password",
+    "GET /api/search query.q",
+    "GET /api/admin/search query.q",
+    "POST /api/patients body.name",
+    "PUT /api/patients/{id} body.name",
+    "POST /api/patients/{id}/notes body.text",
     "GET /api/patients patients[].name",
     "GET /api/patients patients[].age",
+    "GET /api/patients patients[].dept",
     "GET /api/patients/{id} name",
     "GET /api/patients/{id} age",
     "GET /api/patients/{id} prescriptions[].days",
@@ -113,16 +126,17 @@ NON_OBJECTS = (
     "GET /api/search query",
     "GET /api/search page",
     "GET /api/search results[].name",
+    "GET /api/search results[].age",
     "GET /api/search results[].dept",
     "GET /api/admin/search results[].name",
+    "GET /api/admin/search results[].age",
+    "GET /api/admin/search results[].dept",
+    "GET /api/admin/export patients[].name",
+    "GET /api/admin/export patients[].age",
+    "GET /api/admin/export patients[].dept",
     "GET /api/directory doctors[].name",
-    "GET /api/directory doctors[].org",
-    "POST /api/token token",
-    "POST /login password",
-    "POST /api/patients name",
-    "PUT /api/patients/{id} name",
-    "POST /share/{code} path[1]",
-    "GET /share/{code} path[1]",
+    "GET /api/directory doctors[].dept",
+    "POST /api/patients/{id}/share code",
 )
 
 
@@ -550,7 +564,8 @@ class ClinicOrigin:
         doctors = doctors[:LIST_LIMIT]
         payload = {"doctors": [{"id": d["id"], "name": d["name"], "dept": d["dept"], "org": d["org"]}
                                for d in doctors]}
-        return Result(200, payload, shown=tuple(("doctor", d["id"]) for d in doctors))
+        shown = tuple(("doctor", d["id"]) for d in doctors) + tuple(("org", d["org"]) for d in doctors)
+        return Result(200, payload, shown=shown)
 
     def _admin_search(self, text: str) -> Result:
         found = [patient for patient in self._all_patients() if _matches(patient, text, with_id=True)]

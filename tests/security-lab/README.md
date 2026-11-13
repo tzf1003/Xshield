@@ -94,7 +94,9 @@ python3 tests/security-lab/clinic_traffic.py --check                      # 经�
 python3 -m unittest discover -s tests/security-lab -p "test_*.py"         # 源站和流量的单元测试，不经网关
 ```
 
-`--check` 核对四件事。第一，每个 `learnable` 位置的键都在判定记录里出现过（请求位置看 `trace.values[].slot`，响应位置看 `trace.response.fingerprints`）。第二，没有任何记录是拦截、本应拦截、未经判定或 Jev 失败。第三，每个请求的状态码符合旅程的预期。第四，四项证据达到学习规则判定 `high` 所需的数量。阈值沿用 `crates/xshield-core/src/context/learning.rs`：`SESSIONS_MIN` 为 5，`VOTES_MIN` 为 20，`high` 需要两倍的单位数或票数，公共档的一致程度需要 980‰。预算是 30 秒。
+训练段在观察模式（`TRAINING_MODE`，`observe`）下经网关运行，观察行的 `mode` 与之一致，`category` 为 `train_<步骤名>`，便于按步骤看误拦率。
+
+`--check` 核对四件事。第一，每个 `learnable` 位置的键和每个 `non_objects` 键都在判定记录里出现过（请求位置看 `trace.values[].slot`，响应位置看 `trace.response.fingerprints`）。第二，没有任何记录是拦截、本应拦截、未经判定或 Jev 失败。第三，每个请求的状态码符合旅程的预期。第四，四项证据达到学习规则判定 `high` 所需的数量。阈值沿用 `crates/xshield-core/src/context/learning.rs`：`SESSIONS_MIN` 为 5，`VOTES_MIN` 为 20，`high` 需要两倍的单位数或票数，公共档的一致程度需要 980‰。预算是 30 秒。
 
 ## 边界
 

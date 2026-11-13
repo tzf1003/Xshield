@@ -8,9 +8,9 @@ patients. The journeys are fixed by the seed, so one seed always sends the same 
 order. The rows it returns are observations in the format of plan 9.1 with group "train".
 
 `python3 tests/security-lab/clinic_traffic.py --check` runs the training through the edge with the truth
-configuration and checks the result against the decision records. Every learnable position of the origin's
-truth must appear, no benign request may be blocked, would-blocked or left unjudged, and the four pieces of
-evidence in plan 4.2 must reach the counts the learning rules need for `high`.
+configuration and checks the result against the decision records. Every learnable position and every
+non_objects key of the origin's truth must appear, no benign request may be blocked, would-blocked or left
+unjudged, and the four pieces of evidence in plan 4.2 must reach the counts the learning rules need for `high`.
 """
 
 from __future__ import annotations
@@ -40,6 +40,8 @@ SESSIONS_MIN = 5
 VOTES_MIN = 20
 HIGH_AGREEMENT_PER_MILLE = 980
 UNJUDGED_OUTCOMES = ("blocked", "would_block", "unjudged")
+# The training runs in observation mode (plan 9.1): the edge forwards and logs what it would block.
+TRAINING_MODE = "observe"
 
 # Free text comes from the corpus of plan 4.4, its quick subset (the full mode will take all of it).
 CORPUS = Path(__file__).resolve().parent / "corpus"
@@ -78,7 +80,8 @@ class _Session:
 
 
 def run_training(send: Send, origin: ClinicOrigin, seed: int, users: int, logins: int, *,
-                 config: str = "truth", evidence: Evidence | None = None) -> list[dict[str, Any]]:
+                 config: str = "truth", mode: str = TRAINING_MODE,
+                 evidence: Evidence | None = None) -> list[dict[str, Any]]:
     """The training observations of `logins` logins for each of the first `users` doctors.
 
     `send(host, method, target, **options)` returns a labkit.Sent: the edge's answer in the lab, or the
@@ -90,16 +93,19 @@ def run_training(send: Send, origin: ClinicOrigin, seed: int, users: int, logins
         raise ValueError(f"users must be between 1 and the origin's {origin.doctor_count} doctors")
     if logins < 1:
         raise ValueError("every doctor logs in at least once")
-    driver = _Driver(send, origin, config, evidence if evidence is not None else Evidence())
+    if mode not in ("observe", "enforce"):
+        raise ValueError(f"unknown mode {mode!r}")
+    driver = _Driver(send, origin, config, mode, evidence if evidence is not None else Evidence())
     driver.run(users, logins)
     return driver.rows
 
 
 class _Driver:
-    def __init__(self, send: Send, origin: ClinicOrigin, config: str, evidence: Evidence) -> None:
+    def __init__(self, send: Send, origin: ClinicOrigin, config: str, mode: str, evidence: Evidence) -> None:
         self.send = send
         self.origin = origin
         self.config = config
+        self.mode = mode
         self.host = f"clinic-{config}.lab"
         self.evidence = evidence
         self.doctor_ids: list[str] = []
@@ -141,10 +147,11 @@ class _Driver:
             options["json_body"] = json_body
         sent = self.send(self.host, method, target, source=session.source, **options)
         self.rows.append({
-            "case": f"train/{session.label}/{name}", "group": "train", "category": "train",
+            "case": f"train/{session.label}/{name}", "group": "train",
+            "category": f"train_{name.replace('-', '_')}",
             "expect": "allow", "reason": None, "status": "must", "ref": None,
-            "config": self.config, "site": f"clinic-{self.config}", "mode": "enforce", "run": 1,
-            "request_id": sent.reply.request_id,
+            "config": self.config, "site": f"clinic-{self.config}", "mode": self.mode, "run": 1,
+            "request_id": sent.reply.request_id or "",
             "setup_request_ids": [session.login_request] if session.login_request else [],
             "client_status": sent.reply.status, "expected_status": list(expect),
             "origin_served": sent.served,
@@ -301,6 +308,11 @@ def verify(origin: ClinicOrigin, rows: list[dict[str, Any]], records: list[dict[
                   f"{len(response_keys) - sum(k not in fingerprint_keys for k in response_keys)} of {len(response_keys)}")
     for key in missing:
         problems.append(f"learnable position never appears in a decision record: {key}")
+    seen_non_objects = [key for key in truth["non_objects"] if key in slots or key in fingerprint_keys]
+    report.append(f"  non_objects seen in records: {len(seen_non_objects)} of {len(truth['non_objects'])}")
+    for key in truth["non_objects"]:
+        if key not in slots and key not in fingerprint_keys:
+            problems.append(f"non_objects key never appears in a decision record: {key}")
 
     units = len(evidence.search_units)
     values = len(evidence.public_views)
@@ -335,7 +347,8 @@ def check(seed: int = DEFAULT_SEED, users: int = QUICK_DOCTORS, logins: int = 4)
         labkit.build_edge()
         with tempfile.TemporaryDirectory() as scratch:
             sites = Path(scratch) / "sites.json"
-            sites.write_text(json.dumps([site_spec("truth", origin.port)], ensure_ascii=False), encoding="utf-8")
+            sites.write_text(json.dumps([site_spec("truth", origin.port, mode=TRAINING_MODE)], ensure_ascii=False),
+                             encoding="utf-8")
             edge = labkit.Edge(sites, jev.url, labkit.free_port(), Path(scratch) / "decisions.jsonl")
             running = edge
 
@@ -344,7 +357,8 @@ def check(seed: int = DEFAULT_SEED, users: int = QUICK_DOCTORS, logins: int = 4)
 
             evidence = Evidence()
             started = time.monotonic()
-            rows = run_training(through_edge, origin, seed, users, logins, config="truth", evidence=evidence)
+            rows = run_training(through_edge, origin, seed, users, logins, config="truth", mode=TRAINING_MODE,
+                                evidence=evidence)
             elapsed = time.monotonic() - started
             with running.lock:
                 records = list(running.records)
