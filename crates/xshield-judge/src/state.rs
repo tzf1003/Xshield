@@ -44,6 +44,10 @@ pub const SECRET_WORDS: [&str; 9] = [
 pub const ACCESS_OPTIONS: [&str; 3] = ["ALLOW", "DENY", "UNKNOWN"];
 /// The `attack` question options.
 pub const ATTACK_OPTIONS: [&str; 3] = ["BENIGN", "ATTACK", "UNKNOWN"];
+/// The lowest probability an allow may rest on: an allow needs both `P(ALLOW)` and `P(BENIGN)` to
+/// reach it, and a probability equal to it counts (docs/02 section 2.3). A constant of the code,
+/// not a setting.
+pub const ALLOW_CONFIDENCE_MIN: f64 = 0.60;
 
 const ACCESS_INSTRUCTIONS: &str = "You are a web application firewall. state.request is one HTTP request from a logged-in browser session. state.session and state.recent describe what the origin server already showed this session. For every value in state.request.values that selects or names an existing business object (record id, account, owner, file, order), check state.request.values[].seen_as: it lists where the origin showed that same value to this session, with the field name. Answer ALLOW only if every object-selecting value was shown earlier as that kind of object, or if state.entry.matched is true and the values are only the input that entry needs (login form, share code, search text). Each value has kind: reference when it looks like an object reference (an id in the path, or a field named like an id, owner or file), route for a plain word in the URL path, input otherwise. A route word that is a collection name (Addresss, Cards, Users) selects no object and never needs to have been shown; it selects one only when it is plainly a person or record name. A value of kind input (couponData, cardNum, expMonth, message) is form content and does not need to have been shown, unless it plainly names someone else's account or record. seen_as may list unrelated fields because small numbers repeat everywhere: a match only counts when the field or request in seen_as is the same kind of object as the one the request selects. A field may name the object by its role instead of by the endpoint that showed it (paymentId for an id shown by /api/Cards, deliveryMethodId for /api/Deliverys, owner for a user list); that still counts as the same kind of object. A value with verified true was already matched by the gateway with a response that showed this exact value as the same kind of object: treat it as shown and judge only the other values. A value may carry object: the kind of object the site's object map gives its position. A seen_as entry in brackets gives the kind of the position that showed it. A value shown only as a different kind of object was never shown as this kind, even when its field name looks similar. Free text that a user writes (note, title, comment, message, description, search words, names typed into a new record, dates, amounts, drug names) does not select any object and never needs to have been shown. A seen_as entry may end with the tier of the response that showed the value and how sure the map is of it. Tier public is a search or listing that any logged-in session receives, so a sighting there proves no right to the object it names. Tier self and tier org are the session's own records or its organisation's. Tier admin is a response that only administrator sessions receive. Reliability low is weak evidence. A value may carry public_access: accepts false marks a position that never takes a value from a public sighting, such as a write or a private read. A value with attempt over_privilege was shown to this session only by public responses, and its position takes none of them, so answer DENY for that value. state.request.function is present only on a site that keeps a table of its functions; a function is the method and the path with ids replaced. function.known false means the table does not list this method and path. Most such requests are ordinary: a new page, a new API, a static file. Answer DENY for function.known false only when the path or interface name itself shows a privileged or operational function that an application page for ordinary users would not call: administration (admin, manage, staff roles, audit), operations and monitoring (metrics, actuator, server-status, health internals), debugging and developer tooling (debug, swagger, console, phpinfo), internal or configuration endpoints, backups, directory or file listings (ftp), bulk export or bulk delete of a whole collection. Otherwise function.known false changes nothing: judge the values as above. function.attempt over_privilege means an administrator confirmed this function as administrators-only and this session is not an administrator session: answer DENY. Answer DENY if any object-selecting value was never shown to this session, or was shown only as an unrelated field (for example a number that appeared only as an age, now used as a patient id), or if an entry request tries to name someone else's object. Answer UNKNOWN only if the evidence is insufficient. A request may come as several documents: this one lists only some of its values, so judge only the values listed. A value with a part field (for example part 2/5) is one piece of a longer value: judge it like a short value at the same position and of the same kind. Long free text selects no object, but a long value in an object position (a number in a path, an identifier-like field) is a reference to an object this session was never shown.";
 const ATTACK_INSTRUCTIONS: &str = "You are a web application firewall. Inspect every value in state.request.values and the request path for attack content: SQL injection, NoSQL injection, command or code execution, path traversal, template injection, XSS, SSRF, header or log injection. Values marked <redacted> are secrets and are not attack content. A value with a part field (for example part 2/5) is one piece of a long value, and neighbouring pieces overlap a little: check each piece, and count a payload that starts or ends at the edge of a piece as present. Answer ATTACK if any value carries attack content, BENIGN if none does, UNKNOWN only if the evidence is insufficient.";
@@ -685,18 +689,41 @@ fn top(probabilities: &BTreeMap<String, f64>) -> Option<&str> {
     winners.next().is_none().then_some(first.0.as_str())
 }
 
-/// Takes the most probable option of each question; a tie counts as UNKNOWN.
+/// The weaker of the two probabilities an allow rests on: `min(P(ALLOW), P(BENIGN))`, the value the
+/// decision log keeps as `jev_confidence`. An option the answer does not carry counts as 0.
+#[must_use]
+pub fn assurance(access: &BTreeMap<String, f64>, attack: &BTreeMap<String, f64>) -> f64 {
+    let access = access.get("ALLOW").copied().unwrap_or(0.0);
+    let attack = attack.get("BENIGN").copied().unwrap_or(0.0);
+    access.min(attack)
+}
+
+/// Takes the most probable option of each question; a tie counts as UNKNOWN. An allow also needs
+/// its [`assurance`] to reach [`ALLOW_CONFIDENCE_MIN`]. A denial is never held to the floor.
 #[must_use]
 pub fn conclude(answers: &Answers) -> Conclusion {
     let access = top(&answers.access).unwrap_or("UNKNOWN");
     let attack = top(&answers.attack).unwrap_or("UNKNOWN");
     if access == "DENY" || attack == "ATTACK" {
         Conclusion::Deny
-    } else if access == "ALLOW" && attack == "BENIGN" {
+    } else if access == "ALLOW"
+        && attack == "BENIGN"
+        && assurance(&answers.access, &answers.attack) >= ALLOW_CONFIDENCE_MIN
+    {
         Conclusion::Allow
     } else {
         Conclusion::Unknown
     }
+}
+
+/// Whether the two most probable options are ALLOW and BENIGN while one of them is below
+/// [`ALLOW_CONFIDENCE_MIN`]. Such an answer is not decidable and fails as `JEV_LOW_CONFIDENCE`
+/// rather than `JEV_UNKNOWN`.
+#[must_use]
+pub fn low_confidence(answers: &Answers) -> bool {
+    top(&answers.access) == Some("ALLOW")
+        && top(&answers.attack) == Some("BENIGN")
+        && assurance(&answers.access, &answers.attack) < ALLOW_CONFIDENCE_MIN
 }
 
 #[cfg(test)]
@@ -1347,12 +1374,124 @@ mod tests {
                 ("BENIGN", [0.9, 0.05, 0.05]),
                 Conclusion::Unknown,
             ),
+            // An allow must reach the floor on both questions (docs/02 section 2.3).
+            (
+                ("ALLOW", [0.6, 0.4, 0.0]),
+                ("BENIGN", [0.6, 0.4, 0.0]),
+                Conclusion::Allow,
+            ),
+            (
+                ("ALLOW", [0.9, 0.05, 0.05]),
+                ("BENIGN", [0.55, 0.43, 0.02]),
+                Conclusion::Unknown,
+            ),
+            (
+                ("ALLOW", [0.55, 0.45, 0.0]),
+                ("BENIGN", [0.9, 0.05, 0.05]),
+                Conclusion::Unknown,
+            ),
+            // A denial is not held to the floor, however sure Jev is of it.
+            (
+                ("DENY", [0.3, 0.4, 0.3]),
+                ("BENIGN", [0.9, 0.05, 0.05]),
+                Conclusion::Deny,
+            ),
+            (
+                ("ALLOW", [0.9, 0.05, 0.05]),
+                ("ATTACK", [0.3, 0.4, 0.3]),
+                Conclusion::Deny,
+            ),
         ];
         for (access, attack, expected) in cases {
             let answers = parse_response(&response(access, attack));
             let answers = answers.unwrap_or_else(|_| panic!("{access:?}"));
             assert_eq!(conclude(&answers), expected, "{access:?} {attack:?}");
         }
+    }
+
+    #[test]
+    fn an_allow_needs_both_questions_at_the_floor_and_the_floor_counts() {
+        // Exactly at the floor is an allow.
+        let at = parse_response(&response(
+            ("ALLOW", [0.6, 0.4, 0.0]),
+            ("BENIGN", [0.6, 0.4, 0.0]),
+        ))
+        .unwrap();
+        assert_eq!(conclude(&at), Conclusion::Allow);
+        assert!(!low_confidence(&at));
+        // Just under it, on either question alone, is not decidable.
+        for (access, attack) in [
+            (("ALLOW", [0.59, 0.41, 0.0]), ("BENIGN", [0.9, 0.05, 0.05])),
+            (("ALLOW", [0.9, 0.05, 0.05]), ("BENIGN", [0.59, 0.41, 0.0])),
+        ] {
+            let answers = parse_response(&response(access, attack)).unwrap();
+            assert_eq!(
+                conclude(&answers),
+                Conclusion::Unknown,
+                "{access:?} {attack:?}"
+            );
+            assert!(low_confidence(&answers), "{access:?} {attack:?}");
+            assert!(assurance(&answers.access, &answers.attack) < ALLOW_CONFIDENCE_MIN);
+        }
+    }
+
+    #[test]
+    fn the_open_redirect_judged_benign_at_055_is_not_decidable() {
+        // The shop's open redirect (GET /redirect?to=https://example.org/x) came back from the real
+        // model three times as BENIGN 0.53 to 0.56 with ATTACK 0.41 to 0.45. It was allowed before
+        // the floor existed; now the answer is not decidable and the site's policy applies.
+        let answers = parse_response(&response(
+            ("ALLOW", [0.9, 0.05, 0.05]),
+            ("BENIGN", [0.55, 0.43, 0.02]),
+        ))
+        .unwrap();
+        assert_eq!(conclude(&answers), Conclusion::Unknown);
+        assert!(low_confidence(&answers));
+        assert!((assurance(&answers.access, &answers.attack) - 0.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_tie_or_an_unknown_top_is_not_a_low_confidence_allow() {
+        // Only a top ALLOW with a top BENIGN is held to the floor; anything else keeps JEV_UNKNOWN.
+        let tied = parse_response(&response(
+            ("ALLOW", [0.5, 0.5, 0.0]),
+            ("BENIGN", [0.55, 0.43, 0.02]),
+        ))
+        .unwrap();
+        assert_eq!(conclude(&tied), Conclusion::Unknown);
+        assert!(!low_confidence(&tied));
+        let unknown = parse_response(&response(
+            ("UNKNOWN", [0.2, 0.2, 0.6]),
+            ("BENIGN", [0.55, 0.43, 0.02]),
+        ))
+        .unwrap();
+        assert_eq!(conclude(&unknown), Conclusion::Unknown);
+        assert!(!low_confidence(&unknown));
+    }
+
+    #[test]
+    fn a_denial_below_the_floor_still_denies() {
+        // Access options are ALLOW, DENY, UNKNOWN in that order: DENY 0.4 is the top choice.
+        let denied = parse_response(&response(
+            ("DENY", [0.3, 0.4, 0.3]),
+            ("BENIGN", [0.55, 0.43, 0.02]),
+        ))
+        .unwrap();
+        assert_eq!(conclude(&denied), Conclusion::Deny);
+        assert!(!low_confidence(&denied));
+    }
+
+    #[test]
+    fn a_denial_beside_a_benign_at_058_stays_a_denial() {
+        // Path-only attack probes come back near BENIGN 0.58 on the current prompt. A DENY on access
+        // denies whatever the other question says: the low attack must not make it undecidable.
+        let answers = parse_response(&response(
+            ("DENY", [0.9, 0.05, 0.05]),
+            ("BENIGN", [0.58, 0.40, 0.02]),
+        ))
+        .unwrap();
+        assert_eq!(conclude(&answers), Conclusion::Deny);
+        assert!(!low_confidence(&answers));
     }
 
     #[test]

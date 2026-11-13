@@ -135,6 +135,10 @@ export const FAILURE_INFO: Record<JevFailure, { short: string; desc: string }> =
   JEV_RESPONSE_TOO_LARGE: { short: "响应过大", desc: "响应超过 64 KiB" },
   JEV_RESPONSE_INVALID: { short: "响应无效", desc: "响应结构不符合约定" },
   JEV_UNKNOWN: { short: "答不上来", desc: "最高项是 UNKNOWN 或两项并列" },
+  JEV_LOW_CONFIDENCE: {
+    short: "把握不足",
+    desc: "判为放行，但 ALLOW 或 BENIGN 低于 60%，不放行，按站点的 on_jev_unavailable 处理",
+  },
   JEV_STATE_TOO_LARGE: {
     short: "上下文过大",
     desc: "分批（最多 16 批）后仍装不下，没有调用，返回 403（正常不出现）",

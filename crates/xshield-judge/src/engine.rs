@@ -30,8 +30,8 @@ use crate::slots::{
     request_place, response_slot, route_template, tier_name,
 };
 use crate::state::{
-    Answers, Batched, JudgeError, Prompt, StateFunction, StateInput, StateValue, build_states,
-    conclude, parse_response, request_body,
+    Answers, Batched, JudgeError, Prompt, StateFunction, StateInput, StateValue, assurance,
+    build_states, conclude, low_confidence, parse_response, request_body,
 };
 use crate::tiers;
 use crate::trace::{
@@ -1009,6 +1009,9 @@ impl<J: JevPort> Judge<J> {
             }
         };
         let conclusion = conclude(&answers);
+        // An allow whose top options are ALLOW and BENIGN but fall short of the floor is not decidable
+        // (docs/02 section 2.3); it fails under its own code, and the batch merges like an UNKNOWN.
+        let low = low_confidence(&answers);
         let Answers {
             access,
             attack,
@@ -1022,7 +1025,12 @@ impl<J: JevPort> Judge<J> {
             Conclusion::Allow => Kind::Allow,
             Conclusion::Deny => Kind::Deny,
             Conclusion::Unknown => {
-                row.failure = Some("JEV_UNKNOWN".to_owned());
+                let code = if low {
+                    "JEV_LOW_CONFIDENCE"
+                } else {
+                    "JEV_UNKNOWN"
+                };
+                row.failure = Some(code.to_owned());
                 Kind::Unknown
             }
         };
@@ -1665,11 +1673,12 @@ fn unjudged(mut row: JevRecord, code: &str) -> (Verdict, JevRecord) {
 /// How one batch's call ended, for the merge in [`Judge::call_batches`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    /// Jev allowed the batch: `access` is ALLOW and `attack` is BENIGN.
+    /// Jev allowed the batch: `access` is ALLOW and `attack` is BENIGN, both at or above the floor.
     Allow,
     /// Jev denied the batch: `access` is DENY or `attack` is ATTACK.
     Deny,
-    /// The top option of a question is UNKNOWN, or two options tie.
+    /// The top option of a question is UNKNOWN, two options tie, or the allow falls short of the
+    /// confidence floor (`JEV_LOW_CONFIDENCE`).
     Unknown,
     /// No usable answer: a timeout, a transport or HTTP failure, or an invalid reply.
     Failed,
@@ -1686,9 +1695,7 @@ struct BatchAnswer {
 impl BatchAnswer {
     /// The weaker of the two probabilities an allow rests on: `min(P(ALLOW), P(BENIGN))`.
     fn assurance(&self) -> f64 {
-        let access = self.row.access.get("ALLOW").copied().unwrap_or(0.0);
-        let attack = self.row.attack.get("BENIGN").copied().unwrap_or(0.0);
-        access.min(attack)
+        assurance(&self.row.access, &self.row.attack)
     }
 }
 
@@ -1952,8 +1959,25 @@ mod tests {
     /// The gateway id of the origin responses the tests observe.
     const RID: &str = "req_00000000000000000000000000000001";
 
-    /// What a call to the fake answers: the two choices, or a failure.
-    type Reply = Result<(&'static str, &'static str), JevFailure>;
+    /// The two questions' answers the fake gives: each chosen option with the probability it gets.
+    #[derive(Clone, Copy)]
+    struct Given {
+        access: (&'static str, f64),
+        attack: (&'static str, f64),
+    }
+
+    impl Given {
+        /// Both choices with the probability the default answers use.
+        fn sure(access: &'static str, attack: &'static str) -> Self {
+            Self {
+                access: (access, 0.9),
+                attack: (attack, 0.9),
+            }
+        }
+    }
+
+    /// What a call to the fake answers: the two questions' choices, or a failure.
+    type Reply = Result<Given, JevFailure>;
 
     #[derive(Clone)]
     struct FakeJev {
@@ -1973,7 +1997,7 @@ mod tests {
                 calls: Arc::default(),
                 sent: Arc::default(),
                 timeouts: Arc::default(),
-                reply: Arc::new(Mutex::new(Ok(("ALLOW", "BENIGN")))),
+                reply: Arc::new(Mutex::new(Ok(Given::sure("ALLOW", "BENIGN")))),
                 marked: Arc::default(),
                 in_flight: Arc::default(),
                 peak: Arc::default(),
@@ -1983,7 +2007,12 @@ mod tests {
             self.timeouts.lock().unwrap().clone()
         }
         fn answer(&self, access: &'static str, attack: &'static str) {
-            *self.reply.lock().unwrap() = Ok((access, attack));
+            *self.reply.lock().unwrap() = Ok(Given::sure(access, attack));
+        }
+        /// The calls answer each question's choice with the probability given, the rest sharing
+        /// what is left (docs/02 section 2.3).
+        fn answer_with(&self, access: (&'static str, f64), attack: (&'static str, f64)) {
+            *self.reply.lock().unwrap() = Ok(Given { access, attack });
         }
         fn fail(&self, failure: JevFailure) {
             *self.reply.lock().unwrap() = Err(failure);
@@ -1993,7 +2022,19 @@ mod tests {
             self.marked
                 .lock()
                 .unwrap()
-                .push((marker, Ok((access, attack))));
+                .push((marker, Ok(Given::sure(access, attack))));
+        }
+        /// The calls whose body contains `marker` answer with the probabilities given.
+        fn answer_marked_with(
+            &self,
+            marker: &'static str,
+            access: (&'static str, f64),
+            attack: (&'static str, f64),
+        ) {
+            self.marked
+                .lock()
+                .unwrap()
+                .push((marker, Ok(Given { access, attack })));
         }
         /// The calls whose body contains `marker` fail with `failure`.
         fn fail_marked(&self, marker: &'static str, failure: JevFailure) {
@@ -2012,13 +2053,17 @@ mod tests {
         }
     }
 
-    fn probabilities(options: [&str; 3], winner: &str) -> serde_json::Value {
+    /// The probabilities of one question: the chosen option gets its probability, and the other
+    /// options share the rest equally.
+    fn probabilities(options: [&str; 3], (winner, sure): (&str, f64)) -> serde_json::Value {
         let mut map = serde_json::Map::new();
         for option in options {
-            map.insert(
-                option.to_owned(),
-                json!(if option == winner { 0.9 } else { 0.05 }),
-            );
+            let probability = if option == winner {
+                sure
+            } else {
+                (1.0 - sure) / 2.0
+            };
+            map.insert(option.to_owned(), json!(probability));
         }
         serde_json::Value::Object(map)
     }
@@ -2061,10 +2106,10 @@ mod tests {
                 Some(reply) => reply,
                 None => self.reply.lock().unwrap().clone(),
             };
-            let (access, attack) = reply?;
+            let Given { access, attack } = reply?;
             Ok(json!({"model":"fake","answers":{
-                "access":{"type":"choice","choice":access,"probabilities":probabilities(crate::state::ACCESS_OPTIONS, access)},
-                "attack":{"type":"choice","choice":attack,"probabilities":probabilities(crate::state::ATTACK_OPTIONS, attack)},
+                "access":{"type":"choice","choice":access.0,"probabilities":probabilities(crate::state::ACCESS_OPTIONS, access)},
+                "attack":{"type":"choice","choice":attack.0,"probabilities":probabilities(crate::state::ATTACK_OPTIONS, attack)},
             }})
             .to_string()
             .into_bytes())
@@ -3360,6 +3405,170 @@ mod tests {
             verdict.record.jev.unwrap().failure.as_deref(),
             Some("JEV_UNKNOWN")
         );
+    }
+
+    #[tokio::test]
+    async fn an_allow_below_the_confidence_floor_is_not_decidable_and_is_not_kept() {
+        let fake = FakeJev::new();
+        // The shop's open redirect as the real model judged it: BENIGN 0.55 beside an ALLOW of 0.9.
+        fake.answer_with(("ALLOW", 0.9), ("BENIGN", 0.55));
+        let judge = judge(&fake);
+        let strict = site(r#","mode":"enforce""#);
+        let refused = judge
+            .judge(&strict, &get("/api/patients/D4411", None, Some("alice"), 0))
+            .await;
+        assert!(!refused.forward);
+        assert_eq!(refused.refuse_status, 403);
+        assert_eq!(refused.record.decision_path, DecisionPath::JevUnavailable);
+        let jev = refused.record.jev.as_ref().unwrap();
+        assert_eq!(jev.failure.as_deref(), Some("JEV_LOW_CONFIDENCE"));
+        assert_eq!(jev.conclusion, Some(Conclusion::Unknown));
+        // The probabilities are kept in the record, so the console can show why.
+        assert!(
+            jev.access
+                .get("ALLOW")
+                .is_some_and(|p| (p - 0.9).abs() < 1e-9)
+        );
+        assert!(
+            jev.attack
+                .get("BENIGN")
+                .is_some_and(|p| (p - 0.55).abs() < 1e-9)
+        );
+        // A site that allows on a failed call lets it through unjudged, under the same code.
+        let lenient = site(r#","mode":"enforce","on_jev_unavailable":"allow""#);
+        let forwarded = judge
+            .judge(
+                &lenient,
+                &get("/api/patients/D4411", None, Some("alice"), 1_000),
+            )
+            .await;
+        assert!(forwarded.forward);
+        assert_eq!(forwarded.record.outcome, Outcome::Unjudged);
+        assert_eq!(forwarded.record.decision_path, DecisionPath::JevUnavailable);
+        assert_eq!(
+            forwarded.record.jev.as_ref().unwrap().failure.as_deref(),
+            Some("JEV_LOW_CONFIDENCE")
+        );
+        // Nothing judged this way is kept for the cache window: the second request asked Jev again.
+        assert_eq!(fake.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_confidence_floor_counts_and_a_question_just_under_it_is_not_decidable() {
+        let fake = FakeJev::new();
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        // Each case has its own path, so no earlier allow is served from the cache.
+        let cases = [
+            (
+                ("ALLOW", crate::state::ALLOW_CONFIDENCE_MIN),
+                ("BENIGN", crate::state::ALLOW_CONFIDENCE_MIN),
+                true,
+            ),
+            (("ALLOW", 0.59), ("BENIGN", 0.9), false),
+            (("ALLOW", 0.9), ("BENIGN", 0.59), false),
+        ];
+        for (index, (access, attack, allowed)) in cases.into_iter().enumerate() {
+            fake.answer_with(access, attack);
+            let path = format!("/api/patients/D441{index}");
+            let verdict = judge
+                .judge(&enforced, &get(&path, None, Some("alice"), 0))
+                .await;
+            assert_eq!(verdict.forward, allowed, "{access:?} {attack:?}");
+            let expected = if allowed {
+                DecisionPath::JevAllow
+            } else {
+                DecisionPath::JevUnavailable
+            };
+            assert_eq!(
+                verdict.record.decision_path, expected,
+                "{access:?} {attack:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_denial_below_the_floor_still_refuses_on_either_policy() {
+        let fake = FakeJev::new();
+        // DENY is the top choice at 0.4: a denial is not held to the floor.
+        fake.answer_with(("DENY", 0.4), ("BENIGN", 0.9));
+        let judge = judge(&fake);
+        for policy in [
+            r#","mode":"enforce""#,
+            r#","mode":"enforce","on_jev_unavailable":"allow""#,
+        ] {
+            let verdict = judge
+                .judge(
+                    &site(policy),
+                    &get("/api/patients/D4411", None, Some("alice"), 0),
+                )
+                .await;
+            assert!(!verdict.forward, "{policy}");
+            assert_eq!(
+                verdict.record.decision_path,
+                DecisionPath::JevDeny,
+                "{policy}"
+            );
+            assert_eq!(
+                verdict.record.jev.as_ref().unwrap().conclusion,
+                Some(Conclusion::Deny)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_denial_beside_a_benign_at_058_is_still_a_denial() {
+        let fake = FakeJev::new();
+        // Path-only attack probes come back this way on the current prompt: DENY on access and
+        // BENIGN 0.58 on attack. The denial stands on either policy; the floor is for allows only.
+        fake.answer_with(("DENY", 0.9), ("BENIGN", 0.58));
+        let judge = judge(&fake);
+        for policy in [
+            r#","mode":"enforce""#,
+            r#","mode":"enforce","on_jev_unavailable":"allow""#,
+        ] {
+            let verdict = judge
+                .judge(
+                    &site(policy),
+                    &get("/api/patients/D4411", None, Some("alice"), 0),
+                )
+                .await;
+            assert!(!verdict.forward, "{policy}");
+            assert_eq!(
+                verdict.record.decision_path,
+                DecisionPath::JevDeny,
+                "{policy}"
+            );
+            let jev = verdict.record.jev.as_ref().unwrap();
+            assert_eq!(jev.conclusion, Some(Conclusion::Deny), "{policy}");
+            assert!(jev.failure.is_none(), "{policy}");
+        }
+    }
+
+    #[tokio::test]
+    async fn one_batch_below_the_floor_makes_the_whole_request_undecidable() {
+        let fake = FakeJev::new();
+        // Every batch is sure of its answer except the one holding the marker, which is the
+        // open redirect's shape: BENIGN 0.55 beside an ALLOW of 0.9.
+        fake.answer_marked_with("LOW_HERE", ("ALLOW", 0.9), ("BENIGN", 0.55));
+        let judge = judge(&fake);
+        let enforced = site(r#","mode":"enforce""#);
+        let body = survey_ending_with("LOW_HERE");
+        let verdict = judge
+            .judge(&enforced, &survey_request(body.as_bytes(), 1_000))
+            .await;
+        assert!(!verdict.forward);
+        assert_eq!(verdict.refuse_status, 403);
+        assert_eq!(verdict.record.decision_path, DecisionPath::JevUnavailable);
+        let jev = verdict.record.jev.as_ref().unwrap();
+        let batches = jev.batches.unwrap();
+        assert!(batches >= 2, "{batches} batches");
+        assert_eq!(
+            jev.batch,
+            Some(batches),
+            "the last batch holds the low answer"
+        );
+        assert_eq!(jev.failure.as_deref(), Some("JEV_LOW_CONFIDENCE"));
     }
 
     #[tokio::test]

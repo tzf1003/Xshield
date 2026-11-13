@@ -41,6 +41,7 @@ const FAILURE_REASON: Record<string, string> = {
   JEV_RESPONSE_TOO_LARGE: "Jev 响应超过 64 KiB",
   JEV_RESPONSE_INVALID: "Jev 响应格式不符合约定",
   JEV_UNKNOWN: "Jev 答不上来",
+  JEV_LOW_CONFIDENCE: "Jev 判为放行，但把握不足（ALLOW 或 BENIGN 低于 60%）",
   JEV_STATE_TOO_LARGE: "分批（最多 16 批）后仍装不下，没有调用 Jev（正常不出现）",
   JEV_CALL_LIMIT: "调用次数已达上限，没有调用 Jev",
 };
@@ -147,6 +148,9 @@ function reasonOf(input: ExplainInput): string {
       }
       if (jev.failure === "JEV_UNKNOWN") {
         return `Jev 答不上来（UNKNOWN ${percentOf(jev.access, "UNKNOWN")}）。`;
+      }
+      if (jev.failure === "JEV_LOW_CONFIDENCE") {
+        return `Jev 判为放行，但把握不足：ALLOW ${percentOf(jev.access, "ALLOW")}，BENIGN ${percentOf(jev.attack, "BENIGN")}，有一项低于 60%。`;
       }
       if (jev.failure === "JEV_HTTP_ERROR" && jev.http_status !== null) {
         return `模型服务返回 ${jev.http_status}。`;

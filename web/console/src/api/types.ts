@@ -42,6 +42,7 @@ export type JevFailure =
   | "JEV_RESPONSE_TOO_LARGE"
   | "JEV_RESPONSE_INVALID"
   | "JEV_UNKNOWN"
+  | "JEV_LOW_CONFIDENCE"
   | "JEV_STATE_TOO_LARGE"
   | "JEV_CALL_LIMIT";
 

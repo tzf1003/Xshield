@@ -215,7 +215,7 @@
         "attack": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}, "description": "attack 问题各选项的概率。"},
         "conclusion": {"type": ["string", "null"], "enum": ["allow", "deny", "unknown", null]},
         "millis": {"type": "integer", "minimum": 0, "description": "往返耗时，毫秒。"},
-        "failure": {"type": ["string", "null"], "description": "没有可用回答时的稳定失败码，例如 JEV_TIMEOUT、JEV_UNKNOWN、JEV_CALL_LIMIT。"}
+        "failure": {"type": ["string", "null"], "description": "没有可用回答时的稳定失败码，例如 JEV_TIMEOUT、JEV_UNKNOWN、JEV_LOW_CONFIDENCE（放行但把握不足）、JEV_CALL_LIMIT。"}
       }
     }
   }

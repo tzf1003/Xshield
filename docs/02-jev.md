@@ -73,11 +73,14 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 
 每个问题取概率最高的选项：
 
-- `access=DENY` 或 `attack=ATTACK`：拦截。
-- 任一问题最高项是 `UNKNOWN`：按 `on_jev_unavailable` 处理。
-- 其余：放行。
+- `access=DENY` 或 `attack=ATTACK`：拦截，不论概率多少。
+- 任一问题最高项是 `UNKNOWN`，或两个选项并列：按 `on_jev_unavailable` 处理。
+- `access=ALLOW` 且 `attack=BENIGN`，但 `min(P(ALLOW), P(BENIGN))` 低于 0.60：不可判定，失败码 `JEV_LOW_CONFIDENCE`，按 `on_jev_unavailable` 处理。
+- 其余（`access=ALLOW` 且 `attack=BENIGN`，两个概率都不低于 0.60）：放行。
 
-完整概率写入判定日志。首版不设单独阈值；积累观察模式数据之后，如果需要再加一个全局阈值。
+门槛 0.60 是代码常量 `ALLOW_CONFIDENCE_MIN`，不做成配置；恰好等于 0.60 算放行。依据是 home-windows 测试环境的判定日志：357 条放行里有 19 条的较小概率低于 0.60，分布没有明显断点，样本也不代表生产流量。有标注的有效性结果出来后再按误拦和漏拦调整。真实模型对商店开放重定向（`GET /redirect?to=…`）的判定是 BENIGN 0.53 到 0.56，按这条规则不放行。
+
+完整概率写入判定日志。判定记录的 `jev_confidence` 列是两个问题最高概率中较小的一个；放行时它就是 `min(P(ALLOW), P(BENIGN))`，也就是与门槛比较的值。
 
 ## 2.4 输入上限与脱敏
 
@@ -91,7 +94,7 @@ v4 把 Jev 放进请求路径：网关在 [01.4](01-request-flow.md#14-判定步
 - 单次调用超时默认 2 秒，部署时可用 `XSHIELD_JEV_TIMEOUT_MS` 改默认值，站点可用 `advanced.jev_timeout_ms` 覆盖（[07.6](07-console-architecture.md#76-站点级判定参数advanced)）；超时按 `on_jev_unavailable` 处理。
 - 配置来源：控制台保存的 Jev 配置（[03.3.1](03-admin-config-audit.md#331-模型配置在控制台保存)）优先，没有时读环境变量。两者都没有时网关照常启动，判定记为 `JEV_NOT_CONFIGURED`，不发出调用。
 - 快速放行和放行缓存（[01.4](01-request-flow.md#14-判定步骤) 第 4、5 步）用来减少调用次数。
-- 一个请求的 `state` 分成几批时，各批并行调用，同时在途最多 8 个（`JEV_PARALLEL_MAX`）。调用限额按请求计一次，不按批计：一个请求的几批调用只用一次额度。合并规则与各批完成的先后无关：任一批判拒，请求即拒绝，出现拒绝后不再等其余调用；否则任一批调用失败或答案无效，按 `on_jev_unavailable` 处理，失败码取批次序号最小的那一批；否则任一批结论是 UNKNOWN，按 UNKNOWN 处理；全部放行才放行，放行结论写进缓存的条件与一批时相同。判定记录展示定结论的那一批（[07.5.1](07-console-architecture.md#751-jevrecord-v2)）。出现拒绝后，还没开始的调用也不再发出。
+- 一个请求的 `state` 分成几批时，各批并行调用，同时在途最多 8 个（`JEV_PARALLEL_MAX`）。调用限额按请求计一次，不按批计：一个请求的几批调用只用一次额度。合并规则与各批完成的先后无关：任一批判拒，请求即拒绝，出现拒绝后不再等其余调用；否则任一批调用失败或答案无效，按 `on_jev_unavailable` 处理，失败码取批次序号最小的那一批；否则任一批结论是 UNKNOWN，或放行但低于门槛（逐批按 2.3 判定），按不可判定处理；全部放行才放行，放行结论写进缓存的条件与一批时相同。判定记录展示定结论的那一批（[07.5.1](07-console-architecture.md#751-jevrecord-v2)）。出现拒绝后，还没开始的调用也不再发出。
 
 批数最多 16（`JEV_BATCHES_MAX`）。超过 16 批时只发前 16 批，没送出的值和片段数记在 `left_out`。这时结论照常按上面的合并规则定：全部放行则放行，但这样的放行不写进放行缓存，同样的请求下次会再判一次。控制台的 Jev 面板显示“攻击判定不完整：有 N 个值或片段没有送判”。
 

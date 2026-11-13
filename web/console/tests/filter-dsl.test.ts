@@ -57,6 +57,7 @@ test("serialising and parsing again gives the same parameters", () => {
     { outcome: "blocked,would_block", path: "/rest/*", status: "4xx" },
     { decision_path: "jev_deny,no_session", method: "POST", entry: "false" },
     { jev_access: "DENY", jev_attack: "ATTACK", jev_failure: "JEV_TIMEOUT" },
+    { jev_failure: "JEV_LOW_CONFIDENCE" },
     { max_confidence: "0.85", min_ms: "1500", site_version: "12", site: "emr" },
     { request_id: "req_01a19741107477ff9224781077354552", session: "7c1e9a40d2b35f61" },
     { client: "192.168.1.20" },

@@ -483,16 +483,19 @@ fn failure_counts(failures: &[(String, i64)]) -> BTreeMap<String, i64> {
 }
 
 /// The conclusion of one Jev call from its stored answers (docs/02-jev.md section
-/// 2.3): `UNKNOWN` or the `JEV_UNKNOWN` failure is `unknown`, `DENY` access or
-/// `ATTACK` attack is `deny`, any other answer is `allow`. A failed call without an
-/// answer has no conclusion.
+/// 2.3): `UNKNOWN`, the `JEV_UNKNOWN` failure or the `JEV_LOW_CONFIDENCE` failure is
+/// `unknown`, `DENY` access or `ATTACK` attack is `deny`, any other answer is `allow`.
+/// A failed call without an answer has no conclusion.
 #[must_use]
 fn conclusion_of(
     failure: Option<&str>,
     access: Option<&str>,
     attack: Option<&str>,
 ) -> Option<&'static str> {
-    if failure == Some("JEV_UNKNOWN") || access == Some("UNKNOWN") || attack == Some("UNKNOWN") {
+    if matches!(failure, Some("JEV_UNKNOWN" | "JEV_LOW_CONFIDENCE"))
+        || access == Some("UNKNOWN")
+        || attack == Some("UNKNOWN")
+    {
         return Some("unknown");
     }
     let (Some(access), Some(attack), None) = (access, attack, failure) else {
@@ -635,6 +638,11 @@ mod tests {
             Some("unknown")
         );
         assert_eq!(conclusion_of(Some("JEV_TIMEOUT"), None, None), None);
+        // An allow below the confidence floor is not decidable: it counts as unknown, not as an allow.
+        assert_eq!(
+            conclusion_of(Some("JEV_LOW_CONFIDENCE"), Some("ALLOW"), Some("BENIGN")),
+            Some("unknown")
+        );
         let rows: Vec<OutcomeRow> = vec![
             (
                 0,
@@ -644,10 +652,17 @@ mod tests {
                 3,
             ),
             (0, Some("JEV_TIMEOUT".to_owned()), None, None, 9),
+            (
+                0,
+                Some("JEV_LOW_CONFIDENCE".to_owned()),
+                Some("ALLOW".to_owned()),
+                Some("BENIGN".to_owned()),
+                4,
+            ),
         ];
         assert_eq!(
             json!(by_conclusion(&rows)),
-            json!({ "allow": 0, "deny": 3, "unknown": 0 })
+            json!({ "allow": 0, "deny": 3, "unknown": 4 })
         );
     }
 

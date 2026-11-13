@@ -132,7 +132,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `cached_allow` | 缓存时长内同一请求已由 Jev 放行 | `allowed` | 判定记录 |
 | `jev_allow` | Jev 通过 | `allowed` | Jev 记录 |
 | `jev_deny` | Jev 判越权或攻击 | `blocked` / `would_block` | Jev 记录 |
-| `jev_unavailable` | Jev 超时、出错、限额用尽、state 过大或答 UNKNOWN | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽和 state 过大时没有 `state`，也没有调用） |
+| `jev_unavailable` | Jev 超时、出错、限额用尽、state 过大、答 UNKNOWN，或判为放行但把握不足（`JEV_LOW_CONFIDENCE`） | `blocked` / `would_block` / `unjudged` | Jev 记录（限额用尽和 state 过大时没有 `state`，也没有调用） |
 
 `jev_unavailable` 的拒绝不全由 `on_jev_unavailable` 决定：调用限额用完时回 429，`refused` 为 `rate_limited`；state 裁剪后仍超过 8 KiB 时回 403。两者都不论 `on_jev_unavailable`，观察模式下只记“本应拦截”并照常转发。其余失败按 `on_jev_unavailable`：`deny` 回 403，`allow` 记为 `unjudged` 并转发（7.5.4 列出每个失败码的处理）。
 
@@ -316,7 +316,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `model` / `route` | 线上模型名（`typesafe-ai/jev`、`jev-1.13.0` 或 `XSHIELD_JEV_MODEL`）；线路 `gateway` / `direct` / `custom`（新增），没有加载配置时为 `none` |
 | `timeout_ms` | 这次调用实际使用的超时：站点 `advanced.jev_timeout_ms`，没写时取 `XSHIELD_JEV_TIMEOUT_MS`（新增） |
 | `trim` | `state` 裁剪级别 0–4（新增，见 7.5.3）。分批时是展示那一批的级别 |
-| `batches` / `batch` | 分批时才有（新增，单批记录不带这两个字段）：`batches` 是 `state` 分成的批数，`batch` 是本记录展示的第几批，从 1 起。其余字段描述 `batch` 那一批：判拒的、失败的或 UNKNOWN 的，取序号最小的一批；全部放行时取把握最小的一批（`min(P(ALLOW), P(BENIGN))` 最小，相同取序号最小）。`millis` 是全部调用的墙上时间，`request_bytes` 是已发出各批之和，`usage` 把各批的数值字段相加、其他字段取展示的那一批 |
+| `batches` / `batch` | 分批时才有（新增，单批记录不带这两个字段）：`batches` 是 `state` 分成的批数，`batch` 是本记录展示的第几批，从 1 起。其余字段描述 `batch` 那一批：判拒的、失败的、UNKNOWN 或把握不足的，取序号最小的一批；全部放行时取把握最小的一批（`min(P(ALLOW), P(BENIGN))` 最小，相同取序号最小）。`millis` 是全部调用的墙上时间，`request_bytes` 是已发出各批之和，`usage` 把各批的数值字段相加、其他字段取展示的那一批 |
 | `left_out` | 分批超过 16 批时才有（新增，`None` 时不写出）：没有送出的值和片段数（[02.4](02-jev.md#24-输入上限与脱敏)）。有值时，结论只依据送出的部分，放行也不写放行缓存 |
 | `request_bytes` | 完整请求体字节数（新增） |
 | `http_status` | 模型服务的 HTTP 状态；超时和连接失败为 null（新增） |
@@ -372,6 +372,7 @@ GET /api/patients ──响应里出现 id=7──┐
 | `JEV_RESPONSE_TOO_LARGE` | 响应超过 64 KiB | 有 | 按 `on_jev_unavailable` |
 | `JEV_RESPONSE_INVALID` | 响应结构不符合约定，原文在 `response` | 有 | 按 `on_jev_unavailable` |
 | `JEV_UNKNOWN` | 最高项是 UNKNOWN 或两项并列 | 有 | 按 `on_jev_unavailable` |
+| `JEV_LOW_CONFIDENCE` | 最高项是 ALLOW 和 BENIGN，但两者的较小值低于 0.60（`ALLOW_CONFIDENCE_MIN`，[02.3](02-jev.md#23-结论规则)）。`access` 和 `attack` 照实记录 | 有 | 按 `on_jev_unavailable` |
 | `JEV_NOT_CONFIGURED` | 没有加载任何 Jev 配置：控制台没有保存密钥，环境变量也没有可用的配置。没有发出调用 | 无 | 按 `on_jev_unavailable` |
 | `JEV_STATE_TOO_LARGE` | 分批后仍有单个值放不进 8 KiB（级别 4 也放不下），或没核验的非输入值（含片段）在 16 批内装不完。正常不出现。没有发出调用 | 无 | 403（`forbidden`），不论 `on_jev_unavailable` |
 | `JEV_CALL_LIMIT` | 会话或地址每分钟调用次数用完（默认 60 / 30，站点可调）。没有发出调用 | 无 | 429（`rate_limited`），不论 `on_jev_unavailable` |

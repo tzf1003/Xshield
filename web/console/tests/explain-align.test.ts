@@ -153,6 +153,23 @@ test("the other decision paths give their documented reason", () => {
   );
 });
 
+test("an allow below the confidence floor says which probability fell short", () => {
+  const text = explainRecord({
+    status: 403,
+    host: "juice.example.com",
+    decision_path: "jev_unavailable",
+    outcome: "blocked",
+    trace: trace([]),
+    jev: jev({
+      failure: "JEV_LOW_CONFIDENCE",
+      access: { ALLOW: 0.9, DENY: 0.05, UNKNOWN: 0.05 },
+      attack: { BENIGN: 0.55, ATTACK: 0.43, UNKNOWN: 0.02 },
+      conclusion: "unknown",
+    }),
+  });
+  assert.equal(text, "Jev 判为放行，但把握不足：ALLOW 90%，BENIGN 55%，有一项低于 60%。返回 403。");
+});
+
 test("an upstream failure is appended and an old record says so", () => {
   const text = explainRecord({
     decision_path: "fast_allow",

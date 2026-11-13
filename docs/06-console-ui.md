@@ -339,7 +339,7 @@
 | `jev_deny`，access 为 DENY | Jev 判定越权（DENY {p}%）：{位置}里的 {值} 在这个会话里{从未出现过 / 没有以同类对象出现过，只以 {字段} 出现在 {请求} 的响应里}。 |
 | `jev_deny`，access 为 DENY，两边类别不同 | Jev 判定越权（DENY {p}%）：{位置}里的 {值} 在这个会话里只以{文档}出现过，现在用作{医生}。 |
 | `jev_deny`，attack 为 ATTACK | Jev 判定为攻击（ATTACK {p}%）：{位置} 的值含 `{值}`。 |
-| `jev_unavailable` | 按失败码：Jev 调用超时（{timeout_ms} ms，{站点设置 / 默认值}）；本{会话 / 地址}每分钟 Jev 调用已达上限 {n} 次，没有调用 Jev；Jev 答不上来（UNKNOWN {p}%）；模型服务返回 {http_status}；Jev 响应格式不符合约定；上下文裁剪后仍超过 8 KiB，没有调用 Jev。 |
+| `jev_unavailable` | 按失败码：Jev 调用超时（{timeout_ms} ms，{站点设置 / 默认值}）；本{会话 / 地址}每分钟 Jev 调用已达上限 {n} 次，没有调用 Jev；Jev 答不上来（UNKNOWN {p}%）；Jev 判为放行但把握不足（ALLOW {p}%、BENIGN {p}%，有一项低于 60%）；模型服务返回 {http_status}；Jev 响应格式不符合约定；上下文裁剪后仍超过 8 KiB，没有调用 Jev。 |
 
 处理部分按结论和模式追加：拦截“返回 {status}。”；本应拦截“站点处于观察模式，请求照常转发。”；未经判定“站点设置为 Jev 不可用时放行，这个请求没有经过判定。”；放行不追加。源站出错时再加“源站{连接被拒绝 / 连接超时 / 读取超时 / TLS 握手失败}，网关返回 {status}。”。旧格式记录（`trace.v == 0`）只说结论，并在头部显示“旧格式记录：没有判定依据”。
 
@@ -989,6 +989,7 @@
 | `JEV_RESPONSE_TOO_LARGE` | 响应过大 | 响应超过 64 KiB |
 | `JEV_RESPONSE_INVALID` | 响应无效 | 响应结构不符合约定 |
 | `JEV_UNKNOWN` | 答不上来 | 最高项是 UNKNOWN 或两项并列 |
+| `JEV_LOW_CONFIDENCE` | 把握不足 | 判为放行，但 ALLOW 或 BENIGN 低于 60%，按 `on_jev_unavailable` 处理 |
 | `JEV_STATE_TOO_LARGE` | 上下文过大 | 分批后仍装不下，没有调用，返回 403（正常不出现） |
 | `JEV_CALL_LIMIT` | 达到上限 | 会话或地址每分钟调用次数用完，没有调用，返回 429 |
 | 响应未观察：`status` / `content_type` / `compressed` / `too_large` / `head` / `not_forwarded` | — | 非 2xx / 类型不是 JSON 或 HTML / 响应被压缩 / 超过 1 MiB / HEAD 请求 / 请求没有转发 |
