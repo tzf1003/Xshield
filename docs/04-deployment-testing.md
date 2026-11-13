@@ -143,6 +143,9 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
 | F17 | 医生 `POST` 自己新建的患者，`multipart/form-data` 的文本字段 `_method` 为 `DELETE` | 同 F16 |
 | F18 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，不像表单，网关按文字读） | 同 F16 |
 | F19 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x&_method=DELETE`（像表单，网关按字段读） | 同 F16 |
+| F20 | 医生 `POST` 自己新建的患者，表单类型，请求体 `{"a":"&_method=DELETE&b="}`（能解析成 JSON，网关按 JSON 读，源站可能按表单读到 `_method`） | 同 F16 |
+| F21 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=hello world&%5Fm%65thod=DELETE`（带空格按文字读，`_method` 的一个字母做了百分号编码，解码后是 `_method`） | 同 F16 |
+| F22 | 医生 `POST` 自己新建的患者，不带 `Content-Type`，请求体 `note=x;_method=DELETE`（带分号，不像表单，网关按文字读） | 同 F16 |
 
 靶场的站点把地址限额设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。会话合计的总额度按来源地址算（[02](02-jev.md) 2.5），所以 `limit.lab` 上的 C5、C9 各自从回环的另一个地址（127.0.0.2、127.0.0.3、127.0.0.4）发请求，其他场景的会话不占它们的总额度。
 

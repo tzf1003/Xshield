@@ -70,6 +70,9 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | F17 | 医生 A 对自己新建的患者 `POST`，`multipart/form-data` 的文本字段 `_method` 为 `DELETE` | 同 F16 | `jev_deny` |
 | F18 | 医生 A 对自己新建的患者 `POST`，不带 `Content-Type`，请求体 `note=hello world&_method=DELETE`（带空格，不像表单） | 同 F16；网关按文字读这个请求体 | `jev_deny` |
 | F19 | 医生 A 对自己新建的患者 `POST`，不带 `Content-Type`，请求体 `note=x&_method=DELETE`（像表单） | 同 F16；网关按字段读这个请求体 | `jev_deny` |
+| F20 | 医生 A 对自己新建的患者 `POST`，表单类型，请求体 `{"a":"&_method=DELETE&b="}`（能解析成 JSON） | 同 F16；网关按 JSON 读，源站可能按表单读到 `_method` | `jev_deny` |
+| F21 | 医生 A 对自己新建的患者 `POST`，不带 `Content-Type`，请求体 `note=hello world&%5Fm%65thod=DELETE` | 同 F16；按文字读，解码后含 `_method` | `jev_deny` |
+| F22 | 医生 A 对自己新建的患者 `POST`，不带 `Content-Type`，请求体 `note=x;_method=DELETE` | 同 F16；带分号不像表单，按文字读，含 `_method` | `jev_deny` |
 
 C5、C9 从回环的 127.0.0.2 至 127.0.0.4 发请求，使它们各有自己的来源地址（会话合计的 Jev 额度按来源地址算，见 [docs/02 §2.5](../../docs/02-jev.md)）。Linux 的回环整段 127.0.0.0/8 都可用；macOS 需要先给 `lo0` 加别名（`sudo ifconfig lo0 alias 127.0.0.2` 等），否则这两个场景连不上。
 
@@ -101,9 +104,11 @@ F5b 用请求头 `X-HTTP-Method-Override` 把 `POST` 覆盖为 `DELETE`。网关
 
 `fobserve` 站点两张表都有，开关打开，是观察模式（F13）。`admin` 站点没有功能表，用来对照 F12。
 
-### F16 至 F19 说明：方法覆盖
+### F16 至 F22 说明：方法覆盖
 
 四条都用 `functions` 站点，医生 A 对自己新建的患者发 `POST`，`_method=DELETE` 放在网关读取方式不同的位置：查询串的第 231 个值（F16，请求值不设上限，网关读到它）、multipart 的文本字段（F17，读成带字段名的值）、没有类型且带空格的请求体（F18，不像表单，网关按文字读，字节里含 `_method`，于是按功能表里出现过的每个方法判定）、没有类型、形状像表单的请求体（F19，网关按字段读到 `_method`，与 F16 和 F17 一样按读到的方法判定）。四条都要求判定记录的 `trace.function.attempt` 为 `over_privilege`，只看 403 不够（[docs/07](../../docs/07-console-architecture.md) 7.9.18）。
+
+F20 与 F21 补的是两种解析差异：F20 的请求体是表单类型但能解析成 JSON（网关按 JSON 读，源站按表单可能读到 `_method`），F21 的 `_method` 有一个字母做了百分号编码（网关解码后才找得到它）。F22 的分号让请求体不像表单，网关按文字读（`;` 在源站也可能分隔字段），这一条不依赖空格，只靠兜底判定拦下。
 
 靶场的站点地址限额都设为最大值 600：每次登录都从同一地址来，同一地址的调用共用一个限额，靶场只测会话限额（`limit.lab`）。
 

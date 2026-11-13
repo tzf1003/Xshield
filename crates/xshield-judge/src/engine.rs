@@ -8626,6 +8626,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_method_field_in_a_json_looking_body_of_another_type_is_judged_by_the_table() {
+        let fake = FakeJev::new();
+        fake.answer("DENY", "BENIGN");
+        let judge = judge(&fake);
+        let site = users_site();
+        judge.observe(
+            &site,
+            &shown("/api/home", br#"{"doctor":{"id":"DR-A"}}"#, "doctor-a"),
+        );
+        // The body parses as JSON, so it is read as JSON whatever its type. Read as a form, its `_method` would
+        // be a field: the request is judged by the method it may name (docs/07 section 7.9.18).
+        let form: &[u8] = br#"{"a":"&_method=DELETE&b="}"#;
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some("application/x-www-form-urlencoded"),
+                    body: form,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_000)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&attempt);
+        let untyped: &[u8] = br#"{"a=":"&_method=DELETE&b="}"#;
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    body: untyped,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_100)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&attempt);
+        let spaced: &[u8] = br#"{"a": "x y&_method=DELETE&b="}"#;
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    body: spaced,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_200)
+                },
+            )
+            .await;
+        assert_users_delete_attempt(&attempt);
+        // Under a JSON type the same JSON is what the origin reads: no method is named.
+        let json: &[u8] = br#"{"note":"about _method"}"#;
+        let attempt = judge
+            .judge(
+                &site,
+                &RequestFacts {
+                    content_type: Some("application/json"),
+                    body: json,
+                    ..call_as("POST", "/api/users/5", "doctor-a", 1_300)
+                },
+            )
+            .await;
+        assert_eq!(attempt_of(&attempt), None);
+    }
+
+    #[tokio::test]
     async fn an_unread_method_field_is_judged_by_any_method_of_the_table() {
         let fake = FakeJev::new();
         fake.answer("DENY", "BENIGN");

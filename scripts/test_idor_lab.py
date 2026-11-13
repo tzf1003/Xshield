@@ -1141,6 +1141,55 @@ def f19(lab: Lab) -> None:
               f"trace function {traced}")
 
 
+@scenario("F20", "医生 POST 表单类型，请求体能解析成 JSON（含 &_method=DELETE&）：源站可能按表单读到 _method，按更严的 DELETE 判为越权尝试，拦截")
+def f20(lab: Lab) -> None:
+    cookie = lab.login("functions.lab", "doctor_a", "F20 doctor A logs in")
+    created = lab.expect("F20 doctor A creates a patient", lab.send(
+        "functions.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "JSON 形状靶患者"}),
+        Expect(201, "jev_allow", "allowed", True))
+    new_id = created.reply.json().get("id", "MISSING")
+    shaped = lab.expect("F20 doctor A posts a JSON-shaped body typed as a form that names _method", lab.send(
+        "functions.lab", "POST", f"/api/patients/{new_id}", cookie=cookie,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, body=b'{"a":"&_method=DELETE&b="}'),
+        Expect(403, "jev_deny", "blocked", False))
+    traced = function_of(shaped.record) or {}
+    lab.check("F20 the trace names DELETE /api/patients/{id} as the over-privilege attempt",
+              traced.get("entry") == "DELETE /api/patients/{id}" and traced.get("attempt") == "over_privilege",
+              f"trace function {traced}")
+
+
+@scenario("F21", "医生 POST 不带 Content-Type，请求体 note=hello world&%5Fm%65thod=DELETE：带空格按文字读，_method 的一个字母做了百分号编码，解码后按 DELETE 判为越权尝试，拦截")
+def f21(lab: Lab) -> None:
+    cookie = lab.login("functions.lab", "doctor_a", "F21 doctor A logs in")
+    created = lab.expect("F21 doctor A creates a patient", lab.send(
+        "functions.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "编码无类型靶患者"}),
+        Expect(201, "jev_allow", "allowed", True))
+    new_id = created.reply.json().get("id", "MISSING")
+    spelled = lab.expect("F21 doctor A posts a spaced body with no content type that spells _method with an escape", lab.send(
+        "functions.lab", "POST", f"/api/patients/{new_id}", cookie=cookie, body=b"note=hello world&%5Fm%65thod=DELETE"),
+        Expect(403, "jev_deny", "blocked", False))
+    traced = function_of(spelled.record) or {}
+    lab.check("F21 the trace names DELETE /api/patients/{id} as the over-privilege attempt",
+              traced.get("entry") == "DELETE /api/patients/{id}" and traced.get("attempt") == "over_privilege",
+              f"trace function {traced}")
+
+
+@scenario("F22", "医生 POST 不带 Content-Type，请求体 note=x;_method=DELETE 带分号：不像表单，按文字读，按更严的 DELETE 判为越权尝试，拦截")
+def f22(lab: Lab) -> None:
+    cookie = lab.login("functions.lab", "doctor_a", "F22 doctor A logs in")
+    created = lab.expect("F22 doctor A creates a patient", lab.send(
+        "functions.lab", "POST", "/api/patients", cookie=cookie, json_body={"name": "分号无类型靶患者"}),
+        Expect(201, "jev_allow", "allowed", True))
+    new_id = created.reply.json().get("id", "MISSING")
+    semicolon = lab.expect("F22 doctor A posts a body with no content type that names _method after a semicolon", lab.send(
+        "functions.lab", "POST", f"/api/patients/{new_id}", cookie=cookie, body=b"note=x;_method=DELETE"),
+        Expect(403, "jev_deny", "blocked", False))
+    traced = function_of(semicolon.record) or {}
+    lab.check("F22 the trace names DELETE /api/patients/{id} as the over-privilege attempt",
+              traced.get("entry") == "DELETE /api/patients/{id}" and traced.get("attempt") == "over_privilege",
+              f"trace function {traced}")
+
+
 @scenario("F13", "观察模式的功能表站点：医生 POST /api/admin/export 与 GET /metrics 都转发，记为本应拦截")
 def f13(lab: Lab) -> None:
     cookie = lab.login("fobserve.lab", "doctor_a", "F13 doctor A logs in on the observation site")

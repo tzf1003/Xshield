@@ -74,8 +74,9 @@ pub struct ExtractedRequest {
     /// multipart part carries a file whose content is not extracted, or a part could not be read
     /// into its parts. The values then do not cover every byte the origin may echo.
     pub truncated: bool,
-    /// The body, or a part of it, was read as one text, and its bytes hold `_method`, plain or
-    /// percent-encoded: the request may name a method this reader did not read (docs/07 section 7.9.18).
+    /// The body, or a part of it, was read as one text, or as JSON under a type that is not JSON, and its
+    /// bytes hold `_method` once percent-decoded: the request may name a method this reader did not read
+    /// (docs/07 section 7.9.18).
     pub method_field_unread: bool,
 }
 
@@ -342,12 +343,15 @@ pub fn extract_request(
         return out;
     }
     // A body whose text starts like a JSON object or array, and parses as one, is JSON whatever its
-    // type: this takes precedence over reading it as a form (docs/01 section 1.3).
+    // type: this takes precedence over reading it as a form (docs/01 section 1.3). Its type may still be a
+    // form, or none, and the origin may read the same bytes as fields: under a type that is not JSON they
+    // are checked for `_method` (docs/07 section 7.9.18).
     let text = body.trim_ascii();
+    let kind = content_type.map(media_kind).unwrap_or_default();
     if matches!(text.first(), Some(b'{' | b'[')) && walk_json(&mut out, text, "body", None) {
+        out.method_field_unread = !is_json_media(&kind) && names_method_field(body);
         return out;
     }
-    let kind = content_type.map(media_kind).unwrap_or_default();
     // The body is read as its media type says (docs/01 section 1.3). A body that does not read as
     // structured data is judged as one text, unless it has no type and has the shape of a form.
     let read = match kind.as_str() {
@@ -387,11 +391,11 @@ pub fn extract_request(
     out
 }
 
-/// Whether a body's bytes name `_method`, plain or with its underscore percent-encoded.
+/// Whether a body's bytes name `_method` once they are percent-decoded, one time: a field name may spell
+/// any of its letters as `%XX`, and the origin decodes it. The decoding is not repeated, so `%255Fmethod`
+/// does not name it (docs/07 section 7.9.18).
 fn names_method_field(body: &[u8]) -> bool {
-    [&b"_method"[..], &b"%5Fmethod"[..], &b"%5fmethod"[..]]
-        .iter()
-        .any(|needle| find(body, needle, 0).is_some())
+    percent_decode(&String::from_utf8_lossy(body), false).contains("_method")
 }
 
 /// A body read as one text: its bytes decoded leniently, as one value at `body` with no key. The
@@ -1856,6 +1860,12 @@ mod tests {
         assert!(
             extract_request("/api/users/5", None, Some("text/plain"), encoded).method_field_unread
         );
+        // A letter of the name spelled as `%XX` is decoded by the origin, so the name is `_method`. The
+        // decoding is made once: a doubly encoded underscore is not.
+        let spelled: &[u8] = b"note=hello world&%5Fm%65thod=DELETE";
+        assert!(extract_request("/api/users/5", None, None, spelled).method_field_unread);
+        let doubled: &[u8] = b"note=hello world&%255Fmethod=DELETE";
+        assert!(!extract_request("/api/users/5", None, None, doubled).method_field_unread);
         // Without `_method` in its bytes, the same text is not flagged.
         let plain: &[u8] = b"a=1";
         assert!(!extract_request("/api/users/5", None, None, plain).method_field_unread);
@@ -1904,6 +1914,41 @@ mod tests {
             br#"{"a":{"_method":"DELETE"}}"#,
         );
         assert!(!nested.method_field_unread);
+    }
+
+    #[test]
+    fn a_json_looking_body_of_a_type_that_is_not_json_names_a_method_field() {
+        // A body that parses as JSON is read as JSON whatever its type, and the origin may read the same
+        // bytes as a form, where `_method` is a field: under a type that is not JSON it is flagged.
+        let form = extract_request(
+            "/api/users/5",
+            None,
+            Some("application/x-www-form-urlencoded"),
+            br#"{"a":"&_method=DELETE&b="}"#,
+        );
+        assert!(form.method_field_unread);
+        let untyped = extract_request(
+            "/api/users/5",
+            None,
+            None,
+            br#"{"a=":"&_method=DELETE&b="}"#,
+        );
+        assert!(untyped.method_field_unread);
+        let spaced = extract_request(
+            "/api/users/5",
+            None,
+            None,
+            br#"{"a": "x y&_method=DELETE&b="}"#,
+        );
+        assert!(spaced.method_field_unread);
+        // Under a JSON type the origin reads the same JSON, so nothing is flagged.
+        let json = extract_request(
+            "/",
+            None,
+            Some("application/json"),
+            br#"{"note":"about _method"}"#,
+        );
+        assert!(!json.method_field_unread);
     }
 
     #[test]
