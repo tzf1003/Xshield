@@ -32,6 +32,7 @@ EXPECTED_CASES = (
     "p1-5-observe-learns-would-block", "p1-9-big-form", "p1-9-big-form-on-object",
     "p2-1-mass-assignment", "p2-3-header-injection", "p2-5-prompt-injection",
     "p3-method-override",
+    "b11-session-total-cap", "b11-other-address-unaffected",
 )
 
 

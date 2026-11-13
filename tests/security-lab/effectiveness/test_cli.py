@@ -17,10 +17,13 @@ from typing import Any
 from unittest import mock
 
 from effectiveness import jev_relay
-from effectiveness.cli import main
+from effectiveness.cli import KNOWN_GAPS_PATH, main
+from effectiveness.contracts import load_decisions, load_known_gaps
+from effectiveness.score import score
 
 ROOT = Path(__file__).resolve().parents[3]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+NO_GAPS = FIXTURES / "no-known-gaps.json"  # the fixture groups are not the lab's run, so the lab's list does not apply
 SCRIPT = ROOT / "scripts" / "measure_effectiveness.py"
 SECTIONS = ["## 1 结论", "## 2 记分表", "## 3 防护明细", "## 4 学习明细", "## 5 回归用例",
             "## 6 失败清单", "## 7 成本", "## 8 未执行的部分"]
@@ -36,7 +39,7 @@ def run_cli(*args: str) -> tuple[int, str, str]:
 def score_args(group: str, out: Path, *extra: str) -> list[str]:
     folder = FIXTURES / group
     args = ["score", "--observations", str(folder / "observations.jsonl"),
-            "--decisions", str(folder / "decisions.jsonl"), "--out", str(out)]
+            "--decisions", str(folder / "decisions.jsonl"), "--out", str(out), "--known-gaps", str(NO_GAPS)]
     for name, flag in (("truth.json", "--truth"), ("learned.json", "--learned")):
         if (folder / name).exists():
             args += [flag, str(folder / name)]
@@ -77,8 +80,8 @@ class CommandTests(unittest.TestCase):
         self.assertIn("学习段 SKIP", out)
 
     def test_a_baseline_regression_fails_the_run_and_an_improvement_passes(self):
-        worse = self.write_json("worse.json", {"values": {"S3": 0.9}})
-        better = self.write_json("better.json", {"values": {"S3": 0.4}})
+        worse = self.write_json("worse.json", {"groups": {"quick": {"seed": 1, "commit": "c", "values": {"S3": 0.9}}}})
+        better = self.write_json("better.json", {"groups": {"quick": {"seed": 1, "commit": "c", "values": {"S3": 0.4}}}})
         status, _, _ = run_cli(*score_args("all-correct", self.out / "w", "--baseline", str(worse)))
         self.assertEqual(status, 1)
         status, _, _ = run_cli(*score_args("all-correct", self.out / "i", "--baseline", str(better)))
@@ -86,7 +89,8 @@ class CommandTests(unittest.TestCase):
 
     def test_the_lab_refuses_the_modes_that_are_not_built_and_prints_nothing_to_stdout(self):
         for args, text in ((["lab", "--mode", "full"], "批次 7"),
-                           (["lab", "--keep"], "批次 5"), (["lab", "--update-baseline"], "批次 8")):
+                           (["lab", "--keep"], "批次 5"),
+                           (["lab", "--update-baseline", "--only", "idor_read"], "--only")):
             with self.subTest(args=args):
                 status, out, err = run_cli(*args)
                 self.assertEqual(status, 2)
@@ -148,6 +152,32 @@ class CommandTests(unittest.TestCase):
                                  "--out", str(self.out / "x"))
         self.assertEqual(status, 2)
         self.assertIn("error:", err)
+
+    def test_the_score_command_reads_the_lab_known_gap_list_unless_told_otherwise(self):
+        folder = FIXTURES / "all-correct"
+        args = ["score", "--observations", str(folder / "observations.jsonl"),
+                "--decisions", str(folder / "decisions.jsonl"), "--truth", str(folder / "truth.json"),
+                "--learned", str(folder / "learned.json"), "--out", str(self.out / "gaps")]
+        with mock.patch("effectiveness.cli.score", wraps=score) as scored:
+            status, _, err = run_cli(*args)
+            run_cli(*args, "--known-gaps", str(NO_GAPS))
+        self.assertNotEqual(status, 2, err)
+        listed, unlisted = (call.kwargs["gap_entries"] for call in scored.call_args_list)
+        self.assertEqual(listed, load_known_gaps(KNOWN_GAPS_PATH))
+        self.assertTrue(listed)
+        self.assertEqual(unlisted, [])
+
+    def test_the_score_command_reads_the_training_records_only_when_told_and_says_which(self):
+        folder = FIXTURES / "all-correct"
+        base = ["score", "--observations", str(folder / "observations.jsonl"),
+                "--decisions", str(folder / "decisions.jsonl"), "--known-gaps", str(NO_GAPS)]
+        with mock.patch("effectiveness.cli.score", wraps=score) as scored:
+            run_cli(*base, "--out", str(self.out / "all"))
+            run_cli(*base, "--training", str(folder / "decisions.jsonl"), "--out", str(self.out / "training"))
+        self.assertIsNone(scored.call_args_list[0].kwargs["training"])
+        self.assertEqual(scored.call_args_list[1].kwargs["training"], load_decisions(folder / "decisions.jsonl"))
+        self.assertIn("未给 --training", (self.out / "all" / "report.md").read_text(encoding="utf-8"))
+        self.assertIn("原因标签按训练段的判定记录计算", (self.out / "training" / "report.md").read_text(encoding="utf-8"))
 
     def test_help_exits_0(self):
         status, _, _ = run_cli("--help")

@@ -160,6 +160,8 @@ psql "$XSHIELD_DATABASE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO _sqlx_migrations
   `crates/xshield-judge/tests/live_jev.rs` 是这组真实调用的测试（默认忽略）：`XSHIELD_JEV_ROUTE=direct XSHIELD_JEV_API_KEY=... cargo test -p xshield-judge --test live_jev -- --ignored --nocapture`，每个场景打印一行判定、概率和耗时。
 
   功能表的真实调用是其中的 `live_function_table`：75 例加 2 条管理员会话的请求（期望放行，不带 `function`），发给四个站点（两个 emr 站点、一个带管理员身份位置的站点、一个商店），每条核对网关送给 Jev 的 `function`。其中 5 例是已知做不到的（`KnownGap`，只打印，不算失败）。同一文件里的 `function_cases_reach_jev_as_intended` 不需要密钥，CI 里用桩模型运行：它只核对每条请求是否带着用例写明的 `function` 送到了模型面前，不核对模型的结论。
+
+- **防护有效性**：`scripts/measure_effectiveness.py` 经真实的网关跑训练、学习和防护三段，度量防护的效果和学习的质量。快速模式在 CI 的 `validate` 作业里跑；指标、怎么读报告和已知缺口的约定见 4.6。
 - **代码质量**：沿用 `cargo fmt`、`cargo clippy`、`cargo test` 和 `scripts/verify_all.sh`。
 
 v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回归已随对应功能一起删除。
@@ -240,3 +242,52 @@ v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回�
 合入 PR 209 之后提示词变为 `jq_d5df87392a92b44d`，2026-11-13 在合并后的代码上又跑了一遍（74 次调用，耗时 179 到 370 毫秒）：69 条必须符合预期的请求全部符合。`DELETE /api/patients`（DENY 0.64）和 `POST /api/permissions/grant`（0.62）仍离平局较近；普通接口里 DENY 最高的仍是 `GET /api/wards/occupancy`（0.29）。6 条已知做不到的结果与前三遍在同一范围：`GET /trace` 这一遍被拦（DENY 0.53），`GET /api/accounts/all` 放行（0.44），商店 `/redirect?to=` 放行（ATTACK 0.37），`GET /api/config/ui` 仍被误拦（0.92），其余两条放行。
 
 合入 T4b 之后（`{id}` 不覆盖路由词，管理员会话不判未知功能），2026-11-13 在 PR 231 的代码上又跑了一遍（73 次调用，耗时 183 到 385 毫秒）：72 条必须符合预期的请求全部符合。`GET /api/patients/export-all` 现在作为未知功能交给模型并被拦（DENY 1.00），不再属于已知做不到的；带已核验编号的 `GET /api/patients/{id}/export-pdf` 放行（DENY 0.10）。管理员会话的 `GET /api/admin/reports` 和 `GET /api/admin/users/export` 快速放行，不调用模型，上面“另外两条只记录的请求”一段说的情况不再出现。`DELETE /api/patients`（DENY 0.58）和 `POST /api/permissions/grant`（0.66）仍离平局较近。其余 5 条已知做不到的与此前在同一范围：`GET /trace`（0.49）、`GET /api/accounts/all`（0.47）、商店 `GET /api/Users`（0.06）和 `/redirect?to=`（ATTACK 0.40）放行，`GET /api/config/ui` 仍被误拦（0.91）。
+
+## 4.6 防护有效性度量
+
+度量代码在 `tests/security-lab/effectiveness/`，入口是 `scripts/measure_effectiveness.py`。它经真实的 `xshield-edge` 跑靶场的三段：训练段、学习段（需要 PostgreSQL）和防护段。靶场的数据、攻击和良性文本都是合成的。
+
+### 怎么跑
+
+- `python3 scripts/measure_effectiveness.py`：快速模式、理想模型，约一分钟。学习段由 `XSHIELD_TEST_DATABASE_BASE_URL`（或 `PGHOST` 等环境变量）指定 PostgreSQL；没有时该段显示 SKIP 和原因，依赖它的门槛不计。
+- `--only 类别,用例`：只跑这些类别或用例。这种运行不与基线比较，也不检查已知缺口清单是否过期。
+- `--jev live`：用真实 Jev，需要环境变量 `XSHIELD_JEV_ENDPOINT` 和 `XSHIELD_JEV_API_KEY`。缺一即以退出码 2 退出，不退回模拟。密钥只从环境变量读取，不写入报告和日志。
+- `--update-baseline`：把本次指标写入基线文件。只在全部门槛通过、且没有指标变差时写入；不能与 `--only` 同用，也不能与真实 Jev（`--jev live`、`record`、`replay`）同用，基线只记理想模型的数字。
+- `--jev record`：同 `live`，每次应答按请求摘要写入输出目录的 `jev-recording.jsonl`（`jev_relay.py`）；录制不完整时以退出码 2 结束，不要入库。
+- `--jev replay`：不联网、不需要密钥，只从 `effectiveness/recordings/quick.jsonl` 答复；摘要不在录制里的调用收到 UNKNOWN，计入“回放未命中率”。录制文件目前不存在（见 `effectiveness/recordings/README.md`），那时以退出码 2 退出。
+- 完整模式（批次 7）尚未实现，传入时以退出码 2 拒绝。
+
+CI 里，`ci.yml` 的 `validate` 作业先跑 `tests/security-lab` 下的单元测试，再跑快速模式。报告追加到步骤摘要，输出目录作为制品上传，不论成败。`effectiveness.yml` 在 `main` 上有判定、学习或靶场代码的改动时跑一次，也可以手动触发（`jev` 选 `ideal` 或 `live`）。没有定时运行。
+
+### 指标与门槛
+
+- S1 到 S4：防护的核验和放行。S2 误核验数必须为 0；P4 未判定率必须为 0；P5 被拦请求到达源站数必须为 0。
+- L0 到 L3：学习的冷启动候选、请求位置类别、响应位置档位、请求位置接受公共来源。误学数必须为 0，只算没有登记在已知缺口清单里的误学。
+- 学习稳定性：最后两轮学习的结论相同。
+- 未模板化的位置：真值里没有的键，按模式合并计数（例如分享码 `SHR-…` 逐个变化的路径），必须为 0。
+- P1、P2、P3、P7：拦截率、误拦率、拦截原因正确率，以及回归用例的通过情况。
+- 基线比较只进不退：任何指标比基线变差都失败。基线文件是 `tests/security-lab/effectiveness-baseline.json`，有快速组。缺基线时流水线以失败退出，并说明原因。
+
+### 怎么读报告
+
+报告 `report.md`（内容相同的 `report.json`）依次是：结论、记分表、防护明细、学习明细（含学习的已知缺口清单）、回归用例、失败清单、成本、未执行的部分。
+
+- 记分表的“是否通过”列：“必须”的门槛有一条不过，退出码为 1。“不低于基线”的指标在没有基线时显示“—”。
+- 学习明细每个真值位置一行。学到的与真值不同，写出差别；没学到的，写出原因，例如规则学不到、被拒绝记录挡住、被自动暂停、接受公共来源未提议。
+
+### 回归用例与 known_gap
+
+回归用例（`regressions.py`，方案 4.5）有两种状态：
+
+- `must`：网关必须通过。失败即门槛失败。
+- `known_gap`：评审已经列出、修复尚未合入。它失败时不计门槛。如果它通过了，就是“意外通过”，流水线失败，并提示把状态改为 `must`。
+
+修复的 PR 在同一个改动里翻状态，并在 PR 描述里写明依据哪次实跑。
+
+### 学习的已知缺口清单
+
+`tests/security-lab/effectiveness-known-gaps.json` 登记学习质量的已知问题：错误的提议（误学）、未模板化的位置、没学到的位置，以及学到的配置上的失败。每条写明学到的值、评审编号和修法批次（LQ-1 到 LQ-7）。没有修法批次的长期条目（例如训练流量里使用次数低于学习门槛、规则按设计不提议的位置）把 `lq` 写为 `null`，`note` 必须写明为什么没有修法批次；过期门槛对它照常生效。
+
+- 清单里的问题只出现在报告的“学习的已知缺口清单”一节，不让门槛失败。清单之外的误学（wrong）和未模板化的位置（unmodeled）让学习门槛失败；没学到（miss）和学到的配置上的失败（failure）不计学习门槛，由基线比较兜住。
+- 条目不再出现时算过期，门槛失败，提示删掉这一条。修复批次合入的同一个 PR 删掉它对应的条目。
+- 缺少学习段、或探针没有全部跑完时，不检查过期。

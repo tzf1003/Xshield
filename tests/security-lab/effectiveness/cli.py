@@ -5,11 +5,12 @@
     measure_effectiveness.py site (--decisions FILE | --control URL --site NAME)
                              --suite-results DIR_OR_ZIP [--truth FILE] [--objects FILE] [--out DIR]
     measure_effectiveness.py score --observations FILE --decisions FILE
-                             [--truth FILE] [--learned FILE] [--baseline FILE] [--out DIR]
+                             [--truth FILE] [--learned FILE] [--baseline FILE] [--known-gaps FILE]
+                             [--training FILE] [--out DIR]
 
 Without a subcommand the command is `lab`. `lab` (effectiveness.lab) runs the training, learning and
 protection segments in quick mode. `--jev record` and `--jev replay` (batch 9) use the relay of jev_relay.py.
-`--mode full`, `--keep` and `--update-baseline` are not built yet and exit 2. `site` (effectiveness.site) reads
+`--mode full` and `--keep` are not built yet and exit 2. `site` (effectiveness.site) reads
 the suite output and the decision records and sends no traffic.
 
 Exit status: 0 when every gate passes (a gate with no data does not fail), 1 when a gate
@@ -29,12 +30,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .contracts import ContractError, dump_json, load_baseline, load_decisions, load_learned, load_observations, load_truth
+from .contracts import (
+    ContractError, baseline_group, dump_json, load_baseline, load_decisions, load_known_gaps, load_learned,
+    load_observations, load_truth,
+)
 from .report import render_markdown, render_terminal, report_document
 from .score import score
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUT = ROOT / "target" / "effectiveness" / "latest"
+KNOWN_GAPS_PATH = ROOT / "tests" / "security-lab" / "effectiveness-known-gaps.json"
 SUBCOMMANDS = ("lab", "site", "score")
 PASSWORD_ENV = "XSHIELD_CONSOLE_PASSWORD"
 PASSWORD_FLAGS = frozenset({"--password", "--pass", "--passwd", "--pwd"})
@@ -71,6 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     score_parser.add_argument("--truth", type=Path)
     score_parser.add_argument("--learned", type=Path)
     score_parser.add_argument("--baseline", type=Path, help="基线文件；不给就不做基线比较")
+    score_parser.add_argument("--known-gaps", type=Path, default=KNOWN_GAPS_PATH,
+                              help="学习的已知缺口清单，默认与 lab 相同的仓库文件；文件不存在时清单为空")
+    score_parser.add_argument("--training", type=Path,
+                              help="训练段的判定记录（lab 输出目录里的 decisions-train.jsonl）；不给就按全部判定记录算原因标签")
     score_parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     return parser
 
@@ -125,16 +134,21 @@ def _run_score(args: argparse.Namespace) -> int:
         decisions = load_decisions(args.decisions)
         truth = load_truth(args.truth) if args.truth else None
         learned = load_learned(args.learned) if args.learned else None
-        baseline = load_baseline(args.baseline) if args.baseline else None
+        baseline = baseline_group(load_baseline(args.baseline), "quick") if args.baseline else None
+        gap_entries = load_known_gaps(args.known_gaps) if args.known_gaps.exists() else []
+        training = load_decisions(args.training) if args.training else None
     except (ContractError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    result: dict[str, Any] = score(observations, decisions, truth=truth, learned=learned, baseline=baseline)
+    result: dict[str, Any] = score(observations, decisions, truth=truth, learned=learned, baseline=baseline,
+                                   gap_entries=gap_entries, training=training)
     meta: dict[str, Any] = {
         "commit": _commit(),
         "mode": "score",
         "jev": "未指定（按理想模型口径计分）",
+        "note": ("原因标签按训练段的判定记录计算" if training is not None
+                 else "原因标签按全部判定记录计算（未给 --training，防护段的拒绝可能被标成“被拒绝记录挡住”）"),
         "seed": truth["seed"] if truth else None,
         "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "seconds": round(time.monotonic() - started, 3),

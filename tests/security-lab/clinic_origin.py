@@ -35,6 +35,13 @@ SURNAMES = ("王", "李", "张", "刘", "陈", "杨", "黄", "赵", "周", "吴"
 GIVEN_NAMES = ("伟", "芳", "敏", "静", "丽", "强", "磊", "军", "洋", "娜", "秀英", "桂兰")
 ENTRIES = ("/login", "/api/token", "/api/home", "/api/patients", "/share/*")
 BYPASS = ("/static/*",)
+# The public login page, the same for every credential (WAF batch 11, plan 4.5): a session of a credential the origin
+# never issued starts with an answer like this one, so the gateway has a 2xx to learn the session from.
+LOGIN_PAGE = (
+    '<!doctype html><meta charset="utf-8"><title>登录</title>'
+    '<form method="post" action="/login"><input name="username"><input name="password" type="password">'
+    "<button>登录</button></form>\n"
+).encode("utf-8")
 CORS_HEADERS = (
     ("Access-Control-Allow-Origin", "*"),
     ("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS"),
@@ -72,16 +79,20 @@ RESPONSE_POSITIONS: tuple[dict[str, Any], ...] = (
     {"key": "GET /api/patients/{id} visits[].id", "class": "visit", "tier": "self", "learnable": True},
     {"key": "GET /api/patients/{id} prescriptions[].id", "class": "prescription", "tier": "self",
      "learnable": True},
-    {"key": "GET /api/visits/{id} id", "class": "visit", "tier": "self", "learnable": True},
+    {"key": "GET /api/visits/{id} id", "class": "visit", "tier": "self", "learnable": False,
+     "why": "训练流量不用就诊编号；学习只看得到参与了票的位置（设计稿 2.9）"},
     {"key": "GET /api/visits/{id} patient_id", "class": "patient", "tier": "self", "learnable": True},
-    {"key": "GET /api/prescriptions/{id} id", "class": "prescription", "tier": "self", "learnable": True},
+    {"key": "GET /api/prescriptions/{id} id", "class": "prescription", "tier": "self", "learnable": False,
+     "why": "训练流量不用处方编号；学习只看得到参与了票的位置（设计稿 2.9）"},
     {"key": "GET /api/prescriptions/{id} patient_id", "class": "patient", "tier": "self", "learnable": True},
     {"key": "GET /api/reports/{id} patient_id", "class": "patient", "tier": "self", "learnable": False,
      "why": "慢速 id，路由不化为 {id}"},
     {"key": "POST /api/patients id", "class": "patient", "tier": "self", "learnable": True},
     {"key": "GET /api/search results[].id", "class": "patient", "tier": "public", "learnable": True},
-    {"key": "GET /api/directory doctors[].id", "class": "doctor", "tier": "public", "learnable": True},
-    {"key": "GET /api/directory doctors[].org", "class": "org", "tier": "public", "learnable": True},
+    {"key": "GET /api/directory doctors[].id", "class": "doctor", "tier": "public", "learnable": False,
+     "why": "训练流量不用目录里的医生编号；学习只看得到参与了票的位置（设计稿 2.9）"},
+    {"key": "GET /api/directory doctors[].org", "class": "org", "tier": "public", "learnable": False,
+     "why": "训练流量不用目录里的医生机构；学习只看得到参与了票的位置（设计稿 2.9）"},
     {"key": "GET /api/admin/search results[].id", "class": "patient", "tier": "admin", "learnable": True},
     {"key": "GET /api/admin/export patients[].id", "class": "patient", "tier": "admin", "learnable": True},
     {"key": "GET /share/{code} patient.id", "class": "patient", "tier": None, "learnable": False,
@@ -99,6 +110,7 @@ RESPONSE_POSITIONS: tuple[dict[str, Any], ...] = (
 # administrator routes are the administrator tier, at reliability high.
 FUNCTIONS: tuple[dict[str, Any], ...] = (
     {"key": "GET /static/app.js", "source": "admin"},
+    {"key": "GET /login", "source": "admin"},
     {"key": "POST /login", "source": "admin"},
     {"key": "POST /api/token", "source": "admin"},
     {"key": "GET /api/home", "source": "admin"},
@@ -394,6 +406,8 @@ class ClinicOrigin:
             return Result(200, raw=b"xshield_clinic_origin_up 1\n", content_type="text/plain; charset=utf-8")
         if method == "GET" and path == "/static/app.js":
             return Result(200, raw=b"/* clinic lab app */\n", content_type="application/javascript; charset=utf-8")
+        if method == "GET" and path == "/login":
+            return Result(200, raw=LOGIN_PAGE, content_type="text/html; charset=utf-8")
         if method == "POST" and path == "/login":
             return self._login(_fields(headers, body))
         if method == "POST" and path == "/api/token":
