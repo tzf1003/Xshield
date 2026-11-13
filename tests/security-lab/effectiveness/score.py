@@ -883,29 +883,35 @@ def _learning(truth: dict[str, Any] | None, learned: dict[str, Any] | None,
         "unmodeled": unmodeled_metric,
     }
     # Per layer, the keys the layer got right or wrong, and the keys it could learn (the truth's learnable positions),
-    # before any known-gap entry is applied. The convergence and anti-pollution measures (full.py) compare these.
+    # before any known-gap entry is applied. The convergence and anti-pollution measures (full.py) compare these, and
+    # the reliability each right proposal carries: L2 and L3 proposals carry one, L0 and L1 do not.
     learnable_request = sorted(key for key, item in request.items() if item["learnable"])
     learnable_response = sorted(key for key, item in response.items() if item["learnable"])
     keys = {
         "L0": {"right": sorted(c["key"] for c in right0), "wrong": sorted(c["key"] for c in wrong0),
-               "learnable": sorted(set(learnable_request) | set(learnable_response))},
-        "L1": {"right": sorted(right1), "wrong": sorted(key for key, _ in wrong1), "learnable": learnable_request},
+               "learnable": sorted(set(learnable_request) | set(learnable_response)), "reliability": {}},
+        "L1": {"right": sorted(right1), "wrong": sorted(key for key, _ in wrong1), "learnable": learnable_request,
+               "reliability": {}},
         "L2": {"right": sorted(right2), "wrong": sorted(key for key, _ in wrong2),
-               "learnable": sorted(key for key in tiered if response[key]["learnable"])},
-        "L3": {"right": sorted(right3), "wrong": sorted(key for key, _ in wrong3), "learnable": learnable_request},
+               "learnable": sorted(key for key in tiered if response[key]["learnable"]),
+               "reliability": {key: concl[key]["tier_reliability"] for key in right2}},
+        "L3": {"right": sorted(right3), "wrong": sorted(key for key, _ in wrong3), "learnable": learnable_request,
+               "reliability": {key: concl[key]["accepts_reliability"] for key in right3}},
     }
-    return {"metrics": metrics, "gates": gates, "rows": rows, "known": applied, "keys": keys}, None
+    return {"metrics": metrics, "gates": gates, "rows": rows, "known": applied, "keys": keys,
+            "conclusions": concl}, None
 
 
 def learning_metrics(truth: dict[str, Any], learned: dict[str, Any],
                      decisions: list[dict[str, Any]]) -> dict[str, Any]:
     """L0 to L3 of one learning run with no known-gap entry applied, for the convergence and anti-pollution measures
-    (plan 3.2, batch 7). Returns the layers' metrics and their keys (see `_learning`)."""
+    (plan 3.2, batch 7). Returns the layers' metrics, their keys and reliabilities (see `_learning`), and the last
+    round's conclusion for each key (the natural-order report reads the tier of one key from it)."""
     found, reason = _learning(truth, learned, decisions, (), (), False)
     if found is None:
         raise ValueError(reason or "the learning metrics need the truth and the learned file")
     return {"metrics": {layer: found["metrics"][layer] for layer in ("L0", "L1", "L2", "L3")},
-            "keys": found["keys"]}
+            "keys": found["keys"], "conclusions": found["conclusions"]}
 
 
 def _candidate_class(candidate_of: Mapping[tuple[str, str], dict[str, Any]], key: str) -> str | None:

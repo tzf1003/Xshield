@@ -26,16 +26,18 @@ SITE_TRUTH, SITE_LIMIT, SITE_OBSERVE, SITE_EVICT = "clinic-truth", "clinic-truth
     "clinic-truth-evict"
 
 
-def learning_of(**layers: tuple[list[str], list[str], list[str]]) -> dict:
-    """What score.learning_metrics returns, from each layer's (learnable, right, wrong) keys."""
+def learning_of(**layers: tuple) -> dict:
+    """What score.learning_metrics returns, from each layer's (learnable, right, wrong[, reliability]) keys. The
+    reliability is a dict from a right key to its reliability; a layer without one has none."""
     keys: dict = {}
     metrics: dict = {}
     for layer in LAYERS:
-        learnable, right, wrong = layers.get(layer, ([], [], []))
-        keys[layer] = {"learnable": list(learnable), "right": list(right), "wrong": list(wrong)}
+        learnable, right, wrong, *reliability = layers.get(layer, ([], [], [], {}))
+        keys[layer] = {"learnable": list(learnable), "right": list(right), "wrong": list(wrong),
+                       "reliability": dict(reliability[0]) if reliability else {}}
         accuracy = len(set(right) & set(learnable)) / len(learnable) if learnable else None
         metrics[layer] = {"accuracy": {"value": accuracy}}
-    return {"metrics": metrics, "keys": keys}
+    return {"metrics": metrics, "keys": keys, "conclusions": {}}
 
 
 def learned_with(key: str, *agreements: int) -> dict:
@@ -68,32 +70,46 @@ class AttackerShareTests(unittest.TestCase):
 
 
 class ConvergenceTests(unittest.TestCase):
-    def test_a_layer_is_fully_correct_with_no_wrong_proposal_and_every_learnable_position_right(self):
-        self.assertTrue(full.fully_correct({"learnable": ["a"], "right": ["a"], "wrong": []}))
-        self.assertFalse(full.fully_correct({"learnable": ["a"], "right": ["a"], "wrong": ["z"]}))
-        self.assertFalse(full.fully_correct({"learnable": ["a", "b"], "right": ["a"], "wrong": []}))
+    def test_a_layer_is_at_the_top_with_no_wrong_proposal_and_the_top_positions_and_reliabilities(self):
+        top = full.right_reliabilities(learning_of(L2=(["p", "q"], ["p", "q"], [], {"p": "high", "q": "high"}))
+                                       ["keys"]["L2"])
+        at = learning_of(L2=(["p", "q"], ["p", "q"], [], {"p": "high", "q": "high"}))["keys"]["L2"]
+        lower = learning_of(L2=(["p", "q"], ["p", "q"], [], {"p": "medium", "q": "high"}))["keys"]["L2"]
+        wrong = learning_of(L2=(["p", "q"], ["p", "q"], ["z"], {"p": "high", "q": "high"}))["keys"]["L2"]
+        self.assertTrue(full.at_top(at, top))
+        self.assertFalse(full.at_top(lower, top))
+        self.assertFalse(full.at_top(wrong, top))
 
-    def test_each_layer_names_the_first_user_count_at_which_it_is_fully_correct(self):
+    def test_each_layer_names_the_first_user_count_at_which_it_is_at_its_top(self):
         points = [
-            (3, learning_of(L0=(["a", "b", "c", "d"], ["a", "b"], []), L1=(["x"], [], []),
-                            L2=([], [], ["q"]), L3=(["m"], ["m"], []))),
+            (3, learning_of(L0=(["a", "b", "c", "d"], ["a", "b"], []), L1=(["x"], ["x"], ["z"]),
+                            L2=(["p", "q"], ["p", "q"], [], {"p": "medium", "q": "medium"}),
+                            L3=(["m"], ["m"], [], {"m": "high"}))),
             (6, learning_of(L0=(["a", "b", "c", "d"], ["a", "b", "c", "d"], []), L1=(["x"], ["x"], ["z"]),
-                            L2=([], [], []), L3=(["m"], ["m"], []))),
+                            L2=(["p", "q"], ["p", "q"], [], {"p": "high", "q": "medium"}),
+                            L3=(["m"], ["m"], [], {"m": "high"}))),
             (12, learning_of(L0=(["a", "b", "c", "d"], ["a", "b", "c", "d"], []), L1=(["x"], ["x"], []),
-                             L2=([], [], []), L3=(["m"], ["m"], ["n"]))),
+                             L2=(["p", "q"], ["p", "q"], [], {"p": "high", "q": "high"}),
+                             L3=(["m"], ["m"], ["n"], {"m": "high"}))),
             (24, learning_of(L0=(["a", "b", "c", "d"], ["a", "b", "c", "d"], []), L1=(["x"], ["x"], []),
-                             L2=([], [], []), L3=(["m"], ["m"], []))),
+                             L2=(["p", "q"], ["p", "q"], [], {"p": "high", "q": "high"}),
+                             L3=(["m"], ["m"], [], {"m": "high"}))),
         ]
         result = full.convergence(points)
-        self.assertEqual(result["first_fully_correct"], {"L0": 6, "L1": 12, "L2": 6, "L3": 3})
+        self.assertEqual(result["first_top"], {"L0": 6, "L1": 12, "L2": 12, "L3": 3})
         self.assertEqual([row["users"] for row in result["points"]], [3, 6, 12, 24])
-        self.assertEqual(result["points"][0]["layers"]["L0"]["right"], 2)
-        self.assertFalse(result["points"][0]["layers"]["L0"]["fully_correct"])
+        first_point = result["points"][0]["layers"]["L0"]
+        self.assertEqual((first_point["right"], first_point["learnable"], first_point["at_top"]), (2, 4, False))
+        self.assertEqual(result["points"][2]["layers"]["L2"]["high"], 2)
         self.assertEqual(result["points"][1]["layers"]["L1"]["wrong"], 1)
 
-    def test_a_layer_never_fully_correct_is_reported_as_none(self):
-        result = full.convergence([(3, learning_of(L0=(["a"], [], [])))])
-        self.assertIsNone(result["first_fully_correct"]["L0"])
+    def test_a_layer_never_at_its_top_is_reported_as_none(self):
+        result = full.convergence([(3, learning_of(L0=(["a"], [], []))), (6, learning_of(L0=(["a"], ["a"], ["z"])))])
+        self.assertIsNone(result["first_top"]["L0"])
+
+    def test_the_convergence_needs_a_point(self):
+        with self.assertRaises(ValueError):
+            full.convergence([])
 
 
 class PollutionTests(unittest.TestCase):
@@ -101,10 +117,43 @@ class PollutionTests(unittest.TestCase):
         clean = learning_of(L0=(["a", "b", "c"], ["a", "b"], []))
         polluted = learning_of(L0=(["a", "b", "c"], ["a"], ["z"]), L2=([], [], ["w"]))
         result = full.pollution(clean, polluted, attackers=21, benign_sessions=192)
-        self.assertEqual(result["layers"]["L0"], {"wrong_clean": 0, "wrong_polluted": 1, "lost": ["b"]})
+        self.assertEqual(result["layers"]["L0"], {"wrong_clean": 0, "wrong_polluted": 1, "lost": ["b"], "weaker": []})
         self.assertEqual(result["false_learns"], 2)
         self.assertEqual(result["lost"], 1)
+        self.assertEqual(result["weaker"], 0)
         self.assertAlmostEqual(result["share"], 21 / 213)
+
+    def test_a_position_learned_with_a_lower_reliability_is_lost_and_also_weaker(self):
+        clean = learning_of(L2=(["p", "q"], ["p", "q"], [], {"p": "high", "q": "medium"}))
+        polluted = learning_of(L2=(["p", "q"], ["p", "q"], [], {"p": "medium", "q": "medium"}))
+        result = full.pollution(clean, polluted, attackers=21, benign_sessions=192)
+        self.assertEqual(result["layers"]["L2"], {"wrong_clean": 0, "wrong_polluted": 0, "lost": ["p"], "weaker": ["p"]})
+        self.assertEqual((result["lost"], result["weaker"]), (1, 1))
+
+    def test_attack_requests_are_counted_by_category_and_by_what_the_observation_run_did(self):
+        requests = [("pollution_walk", "would_block"), ("pollution_walk", "would_block"),
+                    ("pollution_delete", "allowed"), ("pollution_read", "allowed"), ("pollution_read", "unjudged")]
+        result = full.pollution(learning_of(), learning_of(), attackers=1, benign_sessions=9,
+                                attack_requests=requests)
+        self.assertEqual(result["attack_requests"], {
+            "pollution_walk": {"requests": 2, "would_block": 2, "allowed": 0, "other": 0},
+            "pollution_delete": {"requests": 1, "would_block": 0, "allowed": 1, "other": 0},
+            "pollution_read": {"requests": 2, "would_block": 0, "allowed": 1, "other": 1},
+        })
+
+
+class AttackRequestTests(unittest.TestCase):
+    def test_only_the_requests_of_the_attack_sessions_are_counted_with_their_outcomes(self):
+        rows = [
+            {"group": "attack", "session": "attacker/0", "category": "pollution_walk", "request_id": "r1"},
+            {"group": "attack", "session": "doctor_3/0", "category": "function_level", "request_id": "r2"},
+            {"group": "train", "session": "attacker/0", "category": "train_home", "request_id": "r3"},
+            {"group": "attack", "session": "attacker/1", "category": "pollution_read", "request_id": "r4"},
+            {"group": "attack", "session": "attacker/1", "category": "pollution_delete", "request_id": "r5"},
+        ]
+        self.assertEqual(full.attack_requests(rows, {"r1": "would_block", "r4": "allowed"}),
+                         [("pollution_walk", "would_block"), ("pollution_read", "allowed"),
+                          ("pollution_delete", "unjudged")])
 
 
 class NaturalOrderTests(unittest.TestCase):
@@ -120,11 +169,18 @@ class NaturalOrderTests(unittest.TestCase):
         self.assertIsNone(full.public_agreement({"rounds": [{"judgements": []}]}))
         self.assertIsNone(full.public_agreement(None))
 
-    def test_the_two_orders_are_compared_beside_the_threshold(self):
+    def test_the_two_orders_are_compared_beside_the_threshold_with_the_tier_each_one_learned(self):
         ordered = learned_with(full.NATURAL_ORDER_KEY, 1000)
         natural = learned_with(full.NATURAL_ORDER_KEY, 979)
-        self.assertEqual(full.natural_order(ordered, natural),
-                         {"key": full.NATURAL_ORDER_KEY, "threshold": 980, "ordered": 1000, "natural": 979})
+        ordered_metrics = {"conclusions": {full.NATURAL_ORDER_KEY: {"tier": "public", "tier_reliability": "high"}}}
+        natural_metrics = {"conclusions": {full.NATURAL_ORDER_KEY: {"tier": "public", "tier_reliability": "medium"}}}
+        self.assertEqual(full.natural_order(ordered, natural, ordered_metrics=ordered_metrics,
+                                            natural_metrics=natural_metrics), {
+            "key": full.NATURAL_ORDER_KEY, "threshold": 980,
+            "ordered": {"agreement": 1000, "tier": "public", "reliability": "high"},
+            "natural": {"agreement": 979, "tier": "public", "reliability": "medium"},
+        })
+        self.assertIsNone(full.natural_order(ordered, natural)["natural"]["tier"])
 
 
 def _result(**overrides) -> dict:
@@ -197,10 +253,12 @@ class ConsistencyTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["P6"], {"value": 2, "num": 2, "den": 4})
         self.assertEqual(result["counts"]["consistency"], 5)
 
-    def test_p6_is_report_only(self):
-        observations, decisions = _consistency_sample()
-        result = score(observations, decisions)
-        self.assertFalse(any("P6" in gate["name"] for gate in result["gates"]))
+    def test_the_p6_gate_passes_only_with_no_difference_and_at_least_one_request_compared(self):
+        self.assertTrue(full.consistency_gate({"value": None, "num": 0, "den": 4})["ok"])
+        self.assertFalse(full.consistency_gate({"value": 2, "num": 2, "den": 4})["ok"])
+        self.assertFalse(full.consistency_gate({"value": None, "num": 0, "den": 0})["ok"])
+        self.assertFalse(full.consistency_gate(None)["ok"])
+        self.assertEqual(full.consistency_gate({"value": 0, "num": 0, "den": 4})["value"], 0)
 
     def test_p6_is_empty_when_nothing_is_compared(self):
         row, record = _enforced("c1", "blocked")
@@ -291,14 +349,17 @@ class FullReportTests(unittest.TestCase):
                                                   (48, learning_of(L0=(["a"], ["a"], [])))])
         result["pollution"] = full.pollution(learning_of(L0=(["a", "b"], ["a", "b"], [])),
                                              learning_of(L0=(["a", "b"], ["a"], ["z"])),
-                                             attackers=21, benign_sessions=192)
+                                             attackers=21, benign_sessions=192,
+                                             attack_requests=[("pollution_walk", "would_block"),
+                                                              ("pollution_read", "allowed")])
         result["natural_order"] = full.natural_order(learned_with(full.NATURAL_ORDER_KEY, 1000),
                                                      learned_with(full.NATURAL_ORDER_KEY, 979))
         meta = {**META, "timings": {"b11-session-eviction": {"logins": 20200, "seconds": 61.5}},
                 "two_pass": {"differing": [], "seconds": [200.0, 201.0]}}
         text = render_markdown(result, meta)
-        for fragment in ("### 收敛成本（L4）", "### 抗污染（L5）", "发现：混入攻击后误学 1 个位置",
-                         "### 删除穿插在搜索之间（自然顺序，只报告）", "两遍核对：两遍的记分、门槛、失败项和学习明细逐位相同",
+        for fragment in ("### 收敛成本（L4）", "首次到顶", "### 抗污染（L5）", "发现：混入攻击后误学 1 个位置",
+                         "攻击会话的请求：每个都本应拦截", "搜索后打开", "### 删除穿插在搜索之间（自然顺序，只报告）",
+                         "两遍核对：两遍的记分、门槛、失败项和学习明细逐位相同",
                          "同一批 4 个请求", "b11-session-eviction）：20200 次登录，用时 61.5 秒"):
             self.assertIn(fragment, text)
         document = report_document(result, meta)

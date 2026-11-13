@@ -65,6 +65,7 @@ FULL_BENIGN_NAMES = tuple(row["text"] for row in _corpus_rows("benign.jsonl") if
 ATTACKER_SOURCE = 150
 ATTACKERS_MAX = 254 - ATTACKER_SOURCE
 ATTACKER_WALKS = 6  # patients of other doctors that one attack session asks for by id
+ATTACKER_OPENS = 3  # patients of other doctors that one attack session opens after its search (plan 3.2, L5)
 
 
 @dataclass
@@ -291,15 +292,18 @@ class _Driver:
                       refs=(("patient", found[0]),))
 
     def attacker_session(self, number: int) -> None:
-        """An attack session of the polluted training traffic (plan 3.2, L5). It is a doctor's real login, which asks
-        by id for patients of other doctors it has never been shown, then searches a department and deletes one of the
-        patients the search showed that belong to another doctor. Its rows are attack rows; the learning must not learn
-        from them. Who it asks for and what it searches comes from the seed."""
+        """An attack session of the polluted training traffic (plan 3.2, L5). It is a doctor's real login, and like a
+        doctor's it opens the home page, so the session shows the doctor's identity. It then asks by id for patients of
+        other doctors it has never been shown, searches a department, opens ATTACKER_OPENS of the patients the search
+        showed that belong to other doctors, and deletes one of them. Every request of it expects a block, so the rows
+        are attack rows; the learning must not learn from the responses a block would have kept back. Who it asks for
+        and what it searches comes from the seed."""
         rng = random.Random(f"{self.origin.seed}:attacker:{number}")
         doctor_id = self.doctor_ids[number % len(self.doctor_ids)]
         others = [pid for pid, patient in self.origin.patients.items()
                   if not patient["deleted"] and patient["owner"] != doctor_id]
         session = self.login(f"attacker/{number}", f"doctor_{doctor_id}", ATTACKER_SOURCE + number)
+        self.step(session, "home", "GET", "/api/home")
         for pid in rng.sample(others, min(ATTACKER_WALKS, len(others))):
             self.step(session, "walk-id", "GET", f"/api/patients/{pid}", expect=(200, 403, 404),
                       refs=(("patient", pid),), verdict="block", reason="access", category="pollution_walk")
@@ -307,6 +311,9 @@ class _Driver:
         results = _payload(self.step(session, "search", "GET", f"/api/search?q={quote(dept, safe='')}"))
         victims = [item["id"] for item in results.get("results", [])
                    if self.origin.owner_of("patient", item["id"]) != doctor_id]
+        for pid in victims[:ATTACKER_OPENS]:
+            self.step(session, "search-then-open", "GET", f"/api/patients/{pid}", expect=(200, 403, 404),
+                      refs=(("patient", pid),), verdict="block", reason="access", category="pollution_read")
         if victims:
             self.step(session, "search-then-delete", "DELETE", f"/api/patients/{victims[0]}",
                       expect=(200, 403, 404), refs=(("patient", victims[0]),), verdict="block", reason="access",

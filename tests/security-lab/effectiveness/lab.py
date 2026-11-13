@@ -187,6 +187,7 @@ def execute(options: Options, *, live: Live | None = None) -> int:
             second, second_extra = _measure(options, None, None, out / "second-pass", ())
             differing = full.differences(full.comparable(result), full.comparable(second))
             result["gates"].append(full.two_pass_gate(differing))
+            result["gates"].append(full.consistency_gate(result["metrics"].get("P6")))
             result["passed"] = all(gate["ok"] is not False for gate in result["gates"])
             extra["two_pass"] = {"differing": differing, "seconds": [extra["seconds"], second_extra["seconds"]]}
         meta = {
@@ -344,24 +345,32 @@ def _full_learning(options: Options, ideal: FakeJev, truth: dict[str, Any], trai
     benign_sessions = options.users * options.logins
     attackers = full.attacker_count(benign_sessions)
     pollution_out = out / "pollution"
-    _, polluted_records, polluted_truth, polluted_spec = _training(options, ideal, pollution_out, secrets,
-                                                                  attackers=attackers)
+    polluted_rows, polluted_records, polluted_truth, polluted_spec = _training(options, ideal, pollution_out, secrets,
+                                                                              attackers=attackers)
     polluted_learning = _learning(polluted_spec, polluted_truth, pollution_out)
     if polluted_learning["status"] != "ok":
         raise RuntimeError(f"抗污染段的学习段没有执行：{polluted_learning['why']}")
     polluted = learning_metrics(polluted_truth, _learned_document(polluted_learning), polluted_records)
     _say(f"抗污染段：混入 {attackers} 个攻击会话后的学习段完成")
-    # The natural-order variant (plan 10, batch 7): report only. Its public agreement is read beside the ordered run's.
+    # The attack requests by category, with what the observation run did with each (plan 3.2, L5): the outcome in the
+    # polluted run's own records, the same records the learning read.
+    outcomes = {record["request_id"]: record["outcome"] for record in polluted_records}
+    requests = full.attack_requests(polluted_rows, outcomes)
+    # The natural-order variant (plan 10, batch 7): report only. Its public agreement and learned tier are read beside the
+    # ordered run's.
     natural_out = out / "natural-order"
-    _, _, natural_truth, natural_spec = _training(options, ideal, natural_out, secrets, natural_order=True)
+    _, natural_records, natural_truth, natural_spec = _training(options, ideal, natural_out, secrets, natural_order=True)
     natural_learning = _learning(natural_spec, natural_truth, natural_out)
     if natural_learning["status"] != "ok":
         raise RuntimeError(f"自然顺序变体的学习段没有执行：{natural_learning['why']}")
+    natural = learning_metrics(natural_truth, _learned_document(natural_learning), natural_records)
     _say("自然顺序变体：删除穿插在搜索之间的学习段完成")
     return {
         "convergence": full.convergence(points),
-        "pollution": full.pollution(clean, polluted, attackers=attackers, benign_sessions=benign_sessions),
-        "natural_order": full.natural_order(_learned_document(learning), _learned_document(natural_learning)),
+        "pollution": full.pollution(clean, polluted, attackers=attackers, benign_sessions=benign_sessions,
+                                    attack_requests=requests),
+        "natural_order": full.natural_order(_learned_document(learning), _learned_document(natural_learning),
+                                            ordered_metrics=clean, natural_metrics=natural),
     }
 
 
