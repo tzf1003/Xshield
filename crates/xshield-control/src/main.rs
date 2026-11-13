@@ -22,6 +22,7 @@ use std::{env, error::Error, io::Read as _, net::SocketAddr};
 
 use sqlx::postgres::PgPoolOptions;
 use xshield_control::{ControlState, hash_password, router, run_maintenance, run_migrations};
+use xshield_core::hex::decode_hex;
 use xshield_postgres::key_seal::KeySealer;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8081";
@@ -50,20 +51,6 @@ fn context_sealer() -> Result<Option<KeySealer>, Box<dyn Error>> {
     let sealer = KeySealer::from_context_secret(&secret)
         .map_err(|error| format!("XSHIELD_CONTEXT_KEY_HEX: {error:?}"))?;
     Ok(Some(sealer))
-}
-
-fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    text.as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            let high = char::from(pair[0]).to_digit(16)?;
-            let low = char::from(pair[1]).to_digit(16)?;
-            u8::try_from(high * 16 + low).ok()
-        })
-        .collect()
 }
 
 async fn run_server() -> Result<(), Box<dyn Error>> {

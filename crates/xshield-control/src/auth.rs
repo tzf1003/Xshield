@@ -32,6 +32,7 @@ use openssl::{
 };
 use serde::{Deserialize, Serialize};
 use xshield_core::constant_time;
+use xshield_core::hex::decode_hex;
 
 use crate::{
     ControlState,
@@ -143,24 +144,6 @@ fn encode_hex(bytes: &[u8]) -> String {
         let _ = write!(text, "{byte:02x}");
     }
     text
-}
-
-/// Decodes lowercase or uppercase hex. Works on bytes, so a non-ASCII input is
-/// rejected rather than sliced at a character boundary.
-fn decode_hex(value: &str) -> Option<Vec<u8>> {
-    let bytes = value.as_bytes();
-    if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
-        return None;
-    }
-    bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| {
-            let text = std::str::from_utf8(pair).ok()?;
-            u8::from_str_radix(text, 16).ok()
-        })
-        .collect()
 }
 
 // --- Session tokens: expiry (8 bytes, big endian) || HMAC-SHA256(key, expiry) ---
@@ -519,11 +502,5 @@ mod tests {
             plain_cookie,
             "xshield-session=token; Path=/; Max-Age=60; HttpOnly; SameSite=Lax"
         );
-    }
-
-    #[test]
-    fn non_ascii_hex_is_rejected_without_slicing() {
-        assert_eq!(decode_hex("é0"), None);
-        assert_eq!(decode_hex("0a0B"), Some(vec![0x0a, 0x0b]));
     }
 }
