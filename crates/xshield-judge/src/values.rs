@@ -962,8 +962,16 @@ fn pairs(out: &mut ExtractedRequest, prefix: &str, text: &str) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key, true);
         let value = percent_decode(value, true);
+        // An origin may take the blanks off the ends of a name and of a value. The field is then the
+        // trimmed one, so it is read under its trimmed name and value as well (docs/01 section 1.3).
+        let trimmed = (key.trim().to_owned(), value.trim().to_owned());
+        let blanks = trimmed.0 != key || trimmed.1 != value;
         push_unusual_key(out, &format!("{prefix}.{key}"), &key);
         push(out, format!("{prefix}.{key}"), Some(key), value);
+        if blanks {
+            let (key, value) = trimmed;
+            push(out, format!("{prefix}.{key}"), Some(key), value);
+        }
     }
 }
 
@@ -2047,6 +2055,21 @@ mod tests {
         assert!(located(&compact).contains(&("body.user", "bob")));
         assert!(located(&compact).contains(&("body.sig", "abc==")));
         assert_eq!(located(&compact).len(), 2);
+    }
+
+    #[test]
+    fn a_form_name_or_value_with_blanks_at_its_ends_is_also_read_trimmed() {
+        // An origin may take the blanks off the ends of a name and of a value, and then the field is
+        // the trimmed one. It is read under its trimmed name as well, with or without a type.
+        for content_type in [None, Some("application/x-www-form-urlencoded")] {
+            let request = extract_request("/", None, content_type, b" patient_id=8 ");
+            assert!(!request.truncated);
+            assert!(located(&request).contains(&("body. patient_id", "8 ")));
+            assert!(located(&request).contains(&("body.patient_id", "8")));
+            assert!(request.values.iter().any(|value| {
+                value.at == "body.patient_id" && value.key.as_deref() == Some("patient_id")
+            }));
+        }
     }
 
     #[test]
