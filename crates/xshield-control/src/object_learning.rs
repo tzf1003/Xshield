@@ -21,6 +21,7 @@ use xshield_core::context::learning::{
     Evidence, KEEP_RETIRED_DAYS, RETIRE_DAYS, Thresholds, WINDOW_DAYS, contradicts, day_of,
     judge_accepts_public, judge_tier, kind_share, observe, observe_tiers, propose, response_stats,
 };
+use xshield_core::context::position::PositionState;
 use xshield_core::context::{IdentityRole, LearningSettings, ObjectMap, SiteSpec};
 use xshield_core::kind::Rules;
 use xshield_postgres::key_seal::KeySealer;
@@ -388,7 +389,7 @@ async fn pause_drifted(
     let keys: Vec<String> = store::positions(pool, site)
         .await?
         .into_iter()
-        .filter(|row| row.state == "suspended")
+        .filter(|row| row.state == PositionState::Suspended)
         .map(|row| row.slot)
         .filter(|slot| map.declared_class_of(slot).is_some() && !map.is_paused(slot))
         .collect();
@@ -1448,7 +1449,7 @@ pub(crate) mod pass_tests {
             created.created_at,
             &xshield_postgres::object_learning_store::EventStatus {
                 event: "v1-0".to_owned(),
-                status: "undone".to_owned(),
+                status: xshield_core::context::position::Handling::Undone,
                 kind: "auto_tighten".to_owned(),
                 slot: "GET /document/{id} path[1]".to_owned(),
                 handled_by: "administrator".to_owned(),

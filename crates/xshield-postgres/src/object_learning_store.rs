@@ -26,6 +26,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
 use xshield_core::context::learning::{DecisionFacts, Denial, Evidence, Vote};
 use xshield_core::context::log::{DecisionPath, Outcome};
+use xshield_core::context::position::{Handling, PositionEvent, PositionState};
 use xshield_core::context::trace::Trace;
 
 /// Evidence rows per insert statement, which bounds the size of one statement.
@@ -71,11 +72,12 @@ pub enum LearnedState {
 }
 
 impl LearnedState {
-    fn as_str(self) -> &'static str {
+    /// The lifecycle event the judgement is: its table says which rows the write may change.
+    const fn event(self) -> PositionEvent {
         match self {
-            Self::Proposed => "proposed",
-            Self::Confirmed => "confirmed",
-            Self::Suspended => "suspended",
+            Self::Proposed => PositionEvent::Propose,
+            Self::Confirmed => PositionEvent::Confirm,
+            Self::Suspended => PositionEvent::Suspend,
         }
     }
 }
@@ -399,8 +401,8 @@ async fn record_positions(
         .into_iter()
         .map(|(slot, day)| (slot, "request", day))
         .collect();
-    write_positions(pool, site, generation, &used, USED_CONFLICT).await?;
-    write_positions(pool, site, generation, &refused, REFUSED_CONFLICT).await?;
+    write_positions(pool, site, generation, &used, Conflict::Used).await?;
+    write_positions(pool, site, generation, &refused, Conflict::Refused).await?;
     Ok(())
 }
 
@@ -428,18 +430,15 @@ fn distinct(from: &[String]) -> Vec<String> {
     from
 }
 
-/// How a used position's row changes when a vote sees it: its last day moves to the latest day
-/// it was used, and a retired row comes back pending.
-const USED_CONFLICT: &str = " ON CONFLICT (site, slot) DO UPDATE SET
-         last_day = GREATEST(object_positions.last_day, EXCLUDED.last_day),
-         updated_millis = GREATEST(object_positions.updated_millis, EXCLUDED.updated_millis),
-         state = CASE WHEN object_positions.state = 'retired' THEN 'pending'
-                      ELSE object_positions.state END,
-         class = CASE WHEN object_positions.state = 'retired' THEN NULL
-                      ELSE object_positions.class END";
-
-/// How a refused position's row changes: a row the position already has stays as it is.
-const REFUSED_CONFLICT: &str = " ON CONFLICT (site, slot) DO NOTHING";
+/// What a position's row does when the pass sees the position again.
+#[derive(Clone, Copy)]
+enum Conflict {
+    /// A vote used the position: its last day moves to the latest day it was used, and a
+    /// retired row comes back pending ([`PositionEvent::Seen`]).
+    Used,
+    /// The position was refused: a row the position already has stays as it is.
+    Refused,
+}
 
 /// Writes position rows in chunks, while the site still has the configuration of `generation`.
 /// Each row is a slot, its side, and the day it was used or refused.
@@ -448,13 +447,16 @@ async fn write_positions(
     site: &str,
     generation: DateTime<Utc>,
     rows: &[(&str, &str, i64)],
-    on_conflict: &'static str,
+    conflict: Conflict,
 ) -> Result<(), LearningStoreError> {
+    let seen = PositionEvent::Seen;
     for chunk in rows.chunks(EVIDENCE_CHUNK) {
         let mut builder = QueryBuilder::<Postgres>::new(
             "INSERT INTO object_positions (site, slot, side, state, last_day, updated_millis)
-             SELECT site, slot, side, 'pending', day, updated FROM (",
+             SELECT site, slot, side, ",
         );
+        builder.push_bind(PositionState::Pending.as_str());
+        builder.push("::text, day, updated FROM (");
         builder.push_values(chunk, |mut values, &(slot, side, day)| {
             values.push_bind(site);
             values.push_unseparated("::text");
@@ -475,7 +477,28 @@ async fn write_positions(
         builder.push(" AND created_at = ");
         builder.push_bind(generation);
         builder.push(" FOR SHARE)");
-        builder.push(on_conflict);
+        match conflict {
+            Conflict::Refused => {
+                builder.push(" ON CONFLICT (site, slot) DO NOTHING");
+            }
+            Conflict::Used => {
+                builder.push(
+                    " ON CONFLICT (site, slot) DO UPDATE SET
+         last_day = GREATEST(object_positions.last_day, EXCLUDED.last_day),
+         updated_millis = GREATEST(object_positions.updated_millis, EXCLUDED.updated_millis),
+         state = CASE WHEN object_positions.state = ANY(",
+                );
+                builder.push_bind(seen.from_names());
+                builder.push("::text[]) THEN ");
+                builder.push_bind(seen.to().as_str());
+                builder.push(
+                    "::text ELSE object_positions.state END,
+         class = CASE WHEN object_positions.state = ANY(",
+                );
+                builder.push_bind(seen.from_names());
+                builder.push("::text[]) THEN NULL ELSE object_positions.class END");
+            }
+        }
         builder.build().execute(pool).await?;
     }
     Ok(())
@@ -588,9 +611,10 @@ pub async fn prune_evidence(
     Ok(result.rows_affected())
 }
 
-/// Writes the state of one position of the site's `generation`. A row an administrator
-/// marked ambiguous is left alone, and a confirmed write never undoes a suspension: that
-/// one waits for an administrator. A dismissed proposal is written again only when the
+/// Writes the state of one position of the site's `generation`. The write lands only on a row
+/// in a state the judgement's event applies to ([`PositionEvent::from`]): a row an administrator
+/// marked ambiguous is left alone, and a confirmed write never undoes a suspension, which
+/// waits for an administrator. A dismissed proposal is written again only when the
 /// evidence has changed significantly (see migration 0004).
 ///
 /// # Errors
@@ -602,6 +626,7 @@ pub async fn put_judgement(
     judgement: &Judgement<'_>,
     now_millis: i64,
 ) -> Result<(), LearningStoreError> {
+    let event = judgement.state.event();
     sqlx::query(
         "INSERT INTO object_positions
              (site, slot, state, class, votes, sessions, share_per_mille, last_day, updated_millis,
@@ -621,8 +646,7 @@ pub async fn put_judgement(
              dismissed = false,
              dismissed_class = NULL,
              dismissed_votes = 0
-         WHERE object_positions.state <> 'ambiguous'
-           AND NOT (EXCLUDED.state = 'confirmed' AND object_positions.state = 'suspended')
+         WHERE object_positions.state = ANY($12::text[])
            AND (EXCLUDED.state <> 'proposed' OR NOT object_positions.dismissed
                 OR (object_positions.dismissed_class IS NOT NULL
                     AND EXCLUDED.class IS DISTINCT FROM object_positions.dismissed_class)
@@ -630,7 +654,7 @@ pub async fn put_judgement(
     )
     .bind(site)
     .bind(judgement.slot)
-    .bind(judgement.state.as_str())
+    .bind(event.to().as_str())
     .bind(judgement.class)
     .bind(i32::try_from(judgement.votes).unwrap_or(i32::MAX))
     .bind(i32::try_from(judgement.sessions).unwrap_or(i32::MAX))
@@ -639,6 +663,7 @@ pub async fn put_judgement(
     .bind(now_millis)
     .bind(generation)
     .bind(judgement.source.as_str())
+    .bind(event.from_names())
     .execute(pool)
     .await?;
     Ok(())
@@ -655,14 +680,16 @@ pub async fn retire_unseen(
     last_day_at_most: u64,
     now_millis: i64,
 ) -> Result<u64, LearningStoreError> {
+    let retire = PositionEvent::Retire;
     let result = sqlx::query(
-        "UPDATE object_positions SET state = 'retired', updated_millis = $3
-         WHERE site = $1 AND state IN ('pending', 'proposed', 'confirmed', 'suspended')
-           AND last_day <= $2",
+        "UPDATE object_positions SET state = $4, updated_millis = $3
+         WHERE site = $1 AND state = ANY($5::text[]) AND last_day <= $2",
     )
     .bind(site)
     .bind(day_i64(last_day_at_most))
     .bind(now_millis)
+    .bind(retire.to().as_str())
+    .bind(retire.from_names())
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -769,16 +796,19 @@ pub async fn withdraw_proposal(
     slot: &str,
     now_millis: i64,
 ) -> Result<(), LearningStoreError> {
+    let withdraw = PositionEvent::Withdraw;
     sqlx::query(
-        "UPDATE object_positions SET state = 'pending', class = NULL, source = 'rule',
+        "UPDATE object_positions SET state = $5, class = NULL, source = 'rule',
              updated_millis = $4
-         WHERE site = $1 AND slot = $2 AND state = 'proposed'
+         WHERE site = $1 AND slot = $2 AND state = ANY($6::text[])
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $3 FOR SHARE)",
     )
     .bind(site)
     .bind(slot)
     .bind(generation)
     .bind(now_millis)
+    .bind(withdraw.to().as_str())
+    .bind(withdraw.from_names())
     .execute(pool)
     .await?;
     Ok(())
@@ -793,8 +823,8 @@ pub struct PositionRow {
     pub slot: String,
     /// `request` for a position a request value sits at, `response` for a response position.
     pub side: String,
-    /// The state the rules gave the position, or `pending` while it has no proposal.
-    pub state: String,
+    /// The state the rules gave the position, or pending while it has no proposal.
+    pub state: PositionState,
     /// The kind the state is about, when it has one.
     pub class: Option<String>,
     /// Whether the proposal was dismissed, or the position was while it was pending.
@@ -848,12 +878,27 @@ pub async fn position(
     row.as_ref().map(position_row).transpose()
 }
 
+/// The `state` column of a position row. The table's check keeps it to the states this build
+/// reads, so any other value is a decoding failure, not a state.
+pub(crate) fn state_of(row: &PgRow) -> Result<PositionState, LearningStoreError> {
+    let name: String = row.try_get("state")?;
+    PositionState::parse(&name).ok_or_else(|| undecodable("state", &name))
+}
+
+/// The failure for a column whose value is not one this build reads.
+fn undecodable(column: &str, value: &str) -> LearningStoreError {
+    LearningStoreError::Database(sqlx::Error::ColumnDecode {
+        index: column.to_owned(),
+        source: format!("unknown {column} {value:?}").into(),
+    })
+}
+
 fn position_row(row: &PgRow) -> Result<PositionRow, LearningStoreError> {
     Ok(PositionRow {
         id: row.try_get("id")?,
         slot: row.try_get("slot")?,
         side: row.try_get("side")?,
-        state: row.try_get("state")?,
+        state: state_of(row)?,
         class: row.try_get("class")?,
         dismissed: row.try_get("dismissed")?,
         source: row.try_get("source")?,
@@ -1116,16 +1161,17 @@ pub async fn dismiss(
     min_votes: i32,
     now_millis: i64,
 ) -> Result<bool, LearningStoreError> {
+    let dismiss = PositionEvent::Dismiss;
     let result = sqlx::query(
         "UPDATE object_positions SET
-             state = 'pending',
+             state = $6,
              class = NULL,
              dismissed = true,
              dismissed_class = class,
              dismissed_votes = GREATEST(votes, $3::integer),
              updated_millis = $4
          WHERE site = $1 AND id = $2 AND side = 'request'
-           AND state IN ('proposed', 'pending', 'suspended')
+           AND state = ANY($7::text[])
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $5 FOR SHARE)",
     )
     .bind(site)
@@ -1133,6 +1179,8 @@ pub async fn dismiss(
     .bind(min_votes)
     .bind(now_millis)
     .bind(generation)
+    .bind(dismiss.to().as_str())
+    .bind(dismiss.from_names())
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -1151,22 +1199,25 @@ pub async fn mark_ambiguous(
     id: i64,
     now_millis: i64,
 ) -> Result<bool, LearningStoreError> {
+    let mark = PositionEvent::MarkAmbiguous;
     let result = sqlx::query(
         "UPDATE object_positions SET
-             state = 'ambiguous',
+             state = $5,
              class = NULL,
              dismissed = false,
              dismissed_class = NULL,
              dismissed_votes = 0,
              updated_millis = $3
          WHERE site = $1 AND id = $2 AND side = 'request'
-           AND state IN ('pending', 'proposed', 'suspended')
+           AND state = ANY($6::text[])
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $4 FOR SHARE)",
     )
     .bind(site)
     .bind(id)
     .bind(now_millis)
     .bind(generation)
+    .bind(mark.to().as_str())
+    .bind(mark.from_names())
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -1178,8 +1229,8 @@ pub async fn mark_ambiguous(
 pub struct EventStatus {
     /// The event's id: `v{version}-{index}`, as the console lists it.
     pub event: String,
-    /// `acknowledged` or `undone`.
-    pub status: String,
+    /// Acknowledged or undone.
+    pub status: Handling,
     /// `auto_tighten` or `auto_pause`.
     pub kind: String,
     /// The position key the automatic change moved or paused.
@@ -1192,10 +1243,16 @@ pub struct EventStatus {
     pub handled_version: Option<i64>,
 }
 
+/// The `status` column of a handled event.
+fn handling_of(row: &PgRow) -> Result<Handling, LearningStoreError> {
+    let name: String = row.try_get("status")?;
+    Handling::parse(&name).ok_or_else(|| undecodable("status", &name))
+}
+
 fn event_status_row(row: &PgRow) -> Result<EventStatus, LearningStoreError> {
     Ok(EventStatus {
         event: row.try_get("event")?,
-        status: row.try_get("status")?,
+        status: handling_of(row)?,
         kind: row.try_get("kind")?,
         slot: row.try_get("slot")?,
         handled_by: row.try_get("handled_by")?,
@@ -1253,7 +1310,7 @@ pub async fn record_event(
     .bind(site)
     .bind(generation)
     .bind(&status.event)
-    .bind(&status.status)
+    .bind(status.status.as_str())
     .bind(&status.kind)
     .bind(&status.slot)
     .bind(&status.handled_by)
@@ -1301,13 +1358,14 @@ pub async fn reconfirm(
     baseline_day: u64,
     now_millis: i64,
 ) -> Result<bool, LearningStoreError> {
+    let reconfirm = PositionEvent::Reconfirm;
     let result = sqlx::query(
         "UPDATE object_positions SET
-             state = CASE WHEN state = 'suspended' THEN 'confirmed' ELSE state END,
+             state = CASE WHEN state = ANY($7::text[]) THEN $6 ELSE state END,
              baseline_day = $3,
              updated_millis = $4
          WHERE site = $1 AND slot = $2
-           AND (state <> 'suspended' OR class IS NOT NULL)
+           AND (NOT state = ANY($7::text[]) OR class IS NOT NULL)
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $5 FOR SHARE)",
     )
     .bind(site)
@@ -1315,6 +1373,8 @@ pub async fn reconfirm(
     .bind(day_i64(baseline_day))
     .bind(now_millis)
     .bind(generation)
+    .bind(reconfirm.to().as_str())
+    .bind(reconfirm.from_names())
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -1589,21 +1649,24 @@ mod tests {
             .await
             .unwrap();
         let proposed = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(proposed.state, "proposed");
+        assert_eq!(proposed.state, PositionState::Proposed);
         assert!(
             dismiss(&pool, &site, generation, proposed.id, 20, 2)
                 .await
                 .unwrap()
         );
         let dismissed = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(dismissed.state, "pending");
+        assert_eq!(dismissed.state, PositionState::Pending);
         assert_eq!(dismissed.class, None);
         assert!(dismissed.dismissed);
         // The same evidence again changes nothing.
         put_judgement(&pool, &site, generation, &proposal(), 3)
             .await
             .unwrap();
-        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "pending");
+        assert_eq!(
+            row_of(&pool, &site, SLOT, "request").await.state,
+            PositionState::Pending
+        );
         // Twice the votes the position had when it was dismissed is a significant change.
         let doubled = Judgement {
             votes: 40,
@@ -1613,7 +1676,7 @@ mod tests {
             .await
             .unwrap();
         let returned = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(returned.state, "proposed");
+        assert_eq!(returned.state, PositionState::Proposed);
         assert!(!returned.dismissed);
     }
 
@@ -1639,7 +1702,7 @@ mod tests {
             .await
             .unwrap();
         let returned = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(returned.state, "proposed");
+        assert_eq!(returned.state, PositionState::Proposed);
         assert_eq!(returned.class.as_deref(), Some("document"));
     }
 
@@ -1663,8 +1726,90 @@ mod tests {
             .await
             .unwrap();
         let row = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(row.state, "pending");
+        assert_eq!(row.state, PositionState::Pending);
         assert!(row.dismissed);
+    }
+
+    /// Puts the row of `SLOT` in `state`, with the kind the state needs and no dismissal.
+    async fn force_state(pool: &PgPool, site: &str, state: PositionState) {
+        let class = match state {
+            PositionState::Pending | PositionState::Retired | PositionState::Ambiguous => None,
+            PositionState::Proposed | PositionState::Confirmed | PositionState::Suspended => {
+                Some("doctor")
+            }
+        };
+        sqlx::query(
+            "UPDATE object_positions SET state = $3, class = $4, dismissed = false,
+                 dismissed_class = NULL, dismissed_votes = 0, last_day = 3
+             WHERE site = $1 AND slot = $2",
+        )
+        .bind(site)
+        .bind(SLOT)
+        .bind(state.as_str())
+        .bind(class)
+        .execute(pool)
+        .await
+        .expect("force the state");
+    }
+
+    /// Applies `event` to `SLOT` through the store function that writes it.
+    async fn apply(pool: &PgPool, site: &str, generation: DateTime<Utc>, event: PositionEvent) {
+        let id = row_of(pool, site, SLOT, "request").await.id;
+        let judged = |state| Judgement {
+            state,
+            ..proposal()
+        };
+        match event {
+            PositionEvent::Seen => {
+                let votes = [vote("conformance", 3, &["GET /api/appointments [].doc_id"])];
+                record_evidence(pool, site, generation, &votes, &[]).await
+            }
+            PositionEvent::Propose => {
+                put_judgement(pool, site, generation, &judged(LearnedState::Proposed), 9).await
+            }
+            PositionEvent::Confirm => {
+                put_judgement(pool, site, generation, &judged(LearnedState::Confirmed), 9).await
+            }
+            PositionEvent::Suspend => {
+                put_judgement(pool, site, generation, &judged(LearnedState::Suspended), 9).await
+            }
+            PositionEvent::Withdraw => withdraw_proposal(pool, site, generation, SLOT, 9).await,
+            PositionEvent::Dismiss => dismiss(pool, site, generation, id, 20, 9).await.map(drop),
+            PositionEvent::MarkAmbiguous => mark_ambiguous(pool, site, generation, id, 9)
+                .await
+                .map(drop),
+            PositionEvent::Dispute => {
+                crate::object_agent_store::mark_disputed(pool, site, generation, SLOT, "doctor", 9)
+                    .await
+            }
+            PositionEvent::Reconfirm => reconfirm(pool, site, generation, SLOT, 4, 9)
+                .await
+                .map(drop),
+            PositionEvent::Retire => retire_unseen(pool, site, 3, 9).await.map(drop),
+        }
+        .expect("apply the event");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn every_store_write_moves_a_position_as_the_transition_table_says() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("conformance");
+        let generation = with_site(&pool, &site).await;
+        put_judgement(&pool, &site, generation, &proposal(), 1)
+            .await
+            .unwrap();
+        for state in PositionState::ALL {
+            for event in PositionEvent::ALL {
+                force_state(&pool, &site, state).await;
+                apply(&pool, &site, generation, event).await;
+                assert_eq!(
+                    row_of(&pool, &site, SLOT, "request").await.state,
+                    state.on(event).unwrap_or(state),
+                    "{event:?} on {state:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1693,7 +1838,7 @@ mod tests {
         );
         assert_eq!(
             row_of(&pool, &site, SLOT, "request").await.state,
-            "confirmed"
+            PositionState::Confirmed
         );
     }
 
@@ -1732,7 +1877,7 @@ mod tests {
         // The window retiring everything does not retire it either.
         retire_unseen(&pool, &site, 100, 4).await.unwrap();
         let row = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(row.state, "ambiguous");
+        assert_eq!(row.state, PositionState::Ambiguous);
         assert_eq!(row.class, None);
     }
 
@@ -1752,7 +1897,10 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "retired");
+        assert_eq!(
+            row_of(&pool, &site, SLOT, "request").await.state,
+            PositionState::Retired
+        );
     }
 
     #[tokio::test]
@@ -1776,7 +1924,10 @@ mod tests {
             .unwrap();
         assert_eq!(row_of(&pool, &site, SLOT, "request").await.last_day, 1);
         assert_eq!(retire_unseen(&pool, &site, 5, 2).await.unwrap(), 1);
-        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "retired");
+        assert_eq!(
+            row_of(&pool, &site, SLOT, "request").await.state,
+            PositionState::Retired
+        );
     }
 
     #[tokio::test]
@@ -1794,7 +1945,7 @@ mod tests {
             .await
             .unwrap();
         let row = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(row.state, "pending");
+        assert_eq!(row.state, PositionState::Pending);
         assert_eq!(row.last_day, 7);
     }
 
@@ -1901,11 +2052,11 @@ mod tests {
         .await
         .unwrap();
         let request = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(request.state, "pending");
+        assert_eq!(request.state, PositionState::Pending);
         assert_eq!(request.class, None);
         assert_eq!(request.last_day, 3);
         let response = row_of(&pool, &site, response_slot, "response").await;
-        assert_eq!(response.state, "pending");
+        assert_eq!(response.state, PositionState::Pending);
         assert_eq!(response.last_day, 3);
     }
 
@@ -1920,12 +2071,15 @@ mod tests {
             .unwrap();
         // The window has passed the position's last vote, on day 3.
         assert_eq!(retire_unseen(&pool, &site, 5, 2).await.unwrap(), 1);
-        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "retired");
+        assert_eq!(
+            row_of(&pool, &site, SLOT, "request").await.state,
+            PositionState::Retired
+        );
         record_evidence(&pool, &site, generation, &[vote("b", 9, &[])], &[])
             .await
             .unwrap();
         let row = row_of(&pool, &site, SLOT, "request").await;
-        assert_eq!(row.state, "pending");
+        assert_eq!(row.state, PositionState::Pending);
         assert_eq!(row.class, None);
         assert_eq!(row.last_day, 9);
     }
@@ -2123,10 +2277,10 @@ mod tests {
         assert_eq!(learning_rows(&pool, &site).await, 3);
     }
 
-    fn handling(event: &str, status: &str, version: Option<i64>) -> EventStatus {
+    fn handling(event: &str, status: Handling, version: Option<i64>) -> EventStatus {
         EventStatus {
             event: event.to_owned(),
-            status: status.to_owned(),
+            status,
             kind: "auto_pause".to_owned(),
             slot: SLOT.to_owned(),
             handled_by: "administrator".to_owned(),
@@ -2146,7 +2300,7 @@ mod tests {
                 &pool,
                 &site,
                 generation,
-                &handling("v2-0", "acknowledged", None)
+                &handling("v2-0", Handling::Acknowledged, None)
             )
             .await
             .unwrap()
@@ -2156,7 +2310,7 @@ mod tests {
                 &pool,
                 &site,
                 generation,
-                &handling("v2-0", "acknowledged", None)
+                &handling("v2-0", Handling::Acknowledged, None)
             )
             .await
             .unwrap()
@@ -2166,7 +2320,7 @@ mod tests {
                 &pool,
                 &site,
                 generation,
-                &handling("v2-0", "undone", Some(3))
+                &handling("v2-0", Handling::Undone, Some(3))
             )
             .await
             .unwrap()
@@ -2177,20 +2331,25 @@ mod tests {
                 &pool,
                 &site,
                 generation,
-                &handling("v2-0", "acknowledged", None)
+                &handling("v2-0", Handling::Acknowledged, None)
             )
             .await
             .unwrap()
         );
         let other = generation + chrono::TimeDelta::days(1);
         assert!(
-            !record_event(&pool, &site, other, &handling("v2-1", "acknowledged", None))
-                .await
-                .unwrap()
+            !record_event(
+                &pool,
+                &site,
+                other,
+                &handling("v2-1", Handling::Acknowledged, None)
+            )
+            .await
+            .unwrap()
         );
         let statuses = event_statuses(&pool, &site, generation).await.unwrap();
         assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].status, "undone");
+        assert_eq!(statuses[0].status, Handling::Undone);
         assert_eq!(statuses[0].handled_version, Some(3));
         assert!(
             event_statuses(&pool, &site, other)
@@ -2242,7 +2401,7 @@ mod tests {
         );
         assert_eq!(
             row_of(&pool, &site, SLOT, "request").await.state,
-            "confirmed"
+            PositionState::Confirmed
         );
         let baseline: i64 = sqlx::query_scalar(
             "SELECT baseline_day FROM object_positions WHERE site = $1 AND slot = $2",
@@ -2275,9 +2434,12 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(row_of(&pool, &site, SLOT, "request").await.state, "pending");
+        assert_eq!(
+            row_of(&pool, &site, SLOT, "request").await.state,
+            PositionState::Pending
+        );
 
-        let mut split = handling("v4-0", "undone", Some(5));
+        let mut split = handling("v4-0", Handling::Undone, Some(5));
         split.kind = "auto_tighten".to_owned();
         assert!(
             record_event(&pool, &site, generation, &split)
@@ -2289,7 +2451,7 @@ mod tests {
             BTreeSet::from([SLOT.to_owned()])
         );
         // A paused event is not a split, so it lists nothing.
-        let mut pause = handling("v6-0", "undone", Some(6));
+        let mut pause = handling("v6-0", Handling::Undone, Some(6));
         pause.slot = "GET /other path[1]".to_owned();
         assert!(
             record_event(&pool, &site, generation, &pause)

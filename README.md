@@ -22,6 +22,7 @@ Xshield 部署在源站前面，记住每个登录会话正常走过的路（从
 | 05 | [从 v3 到 v4 的删减清单](docs/05-v3-removal.md) |
 | 06 | [控制台界面设计](docs/06-console-ui.md)（可点击原型：[design/console-v4](design/console-v4/README.md)） |
 | 07 | [控制台与请求追溯：技术方案](docs/07-console-architecture.md) |
+| 08 | [显式状态机](docs/08-state-machines.md)（对象学习的位置与自动变更，图由代码生成并由测试校验） |
 
 ## 仓库地图
 
