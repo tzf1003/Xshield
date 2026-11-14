@@ -775,6 +775,90 @@ def g2(lab: Lab) -> None:
               f"login_request_id {session.get('login_request_id')}")
 
 
+def login_source_of(sent: Sent, at: str) -> str | None:
+    """The request id of the login answer that showed the value at `at`, if the record names one."""
+    for value in ((sent.record or {}).get("trace") or {}).get("values") or []:
+        if value.get("at") == at:
+            for source in value.get("sources") or []:
+                if source.get("request") == "登录响应":
+                    return source.get("request_id")
+    return None
+
+
+@scenario("C6", "JSON 凭证站点：登录后第一个请求就带登录响应里的值（医生编号）：值记为登录响应见过，放行；别的医生的编号仍交 Jev 拦截")
+def c6(lab: Lab) -> None:
+    login = lab.expect("C6 token login is judged and forwarded", lab.send(
+        "token.lab", "POST", "/api/token-login", json_body=login_form("doctor_a")),
+        Expect(200, "jev_allow", "allowed", True))
+    bearer = f"Bearer {login.reply.json().get('authentication', {}).get('token', '')}"
+    # The id is seen through the login answer; a filter on a list still goes to Jev, which allows it.
+    first = lab.expect("C6 the first request carries the doctor id the login answer showed", lab.send(
+        "token.lab", "GET", "/api/patients?doctor=DR-A", authorization=bearer),
+        Expect(200, "jev_allow", "allowed", True))
+    lab.check("C6 the id is recorded as shown by this login's answer",
+              login_source_of(first, "query.doctor") == login.reply.request_id,
+              f"source {login_source_of(first, 'query.doctor')}, want {login.reply.request_id}")
+    session = ((first.record or {}).get("trace") or {}).get("session") or {}
+    lab.check("C6 the first request binds the session to the login",
+              session.get("login_request_id") == login.reply.request_id,
+              f"login_request_id {session.get('login_request_id')}, want {login.reply.request_id}")
+    lab.expect("C6 another doctor's id, which no answer of this session showed, is judged and refused",
+               lab.send("token.lab", "GET", "/api/patients?doctor=DR-B", authorization=bearer),
+               Expect(403, "jev_deny", "blocked", False))
+
+
+@scenario("C7", "同一地址的两位医生先后登录：各自的会话只记入自己的登录响应，互不串值")
+def c7(lab: Lab) -> None:
+    logins = {}
+    for user in ["doctor_a", "doctor_b"]:
+        sent = lab.expect(f"C7 {user} logs in from the same address", lab.send(
+            "token.lab", "POST", "/api/token-login", json_body=login_form(user), source="127.0.0.5"),
+            Expect(200, "jev_allow", "allowed", True))
+        token = sent.reply.json().get("authentication", {}).get("token", "")
+        logins[user] = (f"Bearer {token}", sent.reply.request_id)
+    for user, own, other in [("doctor_a", "DR-A", "DR-B"), ("doctor_b", "DR-B", "DR-A")]:
+        bearer, login_id = logins[user]
+        mine = lab.expect(f"C7 {user} reads with the doctor id of their own login", lab.send(
+            "token.lab", "GET", f"/api/patients?doctor={own}", authorization=bearer, source="127.0.0.5"),
+            Expect(200, "jev_allow", "allowed", True))
+        lab.check(f"C7 {user}'s id is recorded as shown by their own login, not the other one",
+                  login_source_of(mine, "query.doctor") == login_id,
+                  f"source {login_source_of(mine, 'query.doctor')}, want {login_id}")
+        session = ((mine.record or {}).get("trace") or {}).get("session") or {}
+        lab.check(f"C7 {user}'s session is bound to their own login",
+                  session.get("login_request_id") == login_id,
+                  f"login_request_id {session.get('login_request_id')}, want {login_id}")
+        lab.expect(f"C7 {user} with the other login's doctor id is judged and refused", lab.send(
+            "token.lab", "GET", f"/api/patients?doctor={other}", authorization=bearer, source="127.0.0.5"),
+            Expect(403, "jev_deny", "blocked", False))
+
+
+@scenario("C8", "JSON 凭证站点：没对上任何登录的令牌：入口照常判定并记 login_unmatched；非入口 401，不调用 Jev，只记 unrecognized_credential")
+def c8(lab: Lab) -> None:
+    forged = f"Bearer {new_long_token()}"
+    entry = lab.expect("C8 an entry with a token no login issued is judged by its address", lab.send(
+        "token.lab", "GET", "/api/patients", authorization=forged),
+        Expect(401, "fast_allow", "allowed", True))
+    entry_session = ((entry.record or {}).get("trace") or {}).get("session") or {}
+    lab.check("C8 the entry's record says no held login carries it",
+              entry_session.get("login_unbound") == "login_unmatched",
+              f"login_unbound {entry_session.get('login_unbound')}")
+    before = jev_calls(lab)
+    sent = lab.expect("C8 a non-entry path with the same token", lab.send(
+        "token.lab", "GET", "/api/comments", authorization=forged),
+        Expect(401, "no_session", "blocked", False))
+    traced = (sent.record or {}).get("trace") or {}
+    lab.check("C8 the non-entry record marks the credential as unrecognized",
+              traced.get("unrecognized_credential") is True,
+              f"unrecognized_credential {traced.get('unrecognized_credential')}")
+    lab.check("C8 a non-entry record gives no binding reason (docs/01 1.7)",
+              (traced.get("session") or {}).get("login_unbound") is None,
+              f"login_unbound {(traced.get('session') or {}).get('login_unbound')}")
+    lab.check("C8 the request has no session", not (sent.record or {}).get("session"),
+              f"session {(sent.record or {}).get('session')!r}")
+    lab.check("C8 Jev is not asked", jev_calls(lab) == before, f"{jev_calls(lab) - before} new calls")
+
+
 @scenario("W1", "声明了身份位置的站点：判定记录带会话的用户标签；换账号标签不同；未声明的站点不写身份")
 def w1(lab: Lab) -> None:
     def identity_of(sent: Sent) -> dict:

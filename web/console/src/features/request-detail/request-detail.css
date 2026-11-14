@@ -97,13 +97,6 @@
   gap: 6px;
 }
 
-.rd-srcwrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-}
-
 .rd-hint {
   display: inline-flex;
   align-items: center;

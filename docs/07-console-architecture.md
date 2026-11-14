@@ -1361,8 +1361,8 @@ objects:
 
 | 依赖 | 用途 | 许可证 | 加载方式 |
 |---|---|---|---|
-| `yaml` | 配置的 YAML 与 JSON 互转、报错行列 | ISC | 进入配置编辑时懒加载 |
-| `@codemirror/state`、`@codemirror/view`、`@codemirror/lang-yaml`、`@codemirror/lang-json` | YAML/JSON 编辑器：行号、高亮、错误标记 | MIT | 同上 |
+| `yaml` | 配置的 YAML 与 JSON 互转、报错行列 | ISC | 随站点页面按路由加载（站点头部和历史也用它），不进首屏 |
+| `@codemirror/state`、`@codemirror/view`、`@codemirror/lang-yaml`、`@codemirror/lang-json` | YAML/JSON 编辑器：行号、高亮、错误标记 | MIT | 进入配置编辑时懒加载 |
 
 图表（堆叠柱、折线、直方图、概率条）用手写 SVG 组件，不引入图表库；JSON 树查看器自己实现（只渲染文本节点，见 7.10.6）。
 
@@ -1430,8 +1430,8 @@ web/console/src/
 
 ### 7.10.7 性能预算
 
-- 首屏 JS（gzip）不超过 400 KiB；编辑器、YAML、图表按路由懒加载。
-- 请求列表用 antd Table 的 `virtual` 模式，一次最多保留 2000 行，超出提示“缩小时间范围或继续加载”。
+- 首屏 JS（gzip）不超过 400 KiB；除登录页外，每个页面随路由加载（`lazyRouteComponent`），编辑器、YAML、图表因此都不进首屏。
+- 请求列表直接渲染表格行，不做虚拟滚动：一次最多保留 2000 行，到上限时提示“缩小时间范围或增加条件”。行高固定、单元格只有文字，2000 行的渲染不需要窗口化，也省得为此引入依赖并处理键盘选中行的滚动定位。
 - 服务端：24 小时窗、带站点条件的列表首页 300 ms 内；按 ID 打开详情 100 ms 内（单分区索引查找）。
 
 ### 7.10.8 测试

@@ -15,6 +15,8 @@ import { errorText, IMPACT_INFO, PARAM_INFO } from "../../lib/vocab.ts";
 import { validateSpec } from "../../lib/site-validate.ts";
 import { RETENTION_MS } from "../../lib/time-range.ts";
 import { ErrorBar, Loading } from "../../ui/Page.tsx";
+// The dialog opens from the request list and the request detail too, which do not load the site pages.
+import "./sites.css";
 
 export type QuickTarget =
   | { kind: "entry"; site: string; path: string; requestId: string | null }
