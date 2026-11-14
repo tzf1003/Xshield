@@ -17,8 +17,9 @@ the module cannot be imported, the report says the segment did not run and why, 
 The full mode (--mode full, batch 7, plan 5.2) has 48 doctors and the whole corpus, and adds: the convergence cost (L4)
 over 3, 6, 12 and 24 users; the anti-pollution measure (L5), a learning over the training traffic with attack sessions
 mixed in, whose search-then-delete position must not learn to accept public sources (a gate); the deletions in the order
-of the day, whose public search result must learn public at high (a gate); the observation against the enforcement (P6),
-the same protection batch on the observation-mode site; a
+of the day, whose public search result must learn public at high (a gate); the observation against the enforcement
+(P6), the same protection batch on a fresh observation-mode site and on a fresh enforcement site, each on an edge of its
+own; a
 regression case with a session table that overflows (b11-session-eviction, its own gateway); and the whole run a
 second time, in a folder of its own, whose deterministic part must be equal. It needs PostgreSQL and the ideal model,
 and it is refused with exit status 2 otherwise. The full group of the baseline file is its own.
@@ -66,7 +67,14 @@ from .contracts import (
     ContractError, baseline_group, dump_json, load_baseline, load_known_gaps, write_baseline,
 )
 from .report import render_markdown, render_terminal, report_document
-from .score import CONSISTENCY_GROUP, baseline_values, confidence_scan, learning_metrics, score
+from .score import (
+    CONSISTENCY_ENFORCE_GROUP,
+    CONSISTENCY_GROUP,
+    baseline_values,
+    confidence_scan,
+    learning_metrics,
+    score,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUT = ROOT / "target" / "effectiveness" / "latest"
@@ -86,6 +94,8 @@ SITE_LIMIT = "clinic-truth-limit"
 SITE_OBSERVE = "clinic-truth-observe"
 SITE_LEARNED = "clinic-learned"  # the learned object map (batch 5), when the learning stage ran
 SITE_EVICT = regressions.SITE_EVICT  # full mode only: the session table that overflows
+# full mode only: the two halves of P6, each from a fresh origin, on an edge that hosts that site alone
+SITE_P6_ENFORCE, SITE_P6_OBSERVE = "clinic-p6-enforce", "clinic-p6-observe"
 JOURNEY_SITES = (SITE_NONE, SITE_TRUTH)  # the journeys and the probe families run on the two object-map configurations
 
 Live = tuple[str, str]  # the real Jev's endpoint and key, both from the environment
@@ -419,7 +429,7 @@ def _protection_run(options: Options, ideal: FakeJev, real: bool, jev_url: str, 
     if learned_spec:
         names.append(SITE_LEARNED)
     if options.full:
-        names.append(SITE_EVICT)
+        names += [SITE_EVICT, SITE_P6_ENFORCE, SITE_P6_OBSERVE]
     origins = {name: ClinicOrigin(seed=options.seed, doctors=options.users) for name in names}
     for origin in origins.values():
         origin.start()
@@ -442,6 +452,16 @@ def _protection_run(options: Options, ideal: FakeJev, real: bool, jev_url: str, 
         edge_o = labkit.start_edge(_write_sites(out / f"sites-observe{tag}.json", [observe_spec]), jev_url,
                                    out / f"decisions-observe{tag}.jsonl", jev_key=jev_key)
         edges.append((edge_o, f"observe{tag}"))
+        p6_plan: dict[str, tuple[labkit.Edge, str]] = {}
+        if options.full:
+            # P6 (plan 3.3): each half of the batch gets a fresh origin and an edge that hosts that site alone, so the two
+            # start alike and no other site's state reaches either of them.
+            for name, mode in ((SITE_P6_ENFORCE, "enforce"), (SITE_P6_OBSERVE, "observe")):
+                spec = _spec(origins[name], name, "truth", mode)
+                edge = labkit.start_edge(_write_sites(out / f"sites-{name}{tag}.json", [spec]), jev_url,
+                                         out / f"decisions-{name}{tag}.jsonl", jev_key=jev_key)
+                edges.append((edge, f"{name}{tag}"))
+                p6_plan[name] = (edge, mode)
         plan: dict[str, tuple[labkit.Edge, str, str]] = {
             SITE_NONE: (edge_p, "none", "enforce"),
             SITE_TRUTH: (edge_p, "truth", "enforce"),
@@ -458,6 +478,8 @@ def _protection_run(options: Options, ideal: FakeJev, real: bool, jev_url: str, 
             plan[SITE_EVICT] = (edge_e, "truth", "enforce")
         probers = {name: _prober(edge, origins, name, config, mode, pool, ideal, real, run_no, options)
                    for name, (edge, config, mode) in plan.items()}
+        p6_probers = {name: _prober(edge, origins, name, "truth", mode, pool, ideal, real, run_no, options)
+                      for name, (edge, mode) in p6_plan.items()}
         for name in JOURNEY_SITES + ((SITE_LEARNED,) if learned_spec else ()):
             prober = probers[name]
             prober.rows.extend(_journey(prober, options.seed, full=options.full))
@@ -465,16 +487,17 @@ def _protection_run(options: Options, ideal: FakeJev, real: bool, jev_url: str, 
         unsent = dict(probers[JOURNEY_SITES[0]].unsent)
         regressions.run_all(probers, only=options.only, full=options.full)
         if options.full:
-            # P6 (plan 3.3): the same protection batch again, on the observation-mode site, after the regression cases.
-            # The case that reads that site (p1-5) needs its origin as the start left it, so the batch comes last there.
-            # The journey's rows are not scored; the batch's rows are consistency rows, which only P6 reads.
-            observe = probers[SITE_OBSERVE]
-            _journey(observe, options.seed, full=True)
-            first = len(observe.rows)
-            probes.run_site(observe, attacks, benign)
-            for row in observe.rows[first:]:
-                row.update(group=CONSISTENCY_GROUP, category=CONSISTENCY_GROUP, counterpart=SITE_TRUTH)
-        for prober in probers.values():
+            # P6 (plan 3.3): the same protection batch on both halves, each after the same journey, whose rows are not
+            # scored. The enforcement half is the counterpart the observation rows are compared with, so its rows are kept
+            # apart from every other metric, and only P6 reads them.
+            for name, prober in p6_probers.items():
+                _journey(prober, options.seed, full=True)
+                first = len(prober.rows)
+                probes.run_site(prober, attacks, benign)
+                group = CONSISTENCY_GROUP if name == SITE_P6_OBSERVE else CONSISTENCY_ENFORCE_GROUP
+                for row in prober.rows[first:]:
+                    row.update(group=group, category=group, counterpart=SITE_P6_ENFORCE)
+        for prober in (*probers.values(), *p6_probers.values()):
             rows.extend(prober.rows)
             timings.update(prober.notes)
     finally:
