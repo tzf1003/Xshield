@@ -22,6 +22,7 @@ use xshield_core::context::learning::{
     SourceTier, Thresholds, WINDOW_DAYS, contradicting_kind, contradicts, day_of,
     judge_accepts_public, judge_function, judge_tier, kind_share, merge_functions, observe,
     observe_functions, observe_tiers, propose, propose_source, response_stats,
+    undecided_public_share,
 };
 use xshield_core::context::objects::KEY_MAX;
 use xshield_core::context::position::PositionState;
@@ -34,6 +35,7 @@ use xshield_postgres::object_judgement_store::{self as judgements, Proposal};
 use xshield_postgres::object_learning_store::{
     self as store, Cursor, Judgement, LearnedState, Source,
 };
+use xshield_postgres::object_public_share_store::{self as public_shares, PublicShare};
 use xshield_postgres::object_tier_judgement_store::{self as tier_judgements, TierProposal};
 use xshield_postgres::object_tier_store::{self as tier_store, TierRead};
 use xshield_postgres::site_spec_store::{self, Change, NOTE_MAX_CHARS, SiteRecord, WriteOutcome};
@@ -678,7 +680,8 @@ async fn tighten_split(
 /// the rules cannot judge loses its proposal, and so does a position the configuration no longer
 /// declares in effect. The judgements are read from the configuration the site holds now, and the
 /// writes name its generation, so a site deleted meanwhile gets none. The proposals wait for an
-/// administrator; nothing here changes the configuration.
+/// administrator; nothing here changes the configuration. A share the rules leave open is kept for the
+/// administrator to see (docs/07 section 7.9.16, LQ-9), while the configuration carries no acceptance.
 async fn judge_accepts(
     pool: &PgPool,
     site: &str,
@@ -703,6 +706,7 @@ async fn judge_accepts(
         .map(|slot| slot.key.clone())
         .collect();
     judgements::retain(pool, site, generation, &slots).await?;
+    public_shares::retain(pool, site, generation, &slots).await?;
     if slots.is_empty() {
         return Ok(());
     }
@@ -739,6 +743,7 @@ async fn judge_accepts(
     for slot in &slots {
         let Some(evidence) = evidence.get(slot) else {
             judgements::withdraw(pool, site, generation, slot, None).await?;
+            public_shares::withdraw(pool, site, generation, slot).await?;
             continue;
         };
         let admins = if identified {
@@ -768,6 +773,22 @@ async fn judge_accepts(
                     .await?;
             }
             None => judgements::withdraw(pool, site, generation, slot, None).await?,
+        }
+        // A share the rules leave open is shown to the administrator (LQ-9), who decides the acceptance by hand
+        // in the configuration. Any other outcome removes it, and so does a configuration that carries one.
+        match undecided_public_share(evidence, source_of, &admins, identified, thresholds) {
+            Some(share) if map.accepts_public_of(slot).is_none() => {
+                let share = PublicShare {
+                    slot: slot.clone(),
+                    public_per_mille: share.public_per_mille,
+                    pending_per_mille: share.pending_per_mille,
+                    votes: share.votes,
+                    sessions: share.sessions,
+                    last_day: evidence.last_day().unwrap_or(0),
+                };
+                public_shares::put(pool, site, generation, &share, now_millis).await?;
+            }
+            _ => public_shares::withdraw(pool, site, generation, slot).await?,
         }
     }
     Ok(())
@@ -2132,6 +2153,7 @@ mod judgement_pass_tests {
     use super::learn_once;
     use super::pass_tests::{drop_scratch, partitions, scratch};
     use crate::params::DAY_MILLIS;
+    use xshield_postgres::object_public_share_store::{self as public_shares, PublicShare};
 
     /// A public response position: the search results.
     const SEARCH: &str = "GET /api/search [].id";
@@ -2850,6 +2872,148 @@ mod judgement_pass_tests {
                 .fetch_one(&pool)
                 .await
                 .expect("count the judgements");
+        assert_eq!(rows, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_share_the_rules_leave_open_is_kept_for_the_administrator_and_a_conclusion_drops_it()
+    {
+        let Some((admin, pool, name)) = scratch("accepts_open").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(
+            &pool,
+            &clinic(&[(SHARE, json!({})), (DELETE, json!({}))], &quiet()),
+            None,
+        )
+        .await
+        .expect("create the site");
+        partitions(&pool, now).await;
+        // DELETE: four sessions take one public value each, and nine sessions take their own values on four days
+        // each (the partitions cover six days). That is 40 votes from thirteen units with 100 per mille public: the
+        // rules give no answer, so the share is kept for the administrator.
+        traffic_as(
+            &pool,
+            TrafficBatch {
+                now,
+                count: 4,
+                sessions: 4,
+                prefix: "p",
+                method: "DELETE",
+                path: "/api/patients/7",
+                value_slot: DELETE,
+                source: ("GET /api/search", SEARCH),
+            },
+        )
+        .await;
+        traffic_as(
+            &pool,
+            TrafficBatch {
+                now,
+                count: 36,
+                sessions: 9,
+                prefix: "o",
+                method: "DELETE",
+                path: "/api/patients/7",
+                value_slot: DELETE,
+                source: ("GET /api/patients", OWN),
+            },
+        )
+        .await;
+        // SHARE: every use takes a public value, so the rules accept public sources there and keep no share.
+        traffic(
+            &pool,
+            now,
+            40,
+            10,
+            "GET",
+            "/api/share/7",
+            SHARE,
+            ("GET /api/search", SEARCH),
+        )
+        .await;
+        learn_once(&pool, None, now).await;
+
+        assert!(
+            proposal_of(&pool, DELETE).await.is_none(),
+            "the rules give no answer for the middle share"
+        );
+        let shares = public_shares::shares(&pool, "clinic")
+            .await
+            .expect("read the shares");
+        assert_eq!(shares.len(), 1, "only the open share is kept: {shares:?}");
+        assert_eq!(shares[0].slot, DELETE);
+        assert_eq!(
+            (shares[0].public_per_mille, shares[0].pending_per_mille),
+            (100, 0)
+        );
+        assert_eq!((shares[0].votes, shares[0].sessions), (40, 13));
+        assert!(
+            proposal_of(&pool, SHARE)
+                .await
+                .is_some_and(|share| share.accepts_public)
+        );
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_share_is_written_for_the_configuration_it_was_judged_on_and_deleting_the_site_forgets_it()
+     {
+        let Some((admin, pool, name)) = scratch("accepts_share_forgotten").await else {
+            return;
+        };
+        let created =
+            site_spec_store::create(&pool, &clinic(&[(DELETE, json!({}))], &quiet()), None)
+                .await
+                .expect("create the site");
+        let share = PublicShare {
+            slot: DELETE.to_owned(),
+            public_per_mille: 100,
+            pending_per_mille: 0,
+            votes: 40,
+            sessions: 10,
+            last_day: 0,
+        };
+        // A write that names another generation of the site lands nowhere.
+        public_shares::put(
+            &pool,
+            "clinic",
+            created.created_at - chrono::Duration::days(1),
+            &share,
+            0,
+        )
+        .await
+        .expect("write a share of another generation");
+        assert!(
+            public_shares::shares(&pool, "clinic")
+                .await
+                .expect("read the shares")
+                .is_empty()
+        );
+        public_shares::put(&pool, "clinic", created.created_at, &share, 0)
+            .await
+            .expect("write the share");
+        assert_eq!(
+            public_shares::shares(&pool, "clinic")
+                .await
+                .expect("read the shares")
+                .len(),
+            1
+        );
+        let deleted = site_spec_store::delete(&pool, "clinic", created.version, None)
+            .await
+            .expect("delete the site");
+        assert!(matches!(
+            deleted,
+            site_spec_store::DeleteOutcome::Deleted { .. }
+        ));
+        let rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM object_public_shares WHERE site = 'clinic'")
+                .fetch_one(&pool)
+                .await
+                .expect("count the shares");
         assert_eq!(rows, 0);
         drop_scratch(admin, pool, name).await;
     }

@@ -323,6 +323,7 @@ export function ObjectsTab({ site, working, now, dialogOpen, onAdd, onApply }: P
         <JudgementPanel
           site={site.name}
           judgements={data.judgements ?? []}
+          publicShares={data.public_shares ?? []}
           rows={data.slots}
           classes={data.classes}
           identified={data.identified}

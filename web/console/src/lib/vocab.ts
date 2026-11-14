@@ -794,6 +794,10 @@ export const OBJECT_JUDGEMENT = {
     confirmed: "已确认。站点保存了一个新版本，判定开始使用它",
     dismissed: "已驳回，同一判断不再提议，除非规则转到另一个判断",
   },
+  share: {
+    title: (count: number) => `规则不下结论 ${count}`,
+    lead: "这些请求位置的使用里，公共来源超过 1%，计入待确认类别的来源后仍不到 20%。规则不替你判，位置保持现状。要不要接受公共来源由你在对象表里设定",
+  },
   readiness: {
     attempts: (count: string) =>
       `尝试越权 ${count} 个请求：切换拦截后这些请求交 Jev 判定并要求拒绝`,

@@ -18,6 +18,7 @@ pub mod object_agent_store;
 pub mod object_function_store;
 pub mod object_judgement_store;
 pub mod object_learning_store;
+pub mod object_public_share_store;
 pub mod object_tier_judgement_store;
 pub mod object_tier_store;
 pub mod partitions;
