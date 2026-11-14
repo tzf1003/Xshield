@@ -39,7 +39,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | ~~JSON request bodies with duplicate keys: the gateway judges the last one, an origin may use the first.~~ Fixed on 2026-11-13, see CHANGELOG.md. | security | S | LOW | ~~`crates/xshield-judge/src/values.rs:336`, cf. `crates/xshield-core/src/context/route.rs:623`~~ |
 | ~~Session and address contexts are not keyed by site, unlike held logins and shapes.~~ Fixed on 2026-11-13, see CHANGELOG.md. | security | S | LOW | ~~`engine.rs:325,439,912`~~ |
 | Database-gated Rust tests return early and count as PASS when no database is configured (`verify_all.sh` now reports this as SKIP; the tests themselves still pass silently under a bare `cargo test`). | tests | S | LOW | `crates/xshield-edge/tests/postgres.rs:61,249` |
-| Acceptance scenarios C6–C8 are documented as run by CI but are not in the lab script. | tests | M | LOW | `docs/04-deployment-testing.md:75-77,89`, `scripts/test_idor_lab.py` |
 | The Dockerfile copies the whole tree before the cargo build, so any change rebuilds every dependency layer (CI `validate` timeout and cargo cache were added on 2026-11-14). | dx | S–M | LOW–MED | `Dockerfile:28-31` |
 | One global mutex serialises every site's judge and observe calls, with HMAC work inside it. | perf | M | LOW | `engine.rs:442-450,852-929` |
 
