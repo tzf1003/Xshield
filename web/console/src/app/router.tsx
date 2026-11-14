@@ -2,13 +2,16 @@
 // page, and the root's guard sends a visitor without a session to the login page, remembering where
 // they were going. Search parameters are validated per route (search-schema.ts), so a link carries
 // its filters, tabs and view modes. Search strings stay strings: nothing is JSON-coerced, so a session
-// label of digits or a search for "null" reads back as typed.
+// label of digits or a search for "null" reads back as typed. Every page but the login page is loaded
+// with its route (docs/07 7.10.1), so the first screen does not carry the site editor and YAML; with
+// `defaultPreload: "intent"` a page's code starts loading when a link to it is hovered.
 
 import type { QueryClient } from "@tanstack/react-query";
 import {
   createRootRouteWithContext,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   Outlet,
   redirect,
   stringifySearchWith,
@@ -17,16 +20,6 @@ import {
 import { api } from "../api/client.ts";
 import { keys } from "../api/queries.ts";
 import { queryClient } from "../api/query-client.ts";
-import { JevPage } from "../features/jev/JevPage.tsx";
-import { OverviewPage } from "../features/overview/OverviewPage.tsx";
-import { RequestDetailPage } from "../features/request-detail/RequestDetailPage.tsx";
-import { RequestsPage } from "../features/requests/RequestsPage.tsx";
-import { SessionTimelinePage } from "../features/sessions/SessionTimelinePage.tsx";
-import { SessionsPage } from "../features/sessions/SessionsPage.tsx";
-import { SiteDetailPage } from "../features/sites/SiteDetailPage.tsx";
-import { SitesPage } from "../features/sites/SitesPage.tsx";
-import { SiteWizardPage } from "../features/sites/SiteWizardPage.tsx";
-import { SystemPage } from "../features/system/SystemPage.tsx";
 import { LoginPage } from "./LoginPage.tsx";
 import { NotFoundPage } from "./NotFoundPage.tsx";
 import { RouteError } from "./RouteError.tsx";
@@ -87,70 +80,91 @@ const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   validateSearch: validateGlobal,
-  component: OverviewPage,
+  component: lazyRouteComponent(
+    () => import("../features/overview/OverviewPage.tsx"),
+    "OverviewPage",
+  ),
 });
 
 const requestsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/requests",
   validateSearch: validateRequests,
-  component: RequestsPage,
+  component: lazyRouteComponent(
+    () => import("../features/requests/RequestsPage.tsx"),
+    "RequestsPage",
+  ),
 });
 
 const requestDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/requests/$requestId",
   validateSearch: validateDetail,
-  component: RequestDetailPage,
+  component: lazyRouteComponent(
+    () => import("../features/request-detail/RequestDetailPage.tsx"),
+    "RequestDetailPage",
+  ),
 });
 
 const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions",
   validateSearch: validateSessions,
-  component: SessionsPage,
+  component: lazyRouteComponent(
+    () => import("../features/sessions/SessionsPage.tsx"),
+    "SessionsPage",
+  ),
 });
 
 const sessionTimelineRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions/$label",
   validateSearch: validateTimeline,
-  component: SessionTimelinePage,
+  component: lazyRouteComponent(
+    () => import("../features/sessions/SessionTimelinePage.tsx"),
+    "SessionTimelinePage",
+  ),
 });
 
 const jevRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/jev",
   validateSearch: validateJev,
-  component: JevPage,
+  component: lazyRouteComponent(() => import("../features/jev/JevPage.tsx"), "JevPage"),
 });
 
 const sitesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sites",
   validateSearch: validateGlobal,
-  component: SitesPage,
+  component: lazyRouteComponent(() => import("../features/sites/SitesPage.tsx"), "SitesPage"),
 });
 
 const siteWizardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sites/new",
   validateSearch: validateWizard,
-  component: SiteWizardPage,
+  component: lazyRouteComponent(
+    () => import("../features/sites/SiteWizardPage.tsx"),
+    "SiteWizardPage",
+  ),
 });
 
 const siteDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sites/$name",
   validateSearch: validateSite,
-  component: SiteDetailPage,
+  component: lazyRouteComponent(
+    () => import("../features/sites/SiteDetailPage.tsx"),
+    "SiteDetailPage",
+  ),
 });
 
 const systemRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/system",
   validateSearch: validateSystem,
-  component: SystemPage,
+  component: lazyRouteComponent(() => import("../features/system/SystemPage.tsx"), "SystemPage"),
 });
 
 const routeTree = rootRoute.addChildren([
