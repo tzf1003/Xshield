@@ -532,9 +532,9 @@ def _consistency(observed: list[Pair], enforced: list[Pair]) -> dict[str, Any]:
 
 
 def _consequence(pairs: list[Pair], polluted: list[Pair]) -> dict[str, dict[str, Any]] | None:
-    """The anti-pollution consequence (plan 10, batch 10), per polluted site: its probes against the clean run's rows of the
+    """The anti-pollution consequence (plan 10, batch 10), per polluted site: its rows against the clean run's rows of the
     same case and run (`counterpart`). `missed` counts the attacks the clean run blocked and the site let through; `over`
-    counts the benign requests the clean run let through and the site blocked. Every other probe is incomparable. None when
+    counts the benign requests the clean run let through and the site blocked. Every other row is incomparable. None when
     no polluted site ran."""
     if not polluted:
         return None
@@ -550,18 +550,18 @@ def _consequence(pairs: list[Pair], polluted: list[Pair]) -> dict[str, dict[str,
 
 
 def _compare_probes(own: list[Pair], clean: list[Pair]) -> dict[str, Any]:
-    """Compares one polluted site's probes with the clean run's, probe by probe (case and run). A probe is compared when each
-    side has exactly one row for it, the rows are the same kind of probe, and both answers are decided (blocked or allowed)."""
+    """Compares one polluted site's rows with the clean run's, row by row (case, run, and the position among the rows of that
+    case and run). A row is compared when the other side has the same row, the rows are the same kind of request, and both
+    answers are decided (blocked or allowed); every other key is incomparable."""
     own_by, clean_by = _by_probe(own), _by_probe(clean)
     compared = incomparable = missed = over = 0
     missed_cases: list[dict[str, Any]] = []
     over_cases: list[dict[str, Any]] = []
     for probe in sorted(set(own_by) | set(clean_by)):
-        ours, theirs = own_by.get(probe, []), clean_by.get(probe, [])
-        if len(ours) != 1 or len(theirs) != 1 or not _same_probe(ours[0], theirs[0]):
-            incomparable += 1  # one probe that the two sides do not agree on, or that one side did not answer
+        here, base = own_by.get(probe), clean_by.get(probe)
+        if here is None or base is None or not _same_probe(here, base):
+            incomparable += 1  # one row that the two sides do not agree on, or that one side did not answer
             continue
-        here, base = ours[0], theirs[0]
         compared += 1
         item = {"case": here.row["case"], "run": here.row["run"], "category": here.row["category"]}
         if here.row["expect"] == "block" and base.rec["outcome"] == "blocked" and here.rec["outcome"] != "blocked":
@@ -574,11 +574,18 @@ def _compare_probes(own: list[Pair], clean: list[Pair]) -> dict[str, Any]:
             "missed_cases": missed_cases, "over_cases": over_cases}
 
 
-def _by_probe(pairs: list[Pair]) -> dict[tuple[str, Any], list[Pair]]:
-    grouped: dict[tuple[str, Any], list[Pair]] = {}
+def _by_probe(pairs: list[Pair]) -> dict[tuple[str, Any, int], Pair]:
+    """One pair per (case, run, position). A journey repeats a case within one run (the same step for the same user), so
+    the position counts the rows of that case and run in the order they were run; the two sites run the same journey in the
+    same order, so the k-th row of a case lines up with the k-th row of the same case on the other site."""
+    seen: dict[tuple[str, Any], int] = {}
+    keyed: dict[tuple[str, Any, int], Pair] = {}
     for pair in pairs:
-        grouped.setdefault((pair.row["case"], pair.row["run"]), []).append(pair)
-    return grouped
+        case_run = (pair.row["case"], pair.row["run"])
+        position = seen.get(case_run, 0)
+        seen[case_run] = position + 1
+        keyed[(*case_run, position)] = pair
+    return keyed
 
 
 def _same_probe(ours: Pair, theirs: Pair) -> bool:

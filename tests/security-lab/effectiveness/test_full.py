@@ -421,8 +421,8 @@ def _consequence_run(clean: list[tuple[str, str, str]],
     decisions: list[dict] = []
     for site, probes_ in [(CLEAN_SITE, clean), *polluted.items()]:
         consequence = site != CLEAN_SITE
-        for case, expect, outcome in probes_:
-            request_id = f"{site}/{case}"
+        for number, (case, expect, outcome) in enumerate(probes_):
+            request_id = f"{site}/{case}/{number}"
             row = observation(case, request_id=request_id, group="attack" if expect == "block" else "benign",
                               category="idor_direct", expect=expect)
             row["site"] = site
@@ -466,6 +466,22 @@ class ConsequenceTests(unittest.TestCase):
             polluted={POLLUTED_SITE: [("a1", "block", "unjudged"), ("a3", "block", "blocked")]})  # a2 is not run at all
         item = score(observations, decisions)["metrics"]["L5"][POLLUTED_SITE]
         self.assertEqual((item["compared"], item["missed"], item["over"], item["incomparable"]), (1, 0, 0, 2))
+
+    def test_a_case_repeated_within_a_run_lines_up_in_the_order_it_was_run(self):
+        # A journey repeats a case within one run (the same step for the same user): the k-th row meets the k-th row.
+        observations, decisions = _consequence_run(
+            clean=[("j1", "allow", "allowed"), ("j1", "allow", "allowed")],
+            polluted={POLLUTED_SITE: [("j1", "allow", "allowed"), ("j1", "allow", "blocked")]})
+        item = score(observations, decisions)["metrics"]["L5"][POLLUTED_SITE]
+        self.assertEqual((item["compared"], item["missed"], item["over"], item["incomparable"]), (2, 0, 1, 0))
+        self.assertEqual([case["case"] for case in item["over_cases"]], ["j1"])
+
+    def test_a_repeated_case_the_other_side_has_fewer_of_is_incomparable(self):
+        observations, decisions = _consequence_run(
+            clean=[("j1", "allow", "allowed"), ("j1", "allow", "allowed")],
+            polluted={POLLUTED_SITE: [("j1", "allow", "allowed")]})
+        item = score(observations, decisions)["metrics"]["L5"][POLLUTED_SITE]
+        self.assertEqual((item["compared"], item["over"], item["incomparable"]), (1, 0, 1))
 
     def test_identical_configurations_agree_on_every_probe(self):
         probes_ = [("a1", "block", "blocked"), ("b1", "allow", "allowed")]

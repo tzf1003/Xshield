@@ -457,8 +457,8 @@ def _consequence_lines(pollution: dict[str, Any]) -> list[str]:
     rows = [[CONSEQUENCE_TITLES[site], str(item["compared"]), str(item["missed"]), str(item["over"])]
             for site, item in consequence.items() if site in CONSEQUENCE_TITLES]
     lines = ["", "### 防护后果", "",
-             "同一批攻击和良性探针，逐条与干净训练学出的映射（`clinic-learned`）比较。“少拦的攻击”指干净映射拦了、这里放行的；"
-             "“多拦的良性”指干净映射放行、这里拦了的。两边都比较了的探针数如下：", "",
+             "两个站点各自先跑的良性旅程，以及同一批攻击和良性探针，逐条与干净训练学出的映射（`clinic-learned`）比较。"
+             "“少拦的攻击”指干净映射拦了、这里放行的；“多拦的良性”指干净映射放行、这里拦了的。两边都比较了的探针数如下（旅程的步骤也按探针计）：", "",
              *_md_table(["配置", "比较的探针数", "少拦的攻击", "多拦的良性"], rows)]
     for site, item in consequence.items():
         if site not in CONSEQUENCE_TITLES:
