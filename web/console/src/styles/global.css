@@ -2170,3 +2170,12 @@ mark.hit {
 .notice a {
   text-decoration: underline;
 }
+
+/* SourceChip (src/ui) is used by the request list's preview as well as the detail page, and each page's
+   stylesheet loads with its route, so the chip's own rule lives here. */
+.rd-srcwrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
