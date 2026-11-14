@@ -11,7 +11,8 @@ administrator does with the object map, through the same HTTP API the console us
 - rounds 1 to n: the control is restarted, which runs one learning pass at start-up; the object map
   is read, and what the pass proposes is confirmed as it is (classes of positions, tiers, accepts-public).
   The rounds stop when two in a row propose nothing; one more restart then checks stability;
-- the result is learned.json (plan 9.4) and the final site configuration.
+- the result is learned.json (plan 9.4) and the final site configuration. The last round's public shares, the
+  request positions whose acceptance the rules leave open, are kept as `public_shares` (batch 10, LQ-9).
 
 Nothing here reads the truth to decide what to confirm. The truth is used only to check that the
 base configuration declares the administrator's identity positions, which the lab declares. Every
@@ -133,8 +134,10 @@ def _learn(rows: list[tuple[int, bytes]], base_spec: dict[str, Any], out_dir: Pa
     # `events` is what the control's automatic changes left over the last round (tightenings and pauses); the
     # scorer does not read it, and it explains the positions the rounds show.
     # `bootstrap_unpicked`: what round 0 did not confirm, since the console does not preselect it. The scorer ignores it.
+    # `public_shares`: the last round's request positions the rules leave open; the anti-pollution consequence reads it.
     learned = {"bootstrap": learner.bootstrap, "bootstrap_unpicked": learner.bootstrap_unpicked, "rounds": rounds,
-               "final_spec": final_spec, "events": learner.last_events}
+               "final_spec": final_spec, "events": learner.last_events,
+               "public_shares": learner.last_public_shares}
     learned_path = out_dir / "learned.json"
     dump_json(learned_path, learned)
     return {"status": "ok", "why": "", "learned_path": learned_path, "final_spec": final_spec}
@@ -433,6 +436,12 @@ def _candidate_doc(item: dict[str, Any]) -> dict[str, Any]:
             "sessions": item["sessions"]}
 
 
+def _public_share_doc(item: dict[str, Any]) -> dict[str, Any]:
+    """A public share the control lists for the administrator, as learned.json keeps it (plan 9.4, batch 10)."""
+    return {"key": item["key"], "public_per_mille": item["public_per_mille"],
+            "pending_per_mille": item["pending_per_mille"], "votes": item["votes"], "sessions": item["sessions"]}
+
+
 class _Learner:
     """The control plane for one stage: the process, the site, and the rounds run on it."""
 
@@ -449,6 +458,7 @@ class _Learner:
         self.bootstrap: list[dict[str, Any]] = []
         self.bootstrap_unpicked: list[dict[str, Any]] = []
         self.last_events: list[dict[str, Any]] = []
+        self.last_public_shares: list[dict[str, Any]] = []
         self.confirmed: set[tuple[str, ...]] = set()
 
     @property
@@ -584,6 +594,7 @@ class _Learner:
         run_row = self._wait_run(after)
         snapshot = self._api().call("GET", f"{self.site_path}/objects")
         self.last_events = snapshot["events"]
+        self.last_public_shares = [_public_share_doc(item) for item in snapshot["public_shares"]]
         return _round_doc(number, run_row, snapshot), snapshot
 
     def confirm(self, number: int, snapshot: dict[str, Any]) -> int:

@@ -27,7 +27,7 @@ from clinic_origin import ClinicOrigin, DEFAULT_SEED, site_spec
 from clinic_traffic import Evidence, TRAINING_MODE, _attack_texts, run_training
 from effectiveness import learning
 from effectiveness.contracts import load_learned
-from effectiveness.learning import LearningError, MAX_ROUNDS, _Learner, _round_doc, _with_entries
+from effectiveness.learning import LearningError, MAX_ROUNDS, _Learner, _public_share_doc, _round_doc, _with_entries
 from fake_jev import FakeJev
 
 # A stand-in for the control: it listens on the port the stage gives it, and does nothing else.
@@ -195,6 +195,16 @@ class RoundDocumentTest(unittest.TestCase):
                    "proposals": 0, "tightened": 0, "paused": 0}
         with self.assertRaisesRegex(LearningError, "第 2 轮学习失败：decision log unreadable"):
             _round_doc(2, run_row, self._snapshot())
+
+
+class PublicShareTest(unittest.TestCase):
+    """A public share the control lists keeps the five fields the scorer reads, and nothing else (plan 9.4)."""
+
+    def test_a_share_keeps_the_five_fields_the_scorer_reads(self) -> None:
+        listed = {"id": 7, "key": "DELETE /api/patients/{id} path[2]", "public_per_mille": 106, "pending_per_mille": 40,
+                  "votes": 198, "sessions": 12, "last_seen": "2026-11-13T11:00:00Z", "tier": None}
+        self.assertEqual(_public_share_doc(listed), {"key": "DELETE /api/patients/{id} path[2]", "public_per_mille": 106,
+                                                     "pending_per_mille": 40, "votes": 198, "sessions": 12})
 
 
 class ConvergenceTest(unittest.TestCase):
@@ -435,6 +445,9 @@ class LearnsOnPostgresTest(unittest.TestCase):
         self.assertEqual([doc["round"] for doc in learned["rounds"]], list(range(1, len(learned["rounds"]) + 1)))
         self.assertIn("events", document)
         self.assertIn("bootstrap_unpicked", document)
+        self.assertIsInstance(document["public_shares"], list, "the last round's public shares are kept (batch 10)")
+        for share in document["public_shares"]:
+            self.assertEqual(set(share), {"key", "public_per_mille", "pending_per_mille", "votes", "sessions"})
         for item in document["bootstrap_unpicked"]:
             self.assertTrue(item["note"] is not None or item["conflict"] is not None,
                             "an unpicked candidate has a note or a conflict")

@@ -19,7 +19,8 @@ over 3, 6, 12 and 24 users; the anti-pollution measure (L5), a learning over the
 mixed in, whose search-then-delete position must not learn to accept public sources (a gate); the deletions in the order
 of the day, whose public search result must learn public at high (a gate); the observation against the enforcement
 (P6), the same protection batch on a fresh observation-mode site and on a fresh enforcement site, each on an edge of its
-own; a
+own; the consequence of the pollution for the protection (batch 10: clinic-polluted and clinic-polluted-set, each probed
+like clinic-learned and compared with it probe by probe); a
 regression case with a session table that overflows (b11-session-eviction, its own gateway); and the whole run a
 second time, in a folder of its own, whose deterministic part must be equal. It needs PostgreSQL and the ideal model,
 and it is refused with exit status 2 otherwise. The full group of the baseline file is its own.
@@ -68,8 +69,12 @@ from .contracts import (
 )
 from .report import render_markdown, render_terminal, report_document
 from .score import (
+    CONSEQUENCE,
+    CONSEQUENCE_FIELD,
     CONSISTENCY_ENFORCE_GROUP,
     CONSISTENCY_GROUP,
+    POLLUTED_SET_SITE,
+    POLLUTED_SITE,
     baseline_values,
     confidence_scan,
     learning_metrics,
@@ -96,6 +101,8 @@ SITE_LEARNED = "clinic-learned"  # the learned object map (batch 5), when the le
 SITE_EVICT = regressions.SITE_EVICT  # full mode only: the session table that overflows
 # full mode only: the two halves of P6, each from a fresh origin, on an edge that hosts that site alone
 SITE_P6_ENFORCE, SITE_P6_OBSERVE = "clinic-p6-enforce", "clinic-p6-observe"
+# full mode only (batch 10): the learned mapping of the polluted training, as it is, and with each open position set by hand
+SITE_POLLUTED, SITE_POLLUTED_SET = POLLUTED_SITE, POLLUTED_SET_SITE
 JOURNEY_SITES = (SITE_NONE, SITE_TRUTH)  # the journeys and the probe families run on the two object-map configurations
 
 Live = tuple[str, str]  # the real Jev's endpoint and key, both from the environment
@@ -201,6 +208,7 @@ def execute(options: Options, *, live: Live | None = None) -> int:
             result["gates"].append(full.consistency_gate(result["metrics"].get("P6")))
             result["gates"].append(full.natural_order_gate(result.get("natural_order")))
             result["gates"].append(full.polluted_delete_gate(result.get("pollution")))
+            result["gates"].extend(full.consequence_gates(result["metrics"].get("L5")))
             result["passed"] = all(gate["ok"] is not False for gate in result["gates"])
             extra["two_pass"] = {"differing": differing, "seconds": [extra["seconds"], second_extra["seconds"]]}
         meta = {
@@ -245,12 +253,13 @@ def _measure(options: Options, live: Live | None, relay: jev_relay.JevRelay | No
         _say("学习段：完成，学到的配置作为 clinic-learned 进入防护段" if learning["status"] == "ok"
              else f"学习段：SKIP（{learning['why']}）")
         extras: dict[str, Any] = {}
+        polluted: dict[str, Any] | None = None  # the polluted mapping and its set variant (batch 10), full mode only
         if options.full:
             if learning["status"] != "ok":
                 raise RuntimeError(f"完整模式的学习段没有执行：{learning['why']}")
-            extras = _full_learning(options, ideal, truth, train_records, learning, out, secrets)
+            extras, polluted = _full_learning(options, ideal, truth, train_records, learning, out, secrets)
         protect_rows, protect_records, unsent, timings = _protection(options, ideal, live, relay, out, secrets,
-                                                                     learning)
+                                                                     learning, polluted)
         _say(f"防护段：{len(protect_rows)} 个计分请求，{SOURCE_TEXT[options.jev]}")
         observations = [*train_rows, *protect_rows]
         decisions = [*train_records, *protect_records]
@@ -267,6 +276,8 @@ def _measure(options: Options, live: Live | None, relay: jev_relay.JevRelay | No
                        training=train_records)
         _mark_unrun(result, real=real, learning_why=learning["why"], full_mode=options.full)
         result.update(extras)
+        if "pollution" in result:  # the consequence is read beside the pollution measure in report.json (batch 10)
+            result["pollution"]["consequence"] = result["metrics"].get("L5")
         if real:  # the scan needs a real model's probabilities; the ideal model's are fixed (plan 10, batch 9)
             result["confidence_scan"] = confidence_scan(protect_rows, protect_records)
     finally:
@@ -338,10 +349,12 @@ def _training(options: Options, ideal: FakeJev, out: Path, secrets: tuple[str, .
 # Full mode: L4 and L5 -----------------------------------------------------------------------------------
 
 def _full_learning(options: Options, ideal: FakeJev, truth: dict[str, Any], train_records: list[dict[str, Any]],
-                   learning: Mapping[str, Any], out: Path, secrets: tuple[str, ...]) -> dict[str, Any]:
+                   learning: Mapping[str, Any], out: Path, secrets: tuple[str, ...]) -> tuple[
+                       dict[str, Any], dict[str, Any]]:
     """L4 (plan 3.2): the learning over 3, 6, 12 and 24 users, each on a site of its own, next to the run's own 48.
     L5: the learning over the run's training traffic with attack sessions mixed in, ten in a hundred of all sessions.
-    Each run keeps its files in a folder of its own."""
+    Each run keeps its files in a folder of its own. Returns the measures for the report, and the polluted mapping's two
+    configurations for the protection segment: as it is, and with each open position set by hand (batch 10)."""
     clean = learning_metrics(truth, _learned_document(learning), train_records)
     points: list[tuple[int, dict[str, Any]]] = []
     for users in full.CONVERGENCE_USERS:
@@ -363,8 +376,17 @@ def _full_learning(options: Options, ideal: FakeJev, truth: dict[str, Any], trai
     polluted_learning = _learning(polluted_spec, polluted_truth, pollution_out)
     if polluted_learning["status"] != "ok":
         raise RuntimeError(f"抗污染段的学习段没有执行：{polluted_learning['why']}")
-    polluted = learning_metrics(polluted_truth, _learned_document(polluted_learning), polluted_records)
+    polluted_doc = _learned_document(polluted_learning)
+    polluted = learning_metrics(polluted_truth, polluted_doc, polluted_records)
     _say(f"抗污染段：混入 {attackers} 个攻击会话后的学习段完成")
+    # The polluted mapping as it is, and the same with every position the rules left open set by hand (batch 10). A
+    # learned file from before batch 10 has no public_shares, and reads as none.
+    shares = polluted_doc.get("public_shares", [])
+    try:
+        set_spec = full.set_public_positions(polluted_learning["final_spec"], shares)
+    except ValueError as error:
+        raise RuntimeError(f"抗污染段的防护后果没有执行：{error}") from error
+    polluted_plan = {"spec": polluted_learning["final_spec"], "set_spec": set_spec}
     # The attack requests by category, with what the observation run did with each (plan 3.2, L5): the outcome in the
     # polluted run's own records, the same records the learning read.
     outcomes = {record["request_id"]: record["outcome"] for record in polluted_records}
@@ -378,19 +400,21 @@ def _full_learning(options: Options, ideal: FakeJev, truth: dict[str, Any], trai
         raise RuntimeError(f"自然顺序变体的学习段没有执行：{natural_learning['why']}")
     natural = learning_metrics(natural_truth, _learned_document(natural_learning), natural_records)
     _say("自然顺序变体：删除穿插在搜索之间的学习段完成")
-    return {
+    measures = {
         "convergence": full.convergence(points),
         "pollution": full.pollution(clean, polluted, attackers=attackers, benign_sessions=benign_sessions,
-                                    attack_requests=requests),
+                                    attack_requests=requests, set_shares=shares),
         "natural_order": full.natural_order(_learned_document(learning), _learned_document(natural_learning),
                                             ordered_metrics=clean, natural_metrics=natural),
     }
+    return measures, polluted_plan
 
 
 # Protection segment -------------------------------------------------------------------------------------
 
 def _protection(options: Options, ideal: FakeJev, live: Live | None, relay: jev_relay.JevRelay | None, out: Path,
-                secrets: tuple[str, ...], learning: Mapping[str, Any]) -> tuple[
+                secrets: tuple[str, ...], learning: Mapping[str, Any],
+                polluted: Mapping[str, Any] | None = None) -> tuple[
                     list[dict[str, Any]], list[dict[str, Any]], dict[str, int], dict[str, Any]]:
     """The scored rows and decision records of the protection segment, the payloads that were not sent at the path
     point in one run (the same in every run and on every journey site), and what the probes measured about the run.
@@ -411,7 +435,7 @@ def _protection(options: Options, ideal: FakeJev, live: Live | None, relay: jev_
     for run_no in range(1, repeats + 1):
         tag = "" if repeats == 1 else f"-r{run_no}"
         run_rows, run_records, run_unsent, run_timings = _protection_run(
-            options, ideal, real, jev_url, jev_key, out, tag, secrets, learning, pool, run_no)
+            options, ideal, real, jev_url, jev_key, out, tag, secrets, learning, pool, run_no, polluted)
         rows.extend(run_rows)
         records.extend(run_records)
         if run_no == 1:
@@ -422,14 +446,18 @@ def _protection(options: Options, ideal: FakeJev, live: Live | None, relay: jev_
 
 def _protection_run(options: Options, ideal: FakeJev, real: bool, jev_url: str, jev_key: str, out: Path, tag: str,
                     secrets: tuple[str, ...], learning: Mapping[str, Any], pool: probes.Pool,
-                    run_no: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int], dict[str, Any]]:
-    """One pass over the protection sites, on origins and edges that start empty."""
+                    run_no: int, polluted: Mapping[str, Any] | None = None) -> tuple[
+                        list[dict[str, Any]], list[dict[str, Any]], dict[str, int], dict[str, Any]]:
+    """One pass over the protection sites, on origins and edges that start empty. `polluted` holds the two configurations of
+    the anti-pollution consequence (batch 10); None outside the full mode."""
     learned_spec = learning["final_spec"]  # None when the learning stage did not run
     names = [SITE_NONE, SITE_TRUTH, SITE_LIMIT, SITE_OBSERVE]
     if learned_spec:
         names.append(SITE_LEARNED)
     if options.full:
         names += [SITE_EVICT, SITE_P6_ENFORCE, SITE_P6_OBSERVE]
+    if polluted is not None:
+        names += [SITE_POLLUTED, SITE_POLLUTED_SET]
     origins = {name: ClinicOrigin(seed=options.seed, doctors=options.users) for name in names}
     for origin in origins.values():
         origin.start()
@@ -445,6 +473,9 @@ def _protection_run(options: Options, ideal: FakeJev, real: bool, jev_url: str, 
                          _limit_spec(origins[SITE_LIMIT])]
         if learned_spec:
             protect_sites.append(_learned_spec(learned_spec, origins[SITE_LEARNED]))
+        if polluted is not None:
+            protect_sites.append(_learned_spec(polluted["spec"], origins[SITE_POLLUTED], SITE_POLLUTED))
+            protect_sites.append(_learned_spec(polluted["set_spec"], origins[SITE_POLLUTED_SET], SITE_POLLUTED_SET))
         edge_p = labkit.start_edge(_write_sites(out / f"sites-protect{tag}.json", protect_sites), jev_url,
                                    out / f"decisions-protect{tag}.jsonl", jev_key=jev_key)
         edges.append((edge_p, f"protect{tag}"))
@@ -480,10 +511,23 @@ def _protection_run(options: Options, ideal: FakeJev, real: bool, jev_url: str, 
                    for name, (edge, config, mode) in plan.items()}
         p6_probers = {name: _prober(edge, origins, name, "truth", mode, pool, ideal, real, run_no, options)
                       for name, (edge, mode) in p6_plan.items()}
+        # The anti-pollution consequence (batch 10): the two polluted sites share the learned site's edge, and get its journey
+        # and its probes. They get no regression case, so they are not in `probers`.
+        consequence_plan: dict[str, tuple[labkit.Edge, str, str]] = {}
+        if polluted is not None:
+            consequence_plan = {SITE_POLLUTED: (edge_p, "polluted", "enforce"),
+                                SITE_POLLUTED_SET: (edge_p, "polluted-set", "enforce")}
+        consequence_probers = {name: _prober(edge, origins, name, config, mode, pool, ideal, real, run_no, options)
+                               for name, (edge, config, mode) in consequence_plan.items()}
         for name in JOURNEY_SITES + ((SITE_LEARNED,) if learned_spec else ()):
             prober = probers[name]
             prober.rows.extend(_journey(prober, options.seed, full=options.full))
             probes.run_site(prober, attacks, benign)
+        for prober in consequence_probers.values():  # right after the learned site, on the same edge (batch 10)
+            prober.rows.extend(_journey(prober, options.seed, full=options.full))
+            probes.run_site(prober, attacks, benign)
+            for row in prober.rows:  # kept apart from every other metric; score.py compares them with the learned site
+                row.update({CONSEQUENCE_FIELD: CONSEQUENCE, "counterpart": SITE_LEARNED})
         unsent = dict(probers[JOURNEY_SITES[0]].unsent)
         regressions.run_all(probers, only=options.only, full=options.full)
         if options.full:
@@ -497,7 +541,7 @@ def _protection_run(options: Options, ideal: FakeJev, real: bool, jev_url: str, 
                 group = CONSISTENCY_GROUP if name == SITE_P6_OBSERVE else CONSISTENCY_ENFORCE_GROUP
                 for row in prober.rows[first:]:
                     row.update(group=group, category=group, counterpart=SITE_P6_ENFORCE)
-        for prober in (*probers.values(), *p6_probers.values()):
+        for prober in (*probers.values(), *p6_probers.values(), *consequence_probers.values()):
             rows.extend(prober.rows)
             timings.update(prober.notes)
     finally:
@@ -563,12 +607,12 @@ def _learned_document(learning_result: Mapping[str, Any]) -> dict[str, Any] | No
     return json.loads(Path(learning_result["learned_path"]).read_text(encoding="utf-8"))
 
 
-def _learned_spec(final_spec: Mapping[str, Any], origin: ClinicOrigin) -> dict[str, Any]:
-    """The configuration the learning stage saved, under the learned site's own name, host, origin and mode (enforce).
-    The rest of it is kept as the control saved it."""
+def _learned_spec(final_spec: Mapping[str, Any], origin: ClinicOrigin, name: str = SITE_LEARNED) -> dict[str, Any]:
+    """The configuration the learning stage saved, under the site's own name (the learned site's by default), host, origin
+    and mode (enforce). The rest of it is kept as the control saved it."""
     spec = copy.deepcopy(dict(final_spec))
-    spec["name"] = SITE_LEARNED
-    spec["hosts"] = [f"{SITE_LEARNED}.lab"]
+    spec["name"] = name
+    spec["hosts"] = [f"{name}.lab"]
     spec["origin"] = f"http://127.0.0.1:{origin.port}"
     spec["mode"] = "enforce"
     return spec
@@ -638,7 +682,7 @@ def _mark_unrun(result: dict[str, Any], *, real: bool, learning_why: str, full_m
             item["why"] = learning_why
     result["skipped"] = [item for item in result["skipped"] if item["section"] != "L4、L5"]
     if not full_mode:
-        result["skipped"].append({"section": "L4、L5、P6", "why": FULL_ONLY_SKIP})
+        result["skipped"].append({"section": "L4、L5、P6、防护后果", "why": FULL_ONLY_SKIP})
         result["skipped"].append({"section": "b11-session-eviction", "why": EVICTION_SKIP})
     if not real:
         result["skipped"].append({"section": "idor_cross_class/page-as-prescription", "why": PAGE_PROBE_SKIP})
