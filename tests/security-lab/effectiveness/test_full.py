@@ -15,7 +15,7 @@ from clinic_traffic import ATTACKERS_MAX, run_training
 from effectiveness import full, probes, regressions
 from effectiveness.builders import decision, observation
 from effectiveness.report import render_markdown, report_document
-from effectiveness.score import CONSISTENCY_GROUP, score
+from effectiveness.score import CONSISTENCY_ENFORCE_GROUP, CONSISTENCY_GROUP, score
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTEXT_RS = ROOT / "crates" / "xshield-judge" / "src" / "context.rs"
@@ -262,14 +262,23 @@ def _observed(case: str, counterpart: str, outcome: str) -> tuple[dict, dict]:
     return row, decision(request_id, path="jev_deny" if outcome == "would_block" else "jev_allow", outcome=outcome)
 
 
+def _enforcement_half(case: str, outcome: str) -> tuple[dict, dict]:
+    """A row of the enforcement half of the consistency batch (its site is clinic-p6-enforce), and its decision."""
+    request_id = f"p-{case}"
+    row = observation(case, request_id=request_id, config="p6-enforce", group=CONSISTENCY_ENFORCE_GROUP,
+                      category=CONSISTENCY_ENFORCE_GROUP, expect="block")
+    return row, decision(request_id, path="jev_deny" if outcome == "blocked" else "jev_allow", outcome=outcome)
+
+
 def _consistency_sample() -> tuple[list[dict], list[dict]]:
     pairs = [
-        _enforced("c1", "blocked"), _enforced("c2", "allowed"), _enforced("c3", "blocked"), _enforced("c4", "allowed"),
-        _observed("c1", "clinic-truth", "would_block"),  # agree
-        _observed("c2", "clinic-truth", "would_block"),  # differ
-        _observed("c3", "clinic-truth", "allowed"),      # differ
-        _observed("c4", "clinic-truth", "allowed"),      # agree
-        _observed("c5", "clinic-none", "would_block"),   # no enforcement row to compare with: not compared
+        _enforcement_half("c1", "blocked"), _enforcement_half("c2", "allowed"),
+        _enforcement_half("c3", "blocked"), _enforcement_half("c4", "allowed"),
+        _observed("c1", "clinic-p6-enforce", "would_block"),  # agree
+        _observed("c2", "clinic-p6-enforce", "would_block"),  # differ
+        _observed("c3", "clinic-p6-enforce", "allowed"),      # differ
+        _observed("c4", "clinic-p6-enforce", "allowed"),      # agree
+        _observed("c5", "clinic-none", "would_block"),        # no enforcement row to compare with: not compared
     ]
     return [row for row, _ in pairs], [record for _, record in pairs]
 
@@ -389,7 +398,7 @@ class FullReportTests(unittest.TestCase):
                          "攻击会话的请求：每个都本应拦截", "搜索后打开", "### 删除穿插在搜索之间（自然顺序，门槛）",
                          "门槛未通过：自然顺序下公共搜索结果没有学到档位",
                          "两遍核对：两遍的记分、门槛、失败项和学习明细逐位相同",
-                         "同一批 4 个请求", "b11-session-eviction）：20200 次登录，用时 61.5 秒"):
+                         "比较的请求有 4 个", "b11-session-eviction）：20200 次登录，用时 61.5 秒"):
             self.assertIn(fragment, text)
         document = report_document(result, meta)
         for key in ("convergence", "pollution", "natural_order"):
