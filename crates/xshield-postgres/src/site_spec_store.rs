@@ -602,6 +602,30 @@ pub async fn version(
     row.as_ref().map(row_to_history).transpose()
 }
 
+/// Fetches several versions of a site in one query, in no particular order. A number the site has
+/// no version for is left out.
+///
+/// # Errors
+/// Returns [`SiteSpecStoreError`] on a database or serialization failure.
+pub async fn versions(
+    pool: &PgPool,
+    name: &str,
+    versions: &[i64],
+) -> Result<Vec<HistoryEntry>, SiteSpecStoreError> {
+    if versions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT version, change, rollback_of, note, changed_at, spec
+         FROM site_config_history WHERE site = $1 AND version = ANY($2)",
+    )
+    .bind(name)
+    .bind(versions)
+    .fetch_all(pool)
+    .await?;
+    rows.iter().map(row_to_history).collect()
+}
+
 #[cfg(test)]
 mod tests {
     // These storage-layer tests need a reachable PostgreSQL instance. They run

@@ -10,7 +10,7 @@
 //! once, from the configuration, and absorbs the learned row for the same key.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -514,8 +514,14 @@ pub async fn list(
     let proposals = judgements::proposals(&state.pool, &name).await?;
     let tiers = tier_judgements::proposals(&state.pool, &name).await?;
     let events = automatic_events(&state, &record, now).await?;
+    let suspended: Vec<String> = rows
+        .iter()
+        .filter(|row| row.state == PositionState::Suspended)
+        .map(|row| row.key.clone())
+        .collect();
+    let evidence = suspended_evidence(&state, &record, &suspended, now).await?;
     for row in &mut rows {
-        row.suspension = suspension_of(&state, &record, &events, row, now).await?;
+        row.suspension = suspension_of(&record, &events, &evidence, row);
     }
     let waiting = rows
         .iter()
@@ -571,7 +577,12 @@ pub async fn slot(
         .into_iter()
         .find(|row| row.id == id)
         .ok_or_else(slot_not_found)?;
-    row.suspension = suspension_of(&state, &record, &events, &row, now).await?;
+    let evidence = if row.state == PositionState::Suspended {
+        suspended_evidence(&state, &record, std::slice::from_ref(&row.key), now).await?
+    } else {
+        HashMap::new()
+    };
+    row.suspension = suspension_of(&record, &events, &evidence, &row);
     let agent = match learned
         .iter()
         .find(|learned| learned_id(learned.id) == row.id)
@@ -1215,20 +1226,33 @@ pub(crate) async fn mark_saved(state: &ControlState, pending: &PendingEvent, ver
     }
 }
 
-/// The suspension of a suspended position: the pause that suspended it, the entry it took away, what
-/// the name gives, and the kinds its votes name since the pause. `None` for any other position.
+/// The evidence of the suspended positions `keys`, read in one query.
 ///
 /// # Errors
-/// A 500 when a read of the evidence fails.
-async fn suspension_of(
+/// A 500 when the read fails.
+async fn suspended_evidence(
     state: &ControlState,
     record: &SiteRecord,
-    events: &[AutomaticEvent],
-    row: &SlotRow,
+    keys: &[String],
     now: i64,
-) -> ApiResult<Option<SuspensionBody>> {
+) -> ApiResult<HashMap<String, Evidence>> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(store::load_evidence(&state.pool, record.spec.name(), keys, oldest_day(now)).await?)
+}
+
+/// The suspension of a suspended position: the pause that suspended it, the entry it took away, what
+/// the name gives, and the kinds its votes name since the pause (from `evidence`, which
+/// [`suspended_evidence`] read). `None` for any other position.
+fn suspension_of(
+    record: &SiteRecord,
+    events: &[AutomaticEvent],
+    evidence: &HashMap<String, Evidence>,
+    row: &SlotRow,
+) -> Option<SuspensionBody> {
     if row.state != PositionState::Suspended {
-        return Ok(None);
+        return None;
     }
     let map = record.spec.objects();
     let rules = Rules::of(record.spec.advanced());
@@ -1240,14 +1264,7 @@ async fn suspension_of(
                 && matches!(event.status, EventState::Open | EventState::Acknowledged)
         })
         .max_by_key(|event| event.version);
-    let evidence = store::load_evidence(
-        &state.pool,
-        record.spec.name(),
-        std::slice::from_ref(&row.key),
-        oldest_day(now),
-    )
-    .await?;
-    Ok(Some(SuspensionBody {
+    Some(SuspensionBody {
         at: pause.map(|event| event.at.clone()),
         auto: pause.is_some(),
         version: pause.map(|event| event.version),
@@ -1271,7 +1288,7 @@ async fn suspension_of(
             .get(&row.key)
             .map_or_else(Vec::new, |votes| shares_of(votes, map)),
         acknowledged: pause.is_some_and(|event| event.status == EventState::Acknowledged),
-    }))
+    })
 }
 
 /// What the rules judge a position by when its entry is not used: the declared kind its name relates
@@ -1631,23 +1648,36 @@ async fn automatic_events(
             .map(|status| (status.event.clone(), status))
             .collect();
     let map = record.spec.objects();
+    // The versions newest first; the ones inside the window, and the version before each, which the
+    // change is compared with, read in one query.
+    let recent: Vec<_> = versions
+        .into_iter()
+        .take_while(|version| version.changed_at.timestamp_millis() >= since)
+        .collect();
+    let earlier: Vec<i64> = recent
+        .iter()
+        .filter_map(|version| {
+            version
+                .version
+                .checked_sub(1)
+                .filter(|earlier| *earlier > 0)
+        })
+        .collect();
+    let befores: HashMap<i64, SiteSpec> = site_spec_store::versions(&state.pool, name, &earlier)
+        .await?
+        .into_iter()
+        .filter_map(|entry| Some((entry.version, entry.spec?)))
+        .collect();
     let mut events = Vec::new();
-    for version in versions {
-        if version.changed_at.timestamp_millis() < since {
-            break;
-        }
+    for version in recent {
         let Some(spec) = version.spec.as_ref() else {
             continue;
         };
-        let before = match version.version.checked_sub(1) {
-            Some(earlier) if earlier > 0 => site_spec_store::version(&state.pool, name, earlier)
-                .await?
-                .and_then(|entry| entry.spec),
-            _ => None,
-        };
-        for (index, (previous, slot)) in
-            changed_slots(before.as_ref(), spec).into_iter().enumerate()
-        {
+        let before = version
+            .version
+            .checked_sub(1)
+            .and_then(|earlier| befores.get(&earlier));
+        for (index, (previous, slot)) in changed_slots(before, spec).into_iter().enumerate() {
             let id = format!("v{}-{index}", version.version);
             let current = map.slots().iter().find(|entry| entry.key == slot.key);
             events.push(automatic_event(
@@ -4129,6 +4159,32 @@ mod live_tests {
         )
         .await
         .map(|_| ())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn the_list_shows_the_pause_of_a_suspended_position() {
+        let (state, name) = paused_site("list-pause").await;
+        let all = listed(&state, &name, &[]).await;
+        let row = all["slots"]
+            .as_array()
+            .expect("the positions")
+            .iter()
+            .find(|row| row["key"] == APPOINTMENTS)
+            .expect("the paused position");
+        assert_eq!(row["state"], "suspended");
+        assert_eq!(row["suspension"]["version"], 2);
+        assert_eq!(row["suspension"]["auto"], true);
+        assert_eq!(row["suspension"]["event_id"], "v2-0");
+        // Positions that are not suspended carry no suspension.
+        assert!(
+            all["slots"]
+                .as_array()
+                .expect("the positions")
+                .iter()
+                .filter(|row| row["key"] != APPOINTMENTS)
+                .all(|row| row["suspension"].is_null())
+        );
     }
 
     #[tokio::test]
