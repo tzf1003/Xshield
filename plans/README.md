@@ -47,7 +47,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | Actions are referenced by mutable tag or branch, including in the job that pushes and signs images. | dx / security | S | LOW | `.github/workflows/ci.yml:84,130`, `release-images.yml:62-82` |
 | CI `validate` has no timeout and no cargo cache; the Dockerfile copies the whole tree before the cargo build. | dx | S–M | LOW–MED | `.github/workflows/ci.yml:50-110`, `Dockerfile:28-31` |
 | One global mutex serialises every site's judge and observe calls, with HMAC work inside it. | perf | M | LOW | `engine.rs:442-450,852-929` |
-| Per-address login limiting treats every IPv6 address separately and there is no global cap on concurrent password checks. | security | S | LOW | `crates/xshield-control/src/auth.rs:285,371` |
 
 Found while executing the plans (not yet investigated):
 
