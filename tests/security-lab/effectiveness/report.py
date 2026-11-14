@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from .full import CONSISTENCY_GATE, LAYER_TITLES
-from .score import CONFIG_ORDER, LEARNING_GATE_NAMES
+from .score import CONFIG_ORDER, LEARNING_GATE_NAMES, POLLUTED_SET_SITE, POLLUTED_SITE
 
 FAILURES_IN_TERMINAL = 10
 KIND_LABELS = {"wrong": "误学", "unmodeled": "未模板化", "miss": "没学到", "failure": "学到的配置上失败"}
@@ -436,7 +436,45 @@ def _pollution_lines(pollution: dict[str, Any] | None) -> list[str]:
              "", *_md_table(["层", "干净训练的误学数", "混入攻击后的误学数", "本来能学到却学不到", "其中可靠性下降"], rows)]
     if pollution["false_learns"]:
         lines.append(f"- 发现：混入攻击后误学 {pollution['false_learns']} 个位置。")
-    return [*lines, *_attack_request_lines(pollution.get("attack_requests") or {})]
+    return [*lines, *_attack_request_lines(pollution.get("attack_requests") or {}), *_consequence_lines(pollution)]
+
+
+CONSEQUENCE_TITLES = {POLLUTED_SITE: "原样使用（clinic-polluted）", POLLUTED_SET_SITE: "照一栏设定之后（clinic-polluted-set）"}
+
+
+def _case_lines(cases: list[dict[str, Any]]) -> list[str]:
+    return [f"- `{item['case']}`（{item['category']}，第 {item['run']} 遍）" for item in cases]
+
+
+def _consequence_lines(pollution: dict[str, Any]) -> list[str]:
+    """The protection consequence of the anti-pollution (plan 10, batch 10): the polluted mapping against the clean run,
+    probe by probe, and the positions the lab set by hand for the administrator. The set site's misses are a gate; the
+    polluted site's misses are in the baseline, where they may only go down. Both sites' over-blocked benign requests are
+    a gate."""
+    consequence = pollution.get("consequence")
+    if not consequence:
+        return []
+    rows = [[CONSEQUENCE_TITLES[site], str(item["compared"]), str(item["missed"]), str(item["over"])]
+            for site, item in consequence.items() if site in CONSEQUENCE_TITLES]
+    lines = ["", "### 防护后果", "",
+             "同一批攻击和良性探针，逐条与干净训练学出的映射（`clinic-learned`）比较。“少拦的攻击”指干净映射拦了、这里放行的；"
+             "“多拦的良性”指干净映射放行、这里拦了的。两边都比较了的探针数如下：", "",
+             *_md_table(["配置", "比较的探针数", "少拦的攻击", "多拦的良性"], rows)]
+    for site, item in consequence.items():
+        if site not in CONSEQUENCE_TITLES:
+            continue
+        lines.append(f"- {CONSEQUENCE_TITLES[site]}：两边对不上的探针 {item['incomparable']} 个（门槛 0）。")
+        if item["missed_cases"]:
+            lines += ["", f"{CONSEQUENCE_TITLES[site]} 少拦的用例：", "", *_case_lines(item["missed_cases"])]
+    shares = pollution.get("set_shares") or []
+    if shares:
+        share_rows = [[f"`{item['key']}`", f"{item['public_per_mille']}‰", f"{item['pending_per_mille']}‰",
+                       str(item["votes"]), str(item["sessions"])] for item in shares]
+        lines += ["", "靶场替管理员设定的位置（规则不下结论的请求位置，设成不接受公共来源、可靠性高）：", "",
+                  *_md_table(["位置", "公共份额", "待定份额", "票数", "会话数"], share_rows)]
+    else:
+        lines += ["", "没有规则不下结论的请求位置，两个站点的配置相同。"]
+    return lines
 
 
 ATTACK_CATEGORY_TITLES = {

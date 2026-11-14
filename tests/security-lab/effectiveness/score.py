@@ -44,9 +44,18 @@ CONSISTENCY_GROUP = "consistency"
 # The enforcement half of the same batch (P6): the rows an observation row is compared with. They stay out of every other
 # metric as well, so a batch that runs twice is not counted twice.
 CONSISTENCY_ENFORCE_GROUP = "consistency-enforce"
+# The anti-pollution consequence (plan 10, batch 10): the probes that the polluted sites run. Each row keeps its own group,
+# category and expectation, and is compared with the clean run's row of the same case and run. Like the consistency rows,
+# these stay out of every other metric.
+CONSEQUENCE_FIELD = "comparison"
+CONSEQUENCE = "consequence"
+POLLUTED_SITE = "clinic-polluted"  # the mapping the polluted training learned, used as it is
+POLLUTED_SET_SITE = "clinic-polluted-set"  # the same, with each position the rules left open set by hand (not public)
+DECIDED_OUTCOMES = frozenset({"blocked", "allowed"})  # the answers a probe can be compared by
+COMPARED_GROUPS = frozenset({"attack", "benign"})  # the probes of the comparison; regression cases are not compared
 # Positions whose proposals count for learning: a retired, suspended or ambiguous position is not one.
 ACTIVE_STATES = frozenset({"proposed", "confirmed"})
-LOWER_IS_BETTER = frozenset({"P2", "P4", "P5"})
+LOWER_IS_BETTER = frozenset({"P2", "P4", "P5", "L5"})
 CONFIG_ORDER = ("none", "learned", "truth")
 CALL_LIMIT = "JEV_CALL_LIMIT"
 TOLERANCE = 1e-9
@@ -100,6 +109,7 @@ def score(
     pairs: list[Pair] = []
     observed: list[Pair] = []  # the consistency rows (P6), kept apart from everything else
     enforced: list[Pair] = []  # the enforcement half of the same batch (P6), kept apart the same way
+    consequence: list[Pair] = []  # the anti-pollution rows (batch 10), compared with the clean run and kept apart
     missing: list[dict[str, Any]] = []
     for row in observations:
         record = records.get(row["request_id"])
@@ -108,7 +118,9 @@ def score(
             continue
         suspicious, bypass = _label_flags(row, record, records, probe_values_from_record)
         pair = Pair(row, record, suspicious, bypass)
-        if row["group"] == CONSISTENCY_GROUP:
+        if row.get(CONSEQUENCE_FIELD) == CONSEQUENCE:
+            consequence.append(pair)
+        elif row["group"] == CONSISTENCY_GROUP:
             observed.append(pair)
         elif row["group"] == CONSISTENCY_ENFORCE_GROUP:
             enforced.append(pair)
@@ -123,6 +135,7 @@ def score(
     metrics.update(_session_metrics(active))
     metrics.update(_defense_metrics(defend, active, pairs, caps))
     metrics["P6"] = _consistency(observed, enforced)
+    metrics["L5"] = _consequence(pairs, consequence)
     failures, known_gaps = _failures(pairs, missing, caps, exclude_suspicious)
     learning_decisions = decisions if training is None else training  # the learning saw the training segment only
     learning, skip_reason = _learning(truth, learned, learning_decisions, gap_entries, failures, check_gaps)
@@ -184,6 +197,7 @@ def score(
             "missing": len(missing),
             "known_gap_cases": sum(_known_gap(pair.row) for pair in pairs),
             "consistency": len(observed),
+            "consequence": len(consequence),
         },
         "needs": _needs(pairs, caps),
         "skipped": skipped,
@@ -515,6 +529,62 @@ def _consistency(observed: list[Pair], enforced: list[Pair]) -> dict[str, Any]:
         if (pair.rec["outcome"] == "would_block") != (other.rec["outcome"] == "blocked"):
             differing += 1
     return {"value": differing if compared else None, "num": differing, "den": compared}
+
+
+def _consequence(pairs: list[Pair], polluted: list[Pair]) -> dict[str, dict[str, Any]] | None:
+    """The anti-pollution consequence (plan 10, batch 10), per polluted site: its probes against the clean run's rows of the
+    same case and run (`counterpart`). `missed` counts the attacks the clean run blocked and the site let through; `over`
+    counts the benign requests the clean run let through and the site blocked. Every other probe is incomparable. None when
+    no polluted site ran."""
+    if not polluted:
+        return None
+    result: dict[str, dict[str, Any]] = {}
+    for site in sorted({pair.row["site"] for pair in polluted}):
+        own = [pair for pair in polluted if pair.row["site"] == site]
+        counterparts = {pair.row["counterpart"] for pair in own}
+        if len(counterparts) != 1:
+            raise ValueError(f"{site} 的防护后果行对应了多个干净站点：{sorted(counterparts)}")
+        clean = [pair for pair in pairs if pair.row["site"] in counterparts and pair.row["group"] in COMPARED_GROUPS]
+        result[site] = {"counterpart": counterparts.pop(), **_compare_probes(own, clean)}
+    return result
+
+
+def _compare_probes(own: list[Pair], clean: list[Pair]) -> dict[str, Any]:
+    """Compares one polluted site's probes with the clean run's, probe by probe (case and run). A probe is compared when each
+    side has exactly one row for it, the rows are the same kind of probe, and both answers are decided (blocked or allowed)."""
+    own_by, clean_by = _by_probe(own), _by_probe(clean)
+    compared = incomparable = missed = over = 0
+    missed_cases: list[dict[str, Any]] = []
+    over_cases: list[dict[str, Any]] = []
+    for probe in sorted(set(own_by) | set(clean_by)):
+        ours, theirs = own_by.get(probe, []), clean_by.get(probe, [])
+        if len(ours) != 1 or len(theirs) != 1 or not _same_probe(ours[0], theirs[0]):
+            incomparable += 1  # one probe that the two sides do not agree on, or that one side did not answer
+            continue
+        here, base = ours[0], theirs[0]
+        compared += 1
+        item = {"case": here.row["case"], "run": here.row["run"], "category": here.row["category"]}
+        if here.row["expect"] == "block" and base.rec["outcome"] == "blocked" and here.rec["outcome"] != "blocked":
+            missed += 1
+            missed_cases.append(item)
+        elif here.row["expect"] == "allow" and base.rec["outcome"] == "allowed" and here.rec["outcome"] == "blocked":
+            over += 1
+            over_cases.append(item)
+    return {"probes": len(own), "compared": compared, "missed": missed, "over": over, "incomparable": incomparable,
+            "missed_cases": missed_cases, "over_cases": over_cases}
+
+
+def _by_probe(pairs: list[Pair]) -> dict[tuple[str, Any], list[Pair]]:
+    grouped: dict[tuple[str, Any], list[Pair]] = {}
+    for pair in pairs:
+        grouped.setdefault((pair.row["case"], pair.row["run"]), []).append(pair)
+    return grouped
+
+
+def _same_probe(ours: Pair, theirs: Pair) -> bool:
+    """Whether two rows describe the same probe with decided answers, so that they can be compared."""
+    return (ours.row["group"] == theirs.row["group"] and ours.row["expect"] == theirs.row["expect"]
+            and ours.rec["outcome"] in DECIDED_OUTCOMES and theirs.rec["outcome"] in DECIDED_OUTCOMES)
 
 
 # ---------------------------------------------------------------- failures and label checks
@@ -1079,6 +1149,10 @@ def _flatten(metrics: dict[str, Any]) -> dict[str, float]:
         if metrics.get(name):
             flat[f"{name}.accuracy"] = metrics[name]["accuracy"]["value"]
             flat[f"{name}.coverage"] = metrics[name]["coverage"]["value"]
+    # The polluted site's missed attacks are in the baseline and may only go down (batch 10). The set site's are a gate.
+    polluted = (metrics.get("L5") or {}).get(POLLUTED_SITE)
+    if polluted is not None:
+        flat[f"L5/{POLLUTED_SITE}/missed"] = polluted["missed"]
     return {name: value for name, value in flat.items() if value is not None}
 
 

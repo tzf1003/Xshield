@@ -4,6 +4,7 @@ case, and the full-mode sections of the report. The full run itself is the accep
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import unittest
@@ -14,8 +15,11 @@ from unittest import mock
 from clinic_traffic import ATTACKERS_MAX, run_training
 from effectiveness import full, probes, regressions
 from effectiveness.builders import decision, observation
-from effectiveness.report import render_markdown, report_document
-from effectiveness.score import CONSISTENCY_ENFORCE_GROUP, CONSISTENCY_GROUP, score
+from effectiveness.report import _consequence_lines, render_markdown, report_document
+from effectiveness.score import (
+    CONSEQUENCE_FIELD, CONSISTENCY_ENFORCE_GROUP, CONSISTENCY_GROUP, POLLUTED_SET_SITE, POLLUTED_SITE, baseline_values,
+    compare_baseline, score,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTEXT_RS = ROOT / "crates" / "xshield-judge" / "src" / "context.rs"
@@ -404,6 +408,191 @@ class FullReportTests(unittest.TestCase):
         for key in ("convergence", "pollution", "natural_order"):
             self.assertIn(key, document)
         json.dumps(document, ensure_ascii=False)  # the machine-readable report is JSON
+
+
+CLEAN_SITE = "clinic-learned"  # the clean run's site, which the consequence rows are compared with
+
+
+def _consequence_run(clean: list[tuple[str, str, str]],
+                     polluted: dict[str, list[tuple[str, str, str]]]) -> tuple[list[dict], list[dict]]:
+    """Rows and decisions from (case, expect, outcome) triples: the clean run's rows, and each polluted site's rows, which
+    carry the consequence marks. A site's sessions are its own, so no record reads another site's traffic."""
+    observations: list[dict] = []
+    decisions: list[dict] = []
+    for site, probes_ in [(CLEAN_SITE, clean), *polluted.items()]:
+        consequence = site != CLEAN_SITE
+        for case, expect, outcome in probes_:
+            request_id = f"{site}/{case}"
+            row = observation(case, request_id=request_id, group="attack" if expect == "block" else "benign",
+                              category="idor_direct", expect=expect)
+            row["site"] = site
+            if consequence:
+                row.update({CONSEQUENCE_FIELD: "consequence", "counterpart": CLEAN_SITE})
+            observations.append(row)
+            decisions.append(decision(request_id, path="jev_deny" if expect == "block" else "jev_allow",
+                                      outcome=outcome, session=site))
+    return observations, decisions
+
+
+def _site_measure(site: str = POLLUTED_SITE, **fields: object) -> dict:
+    """One polluted site's comparison, with every count the report reads."""
+    item: dict = {"counterpart": CLEAN_SITE, "probes": 4, "compared": 4, "missed": 0, "over": 0, "incomparable": 0,
+                  "missed_cases": [], "over_cases": []}
+    item.update(fields)
+    return item
+
+
+class ConsequenceTests(unittest.TestCase):
+    def test_an_attack_the_clean_run_blocked_and_the_site_lets_through_is_missed(self):
+        observations, decisions = _consequence_run(
+            clean=[("a1", "block", "blocked"), ("a2", "block", "blocked")],
+            polluted={POLLUTED_SITE: [("a1", "block", "blocked"), ("a2", "block", "allowed")]})
+        item = score(observations, decisions)["metrics"]["L5"][POLLUTED_SITE]
+        self.assertEqual((item["compared"], item["missed"], item["over"], item["incomparable"]), (2, 1, 0, 0))
+        self.assertEqual(item["missed_cases"], [{"case": "a2", "run": 1, "category": "idor_direct"}])
+        self.assertEqual(item["counterpart"], CLEAN_SITE)
+
+    def test_a_benign_request_the_clean_run_let_through_and_the_site_blocks_is_over_blocked(self):
+        observations, decisions = _consequence_run(
+            clean=[("b1", "allow", "allowed"), ("b2", "allow", "allowed")],
+            polluted={POLLUTED_SET_SITE: [("b1", "allow", "allowed"), ("b2", "allow", "blocked")]})
+        item = score(observations, decisions)["metrics"]["L5"][POLLUTED_SET_SITE]
+        self.assertEqual((item["compared"], item["missed"], item["over"], item["incomparable"]), (2, 0, 1, 0))
+        self.assertEqual([case["case"] for case in item["over_cases"]], ["b2"])
+
+    def test_a_probe_the_two_sides_do_not_agree_on_is_incomparable(self):
+        observations, decisions = _consequence_run(
+            clean=[("a1", "block", "blocked"), ("a2", "block", "blocked"), ("a3", "block", "blocked")],
+            polluted={POLLUTED_SITE: [("a1", "block", "unjudged"), ("a3", "block", "blocked")]})  # a2 is not run at all
+        item = score(observations, decisions)["metrics"]["L5"][POLLUTED_SITE]
+        self.assertEqual((item["compared"], item["missed"], item["over"], item["incomparable"]), (1, 0, 0, 2))
+
+    def test_identical_configurations_agree_on_every_probe(self):
+        probes_ = [("a1", "block", "blocked"), ("b1", "allow", "allowed")]
+        observations, decisions = _consequence_run(clean=probes_, polluted={POLLUTED_SET_SITE: probes_})
+        item = score(observations, decisions)["metrics"]["L5"][POLLUTED_SET_SITE]
+        self.assertEqual((item["compared"], item["missed"], item["over"], item["incomparable"]), (2, 0, 0, 0))
+
+    def test_the_consequence_rows_count_in_no_other_metric(self):
+        clean = [("a1", "block", "blocked"), ("b1", "allow", "allowed")]
+        observations, decisions = _consequence_run(
+            clean=clean, polluted={POLLUTED_SITE: [("a1", "block", "allowed"), ("b1", "allow", "blocked")]})
+        plain, _ = _consequence_run(clean=clean, polluted={})
+        with_rows, without_rows = score(observations, decisions), score(plain, decisions)
+        self.assertEqual(with_rows["counts"]["scored"], without_rows["counts"]["scored"])
+        self.assertEqual({name: value for name, value in with_rows["metrics"].items() if name != "L5"},
+                         {name: value for name, value in without_rows["metrics"].items() if name != "L5"})
+
+    def test_no_polluted_site_means_no_consequence(self):
+        observations, decisions = _consequence_run(clean=[("a1", "block", "blocked")], polluted={})
+        self.assertIsNone(score(observations, decisions)["metrics"]["L5"])
+
+
+class ConsequenceBaselineTests(unittest.TestCase):
+    def test_only_the_missed_attacks_of_the_polluted_site_enter_the_baseline(self):
+        metrics = {"L5": {POLLUTED_SITE: _site_measure(missed=2), POLLUTED_SET_SITE: _site_measure(POLLUTED_SET_SITE, missed=0)}}
+        self.assertEqual(baseline_values(metrics), {"L5/clinic-polluted/missed": 2})
+        self.assertEqual(baseline_values({"L5": None}), {})
+
+    def test_the_polluted_site_misses_may_only_go_down(self):
+        baseline = {"values": {"L5/clinic-polluted/missed": 2}}
+        worse = compare_baseline({"L5/clinic-polluted/missed": 3}, baseline)
+        better = compare_baseline({"L5/clinic-polluted/missed": 1}, baseline)
+        self.assertEqual([item["name"] for item in worse["regressions"]], ["L5/clinic-polluted/missed"])
+        self.assertEqual([item["name"] for item in better["improvements"]], ["L5/clinic-polluted/missed"])
+
+
+class ConsequenceGateTests(unittest.TestCase):
+    def _measure(self, *, polluted_missed: int = 2, set_missed: int = 0, over: int = 0, incomparable: int = 0,
+                 compared: int = 4) -> dict:
+        return {
+            POLLUTED_SITE: _site_measure(missed=polluted_missed, over=over, incomparable=incomparable, compared=compared),
+            POLLUTED_SET_SITE: _site_measure(POLLUTED_SET_SITE, missed=set_missed, over=over, incomparable=incomparable,
+                                        compared=compared),
+        }
+
+    def test_the_polluted_misses_are_reported_and_the_gates_pass(self):
+        self.assertEqual([gate["ok"] for gate in full.consequence_gates(self._measure(polluted_missed=2))],
+                         [True, True, True])
+
+    def test_a_missed_attack_of_the_set_site_fails_only_the_set_gate(self):
+        self.assertEqual([gate["ok"] for gate in full.consequence_gates(self._measure(set_missed=1))],
+                         [True, False, True])
+
+    def test_an_over_blocked_benign_request_of_either_site_fails_the_benign_gate(self):
+        self.assertEqual([gate["ok"] for gate in full.consequence_gates(self._measure(over=1))], [False, True, True])
+
+    def test_a_probe_the_two_sides_do_not_agree_on_fails_the_match_gate(self):
+        self.assertEqual([gate["ok"] for gate in full.consequence_gates(self._measure(incomparable=1))],
+                         [True, True, False])
+
+    def test_a_site_with_nothing_compared_fails_the_set_and_match_gates(self):
+        self.assertEqual([gate["ok"] for gate in full.consequence_gates(self._measure(compared=0))],
+                         [True, False, False])
+
+    def test_a_missing_measure_fails_every_gate(self):
+        self.assertEqual([gate["ok"] for gate in full.consequence_gates(None)], [False, False, False])
+
+
+class SetPositionTests(unittest.TestCase):
+    SPEC = {"objects": {"classes": [{"id": "patient", "name": "患者"}], "slots": [
+        {"key": "DELETE /api/patients/{id} path[2]", "class": "patient", "source": "rule",
+         "accepts_public": True, "reliability": "medium"},
+        {"key": "GET /api/search results[].id", "class": "patient", "source": "rule", "tier": "public",
+         "reliability": "high"},
+    ]}}
+
+    def test_each_listed_position_refuses_public_sources_at_high_reliability(self):
+        before = copy.deepcopy(self.SPEC)
+        result = full.set_public_positions(self.SPEC, [{"key": "DELETE /api/patients/{id} path[2]"}])
+        slots = {slot["key"]: slot for slot in result["objects"]["slots"]}
+        self.assertEqual((slots["DELETE /api/patients/{id} path[2]"]["accepts_public"],
+                          slots["DELETE /api/patients/{id} path[2]"]["reliability"]), (False, "high"))
+        self.assertEqual(slots["GET /api/search results[].id"], before["objects"]["slots"][1])
+        self.assertEqual(self.SPEC, before, "the configuration given is not changed")
+
+    def test_an_empty_list_leaves_the_configuration_as_it_is(self):
+        self.assertEqual(full.set_public_positions(self.SPEC, []), self.SPEC)
+
+    def test_a_listed_position_the_configuration_does_not_declare_is_an_error(self):
+        with self.assertRaises(ValueError):
+            full.set_public_positions(self.SPEC, [{"key": "GET /api/nowhere path[1]"}])
+
+
+class PollutionSharesTests(unittest.TestCase):
+    def test_the_positions_the_polluted_run_left_open_are_kept_with_their_shares(self):
+        shares = [{"key": "DELETE /api/patients/{id} path[2]", "public_per_mille": 106, "pending_per_mille": 40,
+                   "votes": 198, "sessions": 40}]
+        result = full.pollution(learning_of_clean(), learning_of_clean(), attackers=21, benign_sessions=192,
+                                set_shares=shares)
+        self.assertEqual(result["set_shares"], shares)
+        self.assertEqual(full.pollution(learning_of_clean(), learning_of_clean(), attackers=0,
+                                        benign_sessions=0)["set_shares"], [])
+
+
+def learning_of_clean() -> dict:
+    return learning_of(L0=(["a"], ["a"], []))
+
+
+class ConsequenceReportTests(unittest.TestCase):
+    def test_the_table_names_both_sites_and_lists_the_missed_cases_and_the_set_positions(self):
+        missed = [{"case": "idor_public_source/delete", "run": 1, "category": "idor_public_source"}]
+        pollution = {
+            "consequence": {POLLUTED_SITE: _site_measure(missed=1, missed_cases=missed),
+                            POLLUTED_SET_SITE: _site_measure(POLLUTED_SET_SITE)},
+            "set_shares": [{"key": "DELETE /api/patients/{id} path[2]", "public_per_mille": 106, "pending_per_mille": 40,
+                            "votes": 198, "sessions": 40}],
+        }
+        text = "\n".join(_consequence_lines(pollution))
+        for fragment in ("### 防护后果", "| 原样使用（clinic-polluted） | 4 | 1 | 0 |",
+                         "| 照一栏设定之后（clinic-polluted-set） | 4 | 0 | 0 |",
+                         "`idor_public_source/delete`（idor_public_source，第 1 遍）",
+                         "`DELETE /api/patients/{id} path[2]`", "106‰", "40‰", "198"):
+            self.assertIn(fragment, text)
+
+    def test_without_a_consequence_nothing_is_rendered(self):
+        self.assertEqual(_consequence_lines({"consequence": None}), [])
+        self.assertEqual(_consequence_lines({}), [])
 
 
 if __name__ == "__main__":
