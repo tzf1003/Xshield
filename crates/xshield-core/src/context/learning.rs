@@ -664,36 +664,37 @@ pub enum SourceTier {
     Unknown,
 }
 
-/// Whether a request position accepts public sources, from its votes and what the rules know of the response
-/// positions the votes were shown at ([`SourceTier`]).
+/// The votes a request position's judgement counts, sorted by where their values came from (see
+/// [`judge_accepts_public`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PublicVotes {
+    /// The votes judged.
+    votes: u32,
+    /// Of `votes`, the ones whose values came from public positions and no other.
+    public: u32,
+    /// Of `votes`, the ones with a value at a position awaiting its kind and none from a non-public position.
+    pending: u32,
+    /// The distinct units among the judged votes: users where the site declares identities, sessions otherwise.
+    sessions: u32,
+}
+
+/// Sorts the votes of a request position by where their values came from. A vote is judged when one of its
+/// response positions has a tier or awaits its kind's confirmation. Its kind: non-public when one of its tiered
+/// positions is not `public`; pending when none is non-public and one awaits its kind; public when its tiered
+/// positions are all `public` and none awaits. A vote shown only at unknown positions is left out. Votes of the
+/// sessions in `admin_sessions` are left out: an admin's use of public objects says nothing about ordinary users.
+/// So are votes of sessions refused at the position, since a refused session is what the judge is there to stop.
 ///
-/// A vote is judged when one of its response positions has a tier or awaits its kind's confirmation. Its kind:
-/// non-public when one of its tiered positions is not `public`; pending when none is non-public and one awaits its
-/// kind; public when its tiered positions are all `public` and none awaits. A vote shown only at unknown positions
-/// is left out. Votes of the sessions in `admin_sessions` are left out: an admin's use of public objects says
-/// nothing about ordinary users. So are votes of sessions refused at the position, since a refused session is what
-/// the judge is there to stop.
-///
-/// A pending vote may turn out public or not, so the conclusion is the worst case for each: no acceptance unless
-/// public votes alone reach `COMMON_PUBLIC_PER_MILLE`, and no refusal unless public and pending votes together stay
-/// within `RARE_PUBLIC_PER_MILLE`. The margin of `high` is worked out the same way. Without pending votes this is
-/// the judgement the shares alone give.
-///
-/// With identities (`identified`) the units are the users: the sessions of one user count once, and a
-/// vote that shows no user counts by its session. Without them the units are the sessions, and the
-/// reliability drops one step.
-#[must_use]
-pub fn judge_accepts_public(
+/// With identities (`identified`) the units are the users: the sessions of one user count once, and a vote that
+/// shows no user counts by its session.
+fn public_votes(
     evidence: &Evidence,
     source_of: impl Fn(&str) -> SourceTier,
     admin_sessions: &BTreeSet<String>,
     identified: bool,
-    thresholds: Thresholds,
-) -> Option<AcceptJudgement> {
+) -> PublicVotes {
     let refused = evidence.refused_sessions();
-    let mut votes = 0_u32;
-    let mut public = 0_u32;
-    let mut pending = 0_u32;
+    let mut tally = PublicVotes::default();
     let mut unit_keys = BTreeSet::new();
     for ((session, _), used) in &evidence.votes {
         if admin_sessions.contains(session) || refused.contains(session.as_str()) {
@@ -717,15 +718,42 @@ pub fn judge_accepts_public(
             (false, false, true) => (true, false),
             (false, false, false) => continue,
         };
-        votes = votes.saturating_add(1);
-        public = public.saturating_add(u32::from(is_public));
-        pending = pending.saturating_add(u32::from(is_pending));
+        tally.votes = tally.votes.saturating_add(1);
+        tally.public = tally.public.saturating_add(u32::from(is_public));
+        tally.pending = tally.pending.saturating_add(u32::from(is_pending));
         unit_keys.insert(match (identified, &used.user) {
             (true, Some(user)) => (true, user.as_str()),
             _ => (false, session.as_str()),
         });
     }
-    let sessions = saturating_count(unit_keys.len());
+    tally.sessions = saturating_count(unit_keys.len());
+    tally
+}
+
+/// Whether a request position accepts public sources, from its votes and what the rules know of the response
+/// positions the votes were shown at ([`SourceTier`]).
+///
+/// A vote is judged and sorted as [`public_votes`] sorts it. A pending vote may turn out public or not, so the
+/// conclusion is the worst case for each: no acceptance unless public votes alone reach `COMMON_PUBLIC_PER_MILLE`,
+/// and no refusal unless public and pending votes together stay within `RARE_PUBLIC_PER_MILLE`. The margin of
+/// `high` is worked out the same way. Without pending votes this is the judgement the shares alone give. A share
+/// between the two lines gives no judgement; [`undecided_public_share`] reports it to the administrator instead.
+///
+/// With identities (`identified`) the units are the users, and the reliability drops one step without them.
+#[must_use]
+pub fn judge_accepts_public(
+    evidence: &Evidence,
+    source_of: impl Fn(&str) -> SourceTier,
+    admin_sessions: &BTreeSet<String>,
+    identified: bool,
+    thresholds: Thresholds,
+) -> Option<AcceptJudgement> {
+    let PublicVotes {
+        votes,
+        public,
+        pending,
+        sessions,
+    } = public_votes(evidence, source_of, admin_sessions, identified);
     if votes < thresholds.votes || sessions < thresholds.sessions {
         return None;
     }
@@ -747,6 +775,56 @@ pub fn judge_accepts_public(
         votes,
         sessions,
         public_per_mille,
+    })
+}
+
+/// The shares of a request position whose acceptance the rules leave open (docs/07 section 7.9.16): the public
+/// share, and the share of votes that wait on a position's kind, both in thousandths of the judged votes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UndecidedShare {
+    /// The votes judged, as [`AcceptJudgement::votes`].
+    pub votes: u32,
+    /// The distinct units among them, as [`AcceptJudgement::sessions`].
+    pub sessions: u32,
+    /// The share of judged votes whose values came from public positions only.
+    pub public_per_mille: u32,
+    /// The share of judged votes with a value at a position still awaiting its kind.
+    pub pending_per_mille: u32,
+}
+
+/// The share of a request position that [`judge_accepts_public`] leaves open (docs/07 section 7.9.16, LQ-9): the
+/// public share lies above `RARE_PUBLIC_PER_MILLE` and below `COMMON_PUBLIC_PER_MILLE`, with pending votes counted
+/// in the worst case as there. The rules give no answer there, so the position keeps its configuration, and the
+/// administrator is shown the share to decide. None where the rules give an answer, and where the votes are too few
+/// to judge at all. Only the shares decide this, not the reliability: a share outside the band is a conclusion, or
+/// nothing at all.
+#[must_use]
+pub fn undecided_public_share(
+    evidence: &Evidence,
+    source_of: impl Fn(&str) -> SourceTier,
+    admin_sessions: &BTreeSet<String>,
+    identified: bool,
+    thresholds: Thresholds,
+) -> Option<UndecidedShare> {
+    let PublicVotes {
+        votes,
+        public,
+        pending,
+        sessions,
+    } = public_votes(evidence, source_of, admin_sessions, identified);
+    if votes < thresholds.votes || sessions < thresholds.sessions {
+        return None;
+    }
+    let public_per_mille = share_of(public, votes);
+    let refusal_share = share_of(public.saturating_add(pending), votes);
+    if refusal_share <= RARE_PUBLIC_PER_MILLE || public_per_mille >= COMMON_PUBLIC_PER_MILLE {
+        return None;
+    }
+    Some(UndecidedShare {
+        votes,
+        sessions,
+        public_per_mille,
+        pending_per_mille: share_of(pending, votes),
     })
 }
 
@@ -1298,6 +1376,96 @@ mod tier_tests {
         assert_eq!(
             judge_accepts_public(&evidence, tiers, &no_admins(), true, thresholds()),
             None
+        );
+    }
+
+    #[test]
+    fn a_middle_share_is_undecided_and_the_share_is_reported() {
+        // 4 of 40 judged votes (100 per mille) took public values: neither rare nor common, so no judgement, and the
+        // share is what the administrator is shown.
+        let evidence = uses(40, 10, |index| {
+            if index < 4 {
+                vec![SEARCH]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        let share =
+            undecided_public_share(&evidence, tiers, &no_admins(), true, thresholds()).unwrap();
+        assert_eq!(share.votes, 40);
+        assert_eq!(share.sessions, 10);
+        assert_eq!(share.public_per_mille, 100);
+        assert_eq!(share.pending_per_mille, 0);
+    }
+
+    #[test]
+    fn a_share_the_rules_settle_is_not_undecided() {
+        let rare = uses(40, 10, |_| vec![PATIENTS]);
+        assert_eq!(
+            undecided_public_share(&rare, tiers, &no_admins(), true, thresholds()),
+            None
+        );
+        let common = uses(40, 10, |_| vec![SEARCH]);
+        assert_eq!(
+            undecided_public_share(&common, tiers, &no_admins(), true, thresholds()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_middle_share_over_too_few_votes_is_not_reported() {
+        let evidence = uses(4, 2, |index| {
+            if index == 0 {
+                vec![SEARCH]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        assert_eq!(
+            undecided_public_share(&evidence, tiers, &no_admins(), true, thresholds()),
+            None
+        );
+    }
+
+    #[test]
+    fn the_pending_share_is_reported_beside_the_public_one() {
+        // The 198 votes of the pending test above: all 21 pending, then all 21 settled as public. Both are the
+        // undecided share of 106 per mille, on the side the rules have settled so far.
+        let evidence = uses(198, 10, |index| {
+            if index < 21 {
+                vec![AWAITING]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        let pending =
+            undecided_public_share(&evidence, awaiting, &no_admins(), true, thresholds()).unwrap();
+        assert_eq!(
+            (pending.public_per_mille, pending.pending_per_mille),
+            (0, 106)
+        );
+        let settled =
+            undecided_public_share(&evidence, resolved_public, &no_admins(), true, thresholds())
+                .unwrap();
+        assert_eq!(
+            (settled.public_per_mille, settled.pending_per_mille),
+            (106, 0)
+        );
+    }
+
+    #[test]
+    fn a_middle_share_is_reported_whatever_reliability_the_rules_could_give() {
+        // Without identities the rules grade one step lower, and this evidence gives them no judgement at all. The
+        // share is still open, since only the shares decide it.
+        let evidence = uses(40, 10, |index| {
+            if index < 4 {
+                vec![SEARCH]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        assert!(
+            undecided_public_share(&evidence, tiers, &no_admins(), false, thresholds()).is_some()
         );
     }
 

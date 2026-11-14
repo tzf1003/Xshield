@@ -6,6 +6,7 @@ import type {
   ObjectAcceptanceJudgement,
   ObjectIdentity,
   ObjectJudgement,
+  ObjectPublicShare,
   ObjectReliability,
   ObjectSlotEntry,
   ObjectSlotRow,
@@ -115,6 +116,23 @@ export function proposalFigures(proposal: ObjectJudgement): string[] {
     `不同值 ${proposal.seen_values}`,
     `一致 ${shareOfMille(proposal.agreement_per_mille)}`,
   ];
+}
+
+/** A request position whose acceptance the rules leave open, in words (LQ-9): `使用里 11% 取自待确认类别的来源`, and the
+ *  public share before it when there is one. The rules give no answer there, so the words say no more than the share. */
+export function publicShareWords(share: ObjectPublicShare): string {
+  const parts: string[] = [];
+  if (share.public_per_mille > 0)
+    parts.push(`${shareOfMille(share.public_per_mille)} 来自公共来源`);
+  if (share.pending_per_mille > 0) {
+    parts.push(`${shareOfMille(share.pending_per_mille)} 取自待确认类别的来源`);
+  }
+  return `使用里 ${parts.join("，")}`;
+}
+
+/** The figures a public share rests on, in short phrases: `票 198`, `会话 48`. */
+export function publicShareFigures(share: ObjectPublicShare): string[] {
+  return [`票 ${share.votes}`, `会话 ${share.sessions}`];
 }
 
 /** Whether a judgement carries the note of a site that declares no user identity (LQ-7): an acceptance of no public

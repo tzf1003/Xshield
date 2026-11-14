@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
   ObjectAcceptanceJudgement,
+  ObjectPublicShare,
   ObjectSlotEntry,
   ObjectTierJudgement,
   ObjectsSpec,
@@ -14,6 +15,8 @@ import {
   judgementWords,
   proposalFigures,
   proposalWords,
+  publicShareFigures,
+  publicShareWords,
   shareOfMille,
   unidentifiedNoteOfEntry,
   unidentifiedNoteOfProposal,
@@ -239,5 +242,27 @@ test("a site that declares no user identity says that an acceptance of no public
   assert.equal(
     unidentifiedNoteOfEntry({ accepts_public: false, reliability: "medium" }, true),
     null,
+  );
+});
+
+test("a share the rules leave open is worded with the share that waits on its kind, and counts its votes", () => {
+  const share: ObjectPublicShare = {
+    id: "a1",
+    key: "DELETE /api/patients/{id} path[2]",
+    public_per_mille: 0,
+    pending_per_mille: 106,
+    votes: 198,
+    sessions: 48,
+    last_seen: null,
+  };
+  assert.equal(publicShareWords(share), "使用里 11% 取自待确认类别的来源");
+  assert.deepEqual(publicShareFigures(share), ["票 198", "会话 48"]);
+  assert.equal(
+    publicShareWords({ ...share, public_per_mille: 100, pending_per_mille: 0 }),
+    "使用里 10% 来自公共来源",
+  );
+  assert.equal(
+    publicShareWords({ ...share, public_per_mille: 50, pending_per_mille: 56 }),
+    "使用里 5% 来自公共来源，6% 取自待确认类别的来源",
   );
 });

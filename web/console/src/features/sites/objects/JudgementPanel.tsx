@@ -10,12 +10,15 @@ import type {
   ObjectClass,
   ObjectJudgement,
   ObjectJudgementConfirmation,
+  ObjectPublicShare,
   ObjectSlotRow,
 } from "../../../api/types.ts";
 import {
   isAcceptance,
   proposalFigures,
   proposalWords,
+  publicShareFigures,
+  publicShareWords,
   unidentifiedNoteOfProposal,
 } from "../../../lib/judgement.ts";
 import { errorText, OBJECT_JUDGEMENT, OBJECT_SIDE_INFO } from "../../../lib/vocab.ts";
@@ -27,6 +30,8 @@ import { classNameOf } from "./objects-model.ts";
 type Props = {
   site: string;
   judgements: readonly ObjectJudgement[];
+  /** The request positions whose acceptance the rules leave open, with the share they counted (LQ-9). */
+  publicShares: readonly ObjectPublicShare[];
   /** The position rows, to name each position's side and class. */
   rows: readonly ObjectSlotRow[];
   classes: readonly ObjectClass[];
@@ -48,13 +53,76 @@ function errorOf(error: unknown): string {
   return error instanceof ApiError ? errorText(error.code) : errorText(undefined);
 }
 
-export function JudgementPanel({ site, judgements, rows, classes, identified, dirty }: Props) {
+/** The request positions whose acceptance the rules leave open (LQ-9): the share of their use that came from public
+ *  sources, for the administrator to decide by hand. Nothing here is confirmed or dismissed, so the rows carry no buttons. */
+function PublicShares({
+  shares,
+  rows,
+  classes,
+}: {
+  shares: readonly ObjectPublicShare[];
+  rows: readonly ObjectSlotRow[];
+  classes: readonly ObjectClass[];
+}) {
+  return (
+    <Card
+      className="obj-judgements"
+      title={OBJECT_JUDGEMENT.share.title(shares.length)}
+      aside={<span className="small muted">{OBJECT_JUDGEMENT.share.lead}</span>}
+    >
+      <ul className="obj-judge-list">
+        {shares.map((share) => {
+          const row = rows.find((candidate) => candidate.id === share.id);
+          const side = row === undefined ? null : OBJECT_SIDE_INFO[row.side];
+          const cls = row === undefined ? null : classNameOf(classes, row.class);
+          return (
+            <li key={share.id} className="obj-judge-row">
+              <div className="obj-judge-where">
+                {side === null ? null : (
+                  <span className="obj-side" aria-hidden="true" title={side.desc}>
+                    {side.icon}
+                  </span>
+                )}
+                <span className="obj-code">
+                  <SafeText text={share.key} />
+                </span>
+                {cls === null ? null : (
+                  <span className="small muted">
+                    <SafeText text={cls} />
+                  </span>
+                )}
+              </div>
+              <div className="obj-judge-what">
+                <SafeText text={publicShareWords(share)} />
+                <span className="small muted"> {publicShareFigures(share).join(" · ")}</span>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
+  );
+}
+
+export function JudgementPanel({
+  site,
+  judgements,
+  publicShares,
+  rows,
+  classes,
+  identified,
+  dirty,
+}: Props) {
   const confirm = useConfirmJudgement();
   const dismiss = useDismissJudgement();
   const [pending, setPending] = useState<ObjectJudgement | null>(null);
   const [notice, setNotice] = useState<{ tone: "info" | "bad"; text: string } | null>(null);
 
-  if (judgements.length === 0) return null;
+  const shares =
+    publicShares.length === 0 ? null : (
+      <PublicShares shares={publicShares} rows={rows} classes={classes} />
+    );
+  if (judgements.length === 0) return shares;
 
   const rowOf = (proposal: ObjectJudgement) => rows.find((row) => row.id === proposal.id);
   const act = (proposal: ObjectJudgement, action: "confirm" | "dismiss") => {
@@ -85,86 +153,89 @@ export function JudgementPanel({ site, judgements, rows, classes, identified, di
   };
 
   return (
-    <Card
-      className="obj-judgements"
-      title={OBJECT_JUDGEMENT.panel.title(judgements.length)}
-      aside={<span className="small muted">{OBJECT_JUDGEMENT.panel.lead}</span>}
-    >
-      {notice === null ? null : (
-        <Notice tone={notice.tone === "bad" ? "bad" : "info"}>{notice.text}</Notice>
-      )}
-      <ul className="obj-judge-list">
-        {judgements.map((proposal) => {
-          const row = rowOf(proposal);
-          const side = row === undefined ? null : OBJECT_SIDE_INFO[row.side];
-          const cls = row === undefined ? null : classNameOf(classes, row.class);
-          const note = unidentifiedNoteOfProposal(proposal, identified);
-          return (
-            <li key={proposal.id} className="obj-judge-row">
-              <div className="obj-judge-where">
-                {side === null ? null : (
-                  <span className="obj-side" aria-hidden="true" title={side.desc}>
-                    {side.icon}
-                  </span>
-                )}
-                <span className="obj-code">
-                  <SafeText text={proposal.key} />
-                </span>
-                {cls === null ? null : (
-                  <span className="small muted">
-                    <SafeText text={cls} />
-                  </span>
-                )}
-              </div>
-              <div className="obj-judge-what">
-                <SafeText text={proposalWords(proposal)} />
-                <span className="small muted"> {proposalFigures(proposal).join(" · ")}</span>
-                {note === null ? null : (
-                  <div className="small muted">
-                    <SafeText text={note} />
-                  </div>
-                )}
-              </div>
-              <div className="obj-judge-actions">
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={dirty || confirm.isPending}
-                  title={dirty ? OBJECT_JUDGEMENT.panel.dirtyDraft : undefined}
-                  onClick={() => setPending(proposal)}
-                >
-                  {OBJECT_JUDGEMENT.panel.confirm}
-                </button>
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={dismiss.isPending}
-                  onClick={() => act(proposal, "dismiss")}
-                >
-                  {OBJECT_JUDGEMENT.panel.dismiss}
-                </button>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-      <Modal
-        open={pending !== null}
-        title={OBJECT_JUDGEMENT.panel.confirmTitle}
-        okText={OBJECT_JUDGEMENT.panel.confirmOk}
-        cancelText={OBJECT_JUDGEMENT.panel.cancel}
-        okButtonProps={{ loading: confirm.isPending }}
-        onOk={() => pending !== null && act(pending, "confirm")}
-        onCancel={() => setPending(null)}
+    <>
+      <Card
+        className="obj-judgements"
+        title={OBJECT_JUDGEMENT.panel.title(judgements.length)}
+        aside={<span className="small muted">{OBJECT_JUDGEMENT.panel.lead}</span>}
       >
-        {pending === null ? null : (
-          <p>
-            <SafeText
-              text={OBJECT_JUDGEMENT.panel.confirmBody(pending.key, proposalWords(pending))}
-            />
-          </p>
+        {notice === null ? null : (
+          <Notice tone={notice.tone === "bad" ? "bad" : "info"}>{notice.text}</Notice>
         )}
-      </Modal>
-    </Card>
+        <ul className="obj-judge-list">
+          {judgements.map((proposal) => {
+            const row = rowOf(proposal);
+            const side = row === undefined ? null : OBJECT_SIDE_INFO[row.side];
+            const cls = row === undefined ? null : classNameOf(classes, row.class);
+            const note = unidentifiedNoteOfProposal(proposal, identified);
+            return (
+              <li key={proposal.id} className="obj-judge-row">
+                <div className="obj-judge-where">
+                  {side === null ? null : (
+                    <span className="obj-side" aria-hidden="true" title={side.desc}>
+                      {side.icon}
+                    </span>
+                  )}
+                  <span className="obj-code">
+                    <SafeText text={proposal.key} />
+                  </span>
+                  {cls === null ? null : (
+                    <span className="small muted">
+                      <SafeText text={cls} />
+                    </span>
+                  )}
+                </div>
+                <div className="obj-judge-what">
+                  <SafeText text={proposalWords(proposal)} />
+                  <span className="small muted"> {proposalFigures(proposal).join(" · ")}</span>
+                  {note === null ? null : (
+                    <div className="small muted">
+                      <SafeText text={note} />
+                    </div>
+                  )}
+                </div>
+                <div className="obj-judge-actions">
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={dirty || confirm.isPending}
+                    title={dirty ? OBJECT_JUDGEMENT.panel.dirtyDraft : undefined}
+                    onClick={() => setPending(proposal)}
+                  >
+                    {OBJECT_JUDGEMENT.panel.confirm}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={dismiss.isPending}
+                    onClick={() => act(proposal, "dismiss")}
+                  >
+                    {OBJECT_JUDGEMENT.panel.dismiss}
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+        <Modal
+          open={pending !== null}
+          title={OBJECT_JUDGEMENT.panel.confirmTitle}
+          okText={OBJECT_JUDGEMENT.panel.confirmOk}
+          cancelText={OBJECT_JUDGEMENT.panel.cancel}
+          okButtonProps={{ loading: confirm.isPending }}
+          onOk={() => pending !== null && act(pending, "confirm")}
+          onCancel={() => setPending(null)}
+        >
+          {pending === null ? null : (
+            <p>
+              <SafeText
+                text={OBJECT_JUDGEMENT.panel.confirmBody(pending.key, proposalWords(pending))}
+              />
+            </p>
+          )}
+        </Modal>
+      </Card>
+      {shares}
+    </>
   );
 }

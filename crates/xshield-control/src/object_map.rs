@@ -38,6 +38,7 @@ use xshield_postgres::{
     object_agent_store::{self as runs},
     object_judgement_store::{self as judgements, Proposal},
     object_learning_store::{self as store, Flow, JevFlow, PositionRow},
+    object_public_share_store::{self as public_shares, PublicShare},
     object_tier_judgement_store::{self as tier_judgements, TierProposal},
     site_spec_store::{self, Change, SiteRecord, WriteOutcome},
 };
@@ -288,6 +289,9 @@ pub(crate) struct ObjectsBody {
     slots: Vec<SlotRow>,
     /// The acceptance proposals waiting for an administrator, in key order.
     judgements: Vec<JudgementBody>,
+    /// The request positions whose acceptance the rules leave open, in key order, with the share of public sources
+    /// the rules counted (docs/07 section 7.9.16, LQ-9). An administrator sets their acceptance in the configuration.
+    public_shares: Vec<PublicShareBody>,
     /// Which automatic behaviours this build runs, so the console can say which are off.
     features: Features,
     /// The automatic changes of the last 30 days that no one has handled, newest first: one event
@@ -513,6 +517,7 @@ pub async fn list(
     let mut rows = merged(&record.spec, &learned, &view)?;
     let proposals = judgements::proposals(&state.pool, &name).await?;
     let tiers = tier_judgements::proposals(&state.pool, &name).await?;
+    let shares = public_shares::shares(&state.pool, &name).await?;
     let events = automatic_events(&state, &record, now).await?;
     for row in &mut rows {
         row.suspension = suspension_of(&state, &record, &events, row, now).await?;
@@ -543,6 +548,7 @@ pub async fn list(
         identified: record.spec.objects().declares_user_identity(),
         slots: rows.into_iter().filter(|row| filter.matches(row)).collect(),
         judgements: judgement_bodies(&record.spec, proposals, tiers),
+        public_shares: public_share_bodies(&record.spec, shares),
         features: FEATURES,
         events: events
             .into_iter()
@@ -862,6 +868,47 @@ fn judgement_bodies(
             last_seen: last_seen(i64::try_from(proposal.last_day).unwrap_or(i64::MAX)),
         });
     acceptances.chain(judged_tiers).collect()
+}
+
+/// A request position whose acceptance the rules leave open: `PublicShareBody`. The share tells the administrator how
+/// much of the position's use came from public sources, which the rules do not settle (docs/07 section 7.9.16).
+#[derive(Debug, Serialize)]
+pub(crate) struct PublicShareBody {
+    /// The declared position's id, as the other judgement rows name it.
+    id: String,
+    key: String,
+    /// The share of the judged votes, in thousandths, whose values came from public positions only.
+    public_per_mille: u32,
+    /// The share of the judged votes, in thousandths, with a value at a position still awaiting its kind.
+    pending_per_mille: u32,
+    /// The votes the share rests on.
+    votes: u32,
+    /// The distinct units among them.
+    sessions: u32,
+    last_seen: Option<String>,
+}
+
+/// The shares the console lists: those of declared request positions in effect that the configuration does not
+/// judge yet. A position whose configuration carries an acceptance is settled, so its share is left out.
+fn public_share_bodies(spec: &SiteSpec, shares: Vec<PublicShare>) -> Vec<PublicShareBody> {
+    let map = spec.objects();
+    shares
+        .into_iter()
+        .filter(|share| {
+            map.declared_class_of(&share.slot).is_some()
+                && !map.is_paused(&share.slot)
+                && map.accepts_public_of(&share.slot).is_none()
+        })
+        .map(|share| PublicShareBody {
+            id: declared_id(&share.slot),
+            key: share.slot,
+            public_per_mille: share.public_per_mille,
+            pending_per_mille: share.pending_per_mille,
+            votes: share.votes,
+            sessions: share.sessions,
+            last_seen: last_seen(i64::try_from(share.last_day).unwrap_or(i64::MAX)),
+        })
+        .collect()
 }
 
 /// The declared position an id names, for the judgement actions. A request position takes an acceptance
@@ -3325,6 +3372,48 @@ mod tests {
             "a tier carries no acceptance"
         );
         assert!(row.get("votes").is_none(), "a tier counts units, not votes");
+    }
+
+    #[test]
+    fn a_share_the_rules_leave_open_is_listed_until_the_configuration_judges_the_position() {
+        let spec = site_with_slots(
+            r#"{"key": "DELETE /api/patients/{id} path[2]", "class": "doctor", "source": "admin"},
+               {"key": "PUT /api/notes/{id} path[2]", "class": "doctor", "source": "admin", "accepts_public": false, "reliability": "high"},
+               {"key": "POST /api/notes/{id} path[2]", "class": "doctor", "source": "admin", "paused": true}"#,
+        );
+        let share = |slot: &str| PublicShare {
+            slot: slot.to_owned(),
+            public_per_mille: 106,
+            pending_per_mille: 40,
+            votes: 198,
+            sessions: 48,
+            last_day: 20_000,
+        };
+        let listed = public_share_bodies(
+            &spec,
+            vec![
+                // The configuration carries no acceptance for it: the administrator is shown the share.
+                share("DELETE /api/patients/{id} path[2]"),
+                // The configuration carries an acceptance already, so there is nothing left to decide.
+                share("PUT /api/notes/{id} path[2]"),
+                // A paused position is not in effect.
+                share("POST /api/notes/{id} path[2]"),
+                // An undeclared position has no entry to set an acceptance on.
+                share("PUT /api/undeclared/{id} path[2]"),
+            ],
+        );
+        assert_eq!(listed.len(), 1, "only the open share is listed");
+        let row = serde_json::to_value(&listed[0]).expect("the row serializes");
+        assert_eq!(row["key"], "DELETE /api/patients/{id} path[2]");
+        assert_eq!(row["id"], declared_id("DELETE /api/patients/{id} path[2]"));
+        assert_eq!(row["public_per_mille"], 106);
+        assert_eq!(row["pending_per_mille"], 40);
+        assert_eq!(row["votes"], 198);
+        assert_eq!(row["sessions"], 48);
+        assert!(
+            row.get("accepts_public").is_none(),
+            "the rules give no acceptance here"
+        );
     }
 }
 

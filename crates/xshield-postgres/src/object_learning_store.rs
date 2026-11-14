@@ -1476,6 +1476,7 @@ pub async fn forget_site(
         "DELETE FROM object_agent_calls WHERE site = $1",
         "DELETE FROM object_learning_runs WHERE site = $1",
         "DELETE FROM object_judgements WHERE site = $1",
+        "DELETE FROM object_public_shares WHERE site = $1",
         "DELETE FROM object_tier_judgements WHERE site = $1",
         "DELETE FROM object_response_evidence WHERE site = $1",
     ] {

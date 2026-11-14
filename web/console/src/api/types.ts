@@ -1526,6 +1526,24 @@ export interface ObjectSlotRow {
   reliability?: ObjectReliability;
 }
 
+/** A request position whose acceptance the rules leave open (`public_shares`, docs/07 7.9.16, LQ-9): the share of its
+ *  use that came from public sources, which the administrator decides by hand in the configuration. */
+export interface ObjectPublicShare {
+  /** The declared position's id. */
+  id: string;
+  key: string;
+  /** The share of the judged votes, in thousandths, whose values came from public positions only. */
+  public_per_mille: number;
+  /** The share of the judged votes, in thousandths, with a value at a position still awaiting its kind. */
+  pending_per_mille: number;
+  /** The votes the share rests on. */
+  votes: number;
+  /** The distinct units among them. */
+  sessions: number;
+  /** RFC 3339 UTC of the last evidence, or null. */
+  last_seen: string | null;
+}
+
 /** A proposal waiting for an administrator (`judgements`, docs/07 7.9.16): the judgement the rules give a declared position. */
 export interface ObjectJudgementBase {
   /** The declared position's id, which the confirm and dismiss actions take. */
@@ -1655,6 +1673,8 @@ export interface ObjectsResponse {
   slots: ObjectSlotRow[];
   /** The judgements the rules propose for declared positions and no administrator has answered yet (docs/07 7.9.16). */
   judgements: ObjectJudgement[];
+  /** The request positions whose acceptance the rules leave open, with the share they counted (docs/07 7.9.16, LQ-9). */
+  public_shares: ObjectPublicShare[];
   /** The automatic changes of the last 30 days, newest first; the banner and the list show the open ones. */
   events: ObjectEvent[];
   features: ObjectFeatures;
