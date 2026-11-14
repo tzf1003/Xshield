@@ -606,6 +606,27 @@ class ConsequenceReportTests(unittest.TestCase):
                          "`DELETE /api/patients/{id} path[2]`", "106‰", "40‰", "198"):
             self.assertIn(fragment, text)
 
+    def test_the_incomparable_lines_come_before_the_case_lists_and_each_list_starts_after_a_blank_line(self):
+        missed = [{"case": "idor_public_source/delete", "run": 1, "category": "idor_public_source"}]
+        pollution = {"consequence": {POLLUTED_SITE: _site_measure(missed=1, missed_cases=missed),
+                                     POLLUTED_SET_SITE: _site_measure(POLLUTED_SET_SITE)}}
+        lines = _consequence_lines(pollution)
+        incomparable = [i for i, line in enumerate(lines) if "两边对不上的探针" in line]
+        first_case = next(i for i, line in enumerate(lines) if line.startswith("- `"))
+        self.assertEqual(len(incomparable), 2)
+        self.assertLess(max(incomparable), first_case)
+        for i, line in enumerate(lines):
+            if line.endswith(("少拦的用例：", "多拦的用例：")):
+                self.assertEqual(lines[i - 1], "")
+
+    def test_a_benign_request_only_the_polluted_site_blocks_is_listed_with_its_case(self):
+        over = [{"case": "benign/search", "run": 2, "category": "benign_list"}]
+        pollution = {"consequence": {POLLUTED_SITE: _site_measure(over=1, over_cases=over),
+                                     POLLUTED_SET_SITE: _site_measure(POLLUTED_SET_SITE)}}
+        text = "\n".join(_consequence_lines(pollution))
+        self.assertIn("原样使用（clinic-polluted） 多拦的用例：", text)
+        self.assertIn("- `benign/search`（benign_list，第 2 遍）", text)
+
     def test_without_a_consequence_nothing_is_rendered(self):
         self.assertEqual(_consequence_lines({"consequence": None}), [])
         self.assertEqual(_consequence_lines({}), [])

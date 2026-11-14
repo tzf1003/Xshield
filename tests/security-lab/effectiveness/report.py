@@ -460,12 +460,14 @@ def _consequence_lines(pollution: dict[str, Any]) -> list[str]:
              "两个站点各自先跑的良性旅程，以及同一批攻击和良性探针，逐条与干净训练学出的映射（`clinic-learned`）比较。"
              "“少拦的攻击”指干净映射拦了、这里放行的；“多拦的良性”指干净映射放行、这里拦了的。两边都比较了的探针数如下（旅程的步骤也按探针计）：", "",
              *_md_table(["配置", "比较的探针数", "少拦的攻击", "多拦的良性"], rows)]
-    for site, item in consequence.items():
-        if site not in CONSEQUENCE_TITLES:
-            continue
-        lines.append(f"- {CONSEQUENCE_TITLES[site]}：两边对不上的探针 {item['incomparable']} 个（门槛 0）。")
-        if item["missed_cases"]:
-            lines += ["", f"{CONSEQUENCE_TITLES[site]} 少拦的用例：", "", *_case_lines(item["missed_cases"])]
+    sites = [site for site in consequence if site in CONSEQUENCE_TITLES]
+    lines.append("")
+    for site in sites:
+        lines.append(f"- {CONSEQUENCE_TITLES[site]}：两边对不上的探针 {consequence[site]['incomparable']} 个（门槛 0）。")
+    for site in sites:
+        for label, key in (("少拦的用例", "missed_cases"), ("多拦的用例", "over_cases")):
+            if consequence[site][key]:
+                lines += ["", f"{CONSEQUENCE_TITLES[site]} {label}：", "", *_case_lines(consequence[site][key])]
     shares = pollution.get("set_shares") or []
     if shares:
         share_rows = [[f"`{item['key']}`", f"{item['public_per_mille']}‰", f"{item['pending_per_mille']}‰",
