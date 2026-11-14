@@ -43,7 +43,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | Database-gated Rust tests return early and count as PASS when no database is configured (`verify_all.sh` now reports this as SKIP; the tests themselves still pass silently under a bare `cargo test`). | tests | S | LOW | `crates/xshield-edge/tests/postgres.rs:61,249` |
 | The edge PostgreSQL tests use a hand-copied schema instead of `migrations/`. | tests | S–M | LOW | `crates/xshield-edge/tests/postgres.rs:30-33` |
 | Acceptance scenarios C6–C8 are documented as run by CI but are not in the lab script. | tests | M | LOW | `docs/04-deployment-testing.md:75-77,89`, `scripts/test_idor_lab.py` |
-| Actions are referenced by mutable tag or branch, including in the job that pushes and signs images. | dx / security | S | LOW | `.github/workflows/ci.yml:84,130`, `release-images.yml:62-82` |
 | CI `validate` has no timeout and no cargo cache; the Dockerfile copies the whole tree before the cargo build. | dx | S–M | LOW–MED | `.github/workflows/ci.yml:50-110`, `Dockerfile:28-31` |
 | One global mutex serialises every site's judge and observe calls, with HMAC work inside it. | perf | M | LOW | `engine.rs:442-450,852-929` |
 
