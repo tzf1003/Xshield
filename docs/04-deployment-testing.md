@@ -255,7 +255,7 @@ v3 的 78 项验收用例目录、性能基线、多浏览器回归、OIDC 回�
 - `--update-baseline`：把本次指标写入基线文件。只在全部门槛通过、且没有指标变差时写入；不能与 `--only` 同用，也不能与真实 Jev（`--jev live`、`record`、`replay`）同用，基线只记理想模型的数字。
 - `--jev record`：同 `live`，每次应答按请求摘要写入输出目录的 `jev-recording.jsonl`（`jev_relay.py`）；录制不完整时以退出码 2 结束，不要入库。
 - `--jev replay`：不联网、不需要密钥，只从 `effectiveness/recordings/quick.jsonl` 答复；摘要不在录制里的调用收到 UNKNOWN，计入“回放未命中率”。录制文件目前不存在（见 `effectiveness/recordings/README.md`），那时以退出码 2 退出。
-- `--mode full`：完整模式，48 位医生，良性文本取全部语料，攻击和良性探针取全集，并多跑 L4、L5、P6（完整模式门槛，必须为 0）、删除穿插在搜索之间的自然顺序变体（只报告），以及会话表填满的回归用例 `b11-session-eviction`；整套跑两遍，两遍的确定部分必须逐位相同。只用理想模型（`--jev ideal`），需要 PostgreSQL（学习段）；缺了、或与 `--jev live`、`record`、`replay` 同用，都以退出码 2 退出，不写任何输出。一遍约 4.3 分钟，两遍约 8.6 分钟（不含编译，在开发机上的实测，见 PR 描述）。完整组的基线用 `--update-baseline` 生成。
+- `--mode full`：完整模式，48 位医生，良性文本取全部语料，攻击和良性探针取全集，并多跑 L4、L5、P6（完整模式门槛，必须为 0）、删除穿插在搜索之间的自然顺序变体（门槛：公共搜索结果学到 public、high），以及会话表填满的回归用例 `b11-session-eviction`；整套跑两遍，两遍的确定部分必须逐位相同。只用理想模型（`--jev ideal`），需要 PostgreSQL（学习段）；缺了、或与 `--jev live`、`record`、`replay` 同用，都以退出码 2 退出，不写任何输出。一遍约 4.3 分钟，两遍约 8.6 分钟（不含编译，在开发机上的实测，见 PR 描述）。完整组的基线用 `--update-baseline` 生成。
 
 CI 里，`ci.yml` 的 `validate` 作业先跑 `tests/security-lab` 下的单元测试，再跑快速模式。报告追加到步骤摘要，输出目录作为制品上传，不论成败。`effectiveness.yml` 在 `main` 上有判定、学习或靶场代码的改动时跑一次，也可以手动触发（`mode` 选 `quick` 或 `full`，`jev` 选 `ideal` 或 `live`）。没有定时运行。
 
