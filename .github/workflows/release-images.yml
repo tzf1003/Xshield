@@ -7,13 +7,16 @@ name: release-images
 #
 #   cosign verify ghcr.io/<owner>/xshield-edge@sha256:... \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-#     --certificate-identity-regexp '^https://github\.com/<owner>/<repo>/\.github/workflows/release-images\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$'
+#     --certificate-identity-regexp '^https://github\.com/<owner>/<repo>/\.github/workflows/release-images\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?|heads/main)$'
 #
 # Runs for a pushed v* tag, or when release.yml calls it for the tag it just
 # created (a tag pushed with GITHUB_TOKEN starts no workflow). Called from
 # main, the signing identity is this file at refs/heads/main; the image's
 # version and revision labels, and its provenance, name the released commit.
-# Nothing on pull requests or other branches publishes.
+# Nothing on pull requests or other branches publishes. A tag a person pushes
+# passes the same checks release.yml makes before it tags: the commit is on
+# main and CI on main passed for it. Release tags are vMAJOR.MINOR.PATCH,
+# optionally with an -rcN suffix (the crates' own version is 4.0.0-rc1).
 
 on:
   push:
@@ -38,6 +41,8 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+      # Reads the CI runs of the tagged commit (the check for a pushed tag).
+      actions: read
       packages: write
       # Keyless signing: the Sigstore certificate is issued for this workflow's OIDC identity.
       id-token: write
@@ -51,12 +56,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - name: Check a pushed tag the way release.yml checks its own
+        # release.yml has already checked the commit it tags before calling this workflow.
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          sha=$(git rev-parse --verify "HEAD^{commit}")
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$sha" FETCH_HEAD || fail "$TAG names $sha, which is not on main"
+          passed=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&event=push" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          [[ "$passed" -gt 0 ]] || fail "CI on main has not passed for $sha"
       - id: name
         env:
           OWNER: ${{ github.repository_owner }}
           TARGET: ${{ matrix.target }}
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
           echo "image=ghcr.io/${OWNER,,}/xshield-${TARGET}" >> "$GITHUB_OUTPUT"
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
@@ -88,7 +108,7 @@ jobs:
           cosign sign --yes "$IMAGE"
           # The identity deployers verify: this file, at a release
           # tag (tag push) or at main (called by release.yml).
-          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/release-images\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+|heads/main)$"
+          identity="^https://github\.com/${REPOSITORY//./\\.}/\.github/workflows/release-images\.yml@refs/(tags/v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?|heads/main)$"
           cosign verify "$IMAGE" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --certificate-identity-regexp "$identity" >/dev/null
