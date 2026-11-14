@@ -737,7 +737,8 @@ fn public_votes(
 /// conclusion is the worst case for each: no acceptance unless public votes alone reach `COMMON_PUBLIC_PER_MILLE`,
 /// and no refusal unless public and pending votes together stay within `RARE_PUBLIC_PER_MILLE`. The margin of
 /// `high` is worked out the same way. Without pending votes this is the judgement the shares alone give. A share
-/// between the two lines gives no judgement; [`undecided_public_share`] reports it to the administrator instead.
+/// between the two lines gives no judgement; [`undecided_public_share`] reports the part of it that no pending vote
+/// can move.
 ///
 /// With identities (`identified`) the units are the users, and the reliability drops one step without them.
 #[must_use]
@@ -792,12 +793,12 @@ pub struct UndecidedShare {
     pub pending_per_mille: u32,
 }
 
-/// The share of a request position that [`judge_accepts_public`] leaves open (docs/07 section 7.9.16, LQ-9): the
-/// public share lies above `RARE_PUBLIC_PER_MILLE` and below `COMMON_PUBLIC_PER_MILLE`, with pending votes counted
-/// in the worst case as there. The rules give no answer there, so the position keeps its configuration, and the
-/// administrator is shown the share to decide. None where the rules give an answer, and where the votes are too few
-/// to judge at all. Only the shares decide this, not the reliability: a share outside the band is a conclusion, or
-/// nothing at all.
+/// The share of a request position that [`judge_accepts_public`] leaves open, for the administrator to decide
+/// (docs/07 section 7.9.16, LQ-9). It is reported only when the pending votes cannot change the outcome: the public
+/// votes alone are above `RARE_PUBLIC_PER_MILLE`, so no refusal can follow, and the public and pending votes together
+/// stay below `COMMON_PUBLIC_PER_MILLE`, so no acceptance can follow. A position whose votes wait on a kind's
+/// confirmation is not reported: the confirmation settles it, or moves it into this band. None where the rules give
+/// an answer, and where the votes are too few to judge at all. Only the shares decide this, not the reliability.
 #[must_use]
 pub fn undecided_public_share(
     evidence: &Evidence,
@@ -816,8 +817,10 @@ pub fn undecided_public_share(
         return None;
     }
     let public_per_mille = share_of(public, votes);
-    let refusal_share = share_of(public.saturating_add(pending), votes);
-    if refusal_share <= RARE_PUBLIC_PER_MILLE || public_per_mille >= COMMON_PUBLIC_PER_MILLE {
+    let public_or_pending_per_mille = share_of(public.saturating_add(pending), votes);
+    if public_per_mille <= RARE_PUBLIC_PER_MILLE
+        || public_or_pending_per_mille >= COMMON_PUBLIC_PER_MILLE
+    {
         return None;
     }
     Some(UndecidedShare {
@@ -1428,9 +1431,10 @@ mod tier_tests {
     }
 
     #[test]
-    fn the_pending_share_is_reported_beside_the_public_one() {
-        // The 198 votes of the pending test above: all 21 pending, then all 21 settled as public. Both are the
-        // undecided share of 106 per mille, on the side the rules have settled so far.
+    fn a_share_the_pending_votes_could_still_move_is_not_reported() {
+        // The 198 votes of the pending test above: all 21 wait on their kind, the rest are the own values. While they
+        // wait, no public vote is counted, and the share is pending only: 106 per mille could still turn into an
+        // acceptance or a refusal, so it is not reported (the position of the first learning round in the lab).
         let evidence = uses(198, 10, |index| {
             if index < 21 {
                 vec![AWAITING]
@@ -1438,18 +1442,61 @@ mod tier_tests {
                 vec![PATIENTS]
             }
         });
-        let pending =
-            undecided_public_share(&evidence, awaiting, &no_admins(), true, thresholds()).unwrap();
         assert_eq!(
-            (pending.public_per_mille, pending.pending_per_mille),
-            (0, 106)
+            undecided_public_share(&evidence, awaiting, &no_admins(), true, thresholds()),
+            None
         );
+        // Once they are settled as public, the share is public and nothing is left to move: it is reported.
         let settled =
             undecided_public_share(&evidence, resolved_public, &no_admins(), true, thresholds())
                 .unwrap();
         assert_eq!(
             (settled.public_per_mille, settled.pending_per_mille),
             (106, 0)
+        );
+    }
+
+    #[test]
+    fn a_share_is_reported_only_where_no_pending_vote_can_settle_it() {
+        // 50 public and 56 pending of 1000 votes: the public share is above the refusal line, and public and pending
+        // together stay below the acceptance line, so the pending votes cannot change the outcome. Reported.
+        let reported = uses(1_000, 10, |index| {
+            if index < 50 {
+                vec![SEARCH]
+            } else if index < 106 {
+                vec![AWAITING]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        let share =
+            undecided_public_share(&reported, awaiting, &no_admins(), true, thresholds()).unwrap();
+        assert_eq!((share.public_per_mille, share.pending_per_mille), (50, 56));
+        // 100 public and 150 pending: 150 pending votes that turn out public would make it an acceptance. Not reported.
+        let could_accept = uses(1_000, 10, |index| {
+            if index < 100 {
+                vec![SEARCH]
+            } else if index < 250 {
+                vec![AWAITING]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        assert_eq!(
+            undecided_public_share(&could_accept, awaiting, &no_admins(), true, thresholds()),
+            None
+        );
+        // Exactly 10 per mille public is a refusal the rules give, not a share left open.
+        let refused = uses(1_000, 10, |index| {
+            if index < 10 {
+                vec![SEARCH]
+            } else {
+                vec![PATIENTS]
+            }
+        });
+        assert_eq!(
+            undecided_public_share(&refused, tiers, &no_admins(), true, thresholds()),
+            None
         );
     }
 

@@ -1,6 +1,7 @@
 -- The public-source share of a request position whose acceptance the rules leave open (docs/07 section
--- 7.9.16, LQ-9). Between `RARE_PUBLIC_PER_MILLE` and `COMMON_PUBLIC_PER_MILLE` the rules give no acceptance,
--- so the position keeps its configuration and an administrator decides it. These rows are what the console
+-- 7.9.16, LQ-9). Where the public votes are above `RARE_PUBLIC_PER_MILLE` and the public and pending votes
+-- together stay below `COMMON_PUBLIC_PER_MILLE`, no pending vote can settle the position: the rules give no
+-- acceptance, so the position keeps its configuration and an administrator decides it. These rows are what the console
 -- shows them to decide with. A row is replaced when the rules judge the position again, and removed when they
 -- give an answer, when the position has no votes, or when the configuration already carries its acceptance.
 -- Only the control plane writes this table. Deleting the site removes its rows in the same transaction
