@@ -169,6 +169,13 @@ LEARNED: Fields = {
     "rounds": (_list_of(_is_dict), "对象数组"),
     "final_spec": (_is_dict, "对象"),
 }
+PUBLIC_SHARE: Fields = {
+    "key": (_position_key, "“METHOD /路由 位置”格式的键"),
+    "public_per_mille": (_is_int, "整数，千分之几"),
+    "pending_per_mille": (_is_int, "整数，千分之几"),
+    "votes": (_is_int, "整数"),
+    "sessions": (_is_int, "整数"),
+}
 CANDIDATE: Fields = {
     "key": (_position_key, "“METHOD /路由 位置”格式的键"),
     "side": (_one_of(SIDES), "request 或 response"),
@@ -337,6 +344,11 @@ def load_learned(path: Path) -> dict[str, Any]:
             _check_fields(position, f"{where}.positions[{index}]", POSITION)
         for index, judgement in enumerate(rnd["judgements"]):
             _check_judgement(judgement, f"{where}.judgements[{index}]")
+    shares = doc.get("public_shares", [])  # a file from before batch 10 has none, and reads as an empty list
+    if not _list_of(_is_dict)(shares):
+        raise ContractError(f"{name}: 字段 public_shares 应为对象数组")
+    for index, share in enumerate(shares):
+        _check_fields(share, f"{name}:public_shares[{index}]", PUBLIC_SHARE)
     return doc
 
 

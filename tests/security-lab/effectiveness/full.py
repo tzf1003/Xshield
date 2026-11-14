@@ -13,6 +13,11 @@
   the search-then-delete position as accepting public sources (a gate).
 - P6, the observation against the enforcement (plan 3.3): computed by score.py from the consistency rows; here it becomes
   a gate of the full mode, which must find no difference and must compare at least one request.
+- The anti-pollution consequence (plan 10, batch 10): the learned mapping of the polluted training used as it is
+  (clinic-polluted), and the same with each position the rules leave open set the way the administrator would
+  (clinic-polluted-set). Their probes are compared with the clean run's probe by probe, in score.py. The missed attacks
+  of clinic-polluted are a baseline item that may only go down; the over-blocked benign requests of both sites, the
+  missed attacks of the set site, and any probe the two sides do not agree on are gates.
 - The two-pass check: the whole full run is made twice in one command, and the deterministic part of the two reports
   must be equal. Timings and request IDs differ between runs, so they are left out.
 
@@ -22,9 +27,12 @@ drivers that run the segments are in lab.py.
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from .score import POLLUTED_SET_SITE, POLLUTED_SITE
 
 FULL_DOCTORS = 48  # plan 5.2: the full mode's doctors (the quick mode has 12)
 CONVERGENCE_USERS = (3, 6, 12, 24)  # plan 3.2 L4; the full run's own 48 users are the last point
@@ -134,10 +142,11 @@ def attack_requests(rows: Sequence[Mapping[str, Any]], outcomes: Mapping[str, st
 
 
 def pollution(clean: Mapping[str, Any], polluted: Mapping[str, Any], *, attackers: int, benign_sessions: int,
-              attack_requests: Sequence[tuple[str, str]] = ()) -> dict[str, Any]:
+              attack_requests: Sequence[tuple[str, str]] = (), set_shares: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
     """L5 from the learning metrics of a clean and a polluted run over the same benign sessions. `false_learns` is the
     number of wrong proposals of the polluted run (a finding, not a gate). Per layer, `lost` lists the positions the clean
-    run learned right and the polluted run did not learn, or learned with a lower reliability (`weaker`); report only."""
+    run learned right and the polluted run did not learn, or learned with a lower reliability (`weaker`); report only.
+    `set_shares` are the public shares the polluted run listed, which the set site has set by hand (batch 10)."""
     layers: dict[str, Any] = {}
     for layer in LAYERS:
         clean_keys, polluted_keys = clean["keys"][layer], polluted["keys"][layer]
@@ -164,6 +173,7 @@ def pollution(clean: Mapping[str, Any], polluted: Mapping[str, Any], *, attacker
         "attack_requests": attack_summary(attack_requests),
         "delete_accepts_public": ((polluted.get("conclusions") or {}).get(POLLUTED_DELETE_KEY)
                                   or {}).get("accepts_public"),
+        "set_shares": [dict(item) for item in set_shares],
     }
 
 
@@ -222,6 +232,46 @@ def polluted_delete_gate(pollution: Mapping[str, Any] | None) -> dict[str, Any]:
     label = "接受" if accepts is True else "不接受" if accepts is False else "没有结论"
     return {"name": POLLUTED_DELETE_GATE, "value": label, "limit": "不是接受",
             "ok": pollution is not None and accepts is not True}
+
+
+CONSEQUENCE_BENIGN_GATE = "防护后果：两个站点多拦的良性（门槛 0）"
+CONSEQUENCE_SET_GATE = "防护后果：照一栏设定之后少拦的攻击（门槛 0）"
+CONSEQUENCE_MATCH_GATE = "防护后果：两边对不上的探针（门槛 0，且两个站点都比较了至少一条）"
+
+
+def set_public_positions(spec: Mapping[str, Any], shares: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The configuration with each position of `shares` set the way the administrator sets a position the rules leave open
+    (plan 10, batch 10): not accepting public sources, at high reliability. It is a copy, and `spec` is not changed. A listed
+    position that the configuration does not declare is an error: the setting would be lost without a word."""
+    result = copy.deepcopy(dict(spec))
+    slots = {slot["key"]: slot for slot in result.get("objects", {}).get("slots", [])}
+    for share in shares:
+        if share["key"] not in slots:
+            raise ValueError(f"公共份额列出的位置 {share['key']} 不在配置的对象表里，无法设定")
+        slots[share["key"]].update(accepts_public=False, reliability="high")
+    return result
+
+
+def consequence_gates(consequence: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """The gates of the anti-pollution consequence (plan 10, batch 10): neither polluted site may block a benign request
+    that the clean run let through, the set site may miss no attack the clean run blocked, and every probe of the two sites
+    must be compared, with at least one compared in each. The polluted site's missed attacks are not a gate: the baseline
+    keeps them, and they may only go down. Without a measure every gate fails, since none of them proves anything."""
+    polluted = (consequence or {}).get(POLLUTED_SITE)
+    polluted_set = (consequence or {}).get(POLLUTED_SET_SITE)
+    sites = [item for item in (polluted, polluted_set) if item is not None]
+    both = len(sites) == 2
+    over = sum(item["over"] for item in sites)
+    incomparable = sum(item["incomparable"] for item in sites)
+    compared = all(item["compared"] > 0 for item in sites)
+    set_missed = polluted_set["missed"] if polluted_set is not None else None
+    return [
+        {"name": CONSEQUENCE_BENIGN_GATE, "value": over if both else None, "limit": "== 0", "ok": both and over == 0},
+        {"name": CONSEQUENCE_SET_GATE, "value": set_missed, "limit": "== 0，且至少比较一个请求",
+         "ok": polluted_set is not None and set_missed == 0 and polluted_set["compared"] > 0},
+        {"name": CONSEQUENCE_MATCH_GATE, "value": incomparable if both else None,
+         "limit": "== 0，且两个站点都比较了至少一条", "ok": both and incomparable == 0 and compared},
+    ]
 
 
 def comparable(result: Mapping[str, Any]) -> dict[str, Any]:

@@ -184,7 +184,7 @@
     },
     "full": {
       "seed": 20261113,
-      "commit": "ee59cd4a",
+      "commit": "0479891e",
       "values": {
         "S1": 0.9640102827763496,
         "S1/none": 0.9635922330097088,
@@ -361,7 +361,8 @@
         "L2.accuracy": 1.0,
         "L2.coverage": 0.5,
         "L3.accuracy": 1.0,
-        "L3.coverage": 0.7
+        "L3.coverage": 0.7,
+        "L5/clinic-polluted/missed": 2
       }
     }
   }

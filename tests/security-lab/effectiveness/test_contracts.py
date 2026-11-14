@@ -122,6 +122,25 @@ class ContractTests(unittest.TestCase):
         doc = {"bootstrap": [], "rounds": []}
         self.assertIn("缺少必填字段 final_spec", self.message(load_learned, self.write("learned.json", doc)))
 
+    def test_public_shares_are_optional_and_each_share_is_checked(self):
+        doc = learned_doc([learning_round(1, [], [])], [])
+        # a learned.json from before batch 10 has no public_shares and reads as none
+        self.assertNotIn("public_shares", load_learned(self.write("old.json", doc)))
+        share = {"key": "DELETE /api/patients/{id} path[2]", "public_per_mille": 106, "pending_per_mille": 40,
+                 "votes": 198, "sessions": 12}
+        self.assertEqual(load_learned(self.write("shares.json", dict(doc, public_shares=[share])))["public_shares"],
+                         [share])
+        missing = {key: value for key, value in share.items() if key != "votes"}
+        text = self.message(load_learned, self.write("missing.json", dict(doc, public_shares=[missing])))
+        self.assertIn("missing.json:public_shares[0]", text)
+        self.assertIn("votes", text)
+        wrong_key = dict(share, key="delete patients")
+        text = self.message(load_learned, self.write("key.json", dict(doc, public_shares=[wrong_key])))
+        self.assertIn("key.json:public_shares[0]", text)
+        self.assertNotIn("delete patients", text, "the message never echoes a value from the file")
+        self.assertIn("字段 public_shares 应为对象数组",
+                      self.message(load_learned, self.write("list.json", dict(doc, public_shares={"key": "x"}))))
+
     def test_a_baseline_value_is_a_number_or_null(self):
         bad = self.write("bad.json", raw=json.dumps({"groups": {"quick": {"seed": 1, "commit": "c", "values": {"S3": "0.5"}}}}))
         self.assertIn("应为数字或 null", self.message(load_baseline, bad))
