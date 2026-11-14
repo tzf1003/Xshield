@@ -1070,6 +1070,36 @@ pub async fn uses(
     Ok(total)
 }
 
+/// The examples of a response position: `$1` site, `$2` position, `$3` since, `$4` limit,
+/// `$5` the decision rows read. `trace -> 'values' @>` lets `decision_log_values_idx` find
+/// the rows that used the position.
+pub(crate) const RESPONSE_EXAMPLES_SQL: &str = "WITH recent AS (
+        SELECT d.trace, d.at_millis FROM decision_log d
+        WHERE d.site = $1 AND d.at_millis >= $3
+          AND d.trace -> 'values' @> jsonb_build_array(
+              jsonb_build_object('sources', jsonb_build_array(
+                  jsonb_build_object('slot', $2::text))))
+        ORDER BY d.at_millis DESC
+        LIMIT $5
+    )
+    SELECT s ->> 'request_id' AS request_id
+    FROM recent
+    CROSS JOIN LATERAL jsonb_array_elements(
+        COALESCE(recent.trace -> 'values', '[]'::jsonb)) AS v
+    CROSS JOIN LATERAL jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
+    WHERE s ->> 'slot' = $2 AND s ->> 'request_id' IS NOT NULL
+    GROUP BY s ->> 'request_id'
+    ORDER BY max(COALESCE((s ->> 'at_millis')::bigint, recent.at_millis)) DESC
+    LIMIT $4";
+
+/// The examples of a request position: `$1` site, `$2` position, `$3` since, `$4` limit.
+pub(crate) const REQUEST_EXAMPLES_SQL: &str = "SELECT d.request_id FROM decision_log d
+    WHERE d.site = $1 AND d.at_millis >= $3
+      AND d.trace -> 'values' @> jsonb_build_array(
+          jsonb_build_object('slot', $2::text))
+    ORDER BY d.at_millis DESC
+    LIMIT $4";
+
 /// Jev's decisions on the requests that reached one other end of a position's flows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JevFlow {
@@ -1099,48 +1129,22 @@ pub async fn examples(
     limit: i64,
 ) -> Result<Vec<String>, LearningStoreError> {
     let rows = if slot_side == "response" {
-        sqlx::query(
-            "WITH recent AS (
-                 SELECT d.trace, d.at_millis FROM decision_log d
-                 WHERE d.site = $1 AND d.at_millis >= $3
-                   AND d.trace @> jsonb_build_object('values', jsonb_build_array(
-                       jsonb_build_object('sources', jsonb_build_array(
-                           jsonb_build_object('slot', $2::text)))))
-                 ORDER BY d.at_millis DESC
-                 LIMIT $5
-             )
-             SELECT s ->> 'request_id' AS request_id
-             FROM recent
-             CROSS JOIN LATERAL jsonb_array_elements(
-                 COALESCE(recent.trace -> 'values', '[]'::jsonb)) AS v
-             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
-             WHERE s ->> 'slot' = $2 AND s ->> 'request_id' IS NOT NULL
-             GROUP BY s ->> 'request_id'
-             ORDER BY max(COALESCE((s ->> 'at_millis')::bigint, recent.at_millis)) DESC
-             LIMIT $4",
-        )
-        .bind(site)
-        .bind(slot)
-        .bind(since_millis)
-        .bind(limit)
-        .bind(EXAMPLE_ROWS_READ)
-        .fetch_all(pool)
-        .await?
+        sqlx::query(RESPONSE_EXAMPLES_SQL)
+            .bind(site)
+            .bind(slot)
+            .bind(since_millis)
+            .bind(limit)
+            .bind(EXAMPLE_ROWS_READ)
+            .fetch_all(pool)
+            .await?
     } else {
-        sqlx::query(
-            "SELECT d.request_id FROM decision_log d
-             WHERE d.site = $1 AND d.at_millis >= $3
-               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
-                   jsonb_build_object('slot', $2::text)))
-             ORDER BY d.at_millis DESC
-             LIMIT $4",
-        )
-        .bind(site)
-        .bind(slot)
-        .bind(since_millis)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?
+        sqlx::query(REQUEST_EXAMPLES_SQL)
+            .bind(site)
+            .bind(slot)
+            .bind(since_millis)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
     };
     rows.iter()
         .map(|row| {
@@ -1174,9 +1178,9 @@ pub async fn jev_flows(
              CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.trace -> 'values', '[]'::jsonb)) AS v
              WHERE d.site = $1 AND d.at_millis >= $3 AND d.jev IS NOT NULL
                AND d.decision_path IN ('jev_allow', 'jev_deny')
-               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
+               AND d.trace -> 'values' @> jsonb_build_array(
                    jsonb_build_object('sources', jsonb_build_array(
-                       jsonb_build_object('slot', $2::text)))))
+                       jsonb_build_object('slot', $2::text))))
                AND v ->> 'slot' IS NOT NULL
                AND EXISTS (
                    SELECT 1 FROM jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
@@ -1194,8 +1198,8 @@ pub async fn jev_flows(
              CROSS JOIN LATERAL jsonb_array_elements(COALESCE(v -> 'sources', '[]'::jsonb)) AS s
              WHERE d.site = $1 AND d.at_millis >= $3 AND d.jev IS NOT NULL
                AND d.decision_path IN ('jev_allow', 'jev_deny')
-               AND d.trace @> jsonb_build_object('values', jsonb_build_array(
-                   jsonb_build_object('slot', $2::text)))
+               AND d.trace -> 'values' @> jsonb_build_array(
+                   jsonb_build_object('slot', $2::text))
                AND v ->> 'slot' = $2 AND s ->> 'slot' IS NOT NULL
          )
          SELECT other,
