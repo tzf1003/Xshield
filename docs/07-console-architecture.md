@@ -583,6 +583,9 @@ CREATE INDEX decision_log_path_idx    ON decision_log (site, path text_pattern_o
 CREATE INDEX decision_log_attention_idx ON decision_log (at_millis DESC)
     WHERE outcome IN ('blocked', 'would_block', 'unjudged');
 CREATE INDEX decision_log_jev_idx     ON decision_log (at_millis DESC) WHERE jev IS NOT NULL;
+-- 迁移 0014：对象抽屉按位置找决策记录（7.9.16）。只建在父表上（ON ONLY），之后新建的分区自带；
+-- 升级前已有的当天及更早分区不补建，随 7 天保留期滚出，这期间这些分区照旧扫描。
+CREATE INDEX decision_log_values_idx  ON ONLY decision_log USING gin ((trace -> 'values') jsonb_path_ops);
 
 CREATE TABLE edge_status (
     edge         text PRIMARY KEY,
@@ -636,6 +639,7 @@ CREATE TABLE jev_prompts (
 | 会话时间线 | `decision_log_session_idx`，SQL 里必须逐字写 `AND session <> ''` |
 | 需要关注的记录（拦截、本应拦截、未经判定） | `decision_log_attention_idx`，SQL 里必须逐字写 `AND outcome IN ('blocked','would_block','unjudged')` |
 | Jev 调用列表与统计 | `decision_log_jev_idx`，SQL 里必须逐字写 `AND jev IS NOT NULL` |
+| 对象抽屉的示例请求与 Jev 流向（用到某个位置的记录） | `decision_log_values_idx`，SQL 里必须写成 `trace -> 'values' @> jsonb_build_array(…)`；写成 `trace @> jsonb_build_object('values', …)` 用不上这个索引 |
 | 快捷筛选计数 | 一次扫描、用 `count(*) FILTER (WHERE …)` 同时算出全部标签，不要每个标签一条查询 |
 | 实时模式 | 主键范围扫描：`at_millis >= 已收到的最新值 − 60 秒`（[7.9.3](#793-请求列表)） |
 

@@ -1160,6 +1160,65 @@ mod tests {
         assert_plan_scans(&mut connection, "decision_log_jev_idx", &plan).await;
     }
 
+    /// The object drawer's examples find the rows that used one position through
+    /// `decision_log_values_idx`, on either side, instead of reading every row of the
+    /// site in the window. One position in a hundred is the rare one here.
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn the_examples_of_a_position_scan_the_values_index() {
+        use crate::object_learning_store::{REQUEST_EXAMPLES_SQL, RESPONSE_EXAMPLES_SQL};
+
+        let pool = connect_test_pool().await;
+        let day = NaiveDate::from_ymd_opt(2099, 8, 5).expect("date");
+        ensure_partition(&pool, day).await.expect("partition");
+        let (start, _) = day_bounds_millis(day).expect("bounds");
+        sqlx::query(
+            "INSERT INTO decision_log
+                   (at_millis, request_id, site, edge, host, client, method, path,
+                    decision_path, outcome, trace)
+               SELECT $1 + n, 'req_' || n, 'values-probe', 'edge-1', 'probe.example.com',
+                      '10.0.0.1', 'GET', '/probe', 'fast_allow', 'allowed',
+                      jsonb_build_object('values', jsonb_build_array(jsonb_build_object(
+                          'slot', 'q.id#' || (n % 100),
+                          'sources', jsonb_build_array(jsonb_build_object(
+                              'slot', 'r.id#' || (n % 100), 'request_id', 'req_0')))))
+               FROM generate_series(1, $2) AS n",
+        )
+        .bind(start)
+        .bind(PROBE_ROWS)
+        .execute(&pool)
+        .await
+        .expect("rows");
+        let analyze = format!("ANALYZE \"{}\"", partition_name(day));
+        sqlx::query(AssertSqlSafe(analyze))
+            .execute(&pool)
+            .await
+            .expect("analyze");
+
+        let mut connection = prepared_on_own_connection(&format!(
+            "PREPARE probe (text, text, bigint, bigint) AS {REQUEST_EXAMPLES_SQL}"
+        ))
+        .await;
+        let plan = explain_execute(
+            &mut connection,
+            &format!("probe('values-probe', 'q.id#7', {start}, 20)"),
+        )
+        .await;
+        assert_plan_scans(&mut connection, "decision_log_values_idx", &plan).await;
+        drop(connection);
+
+        let mut connection = prepared_on_own_connection(&format!(
+            "PREPARE probe (text, text, bigint, bigint, bigint) AS {RESPONSE_EXAMPLES_SQL}"
+        ))
+        .await;
+        let plan = explain_execute(
+            &mut connection,
+            &format!("probe('values-probe', 'r.id#7', {start}, 20, 200)"),
+        )
+        .await;
+        assert_plan_scans(&mut connection, "decision_log_values_idx", &plan).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
     async fn a_login_is_found_by_the_session_it_issued_and_is_not_on_its_rows() {
