@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::json;
+use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, PgPool, Row};
 use xshield_core::context::{
@@ -27,35 +28,16 @@ use xshield_judge::state::Prompt;
 use xshield_postgres::key_seal::KeySealer;
 use xshield_postgres::model_config_store::{JevSave, revert_jev_to_env, save_jev};
 
-// The tables the control plane owns (docs/07 section 7.8.1); the columns the
-// edge reads and writes are the contract between the two processes. There is
-// deliberately no default partition for `decision_log`.
-const SCHEMA: &[&str] = &[
-    "CREATE TABLE site_configs (name text PRIMARY KEY, spec jsonb NOT NULL, \
-     version bigint NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), \
-     updated_at timestamptz NOT NULL DEFAULT now())",
-    "CREATE TABLE decision_log (id bigint GENERATED ALWAYS AS IDENTITY, \
-     at_millis bigint NOT NULL, request_id text NOT NULL, site text, site_version bigint, \
-     edge text NOT NULL, host text NOT NULL, client text NOT NULL, \
-     session text NOT NULL DEFAULT '', context text, method text NOT NULL, path text NOT NULL, \
-     logical_path text, api jsonb, request_headers text[] NOT NULL DEFAULT '{}', \
-     query text, status smallint, decision_path text NOT NULL, outcome text NOT NULL, \
-     total_ms integer, jev_ms integer, jev_access text, jev_attack text, \
-     jev_confidence real, jev_failure text, trace jsonb NOT NULL, jev jsonb, \
-     PRIMARY KEY (at_millis, id)) PARTITION BY RANGE (at_millis)",
-    "CREATE TABLE edge_status (edge text PRIMARY KEY, started_at timestamptz NOT NULL, \
-     seen_at timestamptz NOT NULL, build text NOT NULL, listen text NOT NULL, \
-     tls boolean NOT NULL, sites jsonb NOT NULL, sessions integer NOT NULL, \
-     queue integer NOT NULL, written bigint NOT NULL, dropped bigint NOT NULL, \
-     dropped_bypass bigint NOT NULL, write_errors bigint NOT NULL, gaps jsonb NOT NULL, \
-     jev jsonb NOT NULL, params jsonb NOT NULL)",
-    "CREATE TABLE jev_prompts (id text PRIMARY KEY, questions jsonb NOT NULL, \
-     first_seen timestamptz NOT NULL DEFAULT now())",
-];
+// The schema comes from `migrations/`, the same files the control plane applies
+// (docs/07 section 7.8.1), so a column the edge reads or writes cannot drift from
+// the real tables. There is deliberately no default partition for `decision_log`.
+fn migrations() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations")
+}
 
 const DAY_MS: i64 = 86_400_000;
 
-/// A fresh database with the schema. `tag` names it, so tests in one process
+/// A fresh database with every migration applied. `tag` names it, so tests in one process
 /// never drop each other's database.
 async fn database(tag: &str) -> Option<PgPool> {
     let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL").ok()?;
@@ -78,12 +60,12 @@ async fn database(tag: &str) -> Option<PgPool> {
         .connect(&format!("{base}/{name}"))
         .await
         .expect("connect");
-    for statement in SCHEMA {
-        sqlx::query(*statement)
-            .execute(&pool)
-            .await
-            .expect("schema");
-    }
+    Migrator::new(migrations())
+        .await
+        .expect("the migrations")
+        .run(&pool)
+        .await
+        .expect("schema");
     Some(pool)
 }
 
@@ -677,10 +659,6 @@ async fn the_gateway_follows_the_saved_jev_settings() {
         eprintln!("skipped: XSHIELD_TEST_DATABASE_BASE_URL is not set");
         return;
     };
-    sqlx::raw_sql(include_str!("../../../migrations/0006_model_config.sql"))
-        .execute(&pool)
-        .await
-        .expect("the model settings schema");
     let saver = KeySealer::from_context_secret(&[7_u8; 32]).expect("a 32-byte secret");
     let gateway = KeySealer::from_context_secret(&[7_u8; 32]).expect("a 32-byte secret");
     let slot = Arc::new(JevSlot::new());
