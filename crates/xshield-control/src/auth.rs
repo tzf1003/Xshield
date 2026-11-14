@@ -4,14 +4,16 @@
 //! The session cookie is stateless: an expiry time signed with a key derived
 //! from that hash, so a restart keeps every session that has not expired and
 //! changing the password ends them all. Failed sign-ins are counted per client
-//! address; ten failures in ten minutes lock that address out for the window.
+//! address (an IPv6 address by its /64, which one host usually holds whole); ten
+//! failures in ten minutes lock that address out for the window. At most four
+//! password checks run at once across all addresses.
 //! The client address is the peer of the connection, or the one a reverse proxy
 //! listed in `XSHIELD_CONTROL_TRUSTED_PROXIES` reports in `X-Forwarded-For`.
 
 use std::{
     collections::HashMap,
     fmt::Write as _,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant},
 };
@@ -61,6 +63,10 @@ const LOGIN_FAILURES_ALLOWED: usize = 10;
 const LOGIN_WINDOW: Duration = Duration::from_secs(600);
 /// The most client addresses the limiter remembers before it drops idle ones.
 const LOGIN_TRACKED_MAX: usize = 10_000;
+/// Password checks (each a slow PBKDF2 run) that may run at once, whatever the address.
+const LOGIN_CHECKS_AT_ONCE: usize = 4;
+/// How long a sign-in waits for a free check before it is answered `LOGIN_BUSY`.
+const LOGIN_CHECK_WAIT: Duration = Duration::from_secs(5);
 
 // --- Password hashing: pbkdf2-sha256$<iterations>$<salt-hex>$<hash-hex> ---
 
@@ -266,13 +272,54 @@ pub fn session_authenticated(state: &ControlState, headers: &HeaderMap) -> bool 
 
 /// Counts, per client address, the sign-in attempts that have not succeeded: an
 /// attempt counts from the moment it is admitted, so attempts made at once cannot
-/// exceed the limit while their passwords are still being checked.
-#[derive(Debug, Default)]
+/// exceed the limit while their passwords are still being checked. Also bounds the
+/// password checks that run at once, so many addresses together cannot fill the
+/// blocking pool with PBKDF2 runs.
+#[derive(Debug)]
 pub struct LoginLimiter {
     failures: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+    checks: tokio::sync::Semaphore,
+}
+
+impl Default for LoginLimiter {
+    fn default() -> Self {
+        Self {
+            failures: Mutex::default(),
+            checks: tokio::sync::Semaphore::new(LOGIN_CHECKS_AT_ONCE),
+        }
+    }
+}
+
+/// The address failures are counted under. An IPv6 client usually holds a whole
+/// /64 and can pick any address in it, so its attempts are counted for the /64; an
+/// IPv4 address written as IPv6 (`::ffff:a.b.c.d`) counts as that IPv4 address.
+fn limit_key(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(_) => address,
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return IpAddr::V4(v4);
+            }
+            let [a, b, c, d, ..] = v6.segments();
+            IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+        }
+    }
 }
 
 impl LoginLimiter {
+    /// Waits up to [`LOGIN_CHECK_WAIT`] for a free password check. `None` when
+    /// none came free; the attempt then must not be checked or counted.
+    pub async fn check_slot(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        self.check_slot_within(LOGIN_CHECK_WAIT).await
+    }
+
+    async fn check_slot_within(&self, wait: Duration) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        tokio::time::timeout(wait, self.checks.acquire())
+            .await
+            .ok()?
+            .ok()
+    }
+
     fn table(&self) -> MutexGuard<'_, HashMap<IpAddr, Vec<Instant>>> {
         self.failures.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -281,7 +328,7 @@ impl LoginLimiter {
     #[must_use]
     pub fn allows(&self, address: IpAddr, now: Instant) -> bool {
         let mut table = self.table();
-        let Some(attempts) = table.get_mut(&address) else {
+        let Some(attempts) = table.get_mut(&limit_key(address)) else {
             return true;
         };
         attempts.retain(|at| now.duration_since(*at) < LOGIN_WINDOW);
@@ -301,7 +348,7 @@ impl LoginLimiter {
                     .any(|at| now.duration_since(*at) < LOGIN_WINDOW)
             });
         }
-        let attempts = table.entry(address).or_default();
+        let attempts = table.entry(limit_key(address)).or_default();
         attempts.retain(|at| now.duration_since(*at) < LOGIN_WINDOW);
         if attempts.len() >= LOGIN_FAILURES_ALLOWED {
             return false;
@@ -312,7 +359,7 @@ impl LoginLimiter {
 
     /// Forgets the attempts of `address` after a successful sign-in.
     pub fn clear(&self, address: IpAddr) {
-        self.table().remove(&address);
+        self.table().remove(&limit_key(address));
     }
 }
 
@@ -352,8 +399,9 @@ struct LoginBody {
 ///
 /// # Errors
 /// `LOGIN_RATE_LIMITED` (429) after ten failures in ten minutes from the same
-/// address, `INVALID_PASSWORD` (401) for a wrong password, `INVALID_BODY` for a
-/// body that is not `{"password": "..."}`.
+/// address (IPv6: the same /64), `LOGIN_BUSY` (503) when no password check came
+/// free within five seconds, `INVALID_PASSWORD` (401) for a wrong password,
+/// `INVALID_BODY` for a body that is not `{"password": "..."}`.
 pub async fn login(
     State(state): State<Arc<ControlState>>,
     parts: Parts,
@@ -369,6 +417,10 @@ pub async fn login(
     // A malformed body costs no attempt. A well-formed one is counted as it is
     // admitted, before the slow password check, so parallel attempts share the limit.
     let LoginBody { password } = json_body(&parts.headers, &body)?;
+    // A sign-in that finds no free check is not counted against its address.
+    let Some(_slot) = state.login_limiter.check_slot().await else {
+        return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "LOGIN_BUSY"));
+    };
     if !state.login_limiter.try_begin(address, Instant::now()) {
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
@@ -517,6 +569,51 @@ mod tests {
             assert!(limiter.try_begin(address, start));
         }
         assert!(!limiter.try_begin(address, start));
+    }
+
+    #[test]
+    fn an_ipv6_client_is_counted_by_its_slash_64() {
+        let limiter = LoginLimiter::default();
+        let start = Instant::now();
+        let host = |last: u16| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, last));
+        for last in 0..10 {
+            assert!(limiter.try_begin(host(last), start));
+        }
+        // Another address in the same /64 is the same client.
+        assert!(!limiter.allows(host(0xbeef), start));
+        assert!(!limiter.try_begin(host(0xbeef), start));
+        // The next /64 is another client.
+        let neighbour = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 3, 0, 0, 0, 1));
+        assert!(limiter.try_begin(neighbour, start));
+        limiter.clear(host(0x1234));
+        assert!(limiter.allows(host(0), start));
+    }
+
+    #[test]
+    fn an_ipv4_address_written_as_ipv6_counts_as_ipv4() {
+        let limiter = LoginLimiter::default();
+        let start = Instant::now();
+        let v4 = Ipv4Addr::new(192, 0, 2, 7);
+        for _ in 0..LOGIN_FAILURES_ALLOWED {
+            assert!(limiter.try_begin(IpAddr::V4(v4), start));
+        }
+        assert!(!limiter.try_begin(IpAddr::V6(v4.to_ipv6_mapped()), start));
+        // Another IPv4 address is not in the same "/64" of mapped addresses.
+        let other = Ipv4Addr::new(192, 0, 2, 8).to_ipv6_mapped();
+        assert!(limiter.try_begin(IpAddr::V6(other), start));
+    }
+
+    #[tokio::test]
+    async fn only_four_password_checks_run_at_once() {
+        let limiter = LoginLimiter::default();
+        let mut held = Vec::new();
+        for _ in 0..LOGIN_CHECKS_AT_ONCE {
+            held.push(limiter.check_slot().await.expect("a free check"));
+        }
+        let short = Duration::from_millis(20);
+        assert!(limiter.check_slot_within(short).await.is_none());
+        held.pop();
+        assert!(limiter.check_slot_within(short).await.is_some());
     }
 
     #[test]

@@ -271,6 +271,7 @@ export const ERROR_TEXT: Record<string, string> = {
   UNAUTHENTICATED: "登录已过期，请重新登录",
   INVALID_PASSWORD: "口令不正确",
   LOGIN_RATE_LIMITED: "尝试次数过多，请 10 分钟后再试",
+  LOGIN_BUSY: "登录请求太多，请稍后再试",
   SITE_NOT_FOUND: "站点不存在，可能已被删除",
   REQUEST_NOT_FOUND: "找不到这个请求",
   SITE_EXISTS: "已有同名站点",
