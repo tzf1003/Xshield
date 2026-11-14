@@ -41,7 +41,6 @@ Evidence was read by the auditor; rows marked ✔ were also re-read by the advis
 | Routes and `yaml` are imported eagerly although docs/07 §7.10.1/§7.10.7 require lazy loading; the request list is not virtualised although the doc says it is. | perf / docs | M | LOW–MED | `web/console/src/app/router.tsx:20-29`, `src/lib/yaml.ts:4`, `src/features/requests/RequestTable.tsx:137` |
 | Slot-drawer queries filter `decision_log.trace @> …` with no supporting index (verify with EXPLAIN first). | perf | M | MED | `crates/xshield-postgres/src/object_learning_store.rs:986,1013,1057,1077` |
 | Database-gated Rust tests return early and count as PASS when no database is configured (`verify_all.sh` now reports this as SKIP; the tests themselves still pass silently under a bare `cargo test`). | tests | S | LOW | `crates/xshield-edge/tests/postgres.rs:61,249` |
-| The edge PostgreSQL tests use a hand-copied schema instead of `migrations/`. | tests | S–M | LOW | `crates/xshield-edge/tests/postgres.rs:30-33` |
 | Acceptance scenarios C6–C8 are documented as run by CI but are not in the lab script. | tests | M | LOW | `docs/04-deployment-testing.md:75-77,89`, `scripts/test_idor_lab.py` |
 | CI `validate` has no timeout and no cargo cache; the Dockerfile copies the whole tree before the cargo build. | dx | S–M | LOW–MED | `.github/workflows/ci.yml:50-110`, `Dockerfile:28-31` |
 | One global mutex serialises every site's judge and observe calls, with HMAC work inside it. | perf | M | LOW | `engine.rs:442-450,852-929` |
