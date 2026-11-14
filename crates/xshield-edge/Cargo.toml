@@ -21,6 +21,8 @@ xshield-judge = { path = "../xshield-judge" }
 xshield-postgres = { path = "../xshield-postgres" }
 
 [dev-dependencies]
+# `migrate` lets tests/postgres.rs build its database from migrations/ instead of a copy.
+sqlx = { workspace = true, features = ["migrate"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net"] }
 
 [lints]
