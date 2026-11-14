@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version without the v, e.g. 0.1.0 (must match Cargo.toml and a CHANGELOG heading)"
+        description: "Version without the v, e.g. 0.1.0 or 4.0.0-rc1 (must match Cargo.toml and a CHANGELOG heading)"
         required: true
       commit:
         description: "Commit on main to release; empty = the commit that added the CHANGELOG heading"
@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "version must be MAJOR.MINOR.PATCH, got '$VERSION'"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]] || fail "version must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rcN, got '$VERSION'"
           tag="v$VERSION"
           heading="## $VERSION —"
           if [[ -z "$COMMIT" ]]; then
@@ -148,5 +148,8 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "Xshield ${VERSION}" --notes-file notes.md
           else
-            gh release create "$TAG" --verify-tag --title "Xshield ${VERSION}" --notes-file notes.md
+            # A release candidate (-rcN) is published as a pre-release.
+            prerelease=()
+            [[ "$VERSION" == *-rc* ]] && prerelease=(--prerelease)
+            gh release create "$TAG" --verify-tag "${prerelease[@]}" --title "Xshield ${VERSION}" --notes-file notes.md
           fi
