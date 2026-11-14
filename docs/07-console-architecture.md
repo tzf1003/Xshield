@@ -673,7 +673,7 @@ CREATE TABLE jev_prompts (
 
 | 方法与路径 | 用途 |
 |---|---|
-| `POST /api/login`、`POST /api/logout`、`GET /api/session` | 口令登录（沿用 PR #73：PBKDF2 哈希、HMAC 签名的无状态 Cookie、12 小时）；同一客户端地址 10 分钟内失败 10 次返回 429，其他地址不受影响。客户端地址是连接的对端地址；对端在 `XSHIELD_CONTROL_TRUSTED_PROXIES`（[03.3](03-admin-config-audit.md#33-部署级环境变量)）列出的反向代理中时，取 `X-Forwarded-For` 从右往左第一个不在列表里的地址，只读这个头，不读 `Forwarded` |
+| `POST /api/login`、`POST /api/logout`、`GET /api/session` | 口令登录（沿用 PR #73：PBKDF2 哈希、HMAC 签名的无状态 Cookie、12 小时）；同一客户端地址 10 分钟内失败 10 次返回 429，其他地址不受影响；IPv6 地址按所在的 /64 计数（一台主机通常拿到整段 /64，可以随意换地址），写成 IPv6 的 IPv4 地址（`::ffff:a.b.c.d`）按 IPv4 计。所有地址合计最多 4 个口令校验同时进行，5 秒内轮不到的登录返回 503 `LOGIN_BUSY`，不计入该地址的失败次数。客户端地址是连接的对端地址；对端在 `XSHIELD_CONTROL_TRUSTED_PROXIES`（[03.3](03-admin-config-audit.md#33-部署级环境变量)）列出的反向代理中时，取 `X-Forwarded-For` 从右往左第一个不在列表里的地址，只读这个头，不读 `Forwarded` |
 | `GET /api/requests` | 请求列表（7.9.3） |
 | `GET /api/requests/counts` | 同样的筛选条件下一次扫描算出各快捷筛选标签的计数（7.9.3） |
 | `GET /api/requests/{request_id}` | 请求详情（7.9.4） |
