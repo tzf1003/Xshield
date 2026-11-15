@@ -391,6 +391,36 @@ class CleanupTest(unittest.TestCase):
         self.assertIs(signal.getsignal(signal.SIGTERM), previous)
 
 
+class ControlBuildTest(unittest.TestCase):
+    """Every learning segment of a run calls _build_control. The binary is compiled once, and the segments share it."""
+
+    def setUp(self) -> None:
+        learning._build_control.cache_clear()
+        self.addCleanup(learning._build_control.cache_clear)
+        self.scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(self.scratch.cleanup)
+        self.binary = Path(self.scratch.name) / "debug" / learning.CONTROL_BINARY
+        self.binary.parent.mkdir()
+        self.binary.touch()
+        target = mock.patch.object(learning.labkit, "TARGET", Path(self.scratch.name))
+        target.start()
+        self.addCleanup(target.stop)
+
+    def test_the_segments_of_a_run_share_one_build(self) -> None:
+        with mock.patch.object(learning.subprocess, "run") as run:
+            self.assertEqual(learning._build_control(), self.binary)
+            self.assertEqual(learning._build_control(), self.binary)
+        self.assertEqual(run.call_count, 1)
+
+    def test_a_failed_build_is_not_kept(self) -> None:
+        with mock.patch.object(learning.subprocess, "run", side_effect=subprocess.CalledProcessError(101, "cargo")):
+            with self.assertRaises(LearningError):
+                learning._build_control()
+        with mock.patch.object(learning.subprocess, "run") as run:
+            self.assertEqual(learning._build_control(), self.binary)
+        self.assertEqual(run.call_count, 1)
+
+
 def _postgres_answers() -> bool:
     if learning.shutil.which("createdb") is None or learning.shutil.which("dropdb") is None:
         return False
