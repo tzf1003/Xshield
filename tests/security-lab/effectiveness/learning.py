@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
+import functools
 import getpass
 import http.client
 import json
@@ -296,7 +297,13 @@ class _TemporaryDatabase:
         return False
 
 
+@functools.cache
 def _build_control() -> Path:
+    """Compiles xshield-control and returns the binary's path. The result is kept for the process: every learning
+    segment of a run calls this, and cargo reruns the build script of xshield-control on each call while
+    web/console/dist does not exist (build.rs registers that path), which recompiles the binary, about 9 seconds
+    per segment. The sources do not change during a run. A failed build raises and is not kept, so the next call
+    tries again."""
     try:
         subprocess.run(["cargo", "build", "--quiet", "--locked", "-p", "xshield-control", "--bin", "xshield-control"],
                        cwd=labkit.ROOT, check=True)
