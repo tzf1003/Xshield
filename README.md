@@ -8,7 +8,7 @@ Xshield 部署在源站前面，记住每个登录会话正常走过的路（从
 
 2026-11-01 设计重置为 v4：只保留"会话上下文 + Jev 判定"这一条主线，单管理员、配置最少，大量删减 v3 的审批、资格账本、探针、证据链和校准体系。
 
-代码已按 v4 实现：网关（`xshield-edge` + `xshield-judge`）、控制面（`xshield-control`）、控制台（`web/console`）和 `migrations/` 都是 v4。v3 机制的去留和尚未删完的残留模块见 [05 删减清单](docs/05-v3-removal.md)。v3 的文档、测试结果和 CI 状态记录在提交 `ad524d4` 及 [CHANGELOG](CHANGELOG.md) 中。
+代码已按 v4 实现：网关（`xshield-edge` + `xshield-judge`）、控制面（`xshield-control`）、控制台（`web/console`）和 `migrations/` 都是 v4。`xshield-core` 的 v3 专用模块及相关测试已删除。v3 机制、模块和环境变量的去留见 [05 删减清单](docs/05-v3-removal.md)。v3 的文档、测试结果和 CI 状态记录在提交 `ad524d4` 及 [CHANGELOG](CHANGELOG.md) 中。
 
 ## 文档
 

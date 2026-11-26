@@ -1,6 +1,6 @@
 # 05 从 v3 到 v4 的删减清单
 
-v4 的判定路径、控制面、控制台和迁移已经按本组文档实现。本章记录 v3 的每项机制、模块和环境变量在 v4 里的去留；标为“删除”的条目大多已经删除，仍留在仓库里的主要是 `crates/xshield-core` 中不再被其他 crate 引用的 v3 模块及其测试。旧文档可在提交 `ad524d4` 中查看（`git show ad524d4:docs/<文件名>`），代码注释里引用的 `docs/08` 及以后的编号指的都是这些旧文档。
+v4 的判定路径、控制面、控制台和迁移已经按本组文档实现。本章记录 v3 的每项机制、模块和环境变量在 v4 里的去留。`crates/xshield-core` 的 v3 专用模块及相关测试已删除，现存模块见 [5.2](#52-代码模块去留)。旧文档可在提交 `ad524d4` 中查看（`git show ad524d4:docs/<文件名>`），代码注释里引用的 `docs/08` 及以后的编号指的都是这些旧文档。
 
 ## 5.1 机制去留
 
@@ -28,7 +28,7 @@ v4 的判定路径、控制面、控制台和迁移已经按本组文档实现�
 
 | 位置 | 处理 |
 |---|---|
-| `crates/xshield-core` | 已完成：只剩 `context`（站点配置、对象表与学习规则、判定记录）、`kind`、`model`、`path_template`、`constant_time`。v3 的 `site`、`domain`、`calibration`、`grant`、`identity`、`provenance`、`admission`、`investigation`、`ports` 等模块已无任何调用方，连同只服务于它们的示例、测试和 `tests/site-config/` 样例一并删除 |
+| `crates/xshield-core` | 已完成。`src/` 保留 `lib.rs` 及 `context`（站点配置、对象表与学习规则、判定记录）、`kind`、`model`、`path_template`、`constant_time`、`hex`。v3 的 `site`、`domain`、`calibration`、`grant`、`identity`、`provenance`、`admission`、`investigation`、`ports` 等模块已删除，连同只服务于它们的示例、测试和 `tests/site-config/` 样例一并移除 |
 | `crates/xshield-gateway` | 已删除；代理、TLS、监听器、上下文存储、Jev 调用与判定日志写入由全新的 `crates/xshield-edge`（配合 `crates/xshield-judge`）取代，而非在原地改造 |
 | `crates/xshield-control` | 保留站点增改、模式切换；新增判定日志查询、配置历史与回滚、口令登录，以及请求追溯、影响预估、调优建议、判定日志导入导出（[07.9](07-console-architecture.md#79-控制面-api)）；删除审批状态机、案件、证据访问、保全、v3 的证据导出、校准报告、任务管理、API Key、OIDC |
 | `crates/xshield-worker` | 已删除整个 crate（离线 CLI、`model_eval`、outbox 发布器、校准、证据迁移/清理、ClickHouse 索引与检索）；它只剩控制面已删除的调用方，没有需要迁移到网关的能力，因为 `crates/xshield-judge` 已自带 Jev 客户端 |
