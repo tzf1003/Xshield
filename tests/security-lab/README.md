@@ -157,7 +157,7 @@ python3 scripts/measure_effectiveness.py lab --only injection_sqli,no_session   
 - `--jev record` 把判定转发到真实 Jev，需要同样的两个环境变量，缺一即退出码 2。每次应答按请求摘要写入输出目录的 `jev-recording.jsonl`。转发失败或应答含密钥的那次记为失败；录制不完整时以退出码 2 结束。`--jev replay` 不联网、不需要密钥，只从 `effectiveness/recordings/quick.jsonl` 答复；摘要不在录制里的调用收到 UNKNOWN，计入“回放未命中率”。录制文件不存在时以退出码 2 退出。步骤和格式见 `effectiveness/recordings/README.md`。
 - 真实模式（`live`、`record`、`replay`）和 `site` 模式的报告另有“置信度门槛扫描（3.4）”一节：同一批判定记录在 0.50 到 0.90 的门槛下重算，只给一阶估计，不重新发流量。
 - 用例可以带能力要求（`requires`）：`tiers`（档位）、`functions`（功能表）、`classes`（对象表）。配置缺少所需能力时，用例显示为“需要…”，不计分。`none` 没有对象表，需要对象表的用例只在 `clinic-truth` 上计分。
-- 已知缺口：判定器还不读功能表，所以 `clinic-truth` 也显示“需要功能表”的有 `p0-3-function-level`、医生的 `GET /api/admin/search`（旅程）。功能级判定合入后，补上 `clinic-truth` 的功能表并把 `p0-3-function-level` 改为 `must`。
+- 判定器读取站点的 `objects.functions`，并按 `objects.ask_unknown_functions` 处理未知功能。`clinic-truth` 配有功能表且打开了该开关，满足 `p0-3-function-level` 和医生的 `GET /api/admin/search` 旅程的功能表要求，两者均计分。`p0-3-function-level` 是 `must`，两条用例均预期因越权被网关拦截。
 - 退出码：门槛全部通过为 0，有门槛失败为 1，用法或环境错误为 2。基线文件缺失也以 1 退出，报告里写明原因。
 - 学习的已知缺口清单（`effectiveness-known-gaps.json`）登记学习质量的已知问题，规则见 `docs/04` 4.6。报告的“学习的已知缺口清单”一节列出每一条和它本次的出现次数。
 - 完整模式（`--mode full`，批次 7，`effectiveness/full.py`）：48 位医生，良性文本取全部语料，攻击和良性探针取全集。学习段另外跑用户数 3、6、12、24 的收敛段（L4）、混入 10% 攻击会话的抗污染段（L5），以及删除穿插在搜索之间的自然顺序变体（门槛：公共搜索结果学到 public、high）。防护段另有两个各自从全新源站开始的站点（一个观察模式、一个拦截模式），各跑一遍同一批流量（P6，门槛：必须为 0），以及专用网关上的会话表用例 `b11-session-eviction`（快速模式不跑）。抗污染段学出的映射另跑两个拦截模式的站点（`clinic-polluted` 原样使用，`clinic-polluted-set` 把“规则不下结论”一栏的位置设成不接受公共来源、可靠性高），各自从全新源站开始，与 `clinic-learned` 逐条比较，得到防护后果（批次 10，门槛见 [docs/04](../../docs/04-deployment-testing.md) 4.6）。整套跑两遍，两遍的确定部分必须逐位相同。只用理想模型，需要 PostgreSQL；缺了以退出码 2 退出，不写任何输出。完整组的基线用 `--update-baseline` 生成。
