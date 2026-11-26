@@ -26,6 +26,25 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libssl-dev pkg-config cmake \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/xshield-control/Cargo.toml crates/xshield-control/
+COPY crates/xshield-core/Cargo.toml crates/xshield-core/
+COPY crates/xshield-edge/Cargo.toml crates/xshield-edge/
+COPY crates/xshield-judge/Cargo.toml crates/xshield-judge/
+COPY crates/xshield-postgres/Cargo.toml crates/xshield-postgres/
+# Stub the workspace targets to cache their dependencies with the release feature set.
+# Remove the stubs and their artifacts before copying the real workspace sources.
+RUN set -eu; \
+    for crate in crates/*; do \
+        mkdir -p "$crate/src"; \
+        touch "$crate/src/lib.rs"; \
+    done; \
+    printf 'fn main() {}\n' > crates/xshield-edge/src/main.rs; \
+    printf 'fn main() {}\n' > crates/xshield-control/src/main.rs; \
+    cargo build --release --locked -p xshield-edge -p xshield-control; \
+    cargo clean --release --locked --workspace; \
+    rm -rf crates/*/src
+
 COPY . .
 COPY --from=console-builder /src/web/console/dist ./web/console/dist
 # `--locked`: the lockfile is the dependency record; a drifting build must fail.
