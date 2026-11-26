@@ -20,6 +20,7 @@ ignore = [
     { id = "RUSTSEC-2026-0391", reason = "zstd stream encoders/decoders reused through with_context. Pingora 0.9.0 pins zstd 0.13 (pingora-header-serde) and resolves 0.14.0 for pingora-core. The gateway enables neither pingora's response compression nor pingora-cache, so no zstd stream runs; pingora-core only ever creates fresh encoders. Ends with the pingora upgrade that allows zstd >= 0.14.3." },
     { id = "RUSTSEC-2026-0398", reason = "Seekable::decompress requires zstd-safe's 'seekable' feature, which is not enabled anywhere in this graph (cargo tree -e features). Ends with the pingora upgrade that allows zstd-safe >= 8.2.0." },
     { id = "RUSTSEC-2026-0403", reason = "Affects DCtx::decompress_stream (zstd::stream::write::Decoder) on corrupt legacy frames. Pingora 0.9.0 only compresses with zstd and decompresses cached headers with the bulk API in pingora-cache, which the gateway does not use; the bulk API is not affected. Ends with the pingora upgrade that allows zstd-safe >= 8.2.0." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.45 is unmaintained (RUSTSEC-2026-0543). The advisory is about maintenance, not a known vulnerability, and it names no safe upgrade. Xshield uses chrono directly in xshield-control and xshield-postgres for date and time values; pingora-core and sqlx-core depend on it too. Ends when chrono is no longer in the dependency graph. Reviewed by 2027-02-26 at the latest." },
 ]
 
 [licenses]
