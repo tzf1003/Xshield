@@ -61,11 +61,17 @@ function storeOf(owner: object, site: string): Store {
 /** The positions of a site with the states the learning actions gave them. */
 function rowsOf(site: string, owner: object): ObjectSlotRow[] {
   const store = storeOf(owner, site);
-  return baseOf(site).slots.map((row) => ({
-    ...row,
-    state: store.states.get(row.id) ?? row.state,
-    dismissed: store.dismissed.has(row.id) || row.dismissed,
-  }));
+  return baseOf(site).slots.map((row) => {
+    const dismissed = store.dismissed.has(row.id) || row.dismissed;
+    const state = store.states.get(row.id) ?? row.state;
+    return {
+      ...row,
+      state,
+      class: dismissed && state === "pending" ? null : row.class,
+      basis: dismissed && state === "pending" ? "已忽略，证据明显变化后再提议" : row.basis,
+      dismissed,
+    };
+  });
 }
 
 function matchesText(row: ObjectSlotRow, needle: string): boolean {
@@ -116,9 +122,21 @@ export function objectSlotAnswer(site: string, id: string, owner: object): Objec
   if (row === undefined) return { status: 404, body: { error: "SLOT_NOT_FOUND" } };
   const detail: ObjectSlotDetail =
     id === objectSlotS2.id
-      ? { ...objectSlotS2, state: row.state, dismissed: row.dismissed }
+      ? {
+          ...objectSlotS2,
+          state: row.state,
+          class: row.class,
+          basis: row.basis,
+          dismissed: row.dismissed,
+        }
       : id === objectSlotS8.id
-        ? { ...objectSlotS8, state: row.state, dismissed: row.dismissed }
+        ? {
+            ...objectSlotS8,
+            state: row.state,
+            class: row.class,
+            basis: row.basis,
+            dismissed: row.dismissed,
+          }
         : {
             ...row,
             flows_in: [],
@@ -154,6 +172,12 @@ export function learnAnswer(
   const store = storeOf(owner, site);
   const row = rowsOf(site, owner).find((item) => item.id === id);
   if (row === undefined) return { status: 404, body: { error: "SLOT_NOT_FOUND" } };
+  if (action === "ambiguous" && row.side !== "request") {
+    return { status: 409, body: { error: "SLOT_NOT_REQUEST" } };
+  }
+  if (row.state !== "pending" && row.state !== "proposed" && row.state !== "suspended") {
+    return { status: 409, body: { error: "SLOT_STATE_CONFLICT" } };
+  }
   const from = row.state;
   const to: ObjectState = action === "dismiss" ? "pending" : "ambiguous";
   store.states.set(id, to);

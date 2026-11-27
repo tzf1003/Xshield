@@ -3226,11 +3226,7 @@ mod source_pass_tests {
         SiteSpec::from_json(&spec.to_string()).expect("test spec")
     }
 
-    /// One use of `GET /patients/7` by session `index % 5`, on the day `1 + index / 5` days before `now`, whose
-    /// value `7` was shown at the response position `from`. Twenty uses from five sessions fall on distinct
-    /// days inside the window.
-    async fn use_of(pool: &PgPool, index: i64, now: i64, from: &str) {
-        let at_millis = now - (1 + index / 5) * DAY_MILLIS;
+    async fn use_of_session(pool: &PgPool, index: i64, at_millis: i64, session: &str, from: &str) {
         let trace = serde_json::json!({
             "v": 1,
             "values_truncated": false,
@@ -3254,11 +3250,19 @@ mod source_pass_tests {
         )
         .bind(at_millis)
         .bind(format!("req_{index:032x}"))
-        .bind(format!("s{}", index % 5))
+        .bind(session)
         .bind(trace)
         .execute(pool)
         .await
         .expect("insert a decision row");
+    }
+
+    /// One use of `GET /patients/7` by session `index % 5`, on the day `1 + index / 5` days before `now`, whose
+    /// value `7` was shown at the response position `from`. Twenty uses from five sessions fall on distinct
+    /// days inside the window.
+    async fn use_of(pool: &PgPool, index: i64, now: i64, from: &str) {
+        let at_millis = now - (1 + index / 5) * DAY_MILLIS;
+        use_of_session(pool, index, at_millis, &format!("s{}", index % 5), from).await;
     }
 
     /// The state, class and side of the site's row for `slot`, when it has one.
@@ -3414,6 +3418,60 @@ mod source_pass_tests {
         partitions(&pool, now).await;
         learn_uses(&pool, now, "GET /api/search page").await;
         assert_eq!(proposed(&pool).await, 0);
+        drop_scratch(admin, pool, name).await;
+    }
+
+    #[tokio::test]
+    async fn a_dismissed_response_proposal_waits_until_its_evidence_doubles() {
+        let Some((admin, pool, name)) = scratch("source_dismissed").await else {
+            return;
+        };
+        let now = crate::params::now_millis();
+        site_spec_store::create(&pool, &clinic(false), None)
+            .await
+            .expect("create the site");
+        partitions(&pool, now).await;
+        learn_uses(&pool, now, SEARCH).await;
+        assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
+
+        let generation = site_spec_store::get(&pool, "clinic")
+            .await
+            .expect("read the site")
+            .expect("the site exists")
+            .created_at;
+        let row_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM object_positions WHERE site = 'clinic' AND slot = $1",
+        )
+        .bind(SEARCH)
+        .fetch_one(&pool)
+        .await
+        .expect("read the position id");
+        assert!(
+            store::dismiss(&pool, "clinic", generation, row_id, 20, now + 1)
+                .await
+                .expect("dismiss the response proposal")
+        );
+        assert_eq!(
+            row_of(&pool, SEARCH).await,
+            Some(("pending".to_owned(), None, "response".to_owned()))
+        );
+
+        // With unchanged evidence the next pass keeps the dismissal.
+        learn_once(&pool, None, now + 60 * 60_000).await;
+        assert_eq!(
+            row_of(&pool, SEARCH).await,
+            Some(("pending".to_owned(), None, "response".to_owned()))
+        );
+        assert_eq!(proposed(&pool).await, 0);
+
+        // Another 20 uses after the cursor (40 total, twice the 20 votes at dismissal) re-propose it.
+        let later = now + 2 * 60 * 60_000;
+        crate::test_support::ensure_days(&pool, &[later]).await;
+        for index in 20..40 {
+            use_of_session(&pool, index, later, &format!("s{index}"), SEARCH).await;
+        }
+        learn_once(&pool, None, now + 3 * 60 * 60_000).await;
+        assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
         drop_scratch(admin, pool, name).await;
     }
 }

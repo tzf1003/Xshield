@@ -47,7 +47,7 @@ import {
   patternsOverlap,
   scopesOverlap,
 } from "../src/lib/objects-validate.ts";
-import { DECLARE_TEXT } from "../src/lib/vocab.ts";
+import { DECLARE_TEXT, errorText } from "../src/lib/vocab.ts";
 
 const decl = (field: string, kind: string, scope?: string[]): FieldKindDeclaration =>
   scope === undefined ? { field, kind } : { field, kind, in: scope };
@@ -714,4 +714,16 @@ test("the switch's change is one line in the change list, turned on or off", () 
     "功能表 未知功能送 Jev 判定 开 → 关",
   ]);
   assert.deepEqual(objectChanges({ functions }, { functions, ask_unknown_functions: false }), []);
+});
+
+test("slot error codes have readable Chinese messages", () => {
+  for (const code of [
+    "SLOT_NOT_FOUND",
+    "SLOT_IS_DECLARED",
+    "SLOT_NOT_REQUEST",
+    "SLOT_STATE_CONFLICT",
+  ]) {
+    const text = errorText(code);
+    assert.ok(!text.includes(code), `${code} should map to readable text, got ${text}`);
+  }
 });

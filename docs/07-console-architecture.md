@@ -697,8 +697,8 @@ CREATE TABLE jev_prompts (
 | `GET /api/sites/{name}/evidence` | 判定参数旁边显示的证据：最近 24 小时 Jev 耗时 p50/p95/p99、超时次数、调用上限触发次数和每分钟最高调用数、缓存放行次数 |
 | `GET /api/sites/{name}/objects` | 对象表：各状态计数、声明的类别、位置列表，可按 `state`、`class`、`q` 过滤；位置行在条目带有判断时带 `tier`、`accepts_public`、`reliability`；`judgements` 列出待确认的提议，请求位置的接受公共来源与响应位置的档位（7.9.16）；`public_shares` 列出规则不下结论、等管理员自行设定的请求位置及其公共份额（7.9.16，LQ-9）；`identified` 表示站点是否声明了用户身份；声明的位置和学习到的位置各一行，默认不列已退役的位置；已退役的位置在最后一次使用后保留 90 天（`KEEP_RETIRED_DAYS`），之后学习任务删除它们，再次出现时从头学习。学习位置的 id 是 `s<行号>`，声明位置的 id 是 `a` 加上键的 SHA-256 前 8 字节（十六进制），控制台只把 id 当不透明字符串 |
 | `GET /api/sites/{name}/objects/slots/{id}` | 一个位置的抽屉：流入的流向（份额、次数、会话，以及 Jev 通过和拒绝的次数）；有证据的流向最多 20 条，之后另列最多 20 条只有 Jev 判定的流向；示例请求（最多 3 个，最近的在前：请求位置列出用到它的请求，响应位置按返回值的观察时间列出返回过这个值的响应）。Jev 次数和示例都从决策记录读取，只统计学习窗口内且站点创建之后的记录（站点删除后决策记录保留，同名重建的站点不读旧记录），Jev 次数只看调用过 Jev 的记录（部分索引）。结构和历史待后续实现，当前为空。`impact` 是位置主操作（确认提议、恢复暂停的条目、暂停生效中的条目）让快速放行改变的数量，按最近一天计算，只读站点创建之后的记录，路径参数有值；字段位置的主操作暂不估计，此时 `impact_estimated` 为 false（`impact_complete` 同为 false）。`impact_complete` 为 false 表示窗口没有读完，数量可能偏小 |
-| `POST /api/sites/{name}/objects/slots/{id}/dismiss` | 驳回学习中的提议或学习中的位置，成功返回 204。409：`SLOT_IS_DECLARED`（声明的位置）、`SLOT_NOT_REQUEST`（响应侧的位置）、`SLOT_STATE_CONFLICT`（状态不接受驳回） |
-| `POST /api/sites/{name}/objects/slots/{id}/ambiguous` | 标为歧义，规则不再提议，成功返回 204；错误码同上 |
+| `POST /api/sites/{name}/objects/slots/{id}/dismiss` | 驳回学习中的提议或学习中的位置（请求侧和响应侧均可），成功返回 204。409：`SLOT_IS_DECLARED`（声明的位置）、`SLOT_STATE_CONFLICT`（状态不接受驳回） |
+| `POST /api/sites/{name}/objects/slots/{id}/ambiguous` | 标为歧义，规则不再提议，成功返回 204。409：`SLOT_IS_DECLARED`（声明的位置）、`SLOT_NOT_REQUEST`（响应侧的位置）、`SLOT_STATE_CONFLICT`（状态不接受标为歧义） |
 | `POST /api/sites/{name}/objects/slots/{id}/judgement/confirm` | 确认声明的位置的提议（7.9.16）。请求位置的请求体为 `{"accepts_public": bool, "reliability": "high" \| "medium"}`，响应位置的为 `{"tier": "self" \| "org" \| "admin" \| "public", "reliability": "high" \| "medium"}`，必须与当前提议一致，成功写入站点配置的一个新版本并返回 204。409：`JUDGEMENT_CHANGED`（请求体与提议不一致，或判断的种类不对）、`SLOT_NOT_JUDGED`（身份位置）、`SLOT_STATE_CONFLICT`（条目带着另一种判断）、`VERSION_CONFLICT`（保存已让站点前进）；404：`JUDGEMENT_NOT_FOUND`（没有提议）、`SLOT_NOT_FOUND` |
 | `POST /api/sites/{name}/objects/slots/{id}/judgement/dismiss` | 驳回位置的提议（请求位置的接受公共来源，或响应位置的档位），成功返回 204；同一个判断不再提议（7.9.16）。错误码：`JUDGEMENT_NOT_FOUND`（404）、`SLOT_NOT_JUDGED`（409，身份位置）、`SLOT_NOT_FOUND`（404） |
 | `GET /api/sites/{name}/objects/functions` | 功能表：配置里的功能及其证据、没有进表的候选、管理档提议，以及最近一天没有学到的流量（7.9.20） |
@@ -1349,9 +1349,9 @@ objects:
 - 达标的写成提议：状态为提议中、来源为规则，进入现有的待确认列表，管理员确认后才写入站点配置，与其他提议相同。提议不改判定。不达标、证据滚出窗口，或位置已被配置声明的，已有的提议撤回。学习代理不参与这类位置，它的流程不动。
 - 确认后，条目带着类别写入站点配置，下一轮起档位判断（7.9.16）覆盖该位置。
 - 确认并经过一轮档位判断之后，公共档的响应证明会话见过它展示的值（7.4.7），除非请求位置明确不接受公共来源且可靠度为 `high`。在 LQ-4a 落地时，学到的请求位置达不到 `high`（学到的接受公共来源最高为 `medium`），所以搜到的患者编号对这类请求（如 `DELETE /api/patients/{id}`）曾快速放行、不交 Jev。这是 LQ-4a 的残留。LQ-4b 在有身份的站点上把学到的接受公共来源提到 `high`（7.9.16），这类删除和修改随之按 7.4.7 收紧，交给 Jev 判定。没有身份的站点上学到的可靠性仍最高为 `medium`，这类残留在那里仍然存在，需要单独决定（见 7.4.7）。
-- 驳回：存储层的驳回记录与请求位置相同（同一类别、证据翻倍才再次提议）。但驳回接口（7.9.2）目前仍对响应侧的位置返回 409 `SLOT_NOT_REQUEST`，所以这类提议暂时只能确认，不能驳回；证据不变时它会在每次学习后留在待确认列表里。开放响应侧的驳回是后续工作。
+- 驳回：存储层和驳回接口（7.9.2）的行为与请求位置一致（同一类别、证据翻倍才再次提议）。驳回后提议变为 `pending` 并带 `dismissed` 标记，不再留在待确认列表里。
 
-实现状态：纯函数、窗口票的读取（`load_source_evidence`）与控制面提议已实现（LQ-4a）；响应侧的驳回接口未开放（见上）。票带用户和管理员标记、有身份的站点上接受公共来源可达 `high` 已实现（LQ-4b，见 7.9.16）。
+实现状态：纯函数、窗口票的读取（`load_source_evidence`）、控制面提议（LQ-4a）与响应侧驳回接口均已实现。票带用户和管理员标记、有身份的站点上接受公共来源可达 `high` 已实现（LQ-4b，见 7.9.16）。
 
 ## 7.10 控制台前端架构
 

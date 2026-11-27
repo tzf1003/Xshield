@@ -724,19 +724,19 @@ fn slot_source(origin: Origin) -> SlotSource {
 }
 
 /// `POST /api/sites/{name}/objects/slots/{id}/dismiss`: dismisses the proposal of a learned
-/// request position, or the position while it is pending. The rules propose it again only
-/// once its evidence has changed significantly.
+/// position (request or response), or the position while it is pending. The rules propose it
+/// again only once its evidence has changed significantly.
 ///
 /// # Errors
-/// `SITE_NOT_FOUND` and `SLOT_NOT_FOUND` (404); `SLOT_IS_DECLARED` and `SLOT_NOT_REQUEST`
-/// (409) for a position the action does not apply to; `SLOT_STATE_CONFLICT` (409) when the
-/// position's state does not take a dismissal; a 500 when a write fails.
+/// `SITE_NOT_FOUND` and `SLOT_NOT_FOUND` (404); `SLOT_IS_DECLARED` (409) for a position the
+/// configuration declares; `SLOT_STATE_CONFLICT` (409) when the position's state does not take
+/// a dismissal; a 500 when a write fails.
 pub async fn dismiss(
     State(state): State<Arc<ControlState>>,
     Path((name, id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     let record = site_of(&state, &name).await?;
-    let row = learned_request(&state, &name, &record.spec, &id).await?;
+    let row = learned_slot(&state, &name, &record.spec, &id).await?;
     let min_votes =
         i32::try_from(record.spec.objects().learning().thresholds.uses).unwrap_or(i32::MAX);
     let changed = store::dismiss(
@@ -755,7 +755,9 @@ pub async fn dismiss(
 /// ambiguous. It stays with Jev, and the rules never propose it again.
 ///
 /// # Errors
-/// As [`dismiss`], with `SLOT_STATE_CONFLICT` for a confirmed position.
+/// `SITE_NOT_FOUND` and `SLOT_NOT_FOUND` (404); `SLOT_IS_DECLARED` and `SLOT_NOT_REQUEST`
+/// (409) for a position the action does not apply to; `SLOT_STATE_CONFLICT` (409) for a
+/// confirmed or retired position; a 500 when a write fails.
 pub async fn ambiguous(
     State(state): State<Arc<ControlState>>,
     Path((name, id)): Path<(String, String)>,
@@ -1870,14 +1872,13 @@ pub(crate) fn slot_not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "SLOT_NOT_FOUND")
 }
 
-/// The learned request position an action names. A declared position is decided by the
-/// configuration, and a response position has no proposal, so both are refused.
+/// The learned position (request or response) an action names. A declared position is decided by
+/// the configuration, so it is refused.
 ///
 /// # Errors
-/// `SLOT_NOT_FOUND` (404) for an id that names no position of the site, `SLOT_IS_DECLARED`
-/// and `SLOT_NOT_REQUEST` (409) for a position the action does not apply to, and a 500 when
-/// a query fails.
-pub(crate) async fn learned_request(
+/// `SLOT_NOT_FOUND` (404) for an id that names no position of the site, `SLOT_IS_DECLARED` (409)
+/// for a position the configuration declares, and a 500 when a query fails.
+pub(crate) async fn learned_slot(
     state: &ControlState,
     name: &str,
     spec: &SiteSpec,
@@ -1893,6 +1894,21 @@ pub(crate) async fn learned_request(
     if spec.objects().declared_class_of(&row.slot).is_some() {
         return Err(ApiError::new(StatusCode::CONFLICT, "SLOT_IS_DECLARED"));
     }
+    Ok(row)
+}
+
+/// The learned request position an action names. A declared position is decided by the
+/// configuration, and a response position is refused, as the action applies to requests only.
+///
+/// # Errors
+/// As [`learned_slot`], plus `SLOT_NOT_REQUEST` (409) for a response position.
+pub(crate) async fn learned_request(
+    state: &ControlState,
+    name: &str,
+    spec: &SiteSpec,
+    id: &str,
+) -> ApiResult<PositionRow> {
+    let row = learned_slot(state, name, spec, id).await?;
     if Side::parse(&row.side) != Some(Side::Request) {
         return Err(ApiError::new(StatusCode::CONFLICT, "SLOT_NOT_REQUEST"));
     }
@@ -3798,6 +3814,100 @@ mod live_tests {
         .await
         .expect_err("an id that names no position");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_DATABASE_URL)"]
+    async fn a_response_proposal_is_dismissed_and_leaves_the_proposed_list() {
+        const SEARCH: &str = "GET /api/search results[].id";
+        let (state, name) = seeded_site("response-dismissal").await;
+        let generation = site_of(&state, &name).await.expect("the site").created_at;
+        let now = now_millis();
+        let today = day_of(u64::try_from(now).unwrap_or(0));
+        let votes = [Vote {
+            slot: SLOT.to_owned(),
+            session: "b".to_owned(),
+            day: today,
+            from: vec![SEARCH.to_owned()],
+            user: None,
+            admin: false,
+        }];
+        store::record_evidence(&state.pool, &name, generation, &votes, &[])
+            .await
+            .expect("record the response position");
+        let proposal = Judgement {
+            slot: SEARCH,
+            state: LearnedState::Proposed,
+            class: "doctor",
+            votes: 20,
+            sessions: 5,
+            share_per_mille: 1000,
+            last_day: today,
+            source: Source::Rule,
+        };
+        store::put_judgement(&state.pool, &name, generation, &proposal, now)
+            .await
+            .expect("propose the response position");
+
+        let before = listed(&state, &name, &[("state", "proposed")]).await;
+        let response_id = id_of(&before, SEARCH);
+        let status = dismiss(
+            State(Arc::clone(&state)),
+            Path((name.clone(), response_id.clone())),
+        )
+        .await
+        .expect("dismiss the response proposal");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Dismissed, the response proposal leaves the proposed list and stays pending with its flag.
+        let proposed = listed(&state, &name, &[("state", "proposed")]).await;
+        assert!(
+            proposed["slots"]
+                .as_array()
+                .expect("the proposed slots")
+                .iter()
+                .all(|row| row["key"] != SEARCH),
+            "dismissed response proposal must leave proposed list"
+        );
+        assert_eq!(proposed["counts"]["proposed"], 1);
+        assert_eq!(proposed["counts"]["pending"], 2);
+
+        let pending = listed(&state, &name, &[("state", "pending")]).await;
+        let row = pending["slots"]
+            .as_array()
+            .expect("the pending slots")
+            .iter()
+            .find(|row| row["key"] == SEARCH)
+            .expect("the dismissed response position stays listed")
+            .clone();
+        assert_eq!(row["id"], response_id);
+        assert_eq!(row["side"], "response");
+        assert_eq!(row["dismissed"], true);
+        assert!(row["class"].is_null());
+        assert_eq!(row["basis"], "已忽略，证据明显变化后再提议");
+
+        // Marking ambiguous still refuses response positions with SLOT_NOT_REQUEST.
+        let not_request = ambiguous(
+            State(Arc::clone(&state)),
+            Path((name.clone(), response_id.clone())),
+        )
+        .await
+        .expect_err("a response position is not marked ambiguous");
+        assert_eq!(not_request.status(), StatusCode::CONFLICT);
+        assert_eq!(not_request.code(), "SLOT_NOT_REQUEST");
+
+        // A retired response position does not take a dismissal.
+        assert!(
+            store::retire_unseen(&state.pool, &name, today, now + 1)
+                .await
+                .expect("retire the position")
+                >= 1
+        );
+        let retired = dismiss(State(Arc::clone(&state)), Path((name, response_id)))
+            .await
+            .expect_err("a retired response position cannot be dismissed");
+        assert_eq!(retired.status(), StatusCode::CONFLICT);
+        assert_eq!(retired.code(), "SLOT_STATE_CONFLICT");
     }
 
     /// A decision row of the gateway for a `GET /doctor/7` request of `session`, judged as
