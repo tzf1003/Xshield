@@ -1,0 +1,36 @@
+# JEV 置信度分布（只读查询）
+#
+# 数据源：home-windows 上 xshield-home-db 的 xshield 库，表 decision_log
+# 查询：waf-p0-fix-plan.md 第 8 节那条查询，执行前先 SET default_transaction_read_only = on，全程只读
+# 执行时间：2026-11-13（约 11:3x UTC）
+# 代码版本：home-windows 仓库 HEAD cdd2276
+#
+# 口径核对（计划要求先核对）：
+#   jev_confidence = min(access 最高项概率, attack 最高项概率)
+#   见 crates/xshield-postgres/src/decision_log_store.rs:783 的 jev_columns。
+#   只要两个最高项分别是 ALLOW 和 BENIGN，它就是计划里“两者都要 >= T”的判定量。
+#
+# 读法：
+#   width_bucket(jev_confidence, 0.3, 1.0, 14)，桶宽 0.05。
+#   桶 n 覆盖 [0.3 + 0.05*(n-1), 0.3 + 0.05*n)，桶 15 只含恰好 1.0 的行。
+#   allows / denies 分别只统计 decision_path = 'jev_allow' 和 'jev_deny' 的行。
+#   库中 jev 和 jev_confidence 都非空的行里，没有 jev_confidence 低于 0.5 的。
+#
+# 输出：
+bucket|low|high|allows|denies
+5|0.5|0.54|10|5
+6|0.55|0.59|9|2
+7|0.6|0.65|7|1
+8|0.66|0.69|12|0
+9|0.71|0.74|9|0
+10|0.76|0.79|10|6
+11|0.8|0.84|17|6
+12|0.85|0.9|59|10
+13|0.91|0.95|74|32
+14|0.96|0.99|150|87
+15|1|1|0|70
+(11 rows)
+#
+# 合计（只算上面两个 decision_path）：allows 357，denies 219。
+# 注意：样本量不大，且来自 home-windows 上的环境，不一定代表生产流量。
+# 阈值 T 仍待用户确定，本文件不给出推荐值。

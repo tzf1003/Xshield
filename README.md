@@ -26,7 +26,7 @@ Xshield 部署在源站前面，记住每个登录会话正常走过的路（从
 
 ## 仓库地图
 
-`crates/`（Rust：`xshield-edge` 数据面、`xshield-judge` 模型判定、`xshield-control` 控制面、`xshield-core` 领域逻辑，其余 crate 按 05 删除）、`web/console`（控制台）、`migrations/`（PostgreSQL 迁移）、`scripts/`（验证与回归脚本）、`tests/`（靶场与集成回归）、`docs/`（v4 设计文档）、`design/`（控制台可点击原型，不参与构建）。
+`crates/`（Rust：`xshield-edge` 数据面、`xshield-judge` 模型判定、`xshield-control` 控制面、`xshield-core` 领域逻辑，其余 crate 按 05 删除）、`web/console`（控制台）、`migrations/`（PostgreSQL 迁移）、`scripts/`（验证与回归脚本）、`tests/`（靶场与集成回归）、`docs/`（v4 设计文档；`docs/design-records/` 是设计稿、规划和评审记录，不是规格）、`design/`（控制台可点击原型，不参与构建）。
 
 ## 运行与验证
 
