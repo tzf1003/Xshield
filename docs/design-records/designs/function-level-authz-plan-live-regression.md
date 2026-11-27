@@ -1,6 +1,6 @@
 # 实现规划 T6：功能表的真实 Jev 回归用例
 
-- 设计依据：[function-level-authz.md](function-level-authz.md) 第 9、16 节。预检的脚本、用例和原始结果在 [function-level-authz-probe/](function-level-authz-probe/)（`jev_probe.py` 的 `CASES` 34 例和 `HELD` 41 例，`out_draft3.json`、`held_draft3.json` 是上线那版指令的结果）。
+- 设计依据：[function-level-authz.md](function-level-authz.md) 第 9、16 节。预检的脚本和用例在 [function-level-authz-probe/](function-level-authz-probe/)（`jev_probe.py` 的 `CASES` 34 例和 `HELD` 41 例）。上线那版指令的原始结果 `out_draft3.json`、`held_draft3.json` 没有入库，见 [导入说明](../README.md)。
 - 前置：T4（PR 215，判定使用功能表）合入 `main`。不依赖 T5a、T5b。开工前 `git fetch origin main`，以最新 `main` 为准。
 - 范围：`crates/xshield-judge/tests/live_jev.rs`、docs/04 4.4。**不改**任何 `src/` 下的代码、判定指令、`fake_jev.py`、靶场、`migrations/`、`.github/`、`deny.toml`，不加依赖。
 - 验收人：功能级越权线程（Fable）。PR 开出后由它评审，**真实模型的那一遍由验收人来跑**。

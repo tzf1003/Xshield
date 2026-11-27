@@ -280,7 +280,7 @@ def ask(key: str, body: dict) -> dict:
         },
         method="POST",
     )
-    context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE", "/root/.ccr/ca-bundle.crt"))
+    context = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE") or None)
     started = time.time()
     try:
         with urllib.request.urlopen(request, timeout=30, context=context) as response:

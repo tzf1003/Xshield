@@ -17,4 +17,4 @@
 
 - 验收产物、测试输出和报告：项目共享文件夹里的 `acceptance/`、`batch-10/`、`pr211-self-tier/`、`waf-audit/`、`t5b-functions-console/`。
 - 代码补丁草稿：`designs/waf-batch6-field-name-readings.patch` 和 `answers/search-provenance-draft.patch`，不是设计文档；`patches/` 下的补丁同样不入库。
-- 真实 Jev 调用的输出：`designs/function-level-authz-probe/` 里的 `out_*.json` 和 `held_draft*.json`。探针源码保留，运行时需要环境变量 `XSHIELD_JEV_API_KEY`，它们不参与构建和 CI。
+- 真实 Jev 调用的输出：`designs/function-level-authz-probe/` 里的 `out_*.json` 和 `held_draft*.json`。探针源码保留，运行时需要环境变量 `XSHIELD_JEV_API_KEY`，它们不参与构建和 CI。探针的基线指令取自 2026-11-13 的 `main`；当前源码已经改过，用它重跑的结果不能和文中的历史结果对照。

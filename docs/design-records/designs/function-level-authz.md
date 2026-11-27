@@ -332,7 +332,7 @@ T1、T2、T3 可以并行；T4 等 T3（已合入，可以开工，与 T1、T2 �
 
 目的：在动代码之前，确认真实模型拿到第 2、3 层的 `state` 和指令后会怎么答。
 
-做法：脚本直接调用 TypeSafe 直连接口（`jev-1.13.0`），请求体的格式、`attack` 问题和 `access` 问题的现有指令都取自 `main` 的 `state.rs`，只在 `access` 指令里插入功能相关的一段，在 `state.request` 里加 `function`。会话背景是一个看过患者列表和 7005 号患者的医生会话，另有一组仿 Juice Shop 的会话。脚本、三版指令草稿和全部原始结果在 [function-level-authz-probe/](function-level-authz-probe/)，里面没有密钥。
+做法：脚本直接调用 TypeSafe 直连接口（`jev-1.13.0`），请求体的格式、`attack` 问题和 `access` 问题的现有指令都取自 `main` 的 `state.rs`，只在 `access` 指令里插入功能相关的一段，在 `state.request` 里加 `function`。会话背景是一个看过患者列表和 7005 号患者的医生会话，另有一组仿 Juice Shop 的会话。脚本和三版指令草稿在 [function-level-authz-probe/](function-level-authz-probe/)，里面没有密钥；原始结果 JSON 没有入库，见 [导入说明](../README.md)。
 
 **第一组（34 例，用来调指令措辞）**
 
