@@ -3494,19 +3494,13 @@ mod source_pass_tests {
         );
         assert_eq!(proposed(&pool).await, 0);
 
-        // Another 20 uses (40 total, twice the 20 votes at dismissal) re-propose it.
+        // Another 20 uses after the cursor (40 total, twice the 20 votes at dismissal) re-propose it.
+        let later = now + 2 * 60 * 60_000;
+        crate::test_support::ensure_days(&pool, &[later]).await;
         for index in 20..40 {
-            let at_millis = now - (1 + (index - 20) / 5) * DAY_MILLIS;
-            use_of_session(
-                &pool,
-                index,
-                at_millis,
-                &format!("s{}", 5 + index % 5),
-                SEARCH,
-            )
-            .await;
+            use_of_session(&pool, index, later, &format!("s{index}"), SEARCH).await;
         }
-        learn_once(&pool, None, now + 2 * 60 * 60_000).await;
+        learn_once(&pool, None, now + 3 * 60 * 60_000).await;
         assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));
         drop_scratch(admin, pool, name).await;
     }
