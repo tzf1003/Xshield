@@ -112,12 +112,33 @@ test("ignoring a proposal records it on the server and leaves the draft alone", 
   await openMap(page, "/sites/emr?tab=objects&view=slot");
   await page.locator("#slot-s2").click();
   const drawer = page.getByRole("dialog");
+  await expect(drawer.getByRole("button", { name: "标为有歧义" })).toHaveCount(0);
   await drawer.getByRole("button", { name: "忽略" }).click();
 
   await expect(drawer).toContainText("已忽略这个位置的提议");
   expect(callsTo(page, "POST", "/api/sites/emr/objects/slots/s2/dismiss")).toHaveLength(1);
   await expect(page.getByText("未保存的改动")).toHaveCount(0);
   await expect(page.getByRole("dialog", { name: "保存 emr 的配置" })).toHaveCount(0);
+});
+
+test("ignoring a response proposal removes it from the proposed list", async ({ page }) => {
+  await openMap(page, "/sites/emr?tab=objects&view=slot");
+  await page.getByRole("button", { name: /^待确认 7$/ }).click();
+  const table = page.getByRole("table", { name: "位置列表" });
+  await expect(table).toContainText("GET /api/appointments [].doc_id");
+
+  await page.locator("#slot-s2").click();
+  const drawer = page.getByRole("dialog");
+  await drawer.getByRole("button", { name: "忽略" }).click();
+  await expect(drawer).toContainText("已忽略这个位置的提议");
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByRole("button", { name: /^待确认 6$/ })).toBeVisible();
+  await expect(table).not.toContainText("GET /api/appointments [].doc_id");
+
+  await page.getByRole("button", { name: /^学习中 42$/ }).click();
+  await expect(table).toContainText("GET /api/appointments [].doc_id");
+  await expect(table).toContainText("已忽略，证据明显变化后再提议");
 });
 
 test("confirming a proposal puts its declaration in the save dialog", async ({ page }) => {

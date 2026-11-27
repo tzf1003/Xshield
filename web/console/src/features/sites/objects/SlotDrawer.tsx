@@ -712,11 +712,16 @@ export function SlotDrawer({
         ) : null}
         {footReason === null ? null : <div className="small muted">{footReason}</div>}
         {inEffect ? (
-          <div className="small muted">{OBJECT_TEXT.suspension.ambiguousAfterStop}</div>
+          <div className="small muted">
+            {data.side === "request"
+              ? OBJECT_TEXT.suspension.ambiguousAfterStop
+              : OBJECT_TEXT.suspension.rejectAfterStop}
+          </div>
         ) : null}
 
         <div className="obj-foot">
-          {editable && !declared ? (
+          {/* Only request positions can be marked ambiguous (409 SLOT_NOT_REQUEST on response positions). */}
+          {editable && !declared && data.side === "request" ? (
             <button
               type="button"
               className="btn"

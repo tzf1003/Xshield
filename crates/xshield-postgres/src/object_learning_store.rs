@@ -1224,9 +1224,9 @@ pub async fn jev_flows(
         .collect()
 }
 
-/// Dismisses the proposal of a request position, or the position while it is pending: the
-/// rules stop proposing it. The baseline the evidence must double from is the votes the
-/// position has now, or `min_votes` when it has fewer. Returns whether a position was
+/// Dismisses the proposal of a position (request or response), or the position while it is
+/// pending: the rules stop proposing it. The baseline the evidence must double from is the votes
+/// the position has now, or `min_votes` when it has fewer. Returns whether a position was
 /// dismissed. A suspended position can be dismissed, and a confirmed, retired or ambiguous one
 /// cannot.
 ///
@@ -1249,7 +1249,7 @@ pub async fn dismiss(
              dismissed_class = class,
              dismissed_votes = GREATEST(votes, $3::integer),
              updated_millis = $4
-         WHERE site = $1 AND id = $2 AND side = 'request'
+         WHERE site = $1 AND id = $2
            AND state = ANY($7::text[])
            AND EXISTS (SELECT 1 FROM site_configs WHERE name = $1 AND created_at = $5 FOR SHARE)",
     )
@@ -2601,5 +2601,87 @@ mod tests {
             undone_slots(&pool, &site, generation).await.unwrap(),
             BTreeSet::from([SLOT.to_owned()])
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_URL)"]
+    async fn a_dismissed_response_proposal_waits_for_doubled_evidence_or_another_kind() {
+        let pool = connect_test_pool().await;
+        let site = unique_site("response_dismissed");
+        let generation = with_site(&pool, &site).await;
+        let response_slot = "GET /api/search results[].id";
+        record_evidence(
+            &pool,
+            &site,
+            generation,
+            &[vote("a", 3, &[response_slot])],
+            &[],
+        )
+        .await
+        .unwrap();
+        let response_proposal = Judgement {
+            slot: response_slot,
+            state: LearnedState::Proposed,
+            class: "doctor",
+            votes: 20,
+            sessions: 5,
+            share_per_mille: 1000,
+            last_day: 3,
+            source: Source::Rule,
+        };
+        put_judgement(&pool, &site, generation, &response_proposal, 1)
+            .await
+            .unwrap();
+        let proposed = row_of(&pool, &site, response_slot, "response").await;
+        assert_eq!(proposed.state, PositionState::Proposed);
+
+        assert!(
+            dismiss(&pool, &site, generation, proposed.id, 20, 2)
+                .await
+                .unwrap()
+        );
+        let dismissed = row_of(&pool, &site, response_slot, "response").await;
+        assert_eq!(dismissed.state, PositionState::Pending);
+        assert_eq!(dismissed.class, None);
+        assert!(dismissed.dismissed);
+
+        // Same class with fewer than twice the votes stays pending and dismissed.
+        put_judgement(&pool, &site, generation, &response_proposal, 3)
+            .await
+            .unwrap();
+        let kept = row_of(&pool, &site, response_slot, "response").await;
+        assert_eq!(kept.state, PositionState::Pending);
+        assert!(kept.dismissed);
+
+        // Doubled votes propose the same class again.
+        let doubled = Judgement {
+            votes: 40,
+            ..response_proposal
+        };
+        put_judgement(&pool, &site, generation, &doubled, 4)
+            .await
+            .unwrap();
+        let returned = row_of(&pool, &site, response_slot, "response").await;
+        assert_eq!(returned.state, PositionState::Proposed);
+        assert_eq!(returned.class.as_deref(), Some("doctor"));
+        assert!(!returned.dismissed);
+
+        // Dismiss again, then another class at the original count is proposed immediately.
+        assert!(
+            dismiss(&pool, &site, generation, returned.id, 20, 5)
+                .await
+                .unwrap()
+        );
+        let other = Judgement {
+            class: "patient",
+            ..response_proposal
+        };
+        put_judgement(&pool, &site, generation, &other, 6)
+            .await
+            .unwrap();
+        let changed = row_of(&pool, &site, response_slot, "response").await;
+        assert_eq!(changed.state, PositionState::Proposed);
+        assert_eq!(changed.class.as_deref(), Some("patient"));
+        assert!(!changed.dismissed);
     }
 }

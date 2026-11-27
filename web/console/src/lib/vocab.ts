@@ -292,6 +292,10 @@ export const ERROR_TEXT: Record<string, string> = {
   FUNCTION_ON_ENTRY: "这个功能在入口上，不能确认为管理档",
   JUDGEMENT_CHANGED: "这条提议已经变了，请看最新的提议后再确认",
   JUDGEMENT_NOT_FOUND: "这条提议已经不在了，列表已刷新",
+  SLOT_NOT_FOUND: "找不到这个位置",
+  SLOT_IS_DECLARED: "这个位置已在配置中声明，不能从学习状态直接操作",
+  SLOT_NOT_REQUEST: "这个操作只适用于请求位置",
+  SLOT_STATE_CONFLICT: "这个位置的状态已经变了，请刷新",
   INVALID_FILTER: "筛选条件有误",
   WINDOW_TOO_LARGE: "时间范围最长 7 天",
   TOO_MANY_IDS: "一次最多对照 1000 个请求 ID",
@@ -1031,6 +1035,7 @@ export const OBJECT_TEXT = {
     stopNote: "保存后这个位置不再按对象表核验，判定退回名字推断。",
     stopMissing: "这个位置不在配置里，没有要停用的条目。",
     ambiguousAfterStop: "先暂停使用并保存，再驳回或标为有歧义。",
+    rejectAfterStop: "先暂停使用并保存，再驳回。",
   },
   pathParam: {
     label: (method: string, route: string, ordinal: number, segment: number) =>
