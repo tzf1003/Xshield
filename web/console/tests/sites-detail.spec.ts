@@ -1,10 +1,27 @@
 // The site page at /sites/$name (docs/06 6.4.9): five tabs over one draft. Each tab renders from the fixtures,
 // the tuning suggestions can be added to the draft, and every tab passes axe in both themes.
 
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoAxeViolations, setTheme, type Theme } from "./helpers/axe.ts";
 import { mockApi, reply } from "./helpers/mock-api.ts";
-import { callsTo, freezeClock } from "./helpers/sites-flow.ts";
+import {
+  callsTo,
+  expectDialogNoAxeViolations,
+  freezeClock,
+  untilModalSettled,
+} from "./helpers/sites-flow.ts";
+
+/** Checks that the center of `locator` is not covered by a modal mask or another element. */
+async function expectUnoccluded(locator: Locator): Promise<void> {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  const hit = await locator.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return top !== null && (element === top || element.contains(top));
+  });
+  expect(hit).toBe(true);
+}
 
 async function openSite(page: Page, path: string): Promise<void> {
   await freezeClock(page);
@@ -202,7 +219,9 @@ test("an unknown site says it is not there", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText("SITE_NOT_FOUND");
 });
 
-test("a failed delete says so and stays on the page", async ({ page }) => {
+test("a failed delete shows the error inside the confirmation dialog and stays on the page", async ({
+  page,
+}) => {
   await freezeClock(page);
   await mockApi(page, {
     overrides: { "DELETE /api/sites/emr": reply(500, { error: "INTERNAL" }) },
@@ -212,13 +231,66 @@ test("a failed delete says so and stays on the page", async ({ page }) => {
 
   await page.getByRole("button", { name: "更多操作" }).click();
   await page.getByRole("menuitem", { name: "删除站点" }).click();
+  await untilModalSettled(page, "删除站点 emr？");
   const confirm = page.getByRole("dialog", { name: "删除站点 emr？" });
   await confirm.getByRole("button", { name: "删除站点" }).click();
 
   await expect.poll(() => callsTo(page, "DELETE", "/api/sites/emr").length).toBe(1);
-  await expect(page.getByRole("alert")).toBeVisible();
+  const alert = confirm.getByRole("alert");
+  await expect(alert).toBeVisible();
+  await expect(alert).toContainText("控制面出错，请稍后重试；问题持续时查看控制面日志");
+  await expect(alert).toContainText("INTERNAL");
+  await expect(page.getByRole("alert")).toHaveCount(1);
+  await expectUnoccluded(alert);
   await expect(page).toHaveURL((url) => url.pathname === "/sites/emr");
   await expect(page.getByRole("heading", { level: 1, name: "emr" })).toBeVisible();
+
+  // Cancelling clears the error so reopening the dialog starts fresh.
+  await confirm.getByRole("button", { name: "取消" }).click();
+  await expect(confirm).toBeHidden();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "更多操作" }).click();
+  await page.getByRole("menuitem", { name: "删除站点" }).click();
+  await untilModalSettled(page, "删除站点 emr？");
+  await expect(confirm.getByRole("alert")).toHaveCount(0);
+});
+
+test("retrying a failed delete succeeds and returns to the sites list", async ({ page }) => {
+  await freezeClock(page);
+  await mockApi(page);
+  let attempts = 0;
+  await page.route("**/api/sites/emr", async (route) => {
+    if (route.request().method() === "DELETE" && attempts === 0) {
+      attempts += 1;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "INTERNAL" }),
+      });
+      return;
+    }
+    if (route.request().method() === "DELETE") attempts += 1;
+    await route.fallback();
+  });
+
+  await page.goto("/sites/emr");
+  await expect(page.getByRole("tablist")).toBeVisible();
+
+  await page.getByRole("button", { name: "更多操作" }).click();
+  await page.getByRole("menuitem", { name: "删除站点" }).click();
+  await untilModalSettled(page, "删除站点 emr？");
+  const confirm = page.getByRole("dialog", { name: "删除站点 emr？" });
+  await confirm.getByRole("button", { name: "删除站点" }).click();
+
+  await expect(confirm.getByRole("alert")).toContainText("INTERNAL");
+  await expectUnoccluded(confirm.getByRole("alert"));
+
+  await confirm.getByRole("button", { name: "删除站点" }).click();
+  await expect(confirm).toBeHidden();
+  await expect(page).toHaveURL((url) => url.pathname === "/sites");
+  await expect(page.getByRole("heading", { level: 1, name: "站点" })).toBeVisible();
+  expect(attempts).toBe(2);
 });
 
 const PAGES = [
@@ -246,4 +318,22 @@ for (const theme of ["light", "dark"] satisfies Theme[]) {
       await expectNoAxeViolations(page);
     });
   }
+
+  test(`the delete confirmation dialog with an error passes axe in the ${theme} theme`, async ({
+    page,
+  }) => {
+    await setTheme(page, theme);
+    await freezeClock(page);
+    await mockApi(page, {
+      overrides: { "DELETE /api/sites/emr": reply(500, { error: "INTERNAL" }) },
+    });
+    await page.goto("/sites/emr");
+    await page.getByRole("button", { name: "更多操作" }).click();
+    await page.getByRole("menuitem", { name: "删除站点" }).click();
+    await untilModalSettled(page, "删除站点 emr？");
+    const confirm = page.getByRole("dialog", { name: "删除站点 emr？" });
+    await confirm.getByRole("button", { name: "删除站点" }).click();
+    await expect(confirm.getByRole("alert")).toContainText("INTERNAL");
+    await expectDialogNoAxeViolations(page);
+  });
 }

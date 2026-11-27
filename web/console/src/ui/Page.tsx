@@ -71,7 +71,7 @@ export function ErrorBar({ error, onRetry }: { error: unknown; onRetry?: () => v
   return (
     <div className="errbar" role="alert">
       <span>{text}</span>
-      {code ? <span className="mono small dim">{code}</span> : null}
+      {code ? <span className="mono small muted">{code}</span> : null}
       {onRetry ? (
         <button type="button" className="btn" onClick={onRetry}>
           重试

@@ -9,7 +9,7 @@ import { useState } from "react";
 import type { SiteDetail } from "../../api/types.ts";
 import { fmtLocalDateTime } from "../../lib/format.ts";
 import { specToJson, specToYaml } from "../../lib/yaml.ts";
-import { PageHead } from "../../ui/Page.tsx";
+import { ErrorBar, PageHead } from "../../ui/Page.tsx";
 import { rolloutListText } from "./rollout.ts";
 
 const MENU_ITEMS: MenuProps["items"] = [
@@ -26,6 +26,8 @@ type Props = {
   onCopy: () => void;
   onDelete: () => void;
   deleting: boolean;
+  deleteError: Error | null;
+  onClearDeleteError: () => void;
 };
 
 /** Hands a text to the browser as a file. The text goes in a blob, never into the page as markup. */
@@ -40,7 +42,16 @@ function download(filename: string, text: string, type: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
-export function SiteHeader({ site, now, onSwitchMode, onCopy, onDelete, deleting }: Props) {
+export function SiteHeader({
+  site,
+  now,
+  onSwitchMode,
+  onCopy,
+  onDelete,
+  deleting,
+  deleteError,
+  onClearDeleteError,
+}: Props) {
   const [confirming, setConfirming] = useState(false);
   const since = site.observing_since_millis;
   const status = rolloutListText(site.rollout, site.updated_at, now);
@@ -56,7 +67,16 @@ export function SiteHeader({ site, now, onSwitchMode, onCopy, onDelete, deleting
     else if (key === "yaml") download(`${site.name}.yaml`, specToYaml(site.spec), "text/yaml");
     else if (key === "json")
       download(`${site.name}.json`, specToJson(site.spec), "application/json");
-    else if (key === "delete") setConfirming(true);
+    else if (key === "delete") {
+      onClearDeleteError();
+      setConfirming(true);
+    }
+  };
+
+  const closeConfirm = () => {
+    if (deleting) return;
+    setConfirming(false);
+    onClearDeleteError();
   };
 
   return (
@@ -93,15 +113,19 @@ export function SiteHeader({ site, now, onSwitchMode, onCopy, onDelete, deleting
 
       <Modal
         open={confirming}
-        onCancel={() => setConfirming(false)}
+        onCancel={closeConfirm}
+        closable={!deleting}
+        maskClosable={!deleting}
+        keyboard={!deleting}
         title={`删除站点 ${site.name}？`}
         width={460}
         footer={null}
       >
         <div className="stack">
           <div>删除后，网关不再按这个配置处理该站点的请求。</div>
+          {deleteError ? <ErrorBar error={deleteError} /> : null}
           <div className="row" style={{ justifyContent: "flex-end" }}>
-            <button type="button" className="btn" onClick={() => setConfirming(false)}>
+            <button type="button" className="btn" disabled={deleting} onClick={closeConfirm}>
               取消
             </button>
             <button type="button" className="btn btn-danger" disabled={deleting} onClick={onDelete}>
