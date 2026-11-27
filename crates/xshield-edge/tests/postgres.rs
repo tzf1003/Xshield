@@ -1,6 +1,7 @@
 //! The `PostgreSQL` adapters against a real database (docs/07 sections 7.7.6
-//! and 7.8.1). Skipped unless `XSHIELD_TEST_DATABASE_BASE_URL` (a server URL
-//! without a database name) is set.
+//! and 7.8.1). Ignored by default because they require
+//! `XSHIELD_TEST_DATABASE_BASE_URL` (a server URL without a database name);
+//! run through `scripts/test_postgres.sh` or with `-- --ignored`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -39,8 +40,12 @@ const DAY_MS: i64 = 86_400_000;
 
 /// A fresh database with every migration applied. `tag` names it, so tests in one process
 /// never drop each other's database.
-async fn database(tag: &str) -> Option<PgPool> {
-    let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL").ok()?;
+async fn database(tag: &str) -> PgPool {
+    let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL")
+        .ok()
+        .map(|value| value.trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .expect("XSHIELD_TEST_DATABASE_BASE_URL must be set");
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&format!("{base}/postgres"))
@@ -66,7 +71,7 @@ async fn database(tag: &str) -> Option<PgPool> {
         .run(&pool)
         .await
         .expect("schema");
-    Some(pool)
+    pool
 }
 
 /// Creates the UTC day partition `decision_log_pYYYYMMDD` that holds
@@ -227,11 +232,9 @@ async fn edge_sites(pool: &PgPool, edge: &str) -> Option<serde_json::Value> {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn sites_follow_the_table_and_report_their_status() {
-    let Some(pool) = database("sites").await else {
-        eprintln!("skipped: XSHIELD_TEST_DATABASE_BASE_URL is not set");
-        return;
-    };
+    let pool = database("sites").await;
 
     sqlx::query("INSERT INTO site_configs (name, spec, version) VALUES ($1, $2, 1)")
         .bind("emr")
@@ -280,10 +283,9 @@ async fn sites_follow_the_table_and_report_their_status() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn a_batch_lands_with_its_derived_columns() {
-    let Some(pool) = database("batch").await else {
-        return;
-    };
+    let pool = database("batch").await;
     let at = now();
     partition_for(&pool, at).await;
 
@@ -380,10 +382,9 @@ async fn a_batch_lands_with_its_derived_columns() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn a_failed_batch_is_retried_once() {
-    let Some(pool) = database("retry").await else {
-        return;
-    };
+    let pool = database("retry").await;
     // The first attempt at any row fails; sequences are not rolled back, so the
     // retry gets past it. The trigger is cloned into the partition below.
     let at = now();
@@ -435,10 +436,9 @@ async fn a_failed_batch_is_retried_once() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn a_batch_without_its_partition_is_counted_as_write_errors() {
-    let Some(pool) = database("partition").await else {
-        return;
-    };
+    let pool = database("partition").await;
     let at = now();
     partition_for(&pool, at).await;
 
@@ -468,10 +468,9 @@ async fn a_batch_without_its_partition_is_counted_as_write_errors() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn the_heartbeat_is_one_row_per_instance_and_is_rewritten() {
-    let Some(pool) = database("heartbeat").await else {
-        return;
-    };
+    let pool = database("heartbeat").await;
     let instance = Instance {
         edge: "edge-a".to_owned(),
         started_at_millis: now() - 60_000,
@@ -551,10 +550,9 @@ async fn the_heartbeat_is_one_row_per_instance_and_is_rewritten() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn the_instruction_version_is_stored_once() {
-    let Some(pool) = database("prompt").await else {
-        return;
-    };
+    let pool = database("prompt").await;
     let prompt = Prompt::new();
     assert!(prompt.id().starts_with("jq_"));
     assert_eq!(prompt.id().len(), 19);
@@ -582,10 +580,9 @@ async fn the_instruction_version_is_stored_once() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn a_site_change_is_reported_without_waiting_for_the_interval() {
-    let Some(pool) = database("notify").await else {
-        return;
-    };
+    let pool = database("notify").await;
     let table = Arc::new(SiteTable::new());
     let (sink, _rx) = DecisionSink::channel(10);
     let judge = Arc::new(Judge::new(ContextKey::new(vec![7; 32]), Unreachable));
@@ -654,11 +651,9 @@ async fn a_site_change_is_reported_without_waiting_for_the_interval() {
 /// next version that opens clears the failure; and giving the settings back to the
 /// environment empties the slot when the environment holds nothing.
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn the_gateway_follows_the_saved_jev_settings() {
-    let Some(pool) = database("jev_settings").await else {
-        eprintln!("skipped: XSHIELD_TEST_DATABASE_BASE_URL is not set");
-        return;
-    };
+    let pool = database("jev_settings").await;
     let saver = KeySealer::from_context_secret(&[7_u8; 32]).expect("a 32-byte secret");
     let gateway = KeySealer::from_context_secret(&[7_u8; 32]).expect("a 32-byte secret");
     let slot = Arc::new(JevSlot::new());

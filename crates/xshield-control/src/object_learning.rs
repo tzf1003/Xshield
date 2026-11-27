@@ -1288,17 +1288,21 @@ mod tests {
     }
 }
 
-/// Passes over a migrated scratch database. They need a reachable PostgreSQL server
+/// Passes over a migrated scratch database. They require a reachable PostgreSQL server
 /// (`XSHIELD_TEST_DATABASE_BASE_URL`, a server URL without a database name) and
-/// return at once without one, as the migration tests do.
+/// are ignored by default (`scripts/test_postgres.sh` runs them).
 #[cfg(test)]
 pub(crate) mod pass_tests {
     use super::*;
     use crate::MIGRATOR;
     use sqlx::{AssertSqlSafe, PgPool};
 
-    pub(crate) async fn scratch(tag: &str) -> Option<(PgPool, PgPool, String)> {
-        let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL").ok()?;
+    pub(crate) async fn scratch(tag: &str) -> (PgPool, PgPool, String) {
+        let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL")
+            .ok()
+            .map(|value| value.trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty())
+            .expect("XSHIELD_TEST_DATABASE_BASE_URL must be set");
         let admin = PgPool::connect(&format!("{base}/postgres"))
             .await
             .expect("admin connection");
@@ -1315,7 +1319,7 @@ pub(crate) mod pass_tests {
             .await
             .expect("scratch connection");
         MIGRATOR.run(&pool).await.expect("migrations");
-        Some((admin, pool, name))
+        (admin, pool, name)
     }
 
     pub(crate) async fn drop_scratch(admin: PgPool, pool: PgPool, name: String) {
@@ -1421,10 +1425,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn twenty_uses_from_five_sessions_propose_the_kind_of_their_source() {
-        let Some((admin, pool, name)) = scratch("proposal").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("proposal").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(), None)
             .await
@@ -1446,10 +1449,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_refusal_in_the_window_keeps_the_position_unproposed() {
-        let Some((admin, pool, name)) = scratch("refusal").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("refusal").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(), None)
             .await
@@ -1472,10 +1474,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn ten_uses_propose_a_kind_when_the_site_asks_for_ten() {
-        let Some((admin, pool, name)) = scratch("site_threshold").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("site_threshold").await;
         let now = crate::params::now_millis();
         let learning = serde_json::json!({"thresholds": {"uses": 10, "sessions": 5}});
         site_spec_store::create(&pool, &clinic_with(learning), None)
@@ -1498,10 +1499,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_site_with_learning_off_reads_nothing() {
-        let Some((admin, pool, name)) = scratch("learning_off").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("learning_off").await;
         let now = crate::params::now_millis();
         let learning = serde_json::json!({"auto_learn": false});
         site_spec_store::create(&pool, &clinic_with(learning), None)
@@ -1540,10 +1540,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_refusal_after_a_proposal_withdraws_it() {
-        let Some((admin, pool, name)) = scratch("withdrawn").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("withdrawn").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(), None)
             .await
@@ -1563,10 +1562,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_proposal_whose_evidence_ages_out_is_withdrawn() {
-        let Some((admin, pool, name)) = scratch("aged_out").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("aged_out").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(), None)
             .await
@@ -1584,10 +1582,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn deleting_a_site_forgets_what_it_learned() {
-        let Some((admin, pool, name)) = scratch("forget").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("forget").await;
         let now = crate::params::now_millis();
         let created = site_spec_store::create(&pool, &clinic(), None)
             .await
@@ -1785,10 +1782,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_class_whose_votes_show_two_flows_is_split_by_one_new_version() {
-        let Some((admin, pool, name)) = scratch("auto_tighten").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("auto_tighten").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -1843,10 +1839,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn with_auto_tighten_off_a_split_is_not_written() {
-        let Some((admin, pool, name)) = scratch("auto_tighten_off").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("auto_tighten_off").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -1871,10 +1866,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn without_learning_settings_a_split_is_not_written() {
-        let Some((admin, pool, name)) = scratch("auto_tighten_absent").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("auto_tighten_absent").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic_with_two_flows(serde_json::Value::Null), None)
             .await
@@ -1904,10 +1898,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_split_the_administrator_undid_is_not_planned_again() {
-        let Some((admin, pool, name)) = scratch("undone_split").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("undone_split").await;
         let now = crate::params::now_millis();
         // Tightening is on here, so the split the administrator undid is one the pass would make.
         let created = site_spec_store::create(
@@ -1950,10 +1943,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_suspended_declared_position_is_paused_by_one_new_version() {
-        let Some((admin, pool, name)) = scratch("auto_pause").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("auto_pause").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic_declaring_both(serde_json::Value::Null), None)
             .await
@@ -2008,10 +2000,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_suspended_position_keeps_the_function_table_in_the_new_version() {
-        let Some((admin, pool, name)) = scratch("auto_pause_functions").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("auto_pause_functions").await;
         let now = crate::params::now_millis();
         let spec = SiteSpec::from_json(
             &serde_json::json!({
@@ -2064,10 +2055,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn with_auto_pause_off_a_suspended_position_is_only_marked() {
-        let Some((admin, pool, name)) = scratch("auto_pause_off").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("auto_pause_off").await;
         let now = crate::params::now_millis();
         let learning = serde_json::json!({"auto_pause": false});
         site_spec_store::create(&pool, &clinic_declaring_both(learning), None)
@@ -2097,10 +2087,9 @@ pub(crate) mod pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_millisecond_with_more_rows_than_a_batch_is_read_to_the_end() {
-        let Some((admin, pool, name)) = scratch("same_millisecond").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("same_millisecond").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(), None)
             .await
@@ -2420,10 +2409,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn an_identified_site_proposes_high_for_a_position_fed_only_by_its_own_values() {
-        let Some((admin, pool, name)) = scratch("accepts_identified").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_identified").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -2478,10 +2466,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn the_sessions_of_one_user_are_one_unit_on_an_identified_site() {
-        let Some((admin, pool, name)) = scratch("accepts_one_user").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_one_user").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -2514,10 +2501,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn the_votes_of_administrator_sessions_are_left_out_on_an_identified_site() {
-        let Some((admin, pool, name)) = scratch("accepts_admins").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_admins").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -2555,10 +2541,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_position_fed_by_public_positions_is_proposed_as_accepting_them() {
-        let Some((admin, pool, name)) = scratch("accepts_judged").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_judged").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -2613,10 +2598,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_vote_shown_at_a_position_awaiting_its_kind_is_pending_not_refused() {
-        let Some((admin, pool, name)) = scratch("accepts_pending").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_pending").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -2675,10 +2659,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_judgement_the_entry_carries_is_not_proposed_again() {
-        let Some((admin, pool, name)) = scratch("accepts_carried").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_carried").await;
         let now = crate::params::now_millis();
         let carried = json!({"accepts_public": true, "reliability": "medium"});
         site_spec_store::create(
@@ -2722,10 +2705,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_dismissed_proposal_waits_for_the_other_value() {
-        let Some((admin, pool, name)) = scratch("accepts_dismissed").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_dismissed").await;
         let now = crate::params::now_millis();
         let created =
             site_spec_store::create(&pool, &clinic(&[(SHARE, json!({}))], &quiet()), None)
@@ -2778,10 +2760,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_position_the_configuration_no_longer_declares_loses_its_proposal() {
-        let Some((admin, pool, name)) = scratch("accepts_retained").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_retained").await;
         let now = crate::params::now_millis();
         let created = site_spec_store::create(
             &pool,
@@ -2834,10 +2815,9 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn deleting_a_site_forgets_its_judgements() {
-        let Some((admin, pool, name)) = scratch("accepts_forgotten").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_forgotten").await;
         let now = crate::params::now_millis();
         let created =
             site_spec_store::create(&pool, &clinic(&[(SHARE, json!({}))], &quiet()), None)
@@ -2877,11 +2857,10 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_share_the_rules_leave_open_is_kept_for_the_administrator_and_a_conclusion_drops_it()
     {
-        let Some((admin, pool, name)) = scratch("accepts_open").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_open").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -2959,11 +2938,10 @@ mod judgement_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_share_is_written_for_the_configuration_it_was_judged_on_and_deleting_the_site_forgets_it()
      {
-        let Some((admin, pool, name)) = scratch("accepts_share_forgotten").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("accepts_share_forgotten").await;
         let created =
             site_spec_store::create(&pool, &clinic(&[(DELETE, json!({}))], &quiet()), None)
                 .await
@@ -3020,7 +2998,7 @@ mod judgement_pass_tests {
 }
 
 /// The tier pass: response positions judged from what their units saw, and proposed as tiers. Each test
-/// runs against a scratch database and returns at once without `XSHIELD_TEST_DATABASE_BASE_URL`.
+/// runs against a scratch database and is ignored without `XSHIELD_TEST_DATABASE_BASE_URL` unless `--ignored` is passed.
 #[cfg(test)]
 mod tier_pass_tests {
     use serde_json::{Value, json};
@@ -3134,10 +3112,9 @@ mod tier_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_position_its_units_share_is_proposed_public_and_one_they_keep_apart_self() {
-        let Some((admin, pool, name)) = scratch("tiers_judged").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("tiers_judged").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3187,10 +3164,9 @@ mod tier_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_tier_proposal_whose_evidence_ages_out_is_withdrawn() {
-        let Some((admin, pool, name)) = scratch("tiers_aged").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("tiers_aged").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(&[(SHARED, json!({"tier": "self"}))]), None)
             .await
@@ -3322,10 +3298,9 @@ mod source_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn the_values_patient_uses_show_at_a_response_position_are_proposed_as_patients() {
-        let Some((admin, pool, name)) = scratch("source_proposal").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("source_proposal").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(false), None)
             .await
@@ -3340,10 +3315,9 @@ mod source_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_response_proposal_is_withdrawn_when_its_evidence_ages_out() {
-        let Some((admin, pool, name)) = scratch("source_aged_out").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("source_aged_out").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(false), None)
             .await
@@ -3363,10 +3337,9 @@ mod source_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_response_proposal_stays_while_its_evidence_holds() {
-        let Some((admin, pool, name)) = scratch("source_holds").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("source_holds").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(false), None)
             .await
@@ -3381,10 +3354,9 @@ mod source_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_declared_response_position_is_not_proposed() {
-        let Some((admin, pool, name)) = scratch("source_declared").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("source_declared").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(true), None)
             .await
@@ -3396,10 +3368,9 @@ mod source_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_response_proposal_the_administrator_declares_is_withdrawn() {
-        let Some((admin, pool, name)) = scratch("source_declared_later").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("source_declared_later").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(false), None)
             .await
@@ -3433,10 +3404,9 @@ mod source_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_response_field_that_is_not_an_identifier_is_not_proposed() {
-        let Some((admin, pool, name)) = scratch("source_field").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("source_field").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(false), None)
             .await
@@ -3649,10 +3619,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_function_only_admins_use_is_proposed_as_admin() {
-        let Some((admin, pool, name)) = scratch("function_admin").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_admin").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3684,10 +3653,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_function_an_ordinary_user_uses_is_not_proposed() {
-        let Some((admin, pool, name)) = scratch("function_ordinary").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_ordinary").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3721,10 +3689,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn an_entry_is_never_proposed() {
-        let Some((admin, pool, name)) = scratch("function_entry").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_entry").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3748,10 +3715,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn slug_paths_are_judged_as_one_function() {
-        let Some((admin, pool, name)) = scratch("function_slugs").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_slugs").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3785,10 +3751,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_function_proposal_is_withdrawn_when_its_evidence_ages_out() {
-        let Some((admin, pool, name)) = scratch("function_aged").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_aged").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3816,10 +3781,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_dismissed_function_proposal_stays_dismissed() {
-        let Some((admin, pool, name)) = scratch("function_dismissed").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_dismissed").await;
         let now = crate::params::now_millis();
         let record = site_spec_store::create(
             &pool,
@@ -3856,10 +3820,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn tier_proposals_of_positions_survive_the_function_pass_and_the_other_way_round() {
-        let Some((admin, pool, name)) = scratch("function_and_tiers").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_and_tiers").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3890,10 +3853,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_site_with_learning_off_keeps_no_function_evidence() {
-        let Some((admin, pool, name)) = scratch("function_off").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_off").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3937,10 +3899,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn administrators_on_entries_are_no_ordinary_bystanders() {
-        let Some((admin, pool, name)) = scratch("function_entries").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_entries").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,
@@ -3968,10 +3929,9 @@ mod function_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_site_with_more_function_keys_than_one_pass_reads_is_not_judged() {
-        let Some((admin, pool, name)) = scratch("function_more").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("function_more").await;
         let now = crate::params::now_millis();
         site_spec_store::create(
             &pool,

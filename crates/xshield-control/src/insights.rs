@@ -2154,14 +2154,17 @@ mod tests {
         }
     }
 
-    /// The route suggestions read from the decision log of a migrated database. Skipped
-    /// unless `XSHIELD_TEST_DATABASE_BASE_URL` (a server URL without a database name) is set.
+    /// The route suggestions read from the decision log of a migrated database. Ignored
+    /// by default because it requires `XSHIELD_TEST_DATABASE_BASE_URL` (a server URL
+    /// without a database name).
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn the_route_scan_reads_the_decision_log() {
-        let Ok(base) = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL") else {
-            eprintln!("skipped: XSHIELD_TEST_DATABASE_BASE_URL is not set");
-            return;
-        };
+        let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL")
+            .ok()
+            .map(|value| value.trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty())
+            .expect("XSHIELD_TEST_DATABASE_BASE_URL must be set");
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect(&format!("{base}/postgres"))

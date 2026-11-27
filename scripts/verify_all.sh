@@ -25,7 +25,7 @@
 #   PGHOST/PGPORT/PGUSER/PGPASSWORD   server for the PostgreSQL steps.
 #   XSHIELD_TEST_DATABASE_BASE_URL    server URL without a database name, e.g.
 #                           postgresql://postgres:postgres@localhost:5432. Without it the
-#                           database-gated tests inside `cargo test` return without running,
+#                           database-gated tests inside `cargo test` are ignored,
 #                           and the summary reports that as SKIP test-database.
 #
 # A step whose tool is missing is reported as SKIP, never as success. The exit
@@ -116,16 +116,18 @@ group_rust() {
     run_step library python3 scripts/validate_library.py
     run_step clippy cargo clippy --workspace --all-targets --locked -- -D warnings
     run_step test cargo test --workspace --all-targets --locked --no-fail-fast
-    # The database-gated tests in that run return at once without a server URL, and
-    # cargo counts them as passed. Say so, rather than let PASS cover them.
+    # The database-gated tests are #[ignore]d during normal `cargo test`; they run in
+    # `scripts/test_postgres.sh` when PostgreSQL is configured.
     if [ -z "${XSHIELD_TEST_DATABASE_BASE_URL:-}" ]; then
-        skip_step test-database "XSHIELD_TEST_DATABASE_BASE_URL is not set: the database-gated tests in 'test' returned without running"
+        skip_step test-database "XSHIELD_TEST_DATABASE_BASE_URL is not set: the database-gated tests in 'test' were ignored"
     fi
     run_step doctest cargo test --workspace --doc --locked
-    if have psql && have createdb; then
-        run_step postgres scripts/test_postgres.sh
-    else
+    if ! have psql || ! have createdb; then
         skip_step postgres "psql/createdb not found"
+    elif [ -z "${XSHIELD_TEST_DATABASE_BASE_URL:-}${PGHOST:-}${PGPORT:-}${PGUSER:-}" ] && have pg_isready && ! pg_isready -q >/dev/null 2>&1; then
+        skip_step postgres "no PostgreSQL server configured or running"
+    else
+        run_step postgres scripts/test_postgres.sh
     fi
 }
 

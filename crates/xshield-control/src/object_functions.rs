@@ -1530,9 +1530,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn the_functions_list_shows_the_table_the_candidates_and_the_proposals() {
-        let Some((admin, pool, name)) = scratch("fn_list").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("fn_list").await;
         create_clinic(
             &pool,
             json!([{"key": FEED, "source": "admin"}]),
@@ -1604,9 +1602,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_site_over_the_key_limit_lists_no_candidates() {
-        let Some((admin, pool, name)) = scratch("fn_limit").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("fn_limit").await;
         let now = crate::params::now_millis();
         create_clinic(
             &pool,
@@ -1648,9 +1644,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_site_with_learning_off_says_so() {
-        let Some((admin, pool, name)) = scratch("fn_off").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("fn_off").await;
         let now = crate::params::now_millis();
         create_clinic(&pool, json!([]), json!({"auto_learn": false})).await;
         learn_scenario(&pool, now).await;
@@ -1667,9 +1661,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn confirming_changes_writes_one_version_and_clears_the_proposal() {
-        let Some((admin, pool, name)) = scratch("fn_confirm").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("fn_confirm").await;
         let now = crate::params::now_millis();
         create_clinic(
             &pool,
@@ -1733,9 +1725,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_change_that_changes_nothing_writes_no_version() {
-        let Some((admin, pool, name)) = scratch("fn_nochange").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("fn_nochange").await;
         let now = crate::params::now_millis();
         create_clinic(
             &pool,
@@ -1803,9 +1793,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_stale_version_is_a_conflict() {
-        let Some((admin, pool, name)) = scratch("fn_stale").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("fn_stale").await;
         create_clinic(
             &pool,
             json!([]),
@@ -1838,9 +1826,7 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn dismissing_a_function_proposal_keeps_it_dismissed() {
-        let Some((admin, pool, name)) = scratch("fn_dismiss").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("fn_dismiss").await;
         let now = crate::params::now_millis();
         create_clinic(
             &pool,
