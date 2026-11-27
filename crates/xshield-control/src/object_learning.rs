@@ -3422,10 +3422,9 @@ mod source_pass_tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_dismissed_response_proposal_waits_until_its_evidence_doubles() {
-        let Some((admin, pool, name)) = scratch("source_dismissed").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("source_dismissed").await;
         let now = crate::params::now_millis();
         site_spec_store::create(&pool, &clinic(false), None)
             .await
