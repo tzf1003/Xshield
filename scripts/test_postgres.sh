@@ -10,31 +10,52 @@ set -euo pipefail
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 test_database="xshield_test_${PPID}_${RANDOM}"
 control_database="xshield_control_${PPID}_${RANDOM}"
+database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
+database_base_url=${database_base_url%/}
 
 cleanup() {
-    dropdb --if-exists "$test_database" >/dev/null
-    dropdb --if-exists "$control_database" >/dev/null
+    if [ -n "${XSHIELD_TEST_DATABASE_BASE_URL:-}" ]; then
+        dropdb --if-exists --maintenance-db="$database_base_url/postgres" "$test_database" >/dev/null
+        dropdb --if-exists --maintenance-db="$database_base_url/postgres" "$control_database" >/dev/null
+    else
+        dropdb --if-exists "$test_database" >/dev/null
+        dropdb --if-exists "$control_database" >/dev/null
+    fi
 }
 trap cleanup EXIT INT TERM
 
 # Each suite gets a migrated database of its own: the control plane's tests fail when the
 # PostgreSQL crate's tests have already written to the same database.
 migrate() {
-    createdb "$1"
-    for migration in "$repo_root"/migrations/*.sql; do
-        psql -X -v ON_ERROR_STOP=1 -d "$1" -f "$migration"
-    done
+    if [ -n "${XSHIELD_TEST_DATABASE_BASE_URL:-}" ]; then
+        createdb --maintenance-db="$database_base_url/postgres" "$1"
+        for migration in "$repo_root"/migrations/*.sql; do
+            psql -X -v ON_ERROR_STOP=1 -d "$database_base_url/$1" -f "$migration"
+        done
+    else
+        createdb "$1"
+        for migration in "$repo_root"/migrations/*.sql; do
+            psql -X -v ON_ERROR_STOP=1 -d "$1" -f "$migration"
+        done
+    fi
 }
 migrate "$test_database"
 migrate "$control_database"
 
 # The PostgreSQL crate's database-gated tests are `#[ignore]`d `#[cfg(test)]`
 # modules inside src/, so `--lib -- --ignored` runs exactly them.
-database_base_url=${XSHIELD_TEST_DATABASE_BASE_URL:-"postgresql://${PGUSER:-$(id -un)}@${PGHOST:-localhost}:${PGPORT:-5432}"}
 XSHIELD_TEST_DATABASE_URL="$database_base_url/$test_database" \
     cargo test -p xshield-postgres --lib -- --ignored
 
-# The control plane's database-gated tests (the object map and the impact preview) run on their
-# own migrated database, through XSHIELD_DATABASE_URL.
+# The control plane's database-gated tests run on their own migrated database
+# (XSHIELD_DATABASE_URL) or create scratch databases on the server
+# (XSHIELD_TEST_DATABASE_BASE_URL).
 XSHIELD_DATABASE_URL="$database_base_url/$control_database" \
+XSHIELD_TEST_DATABASE_BASE_URL="$database_base_url" \
     cargo test -p xshield-control --lib -- --ignored
+
+XSHIELD_TEST_DATABASE_BASE_URL="$database_base_url" \
+    cargo test -p xshield-control --test migrations -- --ignored
+
+XSHIELD_TEST_DATABASE_BASE_URL="$database_base_url" \
+    cargo test -p xshield-edge --test postgres -- --ignored

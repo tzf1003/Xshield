@@ -1,6 +1,7 @@
-//! Start-up migrations (docs/04 section 4.2). The database tests are skipped
-//! unless `XSHIELD_TEST_DATABASE_BASE_URL` (a server URL without a database
-//! name) is set; CI's validate job sets it.
+//! Start-up migrations (docs/04 section 4.2). The database tests are ignored by
+//! default because they require `XSHIELD_TEST_DATABASE_BASE_URL` (a server URL
+//! without a database name); CI's validate job and `scripts/test_postgres.sh`
+//! run them.
 
 use sha2::{Digest as _, Sha384};
 use sqlx::migrate::MigrateError;
@@ -19,9 +20,13 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// `None` when the test server is not configured.
-    async fn new(tag: &str) -> Option<Self> {
-        let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL").ok()?;
+    /// Creates a fresh scratch database on the test server.
+    async fn new(tag: &str) -> Self {
+        let base = std::env::var("XSHIELD_TEST_DATABASE_BASE_URL")
+            .ok()
+            .map(|value| value.trim_end_matches('/').to_owned())
+            .filter(|value| !value.is_empty())
+            .expect("XSHIELD_TEST_DATABASE_BASE_URL must be set");
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect(&format!("{base}/postgres"))
@@ -42,7 +47,7 @@ impl Scratch {
             .connect(&format!("{base}/{name}"))
             .await
             .expect("connect to the scratch database");
-        Some(Self { admin, name, pool })
+        Self { admin, name, pool }
     }
 
     async fn finish(self) {
@@ -88,11 +93,9 @@ fn every_migration_file_is_compiled_in() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn a_fresh_database_gets_every_migration_once() {
-    let Some(db) = Scratch::new("fresh").await else {
-        eprintln!("skipped: XSHIELD_TEST_DATABASE_BASE_URL is not set");
-        return;
-    };
+    let db = Scratch::new("fresh").await;
     run_migrations(&db.pool)
         .await
         .expect("the first start applies every migration");
@@ -107,11 +110,9 @@ async fn a_fresh_database_gets_every_migration_once() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn a_database_with_the_baseline_but_no_ledger_is_refused_not_adopted() {
-    let Some(db) = Scratch::new("unledgered").await else {
-        eprintln!("skipped: XSHIELD_TEST_DATABASE_BASE_URL is not set");
-        return;
-    };
+    let db = Scratch::new("unledgered").await;
     sqlx::raw_sql(BASELINE_FILE)
         .execute(&db.pool)
         .await
@@ -130,11 +131,9 @@ async fn a_database_with_the_baseline_but_no_ledger_is_refused_not_adopted() {
 }
 
 #[tokio::test]
+#[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
 async fn a_database_adopted_with_the_recipe_in_docs_is_not_migrated_again() {
-    let Some(db) = Scratch::new("adopted").await else {
-        eprintln!("skipped: XSHIELD_TEST_DATABASE_BASE_URL is not set");
-        return;
-    };
+    let db = Scratch::new("adopted").await;
     sqlx::raw_sql(BASELINE_FILE)
         .execute(&db.pool)
         .await

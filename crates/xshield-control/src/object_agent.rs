@@ -445,10 +445,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn an_answer_proposes_the_kind_the_rules_cannot_name() {
-        let Some((admin, pool, name)) = scratch("agent_proposal").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("agent_proposal").await;
         let now = now_millis();
         site_spec_store::create(&pool, &agent_site(&json!({"enabled": true})), None)
             .await
@@ -472,10 +471,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_kept_answer_is_not_asked_about_again_while_its_evidence_holds() {
-        let Some((admin, pool, name)) = scratch("agent_kept").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("agent_kept").await;
         let now = now_millis();
         site_spec_store::create(&pool, &agent_site(&json!({"enabled": true})), None)
             .await
@@ -492,10 +490,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_site_with_no_daily_budget_asks_nothing() {
-        let Some((admin, pool, name)) = scratch("agent_budget").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("agent_budget").await;
         let now = now_millis();
         site_spec_store::create(
             &pool,
@@ -516,10 +513,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_switched_off_agent_is_never_asked() {
-        let Some((admin, pool, name)) = scratch("agent_off").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("agent_off").await;
         let now = now_millis();
         site_spec_store::create(&pool, &agent_site(&json!({"enabled": false})), None)
             .await
@@ -534,10 +530,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_failed_call_is_recorded_and_proposes_nothing() {
-        let Some((admin, pool, name)) = scratch("agent_failed").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("agent_failed").await;
         let now = now_millis();
         site_spec_store::create(&pool, &agent_site(&json!({"enabled": true})), None)
             .await
@@ -560,10 +555,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn an_answer_outside_the_candidates_is_refused_and_proposes_nothing() {
-        let Some((admin, pool, name)) = scratch("agent_refused").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("agent_refused").await;
         let now = now_millis();
         site_spec_store::create(&pool, &agent_site(&json!({"enabled": true})), None)
             .await
@@ -584,10 +578,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_low_confidence_answer_leaves_the_position_pending() {
-        let Some((admin, pool, name)) = scratch("agent_low").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("agent_low").await;
         let now = now_millis();
         site_spec_store::create(&pool, &agent_site(&json!({"enabled": true})), None)
             .await
@@ -607,10 +600,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a reachable PostgreSQL database (XSHIELD_TEST_DATABASE_BASE_URL)"]
     async fn a_rule_that_names_another_kind_makes_the_agent_answer_ambiguous() {
-        let Some((admin, pool, name)) = scratch("agent_conflict").await else {
-            return;
-        };
+        let (admin, pool, name) = scratch("agent_conflict").await;
         let now = now_millis();
         let spec = agent_site(&json!({"enabled": true}));
         let created = site_spec_store::create(&pool, &spec, None)
