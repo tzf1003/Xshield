@@ -367,7 +367,7 @@ CASES: tuple[Case, ...] = (
          requires=("functions",), note="doctor's real session on /api/patients/export-all: a route word under {id}"),
     Case("p1-1-rotation", "P1-1", "known_gap", "allow", None, SITE_TRUTH, rotation,
          note="the credential is refreshed between the list and the open"),
-    Case("p1-2-search-id-then-open", "P1-2", "known_gap", "allow", None, SITE_TRUTH, search_id_then_open,
+    Case("p1-2-search-id-then-open", "P1-2", "must", "allow", None, SITE_TRUTH, search_id_then_open,
          note="the patient number typed into the search, then the list, then the open"),
     Case("p1-3-preflight", "P1-3", "known_gap", "allow", None, SITE_TRUTH, preflight,
          note="CORS preflight without a credential"),

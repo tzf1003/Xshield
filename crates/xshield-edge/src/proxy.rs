@@ -74,12 +74,20 @@ pub struct RequestContext {
     issued: Option<String>,
     status: u16,
     observed: bool,
-    /// Digests of the request values the judge found unseen, handed to the
-    /// judge with the response (see `Judgement::sent`).
+    /// Digests of the request values sent as references/routes (or tokens of a
+    /// truncated request) that were not verified, handed to the judge with this
+    /// request's response only (see `Judgement::sent`).
     sent: Vec<Digest16>,
+    /// Digests of the request values sent as inputs in a structured request,
+    /// handed to the judge with this request's response only (see
+    /// `Judgement::typed`).
+    typed: Vec<Digest16>,
     /// Digests of the request values the tiers turned down, handed to the judge
     /// with this request's response only (see `Judgement::echo`).
     echo: Vec<Digest16>,
+    /// Whether this response must teach nothing because a truncated request had
+    /// more distinct tokens than may be tracked (see `Judgement::skip_learning`).
+    skip_learning: bool,
     /// The request's logical path and interface name, once the request is routed.
     resolved: Option<Resolved>,
     /// The request was bypassed: forwarded as it arrived, never judged.
@@ -361,7 +369,9 @@ impl<J: JevPort + 'static> EdgeProxy<J> {
                 would_block,
                 now_ms: now_ms(),
                 sent: &ctx.sent,
+                typed: &ctx.typed,
                 echo: &ctx.echo,
+                skip_learning: ctx.skip_learning,
             },
         ))
     }
@@ -389,7 +399,9 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
             status: 0,
             observed: false,
             sent: Vec::new(),
+            typed: Vec::new(),
             echo: Vec::new(),
+            skip_learning: false,
             resolved: None,
             bypass: false,
         }
@@ -479,7 +491,9 @@ impl<J: JevPort + 'static> ProxyHttp for EdgeProxy<J> {
             .await;
         ctx.credential = credential;
         ctx.sent = judgement.sent;
+        ctx.typed = judgement.typed;
         ctx.echo = judgement.echo;
+        ctx.skip_learning = judgement.skip_learning;
         ctx.bypass = bypass;
         ctx.resolved = Some(resolved);
         let mut record = judgement.record;

@@ -213,7 +213,8 @@ class _Handler(BaseHTTPRequestHandler):
             return 200, {"results": [p for p in origin.patients.values() if text in p["name"]]}, {}
         if method == "GET" and url.path == "/api/search":
             text = query.get("q", [""])[0]
-            return 200, {"results": [p for p in origin.patients.values() if text in p["name"]]}, {}
+            results = [p for p in origin.patients.values() if text in p["name"] or text == p["id"]]
+            return 200, {"query": text, "results": results}, {}
         if method == "GET" and url.path == "/api/comments":
             return 200, {"comments": COMMENTS.get(query.get("patient", [""])[0], [])}, {}
         if method == "POST" and url.path == "/api/notes":

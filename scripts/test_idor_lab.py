@@ -504,6 +504,26 @@ def a12(lab: Lab) -> None:
     lab.origin_direct("A12 patient D", "GET", "/api/patients/PT-7004", cookie_a)
 
 
+@scenario("A13", "医生 A 按患者编号搜索后打开结果：放行（在标识字段展示的值学入会话）；未命中只回显在 query 的编号不学")
+def a13(lab: Lab) -> None:
+    cookie = lab.login("emr.lab", "doctor_a", "A13 doctor A logs in")
+    found = lab.expect("doctor A searches by patient id", lab.send(
+        "emr.lab", "GET", "/api/search?q=PT-7001", cookie=cookie), Expect(200, "jev_allow", "allowed", True))
+    shown = [item.get("id") for item in found.reply.json().get("results", [])]
+    lab.check("the search returns PT-7001", "PT-7001" in shown, f"ids {shown}")
+    before = jev_calls(lab)
+    lab.expect("doctor A opens the patient returned by the search", lab.send(
+        "emr.lab", "GET", "/api/patients/PT-7001", cookie=cookie), Expect(200, "fast_allow", "allowed", True))
+    lab.check("opening the searched patient asks Jev nothing", jev_calls(lab) == before,
+              f"{jev_calls(lab) - before} new calls")
+    missed = lab.expect("doctor A searches for a missing patient id echoed only in query", lab.send(
+        "emr.lab", "GET", "/api/search?q=PT-9999", cookie=cookie), Expect(200, "jev_allow", "allowed", True))
+    lab.check("the missing id is echoed in query", missed.reply.json().get("query") == "PT-9999",
+              f"body {missed.reply.body[:200]!r}")
+    lab.expect("opening the id echoed only in query still goes to Jev and is refused", lab.send(
+        "emr.lab", "GET", "/api/patients/PT-9999", cookie=cookie), Expect(403, "jev_deny", "blocked", False))
+
+
 @scenario("B1", "搜索框、表单里输入正常中文和英文文本：放行")
 def b1(lab: Lab) -> None:
     cookie = lab.login("emr.lab", "doctor_a")

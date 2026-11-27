@@ -16,10 +16,6 @@ use crate::values::{ResponseValue, is_id_like};
 
 /// Most values remembered per session.
 pub const SEEN_MAX: usize = 5_000;
-/// Most values a session may have sent that the origin had not shown it. Past
-/// it the session stops learning from responses: evicting one of them would let
-/// its echo be learned later.
-pub const SENT_MAX: usize = SEEN_MAX;
 /// Most origins of one value kept.
 pub const SOURCES_MAX: usize = 6;
 /// Most recent requests kept per session.
@@ -46,11 +42,6 @@ pub const HELD_LOGINS_MAX: usize = 1_000;
 pub const HELD_VALUES_MAX: usize = 20_000;
 /// How long a held login waits for its credential, in milliseconds (docs/01 section 1.7).
 pub const HELD_LOGIN_MS: u64 = 5 * 60 * 1000;
-/// Most credentials whose requests' values are kept while the origin has not accepted them (see
-/// [`PendingSent`]). Past it the oldest goes.
-const PENDING_MAX: usize = 1_000;
-/// Most values all of them keep together. Past it the oldest goes.
-const PENDING_VALUES_MAX: usize = 20_000;
 /// The shortest value a login response may carry as the session credential (docs/01 section 1.7).
 pub const LOGIN_CREDENTIAL_CHARS: usize = 16;
 /// The source a value taken from a login response is shown under (docs/01 section 1.7).
@@ -346,14 +337,6 @@ struct CachedAllow {
     source: u128,
 }
 
-/// The values a session sent, copied into a session that a response issues a
-/// credential to, so that an echo in that response is not learned either.
-#[derive(Debug, Clone, Default)]
-pub struct SentRecord {
-    overflow: bool,
-    digests: HashSet<Digest16>,
-}
-
 /// Who a session is, as the origin's identity positions declared it (docs/01 section 1.2).
 /// The user and the organization are keyed hashes of their ids, so the gateway never keeps an
 /// id; the role is its label. A kind the session has not shown is `None`.
@@ -457,10 +440,6 @@ pub struct SessionContext {
     recent: VecDeque<Recent>,
     entries: Vec<EntryPass>,
     cache: HashMap<Digest16, CachedAllow>,
-    /// Values the session sent that the origin had not shown it.
-    sent: HashSet<Digest16>,
-    /// The session stopped learning from responses (see [`SENT_MAX`]).
-    sent_overflow: bool,
     /// Who the session is, as its identity responses declared it.
     identity: SessionIdentity,
     /// The login response this session took its values from, when its credential set it up.
@@ -484,8 +463,6 @@ impl SessionContext {
             recent: VecDeque::new(),
             entries: Vec::new(),
             cache: HashMap::new(),
-            sent: HashSet::new(),
-            sent_overflow: false,
             identity: SessionIdentity::default(),
             login: None,
             login_unbound: None,
@@ -512,21 +489,9 @@ impl SessionContext {
     }
 
     /// Records what a successful response declares about the session (W1). `claims` are its
-    /// values at the site's identity positions. A value the session sent is not declared: an
-    /// echo of what the session sent says nothing about who it is, the same rule that keeps
-    /// echoes out of [`SessionContext::remember`]. Nothing is declared once the session has
-    /// stopped learning from responses.
+    /// values at the site's identity positions, with any echoes of the request already removed.
     pub fn declare_identity(&mut self, key: &ContextKey, claims: &[(IdentityRole, &str)]) {
-        if self.sent_overflow {
-            return;
-        }
-        let shown: Vec<(IdentityRole, &str)> = claims
-            .iter()
-            .copied()
-            .filter(|(_, value)| !self.sent.contains(&key.mac("value", value.as_bytes())))
-            .collect();
-        self.identity
-            .update(&SessionIdentity::declared(key, &shown));
+        self.identity.update(&SessionIdentity::declared(key, claims));
     }
 
     /// Seconds since the session was first seen.
@@ -541,19 +506,15 @@ impl SessionContext {
         self.seen.get(&key.mac("value", value.as_bytes()))
     }
 
-    /// Records the values of a successful response and returns how many of
-    /// them the session had not seen before. A value the session sent is not
-    /// recorded: its echo shows nothing the origin showed (see
-    /// [`SessionContext::note_sent`]).
+    /// Records the values of a successful response (with any echoes of the
+    /// request already removed) and returns how many of them the session had
+    /// not seen before.
     pub fn remember(
         &mut self,
         key: &ContextKey,
         source: &Source<'_>,
         values: &[ResponseValue],
     ) -> usize {
-        if self.sent_overflow {
-            return 0;
-        }
         let mut new = 0;
         for value in values {
             let digest = key.mac("value", value.value.as_bytes());
@@ -571,12 +532,9 @@ impl SessionContext {
         new
     }
 
-    /// Learns one value under `origin`. A value the session sent is not learned; a value it has
-    /// seen gains the origin. Returns whether the value is new to the session.
+    /// Learns one value under `origin`; a value it has seen gains the origin.
+    /// Returns whether the value is new to the session.
     fn learn(&mut self, digest: Digest16, origin: Origin) -> bool {
-        if self.sent.contains(&digest) {
-            return false;
-        }
         if let Some(seen) = self.seen.get_mut(&digest) {
             seen.note(origin);
             return false;
@@ -620,61 +578,6 @@ impl SessionContext {
     /// Records why the credential that set this session up took no login response.
     fn refuse_login(&mut self, reason: LoginUnbound) {
         self.login_unbound = Some(reason);
-    }
-
-    /// Notes values this session sent in a request the origin answered. Later
-    /// responses do not teach the session these values, whichever field echoes
-    /// them. The record never evicts: an evicted value could be echoed back, so a
-    /// session that overflows [`SENT_MAX`] stops learning from responses.
-    pub fn note_sent(&mut self, digests: &[Digest16]) {
-        for digest in digests {
-            self.note(*digest);
-        }
-    }
-
-    fn note(&mut self, digest: Digest16) {
-        if self.sent_overflow || self.sent.contains(&digest) {
-            return;
-        }
-        if self.sent.len() >= SENT_MAX {
-            self.stop_learning();
-            return;
-        }
-        self.sent.insert(digest);
-    }
-
-    /// Stops learning from responses. Used when a request's values could not all
-    /// be read, so an echo of one of them cannot be told apart from what the
-    /// origin shows. What was learned before stays.
-    pub fn stop_learning(&mut self) {
-        self.sent_overflow = true;
-        self.sent.clear();
-    }
-
-    /// How many values the session sent that the origin had not shown it.
-    fn sent_len(&self) -> usize {
-        self.sent.len()
-    }
-
-    /// What the session sent, for a session that a response is about to issue a
-    /// credential to.
-    #[must_use]
-    pub fn sent_record(&self) -> SentRecord {
-        SentRecord {
-            overflow: self.sent_overflow,
-            digests: self.sent.clone(),
-        }
-    }
-
-    /// Takes over what another session sent. A credential a response issues
-    /// starts with what the request sent, so the response cannot teach it an echo.
-    pub fn inherit_sent(&mut self, record: &SentRecord) {
-        if record.overflow {
-            self.stop_learning();
-        }
-        for digest in &record.digests {
-            self.note(*digest);
-        }
     }
 
     /// Appends one request to the recent list.
@@ -862,84 +765,6 @@ fn carries(login: &HeldLogin, site: &str, token: &Digest16) -> bool {
                 .any(|value| value.candidate && value.digest == *token))
 }
 
-/// What the requests of a credential sent before the origin accepted the credential. Such a
-/// credential has no session (docs/01 section 1.2), yet a refused request's values must not teach
-/// the session that the credential starts later: their echo in a later response, such as a list of
-/// recent attempts, is not learned. So they are kept here, apart from the sessions, and the session
-/// takes them when it starts. They count against neither the session table nor any budget. Bounded
-/// by [`PENDING_MAX`] credentials and [`PENDING_VALUES_MAX`] values, the oldest going first, and
-/// dropped after [`IDLE_MAX_MS`]. Memory only: a restart loses them.
-#[derive(Debug, Default)]
-struct PendingSent {
-    /// Oldest first.
-    records: VecDeque<PendingRecord>,
-}
-
-/// The record of one credential in [`PendingSent`]: a session with no values but what it sent.
-#[derive(Debug)]
-struct PendingRecord {
-    id: Digest16,
-    at_ms: u64,
-    sent: SessionContext,
-}
-
-impl PendingSent {
-    /// Applies `change` to the record of `id`, created when absent. Records are dropped to make
-    /// room, never the one being changed.
-    fn with(&mut self, id: Digest16, now_ms: u64, change: impl FnOnce(&mut SessionContext)) {
-        while self
-            .records
-            .front()
-            .is_some_and(|front| now_ms.saturating_sub(front.at_ms) > IDLE_MAX_MS)
-        {
-            self.records.pop_front();
-        }
-        if !self.records.iter().any(|record| record.id == id) {
-            while self.records.len() >= PENDING_MAX {
-                self.records.pop_front();
-            }
-            self.records.push_back(PendingRecord {
-                id,
-                at_ms: now_ms,
-                sent: SessionContext::new(now_ms),
-            });
-        }
-        if let Some(record) = self.records.iter_mut().find(|record| record.id == id) {
-            change(&mut record.sent);
-        }
-        while self.values() > PENDING_VALUES_MAX {
-            let Some(oldest) = self.records.iter().position(|record| record.id != id) else {
-                break;
-            };
-            self.records.remove(oldest);
-        }
-    }
-
-    /// The values all the records keep together.
-    fn values(&self) -> usize {
-        self.records
-            .iter()
-            .map(|record| record.sent.sent_len())
-            .sum()
-    }
-
-    /// What the record of `id` sent, if it has one.
-    fn sent_record(&self, id: &Digest16) -> Option<SentRecord> {
-        self.records
-            .iter()
-            .find(|record| record.id == *id)
-            .map(|record| record.sent.sent_record())
-    }
-
-    /// Takes the record of `id`, for the session that starts with it.
-    fn take(&mut self, id: &Digest16) -> Option<SentRecord> {
-        let index = self.records.iter().position(|record| record.id == *id)?;
-        self.records
-            .remove(index)
-            .map(|record| record.sent.sent_record())
-    }
-}
-
 /// Takes one session out of the count of `origin`.
 fn forget_origin(origins: &mut HashMap<Digest16, usize>, origin: &Digest16) {
     if let Some(count) = origins.get_mut(origin) {
@@ -958,7 +783,6 @@ pub struct ContextStore {
     /// evict does not have to count them (see [`ContextStore::make_room`]).
     origins: HashMap<Digest16, usize>,
     held: HeldLogins,
-    pending: PendingSent,
 }
 
 impl ContextStore {
@@ -982,13 +806,6 @@ impl ContextStore {
         if !self.sessions.contains_key(&id) && self.sessions.len() >= SESSIONS_MAX {
             self.make_room(now_ms);
         }
-        // A session that starts here takes what its credential's requests sent before the origin
-        // accepted it (see `PendingSent`).
-        let pending = if self.sessions.contains_key(&id) {
-            None
-        } else {
-            self.pending.take(&id)
-        };
         let session = match self.sessions.entry(id) {
             Entry::Occupied(slot) => slot.into_mut(),
             Entry::Vacant(slot) => {
@@ -998,9 +815,6 @@ impl ContextStore {
                 slot.insert(session)
             }
         };
-        if let Some(record) = pending {
-            session.inherit_sent(&record);
-        }
         session.last_ms = now_ms;
         session
     }
@@ -1079,57 +893,6 @@ impl ContextStore {
             .get(id)
             .filter(|session| now_ms.saturating_sub(session.last_ms) <= IDLE_MAX_MS)
             .map(|session| session.origin)
-    }
-
-    /// Notes values a request sent in the session `id` has or, while it has none, for the session
-    /// it starts (see `PendingSent`). Nothing is kept for an empty list.
-    pub fn note_sent(&mut self, id: Digest16, now_ms: u64, digests: &[Digest16]) {
-        if digests.is_empty() {
-            return;
-        }
-        if let Some(session) = self.existing(id, now_ms) {
-            session.note_sent(digests);
-        } else {
-            self.pending
-                .with(id, now_ms, |session| session.note_sent(digests));
-        }
-    }
-
-    /// Stages what a response issues the credential `id` for, when the gateway would have refused the
-    /// request that got it: the values that request sent, and what its own credential had sent before
-    /// (`inherited`). Like [`ContextStore::note_sent`] it creates no session, so the credential is
-    /// recognized only by a later response (docs/01 section 1.2).
-    pub fn stage_issued(
-        &mut self,
-        id: Digest16,
-        now_ms: u64,
-        inherited: Option<&SentRecord>,
-        digests: &[Digest16],
-    ) {
-        if digests.is_empty() && inherited.is_none() {
-            return;
-        }
-        let stage = |session: &mut SessionContext| {
-            if let Some(record) = inherited {
-                session.inherit_sent(record);
-            }
-            session.note_sent(digests);
-        };
-        if let Some(session) = self.existing(id, now_ms) {
-            stage(session);
-        } else {
-            self.pending.with(id, now_ms, stage);
-        }
-    }
-
-    /// Stops the session `id` from learning from responses. While it has none, the stop waits for
-    /// the session it starts (see `PendingSent`).
-    pub fn stop_learning(&mut self, id: Digest16, now_ms: u64) {
-        if let Some(session) = self.existing(id, now_ms) {
-            session.stop_learning();
-        } else {
-            self.pending.with(id, now_ms, SessionContext::stop_learning);
-        }
     }
 
     /// The live session for `id`, marked as active now, or `None`: nothing is created.
@@ -1217,17 +980,6 @@ impl ContextStore {
             }
             Err(reason) => Some(reason),
         }
-    }
-
-    /// What the session sent, for a session a response is about to issue a
-    /// credential to, or what its requests sent before it was accepted. Creates nothing.
-    #[must_use]
-    pub fn sent_record(&self, id: &Digest16) -> SentRecord {
-        self.sessions
-            .get(id)
-            .map(SessionContext::sent_record)
-            .or_else(|| self.pending.sent_record(id))
-            .unwrap_or_default()
     }
 
     /// Number of sessions held.
@@ -1464,64 +1216,6 @@ mod tests {
         store.session(id, address(2), IDLE_MAX_MS + 10);
         assert_eq!(store.origin_of(&id, IDLE_MAX_MS + 10), Some(address(2)));
         assert_eq!(store.origin_of(&session_id(9), 2), None);
-    }
-
-    #[test]
-    fn a_session_takes_what_its_credential_sent_before_the_origin_accepted_it() {
-        let key = key();
-        let mut store = ContextStore::new();
-        let id = key.mac("session", b"late");
-        // A refused request sent 7; the origin accepts the credential on a later answer.
-        store.note_sent(id, 0, &[key.mac("value", b"7")]);
-        assert_eq!(store.len(), 0, "a refused credential starts no session");
-        let session = store.session(id, HOME, 1);
-        // The echo of what the session sent is not learned.
-        assert_eq!(
-            session.remember(&key, &at("GET /api/home"), &[response("id", "7")]),
-            0
-        );
-    }
-
-    #[test]
-    fn a_session_that_starts_after_a_stop_learns_nothing_from_responses() {
-        let key = key();
-        let mut store = ContextStore::new();
-        let id = key.mac("session", b"late");
-        store.stop_learning(id, 0);
-        assert_eq!(store.len(), 0, "judging a request starts no session");
-        let session = store.session(id, HOME, 1);
-        assert_eq!(
-            session.remember(&key, &at("GET /api/home"), &[response("id", "7")]),
-            0
-        );
-    }
-
-    #[test]
-    fn pending_records_are_bounded_and_drop_when_idle() {
-        let key = key();
-        let mut store = ContextStore::new();
-        for index in 0..(PENDING_MAX + 50) {
-            let id = key.mac("session", format!("made-up-{index}").as_bytes());
-            store.note_sent(id, 0, &[key.mac("value", b"7")]);
-        }
-        assert_eq!(store.pending.records.len(), PENDING_MAX);
-        // Their values are bounded too: each credential sends the most a session may hold.
-        let mut big = ContextStore::new();
-        for index in 0..10 {
-            let id = key.mac("session", format!("big-{index}").as_bytes());
-            let digests: Vec<Digest16> = (0..SENT_MAX)
-                .map(|n| key.mac("value", format!("{index}-{n}").as_bytes()))
-                .collect();
-            big.note_sent(id, 0, &digests);
-        }
-        assert!(big.pending.values() <= PENDING_VALUES_MAX);
-        // A record idle for longer than a session lives is dropped by the next one.
-        store.note_sent(
-            key.mac("session", b"next"),
-            IDLE_MAX_MS + 1,
-            &[key.mac("value", b"7")],
-        );
-        assert_eq!(store.pending.records.len(), 1);
     }
 
     #[test]
@@ -1912,55 +1606,6 @@ mod tests {
         let fresh = store.session(id, HOME, IDLE_MAX_MS + 1);
         assert!(fresh.lookup(&key, "7").is_none());
         assert_eq!(fresh.age_seconds(IDLE_MAX_MS + 1), 0);
-    }
-
-    #[test]
-    fn a_value_the_session_sent_is_not_learned_from_an_echo() {
-        let key = key();
-        let mut session = SessionContext::new(0);
-        session.note_sent(&[key.mac("value", b"P-0000099")]);
-        session.remember(
-            &key,
-            &at("GET /api/search"),
-            &[
-                response("patientId", "P-0000099"),
-                response("patientId", "P-0000042"),
-            ],
-        );
-        assert!(session.lookup(&key, "P-0000099").is_none());
-        assert!(session.lookup(&key, "P-0000042").is_some());
-    }
-
-    #[test]
-    fn a_new_credential_starts_with_what_the_request_sent() {
-        let key = key();
-        let mut old = SessionContext::new(0);
-        old.note_sent(&[key.mac("value", b"P-0000099")]);
-        let mut fresh = SessionContext::new(0);
-        fresh.inherit_sent(&old.sent_record());
-        fresh.remember(
-            &key,
-            &at("GET /api/history"),
-            &[response("patientId", "P-0000099")],
-        );
-        assert!(fresh.lookup(&key, "P-0000099").is_none());
-    }
-
-    #[test]
-    fn a_full_sent_record_stops_learning_rather_than_forgetting() {
-        let key = key();
-        let mut session = SessionContext::new(0);
-        session.remember(&key, &at("GET /x"), &[response("id", "before")]);
-        let sent: Vec<Digest16> = (0..=SENT_MAX)
-            .map(|index| key.mac("value", format!("s{index}").as_bytes()))
-            .collect();
-        session.note_sent(&sent);
-        assert_eq!(
-            session.remember(&key, &at("GET /y"), &[response("id", "later")]),
-            0
-        );
-        assert!(session.lookup(&key, "later").is_none());
-        assert!(session.lookup(&key, "before").is_some());
     }
 
     #[test]
