@@ -360,8 +360,9 @@ function SiteDetailBody({ name }: { name: string }) {
         onCopy={copySite}
         onDelete={deleteSite}
         deleting={remove.isPending}
+        deleteError={remove.error}
+        onClearDeleteError={remove.reset}
       />
-      {remove.isError ? <ErrorBar error={remove.error} /> : null}
 
       {created ? (
         <div className="created-site">
