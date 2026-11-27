@@ -35,6 +35,7 @@ python3 scripts/test_idor_lab.py --only A2,C4
 | A10 | 医生 A 搜到医生 B 的患者后，在它的备注接口上写入 | 放行。备注位置接受公共来源，搜到的患者在这里有效 | `fast_allow` |
 | A11 | 没有标注档位的站点，同样的搜索后删除 | 与标注前相同：放行，源站删除。这是没有标注的站点的已知缺口 | `jev_allow` |
 | A12 | 医生 A 在搜索结果里看到医生 B 的患者 D（慢速 id `PT-7004`），然后按这个 id 删除 | 拦截，记为尝试越权：慢速 id 按声明的 `DELETE /api/patients/{id}` 位置判定，源站不收到请求。见下方说明 | `jev_deny` |
+| A13 | 医生 A 按编号搜索患者 `PT-7001` 后打开结果；再搜不存在的 `PT-9999`（仅在 `query` 字段回显）后打开 | 搜索 `PT-7001` 放行，随后打开走快速放行不问 Jev；仅在 `query` 回显的 `PT-9999` 不学，打开仍交 Jev 拦截 | `jev_allow`，`fast_allow`，`jev_deny` |
 | B1 | 搜索框、表单里的中英文文本 | 放行；重复的搜索走放行缓存 | `jev_allow`，`cached_allow` |
 | B2 | 参数里的 SQL 注入、命令执行、路径穿越 | 拦截 | `jev_deny` |
 | B10 | 查询串里垫 200 个惰性参数，后面是医生 B 的患者编号 `PT-7004` | 拦截；Jev 收到的 `query.patient_id` 是 `reference` | `jev_deny` |

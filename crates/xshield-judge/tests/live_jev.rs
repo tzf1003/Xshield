@@ -128,7 +128,9 @@ async fn live_business_traffic_and_evasions() {
             body: br#"{"patients":[{"id":"7f3a91c2","name":"Zhang Wei","age":54}]}"#,
             now_ms: 1_000,
             sent: &[],
+            typed: &[],
             echo: &[],
+            skip_learning: false,
         },
     );
     let cases = [
@@ -289,7 +291,9 @@ async fn live_acceptance_scenarios() {
                 body: list,
                 now_ms: 1_000,
                 sent: &[],
+                typed: &[],
                 echo: &[],
+                skip_learning: false,
             },
         );
     }
@@ -311,7 +315,9 @@ async fn live_acceptance_scenarios() {
             body: br#"{"patient":{"id":"a91be0d4","name":"Wang Fang"}}"#,
             now_ms: 1_100,
             sent: &[],
+            typed: &[],
             echo: &[],
+            skip_learning: false,
         },
     );
 
@@ -514,7 +520,9 @@ async fn live_juice_shop_checkout_flow() {
                 body,
                 now_ms,
                 sent: &[],
+                typed: &[],
                 echo: &[],
+                skip_learning: false,
             },
         );
     };
@@ -717,7 +725,9 @@ async fn live_juice_shop_sign_up_flow() {
                 body,
                 now_ms,
                 sent: &[],
+                typed: &[],
                 echo: &[],
+                skip_learning: false,
             },
         );
     }
@@ -1487,7 +1497,9 @@ fn see<J: JevPort>(
             body,
             now_ms,
             sent: &[],
+            typed: &[],
             echo: &[],
+            skip_learning: false,
         },
     );
 }
