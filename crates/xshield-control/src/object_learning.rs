@@ -3497,7 +3497,14 @@ mod source_pass_tests {
         // Another 20 uses (40 total, twice the 20 votes at dismissal) re-propose it.
         for index in 20..40 {
             let at_millis = now - (1 + (index - 20) / 5) * DAY_MILLIS;
-            use_of_session(&pool, index, at_millis, &format!("s{}", 5 + index % 5), SEARCH).await;
+            use_of_session(
+                &pool,
+                index,
+                at_millis,
+                &format!("s{}", 5 + index % 5),
+                SEARCH,
+            )
+            .await;
         }
         learn_once(&pool, None, now + 2 * 60 * 60_000).await;
         assert_eq!(row_of(&pool, SEARCH).await, Some(proposed_as_patient()));

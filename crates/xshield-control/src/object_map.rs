@@ -3851,9 +3851,12 @@ mod live_tests {
 
         let before = listed(&state, &name, &[("state", "proposed")]).await;
         let response_id = id_of(&before, SEARCH);
-        let status = dismiss(State(Arc::clone(&state)), Path((name.clone(), response_id.clone())))
-            .await
-            .expect("dismiss the response proposal");
+        let status = dismiss(
+            State(Arc::clone(&state)),
+            Path((name.clone(), response_id.clone())),
+        )
+        .await
+        .expect("dismiss the response proposal");
         assert_eq!(status, StatusCode::NO_CONTENT);
 
         // Dismissed, the response proposal leaves the proposed list and stays pending with its flag.
